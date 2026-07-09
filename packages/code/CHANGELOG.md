@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-09
+
+The FSL release. The source is available under FSL-1.1-Apache-2.0, interactive use is free with no license or signup, and unattended automation is licensed via Supporter, Team, or Business plans.
+
+### Added
+
+- **Linear, GitHub Issues, Azure DevOps, and Asana trackers**: full lifecycle support (fetch, status transitions, implementation summary comments), bringing supported trackers to seven: Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, and local markdown files
+- **`--query` for Trello and Markdown trackers**: batch selection now works across all trackers (`--jql` remains as a deprecated alias)
+- **Entitlement grace window**: when the license server is unreachable (network error or 5xx), a cached last-known-good entitlement is honored for 72 hours so an outage never blocks paying customers' automation
+
+### Changed
+
+- **License**: switched to the Functional Source License (FSL-1.1-Apache-2.0); each release converts to Apache-2.0 after two years
+- **Licensing model (breaking)**: interactive runs no longer perform any license check; unattended execution (systemd, cron, CI, webhook server) requires an automation license (Supporter, Team, or Business). Pre-FSL product SKUs are no longer recognized; existing perpetual license holders receive equivalent entitlements
+
+### Removed
+
+- **14-day trial (breaking)**: interactive use is free forever and needs no trial; unattended automation is covered by the subscription's 30-day money-back guarantee instead
+
 ## [1.2.0] - 2026-06-01
 
 ### Added
