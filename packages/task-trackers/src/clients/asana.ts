@@ -102,6 +102,7 @@ export function parseAsanaTaskFilters(query: string): AsanaTaskFilters {
       remainder.push(free);
       continue;
     }
+    if (key === undefined) continue;
     const value = quoted ?? bare ?? "";
     switch (key.toLowerCase()) {
       case "project":
