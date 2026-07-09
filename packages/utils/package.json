@@ -1,0 +1,22 @@
+{
+  "name": "@devintern/utils",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo \"utils: source-only package\"",
+    "format": "oxfmt \"src/**/*.ts\" \"*.test.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"*.test.ts\"",
+    "lint": "oxlint .",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

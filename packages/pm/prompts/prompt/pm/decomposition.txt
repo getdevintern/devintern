@@ -1,0 +1,30 @@
+Break down the following story into actionable subtasks:
+
+Story: {{storySummary}}
+
+Description:
+{{storyDescription}}
+
+IMPORTANT:
+- Create specific, actionable subtasks that can be worked on independently
+- Focus on user-facing deliverables and testable outcomes
+- Keep implementation details minimal - let developers determine the "how"
+- Suggest researching existing code patterns as part of the work
+- Each subtask should deliver incremental value
+- Order subtasks logically (research → design → build → test)
+
+Please provide subtasks in the following JSON format with MARKDOWN formatting:
+
+{
+  "subtasks": [
+    {
+      "summary": "Clear, action-oriented title",
+      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance\n\n- [ ] Deliverable is complete\n- [ ] Quality criteria met"
+    }
+  ]
+}
+
+IMPORTANT:
+- Format descriptions using MARKDOWN (## headers, - bullets, **bold**, `code`)
+- Each subtask should be completable in a reasonable timeframe
+- Return ONLY valid JSON, no additional text

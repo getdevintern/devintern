@@ -1,0 +1,27 @@
+Analyze the following Figma design and generate PM-style requirements for a Jira story:
+
+{{figmaUrl}}
+{{epicContext}}
+{{extraInstructions}}
+
+IMPORTANT:
+- Implementation should use the existing design system. DO NOT include specific design notes or styling details from Figma.
+- BEFORE creating requirements, explore the current codebase to identify existing code that can be reused:
+  * Check for existing API endpoints and client methods
+  * Look for similar UI components that can be adapted
+  * Review existing screens/pages for similar patterns
+  * Search for Redux actions, reducers, selectors that might be relevant
+  * Identify utility functions that could be leveraged
+- Reference specific existing code in your requirements when applicable
+
+Please analyze the Figma design and provide the requirements in the following JSON format with MARKDOWN formatting:
+
+{
+  "summary": "Brief, clear title for the story",
+  "description": "## User Story\\n\\nAs a [user type]\\nI want [goal]\\nSo that [benefit]\\n\\n## Design Reference\\n\\n{{figmaUrl}}\\n\\n## Acceptance Criteria\\n\\n- Criterion 1\\n- Criterion 2\\n- Criterion 3\\n\\n## Technical Considerations\\n\\n- Use existing **design system** components\\n- Leverage existing `ApiClient` methods or similar patterns\\n- Reuse `ExistingComponent` or adapt similar UI patterns\\n- Follow existing Redux patterns (e.g., `existingActions`, `existingSelectors`)\\n- Consider existing utility functions in `@/utils`\\n\\n**Note:** Implementation must use existing design system components and patterns, not Figma-specific styling."
+}
+
+IMPORTANT:
+- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`)
+- This ensures proper rich formatting in Jira
+- Return ONLY valid JSON, no additional text

@@ -1,0 +1,24 @@
+Analyze the following requirement or feature description and generate technical requirements for a Jira story:
+
+{{promptContent}}
+{{epicContext}}
+{{extraInstructions}}
+
+IMPORTANT:
+- Include technical considerations and implementation approach
+- Identify potential technical challenges
+- Suggest architecture patterns and best practices
+- Reference existing codebase patterns when relevant
+- Balance user value with technical feasibility
+
+Please analyze the requirement and provide it in the following JSON format with MARKDOWN formatting:
+
+{
+  "summary": "Brief, clear title for the story",
+  "description": "## Overview\n\n[High-level description of the feature/requirement]\n\n## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Technical Considerations\n\n- Architecture patterns to use\n- Integration points\n- Data model changes\n- API design considerations\n- Performance implications\n\n## Implementation Approach\n\n1. Research existing patterns in codebase\n2. Design the solution\n3. Implement core functionality\n4. Add tests and documentation\n\n## Acceptance Criteria\n\n- [ ] Functional requirement 1\n- [ ] Functional requirement 2\n- [ ] Technical requirement (performance, security, etc.)\n- [ ] Tests are written and passing\n\n## Edge Cases & Considerations\n\n- Potential error scenarios\n- Backwards compatibility\n- Migration needs"
+}
+
+IMPORTANT:
+- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
+- This ensures proper rich formatting in Jira
+- Return ONLY valid JSON, no additional text

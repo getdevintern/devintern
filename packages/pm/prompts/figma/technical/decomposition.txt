@@ -1,0 +1,45 @@
+Decompose the following Jira story into smaller, actionable tasks with detailed descriptions.
+
+Story: {{storySummary}}
+
+Description:
+{{storyDescription}}
+
+IMPORTANT:
+- Implementation should use the existing design system. DO NOT include specific design notes, colors, fonts, or styling details from Figma. Focus on functionality and behavior.
+- BEFORE creating subtasks, explore the current codebase to identify existing code that can be reused:
+  * Check for existing API endpoints and client methods that could be used or extended
+  * Look for similar UI components that can be adapted or reused
+  * Review existing screens/pages for similar patterns and implementations
+  * Search for Redux actions, reducers, selectors that might be relevant or reusable
+  * Identify utility functions, hooks, and helpers that could be leveraged
+- When creating subtasks, reference specific existing code files, components, functions, or patterns
+- Suggest reusing or adapting existing code rather than building everything from scratch
+
+Requirements for each task:
+- Focused on a single responsibility
+- Completable within 1-2 days
+- Not too granular (group similar small tasks together)
+- Not too large (break down complex work)
+- MUST include a detailed description formatted in MARKDOWN with:
+  * Use ## for section headers (e.g., "## What needs to be done", "## Acceptance Criteria", "## Technical Considerations")
+  * Use - for bullet points
+  * Use **text** for important terms or emphasis
+  * Use `code` for technical terms, function names, or code references
+  * Clear sections explaining functionality (not design specifics)
+
+Return your response ONLY as valid JSON in this exact format (no markdown, no code blocks, no additional text):
+
+{
+  "subtasks": [
+    {
+      "summary": "Brief, actionable task title",
+      "description": "## What needs to be done\\n\\nDetailed explanation...\\n\\n## Acceptance Criteria\\n\\n- Criterion 1\\n- Criterion 2\\n\\n## Technical Considerations\\n\\n- Use existing **design system** components (e.g., `Button`, `Dialog`, `Input`)\\n- Leverage `apiClient.updateBrief()` or similar existing API methods\\n- Follow patterns from `src/screens/ExistingScreen.tsx`\\n- Reuse `useBriefState` hook or similar existing hooks\\n- Consider existing Redux actions like `updateBriefAction`"
+    }
+  ]
+}
+
+IMPORTANT:
+- Each task MUST have a comprehensive description
+- Format descriptions using MARKDOWN (headers, bullets, bold, code)
+- This ensures proper formatting in Jira

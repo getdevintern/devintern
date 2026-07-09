@@ -1,0 +1,65 @@
+pre-commit:
+  parallel: false
+  commands:
+    format:
+      run: bun run format
+      stage_fixed: true
+    lint:
+      run: bun run lint
+    typecheck:
+      run: bun run typecheck
+
+pre-push:
+  parallel: false
+  commands:
+    typecheck:
+      files: git ls-files -- lefthook.yml
+      run: 'test -n "{files}" && bun run typecheck'
+    test:
+      files: git ls-files -- lefthook.yml
+      # env -u: git exports GIT_DIR & co to hook processes; unguarded test
+      # fixtures inherit them and run git against the real repo instead of
+      # their temp dirs.
+      run: 'test -n "{files}" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR bun run test'
+# EXAMPLE USAGE:
+#
+#   Refer for explanation to following link:
+#   https://lefthook.dev/configuration/
+#
+# pre-push:
+#   jobs:
+#     - name: packages audit
+#       tags:
+#         - frontend
+#         - security
+#       run: yarn audit
+#
+#     - name: gems audit
+#       tags:
+#         - backend
+#         - security
+#       run: bundle audit
+#
+# pre-commit:
+#   parallel: true
+#   jobs:
+#     - run: yarn eslint {staged_files}
+#       glob: "*.{js,ts,jsx,tsx}"
+#
+#     - name: rubocop
+#       glob: "*.rb"
+#       exclude:
+#         - config/application.rb
+#         - config/routes.rb
+#       run: bundle exec rubocop --force-exclusion -- {all_files}
+#
+#     - name: govet
+#       files: git ls-files -m
+#       glob: "*.go"
+#       run: go vet -- {files}
+#
+#     - script: "hello.js"
+#       runner: node
+#
+#     - script: "hello.go"
+#       runner: go run

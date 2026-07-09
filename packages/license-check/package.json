@@ -1,0 +1,26 @@
+{
+  "name": "@devintern/license-check",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo 'license-check: source-only package'",
+    "format": "oxfmt \"src/**/*.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\"",
+    "lint": "oxlint .",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@devintern/auth": "workspace:*",
+    "@devintern/utils": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

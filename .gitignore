@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.local
+
+# devintern-pm configuration (contains secrets)
+.devintern-pm/.env
+.devintern-pm/.auth-session.json
+
+# @devintern/code - Keep credentials secure
+.devintern-code/.env
+.devintern-code/.env.local
+.devintern-code/.pid.lock
+.devintern-code/.auth-session.json
+
+# Supabase CLI local cache (linked project ref, pooler URL, version info)
+supabase/.temp/
+
+# Internal strategy docs — never publish
+/docs/
+packages/website/docs/

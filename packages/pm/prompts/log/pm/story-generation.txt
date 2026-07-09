@@ -1,0 +1,23 @@
+Analyze the following error log or bug report and generate PM-style requirements for a Jira story to fix the issue:
+
+{{logContent}}
+{{epicContext}}
+{{extraInstructions}}
+
+IMPORTANT:
+- Focus on the user impact and business value of fixing this issue
+- Describe the problem from a user perspective
+- Avoid overly technical implementation details
+- Suggest investigating existing code and patterns for the fix
+
+Please analyze the log/error and provide the requirements in the following JSON format with MARKDOWN formatting:
+
+{
+  "summary": "Brief, clear title describing the bug or issue",
+  "description": "## Problem Description\\n\\nClear explanation of what's broken from user perspective\\n\\n## Error Details\\n\\n```\\n{{logContent}}\\n```\\n\\n## Expected Behavior\\n\\n- What should happen\\n\\n## Actual Behavior\\n\\n- What currently happens\\n\\n## User Impact\\n\\n- Who is affected\\n- Severity and frequency\\n\\n## Acceptance Criteria\\n\\n- Issue is resolved\\n- No regression in related functionality\\n- Error handling is improved"
+}
+
+IMPORTANT:
+- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
+- This ensures proper rich formatting in Jira
+- Return ONLY valid JSON, no additional text

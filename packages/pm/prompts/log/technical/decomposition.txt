@@ -1,0 +1,41 @@
+Decompose the following bug fix story into smaller, actionable technical tasks with detailed descriptions:
+
+Story: {{storySummary}}
+
+Description:
+{{storyDescription}}
+
+IMPORTANT:
+- Include investigation, debugging, implementation, testing, and monitoring tasks
+- Suggest checking existing error handling patterns and recovery mechanisms
+- Consider both immediate fix and preventive measures
+- Include technical debt reduction opportunities
+
+Requirements for each task:
+- Focused on a single responsibility
+- Completable within 1-2 days
+- Not too granular (group similar small tasks together)
+- Not too large (break down complex work)
+- MUST include a detailed description formatted in MARKDOWN with:
+  * Use ## for section headers (e.g., "## What needs to be done", "## Technical Approach", "## Acceptance Criteria")
+  * Use - for bullet points
+  * Use **text** for important terms or emphasis
+  * Use `code` for technical terms, function names, file paths, or code references
+  * Include technical context and implementation guidance
+
+Return your response ONLY as valid JSON in this exact format (no markdown, no code blocks, no additional text):
+
+{
+  "subtasks": [
+    {
+      "summary": "Brief, actionable task title",
+      "description": "## What needs to be done\\n\\nDetailed explanation...\\n\\n## Technical Approach\\n\\n- Implementation details\\n\\n## Acceptance Criteria\\n\\n- Criterion 1\\n- Criterion 2"
+    }
+  ]
+}
+
+IMPORTANT:
+- Each task MUST have a comprehensive description
+- Format descriptions using MARKDOWN (headers, bullets, bold, code)
+- Include specific technical guidance where helpful
+- This ensures proper formatting in Jira

@@ -1,0 +1,8 @@
+[test]
+# Root-level safety net: `bun test` run from the repo root discovers package
+# tests but does NOT read per-package bunfig.toml, so packages/code's guard
+# preload would be skipped. Running the suite from a git hook (lefthook
+# pre-push) leaks GIT_DIR into test fixtures, and unguarded fixture git
+# commands then execute against the real repository (this rewrote master
+# twice). Preload the same guard here so root-invoked runs are safe too.
+preload = ["./packages/code/tests/setup/guard-git-state.ts"]

@@ -1,0 +1,31 @@
+Break down the following story into technical subtasks:
+
+Story: {{storySummary}}
+
+Description:
+{{storyDescription}}
+
+IMPORTANT:
+- Create specific, technical subtasks with clear deliverables
+- Include both implementation and testing tasks
+- Consider architecture, implementation, testing, and documentation
+- Suggest exploring existing codebase patterns first
+- Order tasks to minimize blockers (research → setup → implementation → testing)
+- Each subtask should be independently verifiable
+
+Please provide subtasks in the following JSON format with MARKDOWN formatting:
+
+{
+  "subtasks": [
+    {
+      "summary": "Clear, technical title indicating the deliverable",
+      "description": "## Objective\n\n[Technical goal of this task]\n\n## Technical Details\n\n- Implementation requirements\n- APIs/interfaces to create/modify\n- Dependencies and integration points\n\n## Testing\n\n- Unit tests needed\n- Integration test scenarios\n\n## Acceptance\n\n- [ ] Code complete and reviewed\n- [ ] Tests passing\n- [ ] Documentation updated"
+    }
+  ]
+}
+
+IMPORTANT:
+- Format descriptions using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
+- Include both implementation and verification tasks
+- Each subtask should be completable independently where possible
+- Return ONLY valid JSON, no additional text

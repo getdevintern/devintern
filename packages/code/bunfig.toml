@@ -1,0 +1,5 @@
+[test]
+# Preloaded before every test. Bans process.chdir so tests cannot leave the
+# process inside a scratch git repo (which caused junk branches to be pushed to
+# the real remote). See tests/setup/guard-git-state.ts.
+preload = ["./tests/setup/guard-git-state.ts"]

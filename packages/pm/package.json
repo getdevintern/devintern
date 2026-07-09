@@ -1,0 +1,70 @@
+{
+  "name": "@getdevintern/pm",
+  "version": "1.2.0",
+  "description": "Automate story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues using your preferred AI agent.",
+  "type": "module",
+  "bin": {
+    "devpm": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "README.md",
+    "LICENSE.md",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "bun build index.ts --target=bun --outdir=dist --format=esm --external=ink --external=react --external=ink-scroll-view --minify && bun run tsc --noEmit",
+    "format": "oxfmt \"index.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
+    "format:check": "oxfmt --check \"index.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
+    "lint": "oxlint .",
+    "install-global": "bun run build && bun link",
+    "uninstall-global": "bun unlink",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "jira",
+    "claude",
+    "opencode",
+    "codex",
+    "cursor",
+    "ai",
+    "project-management",
+    "figma",
+    "automation",
+    "cli",
+    "task-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danii1/devintern.git",
+    "directory": "packages/pm"
+  },
+  "bugs": {
+    "url": "https://github.com/danii1/devintern/issues"
+  },
+  "homepage": "https://devintern.com",
+  "author": "Daniil",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@devintern/agent-harness": "workspace:*",
+    "@devintern/auth": "workspace:*",
+    "@devintern/task-trackers": "workspace:*",
+    "@devintern/text-formatter": "workspace:*",
+    "@devintern/utils": "workspace:*",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.7",
+    "ink": "^6.6.0",
+    "ink-scroll-view": "^0.3.2",
+    "ink-text-input": "^6.0.0",
+    "react": "19.2.5"
+  }
+}

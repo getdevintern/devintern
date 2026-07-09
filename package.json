@@ -1,0 +1,29 @@
+{
+  "name": "devintern",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Monorepo for @devintern/code and @devintern/pm.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "format": "bun run --filter '*' format",
+    "format:check": "bun run --filter '*' format:check",
+    "lint": "bun run --filter '*' lint",
+    "prepare": "lefthook install",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "lefthook": "^2.1.5",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.2.4"
+  }
+}

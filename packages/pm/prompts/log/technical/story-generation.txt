@@ -1,0 +1,23 @@
+Analyze the following error log or bug report and generate technical requirements for a Jira story to fix the issue:
+
+{{logContent}}
+{{epicContext}}
+{{extraInstructions}}
+
+IMPORTANT:
+- Provide technical analysis of the root cause
+- Include implementation approach and technical considerations
+- Suggest investigating existing error handling and recovery patterns
+- Consider architectural implications
+
+Please analyze the log/error and provide the requirements in the following JSON format with MARKDOWN formatting:
+
+{
+  "summary": "Brief, clear title describing the bug or issue",
+  "description": "## Problem Description\\n\\nClear explanation of what's broken\\n\\n## Error Details\\n\\n```\\n{{logContent}}\\n```\\n\\n## Root Cause Analysis\\n\\n- Potential causes based on the error\\n- Affected components/services\\n\\n## Expected Behavior\\n\\n- What should happen\\n\\n## Actual Behavior\\n\\n- What currently happens\\n\\n## User Impact\\n\\n- Who is affected\\n- Severity and frequency\\n\\n## Technical Considerations\\n\\n- Error handling approach\\n- Logging and monitoring improvements\\n- Testing strategy\\n- Potential side effects\\n\\n## Acceptance Criteria\\n\\n- Issue is resolved\\n- Error handling is improved\\n- Appropriate logging is in place\\n- Tests cover the fix\\n- No regression in related functionality"
+}
+
+IMPORTANT:
+- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
+- This ensures proper rich formatting in Jira
+- Return ONLY valid JSON, no additional text

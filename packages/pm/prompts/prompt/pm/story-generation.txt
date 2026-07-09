@@ -1,0 +1,24 @@
+Analyze the following requirement or feature description and generate PM-style requirements for a Jira story:
+
+{{promptContent}}
+{{epicContext}}
+{{extraInstructions}}
+
+IMPORTANT:
+- Focus on user value and business outcomes
+- Frame requirements from a user perspective
+- Keep technical implementation details minimal
+- Suggest investigating existing code and patterns when implementing
+- Create clear, actionable acceptance criteria
+
+Please analyze the requirement and provide it in the following JSON format with MARKDOWN formatting:
+
+{
+  "summary": "Brief, clear title for the story (user-facing benefit)",
+  "description": "## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Background\n\n[Context and motivation for this feature]\n\n## Acceptance Criteria\n\n- [ ] Criterion 1\n- [ ] Criterion 2\n- [ ] Criterion 3\n\n## User Impact\n\n- Who benefits from this\n- Expected outcomes\n\n## Notes\n\n- Any additional considerations\n- Potential edge cases to consider"
+}
+
+IMPORTANT:
+- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
+- This ensures proper rich formatting in Jira
+- Return ONLY valid JSON, no additional text

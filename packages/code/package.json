@@ -1,0 +1,88 @@
+{
+  "name": "@getdevintern/code",
+  "version": "1.3.0",
+  "description": "AI-powered task automation for Jira and other project management tools. Automatically implement tasks using your preferred AI agent with git integration and PR creation.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts",
+    "build": "bun run build.ts",
+    "format": "oxfmt \"src/**/*.ts\" \"tests/**/*.ts\" \"build.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"tests/**/*.ts\" \"build.ts\"",
+    "lint": "oxlint .",
+    "typecheck": "bun run tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "bun test",
+    "install-global": "bun run build && bun link",
+    "uninstall-global": "bun unlink",
+    "prepare": "bun run build",
+    "prepublishOnly": "bun run clean && bun run build && bun run typecheck"
+  },
+  "keywords": [
+    "jira",
+    "linear",
+    "task",
+    "automation",
+    "claude",
+    "opencode",
+    "codex",
+    "cursor",
+    "ai",
+    "intern",
+    "bitbucket",
+    "github",
+    "cli",
+    "workflow",
+    "productivity",
+    "code-generation",
+    "project-management"
+  ],
+  "author": {
+    "name": "Daniil Pokrovsky",
+    "url": "https://github.com/danii1"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "homepage": "https://devintern.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danii1/devintern.git",
+    "directory": "packages/code"
+  },
+  "bugs": {
+    "url": "https://github.com/danii1/devintern/issues"
+  },
+  "dependencies": {
+    "@types/turndown": "^5.0.5",
+    "commander": "^11.0.0",
+    "dotenv": "^16.3.1",
+    "p-queue": "^9.0.1",
+    "turndown": "^7.2.0"
+  },
+  "devDependencies": {
+    "@devintern/agent-harness": "workspace:*",
+    "@devintern/auth": "workspace:*",
+    "@devintern/license-check": "workspace:*",
+    "@devintern/task-trackers": "workspace:*",
+    "@devintern/utils": "workspace:*",
+    "@devintern/text-formatter": "workspace:*",
+    "@types/bun": "^1.3.3",
+    "@types/node": "^20.10.0",
+    "bun-types": "latest",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^5.3.0"
+  },
+  "bin": {
+    "devintern": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE.md",
+    ".env.example"
+  ]
+}
