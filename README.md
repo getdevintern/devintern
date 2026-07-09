@@ -43,9 +43,13 @@ The devintern.com website and its server code live in a separate repository.
 - **Review comments become commits** (with unattended automation): reviewer feedback is addressed on the same branch, with replies
 - **Survives real life**: persistent queue, crash recovery, provider rate-limit detection with pause and resume
 
+## Repository status
+
+History starts at the FSL release. Development currently happens in a private monorepo that also contains the devintern.com website; this repository receives regular synced snapshots of the tool packages, and pull requests here are reviewed and ported with authorship preserved (see [CONTRIBUTING.md](CONTRIBUTING.md)). Once the in-flight internal work lands, development of the tool packages moves here and PRs merge directly.
+
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for the monorepo layout, tooling (Bun only), and per-package commands. Pre-commit hooks run format, lint, and typecheck via lefthook.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how PRs are handled during the transition, and [AGENTS.md](AGENTS.md) for the monorepo layout, tooling (Bun only), and per-package commands. Pre-commit hooks run format, lint, and typecheck via lefthook.
 
 ## License and pricing
 
