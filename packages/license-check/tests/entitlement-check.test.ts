@@ -1,22 +1,27 @@
 import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:test";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
-
-function recentTrialStart(): string {
-  const started = new Date();
-  started.setDate(started.getDate() - 1);
-  return started.toISOString();
-}
 
 mock.module("@devintern/auth", () => ({
   getAuthenticatedUser: async () => ({
     id: "user-1",
     email: "test@example.com",
-    createdAt: recentTrialStart(),
+    createdAt: new Date().toISOString(),
     accessToken: "test-access-token",
   }),
-  getUserTrialStartedAt: async () => recentTrialStart(),
 }));
+
+function freshSupabaseConfig() {
+  const dir = mkdtempSync(join(tmpdir(), "license-check-test-"));
+  return {
+    url: "https://x.supabase.co",
+    publishableKey: "pk",
+    sessionFilePath: join(dir, "session.json"),
+  };
+}
 
 describe("checkLicense entitlement API", () => {
   beforeEach(() => {
@@ -58,12 +63,7 @@ describe("checkLicense entitlement API", () => {
 
     const result = await checkLicense({
       productKey: "devintern/code",
-      supabaseConfig: {
-        url: "https://x.supabase.co",
-        publishableKey: "pk",
-        sessionFilePath: "/tmp/session.json",
-      },
-      allowTrial: true,
+      supabaseConfig: freshSupabaseConfig(),
     });
 
     expect(calls).toBe(3);
@@ -78,7 +78,7 @@ describe("checkLicense entitlement API", () => {
     warnSpy.mockRestore();
   });
 
-  test("logs error and uses trial when entitlement check keeps failing", async () => {
+  test("fails when entitlement check keeps failing and no cache exists", async () => {
     globalThis.fetch = (async (input) => {
       const url = String(input);
       if (!url.includes("/api/license/check")) {
@@ -91,27 +91,120 @@ describe("checkLicense entitlement API", () => {
 
     const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
-    const { checkLicense } = await import(`../src/index.ts?trial=${Date.now()}`);
+    const { checkLicense } = await import(`../src/index.ts?nocache=${Date.now()}`);
 
     const result = await checkLicense({
       productKey: "devintern/code",
-      supabaseConfig: {
-        url: "https://x.supabase.co",
-        publishableKey: "pk",
-        sessionFilePath: "/tmp/session.json",
-      },
-      allowTrial: true,
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
     });
 
-    expect(result.valid).toBe(true);
-    expect(result.source).toBe("trial");
-    expect(result.message).toContain("Entitlement check unavailable");
+    expect(result.valid).toBe(false);
+    expect(result.source).toBe("none");
     expect(result.message).toContain("HTTP 502: polar license lookup failed");
     const entitlementFailureWarn = warnSpy.mock.calls.find((call) =>
       String(call[0]).includes("License entitlement check failed"),
     );
     expect(entitlementFailureWarn).toBeDefined();
     expect(String(entitlementFailureWarn?.[0])).toContain("3 attempts");
+
+    warnSpy.mockRestore();
+  });
+
+  test("honors the grace window when the server becomes unreachable after a successful check", async () => {
+    const supabaseConfig = freshSupabaseConfig();
+    let failing = false;
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      if (!url.includes("/api/license/check")) {
+        return originalFetch(input);
+      }
+      if (failing) {
+        return new Response(JSON.stringify({ reason: "polar license lookup failed" }), {
+          status: 502,
+        });
+      }
+      return Response.json({
+        entitled: true,
+        source: "team-automation",
+        productName: "DevIntern Team",
+      });
+    }) as typeof fetch;
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+
+    const { checkLicense } = await import(`../src/index.ts?grace=${Date.now()}`);
+
+    const first = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    expect(first.valid).toBe(true);
+    expect(first.source).toBe("entitlement");
+
+    const cachePath = join(supabaseConfig.sessionFilePath, "..", "license-cache.json");
+    expect(existsSync(cachePath)).toBe(true);
+    expect(readFileSync(cachePath, "utf8")).toContain("team-automation");
+
+    failing = true;
+    const second = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    expect(second.valid).toBe(true);
+    expect(second.source).toBe("grace");
+    expect(second.entitlementSource).toBe("team-automation");
+    expect(second.message).toContain("License server unreachable");
+
+    warnSpy.mockRestore();
+  });
+
+  test("definitive not-entitled clears the cache instead of granting grace", async () => {
+    const supabaseConfig = freshSupabaseConfig();
+    let mode: "entitled" | "denied" | "down" = "entitled";
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      if (!url.includes("/api/license/check")) {
+        return originalFetch(input);
+      }
+      if (mode === "entitled") {
+        return Response.json({ entitled: true, source: "team-automation" });
+      }
+      if (mode === "denied") {
+        return Response.json({ entitled: false, reason: "no polar customer" });
+      }
+      return new Response("", { status: 502 });
+    }) as typeof fetch;
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+
+    const { checkLicense } = await import(`../src/index.ts?revoke=${Date.now()}`);
+
+    const first = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    expect(first.valid).toBe(true);
+
+    mode = "denied";
+    const second = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    expect(second.valid).toBe(false);
+
+    mode = "down";
+    const third = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    expect(third.valid).toBe(false);
+    expect(third.source).toBe("none");
 
     warnSpy.mockRestore();
   });
@@ -130,21 +223,16 @@ describe("checkLicense entitlement API", () => {
 
     const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
-    const { checkLicense } = await import(`../src/index.ts?401=${Date.now()}`);
+    const { checkLicense } = await import(`../src/index.ts?d401=${Date.now()}`);
 
     const result = await checkLicense({
       productKey: "devintern/code",
-      supabaseConfig: {
-        url: "https://x.supabase.co",
-        publishableKey: "pk",
-        sessionFilePath: "/tmp/session.json",
-      },
-      allowTrial: true,
+      supabaseConfig: freshSupabaseConfig(),
     });
 
     expect(calls).toBe(1);
-    expect(result.source).toBe("trial");
-    expect(result.message).toContain("HTTP 401: invalid token");
+    expect(result.valid).toBe(false);
+    expect(result.source).toBe("none");
 
     warnSpy.mockRestore();
   });

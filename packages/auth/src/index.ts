@@ -12,11 +12,9 @@ import {
   resolveLogin,
   type OAuthProvider,
 } from "./login-provider";
-import { startUserTrial } from "./trial";
 import type { AuthenticatedUser, LoginMethod, SupabaseAuthConfig } from "./types";
 
 export type { AuthenticatedUser, LoginMethod, OAuthProvider, SupabaseAuthConfig } from "./types";
-export { getUserTrialStartedAt, startUserTrial } from "./trial";
 export {
   extractLoginFromArgv,
   extractLoginProviderFromArgv,
@@ -122,7 +120,7 @@ async function writeStoredSession(
 }
 
 /**
- * Persist a Supabase session to disk, start the user trial, and return CLI user info.
+ * Persist a Supabase session to disk and return CLI user info.
  *
  * @param config - Supabase auth configuration.
  * @param session - Active Supabase session from OAuth or magic-link exchange.
@@ -144,8 +142,6 @@ async function persistAuthenticatedSession(
       createdAt: user.created_at ?? null,
     },
   });
-
-  await startUserTrial(config, user.id, session.access_token);
 
   return {
     id: user.id,

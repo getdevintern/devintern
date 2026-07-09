@@ -241,7 +241,7 @@ AGENT_CLI_PATH=claude
 
 # Optional: License Key
 # You can purchase a license at https://devintern.com/pricing
-# Setting this skips the trial period and activates the product permanently
+# Required for unattended automation (systemd, cron, CI, webhook server); interactive use needs no license
 # License keys start with CODE-****
 # LICENSE_KEY=CODE-XXXX-XXXX-XXXX-XXXX
 `;
@@ -675,12 +675,12 @@ if (process.argv[2] === "init") {
     }
 
     // License check — the webhook server is unattended automation, so it
-    // always requires an automation license (or an active trial).
+    // always requires an automation license.
     const supabaseConfig = loadSupabaseConfig();
     const licenseResult = await checkLicense({
       productKey: "devintern/code",
       supabaseConfig,
-      requireServerAddon: true,
+      requireAutomation: true,
     });
     requireLicense(licenseResult);
 
@@ -1506,7 +1506,7 @@ async function main(): Promise<void> {
       const licenseResult = await checkLicense({
         productKey: "devintern/code",
         supabaseConfig,
-        requireServerAddon: true,
+        requireAutomation: true,
       });
       requireLicense(licenseResult);
     }
