@@ -46,11 +46,11 @@
   "homepage": "https://devintern.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danii1/devintern.git",
+    "url": "git+https://github.com/getdevintern/devintern.git",
     "directory": "packages/code"
   },
   "bugs": {
-    "url": "https://github.com/danii1/devintern/issues"
+    "url": "https://github.com/getdevintern/devintern/issues"
   },
   "dependencies": {
     "@types/turndown": "^5.0.5",

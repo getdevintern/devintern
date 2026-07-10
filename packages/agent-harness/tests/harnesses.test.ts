@@ -98,7 +98,7 @@ describe("CursorHarness", () => {
   test("metadata", () => {
     expect(h.name).toBe("cursor");
     expect(h.displayName).toBe("Cursor");
-    expect(h.defaultPath).toBe("agent");
+    expect(h.defaultPath).toBe("cursor-agent");
     expect(h.promptFlag).toBeUndefined();
   });
 

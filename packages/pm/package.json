@@ -37,11 +37,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danii1/devintern.git",
+    "url": "git+https://github.com/getdevintern/devintern.git",
     "directory": "packages/pm"
   },
   "bugs": {
-    "url": "https://github.com/danii1/devintern/issues"
+    "url": "https://github.com/getdevintern/devintern/issues"
   },
   "homepage": "https://devintern.com",
   "author": "Daniil",

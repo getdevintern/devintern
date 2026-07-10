@@ -1,7 +1,7 @@
 /**
  * Cursor CLI harness.
  *
- * CLI: agent -p [--force] [--trust] [--approve-mcps] [--model <model>] [prompt...]
+ * CLI: cursor-agent -p [--force] [--trust] [--approve-mcps] [--model <model>] [prompt...]
  *
  * Uses `-p` / `--print` for non-interactive (headless) mode. The prompt is a
  * positional argument; runners append it after flags from {@link buildArgs}.
@@ -14,7 +14,9 @@ import type { AgentHarness, AgentRunOptions } from "../types.js";
 export class CursorHarness implements AgentHarness {
   readonly name = "cursor";
   readonly displayName = "Cursor";
-  readonly defaultPath = "agent";
+  // Cursor installs both `agent` and `cursor-agent` symlinks; use the
+  // unambiguous name — other CLIs (e.g. Grok) also install as `agent`.
+  readonly defaultPath = "cursor-agent";
 
   /**
    * Build Cursor `agent` CLI flags for non-interactive (`-p`) execution.

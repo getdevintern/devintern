@@ -58,3 +58,6 @@ export {
   detectIncompleteImplementation,
   type IncompleteImplementationResult,
 } from "./detect-incomplete-implementation.js";
+
+// Open-question detection (agent blocked on user input)
+export { detectOpenQuestions, type OpenQuestionsResult } from "./detect-open-questions.js";

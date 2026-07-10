@@ -18,6 +18,7 @@ import { checkLicense, requireLicense } from "@devintern/license-check";
 import {
   detectIncompleteImplementation,
   detectMaxTurnsReached,
+  detectOpenQuestions,
   detectUsageLimit,
   resolveHarness,
   resolveExecutablePathStrict,
@@ -2917,6 +2918,36 @@ async function runAgentHarness(
           return;
         } else {
           console.log("✅ Agent execution completed successfully");
+        }
+
+        // Agent finished by asking the user questions instead of implementing.
+        // Committing here would ship an answer nobody gave, so surface the
+        // questions and stop before the git/PR flow.
+        const openQuestions = detectOpenQuestions(stdoutOutput);
+        if (openQuestions.awaitingInput) {
+          console.log("\n⏸️  Agent is asking questions and needs your input before proceeding:");
+          for (const question of openQuestions.questions) {
+            console.log(`   • ${question}`);
+          }
+
+          if (tracker && !skipComments && taskKey) {
+            try {
+              const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
+              await tracker.postComment(taskKey, {
+                format: "markdown",
+                body:
+                  `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
+                  `Answer in the task description or a comment, then re-run devintern.`,
+              });
+              console.log("💬 Posted the questions as a comment on the task");
+            } catch (commentError) {
+              console.warn(`⚠️  Failed to post questions comment: ${commentError}`);
+            }
+          }
+
+          console.log("\n⏭️  Skipping commit and PR until the questions are answered...");
+          resolve();
+          return;
         }
 
         // --- Shared helpers for hook validation, push, and PR creation ---
