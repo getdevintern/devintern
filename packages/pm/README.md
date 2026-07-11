@@ -4,7 +4,7 @@ Automate story and task creation across multiple project management tools with A
 
 Supported task trackers: Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, Markdown.
 
-Supported agent harnesses: Claude Code, OpenCode, Codex, Cursor.
+Supported agent harnesses: Claude Code, OpenCode, Codex, Cursor, Grok Build, Reasonix (DeepSeek), and others.
 
 ## Install
 

@@ -12,15 +12,31 @@ import {
 
 describe("resolveHarness", () => {
   const originalEnv = { ...process.env };
+  let warnings: string[];
+  const originalWarn = console.warn;
 
   beforeEach(() => {
     delete process.env.AGENT_HARNESS;
     delete process.env.AGENT_CLI_PATH;
     delete process.env.CLAUDE_CLI_PATH;
     delete process.env.OPENCODE_CLI_PATH;
+    delete process.env.ANTIGRAVITY_CLI_PATH;
+    delete process.env.AGY_CLI_PATH;
+    delete process.env.GEMINI_CLI_PATH;
+    warnings = [];
+    console.warn = (msg?: unknown) => {
+      warnings.push(String(msg));
+    };
   });
 
   afterEach(() => {
+    console.warn = originalWarn;
+    // Restore env without leaking deletes from beforeEach across tests.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
     Object.assign(process.env, originalEnv);
   });
 
@@ -43,6 +59,10 @@ describe("resolveHarness", () => {
 
   test("throws for unknown harness name", () => {
     expect(() => resolveHarness({ harnessName: "unknown" })).toThrow("Unknown agent harness");
+    expect(() => resolveHarness({ harnessName: "unknown" })).toThrow("Available harnesses:");
+    expect(() => resolveHarness({ harnessName: "unknown" })).toThrow('"grok"');
+    expect(() => resolveHarness({ harnessName: "unknown" })).toThrow('"deepseek"');
+    expect(() => resolveHarness({ harnessName: "unknown" })).toThrow('"antigravity"');
   });
 
   test("uses options.cliPath", () => {
@@ -78,6 +98,68 @@ describe("resolveHarness", () => {
     const result = resolveHarness({ harnessName: "opencode", envPrefix: "MY_CUSTOM_PREFIX" });
     expect(result.path).toBe("/custom/path");
     delete process.env.MY_CUSTOM_PREFIX_CLI_PATH;
+  });
+
+  test("resolves antigravity with defaultPath agy", () => {
+    const result = resolveHarness({ harnessName: "antigravity" });
+    expect(result.harness.name).toBe("antigravity");
+    expect(result.path).toBe("agy");
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("resolves agy alias to antigravity without deprecation warning", () => {
+    const result = resolveHarness({ harnessName: "agy" });
+    expect(result.harness.name).toBe("antigravity");
+    expect(result.path).toBe("agy");
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("resolves deprecated gemini alias to antigravity and warns once", () => {
+    const result = resolveHarness({ harnessName: "gemini" });
+    expect(result.harness.name).toBe("antigravity");
+    expect(result.path).toBe("agy");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("AGENT_HARNESS=gemini is deprecated");
+    expect(warnings[0]).toContain("antigravity");
+  });
+
+  test("gemini alias via AGENT_HARNESS env still works and warns", () => {
+    process.env.AGENT_HARNESS = "gemini";
+    const result = resolveHarness();
+    expect(result.harness.name).toBe("antigravity");
+    expect(result.path).toBe("agy");
+    expect(warnings.some((w) => w.includes("deprecated"))).toBe(true);
+  });
+
+  test("uses ANTIGRAVITY_CLI_PATH for antigravity harness", () => {
+    process.env.ANTIGRAVITY_CLI_PATH = "/opt/agy";
+    const result = resolveHarness({ harnessName: "antigravity" });
+    expect(result.path).toBe("/opt/agy");
+  });
+
+  test("uses AGY_CLI_PATH for antigravity harness", () => {
+    process.env.AGY_CLI_PATH = "/usr/local/bin/agy";
+    const result = resolveHarness({ harnessName: "antigravity" });
+    expect(result.path).toBe("/usr/local/bin/agy");
+  });
+
+  test("ignores bare GEMINI_CLI_PATH=gemini and falls back to agy with warning", () => {
+    process.env.GEMINI_CLI_PATH = "gemini";
+    const result = resolveHarness({ harnessName: "antigravity" });
+    expect(result.path).toBe("agy");
+    expect(warnings.some((w) => w.includes("GEMINI_CLI_PATH is deprecated"))).toBe(true);
+  });
+
+  test("does not use retired gemini binary even when cliPath is gemini", () => {
+    const result = resolveHarness({ harnessName: "antigravity", cliPath: "gemini" });
+    expect(result.path).toBe("agy");
+    expect(warnings.some((w) => w.includes("retired Gemini CLI"))).toBe(true);
+  });
+
+  test("warnDeprecated=false suppresses gemini deprecation warning", () => {
+    const result = resolveHarness({ harnessName: "gemini", warnDeprecated: false });
+    expect(result.harness.name).toBe("antigravity");
+    expect(warnings).toHaveLength(0);
   });
 });
 

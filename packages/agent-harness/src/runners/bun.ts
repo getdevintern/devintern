@@ -10,6 +10,8 @@
  */
 
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { assertModeSupported } from "../modes.js";
+import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
@@ -25,6 +27,7 @@ import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js"
  * @param prompt - Task prompt passed to the agent.
  * @param options - Run options (turn limits, model, input method, etc.).
  * @returns Captured stdout, stderr, and process exit code.
+ * @throws {UnsupportedAgentModeError} when `options.mode` is not supported.
  */
 export async function runAgentBun(
   harness: AgentHarness,
@@ -32,15 +35,13 @@ export async function runAgentBun(
   prompt: string,
   options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
+  assertModeSupported(harness, options.mode);
+
   const inputMethod = options.inputMethod ?? "arg";
   const args = harness.buildArgs(options);
 
   if (inputMethod === "arg") {
-    if (harness.promptFlag) {
-      args.push(harness.promptFlag, prompt);
-    } else {
-      args.push(prompt);
-    }
+    args.push(...buildPromptArgs(harness, prompt));
   }
 
   if (!options.silent) {

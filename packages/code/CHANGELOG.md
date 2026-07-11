@@ -1,6 +1,19 @@
 # @devintern/code Changelog
 
-## [Unreleased]
+## [2.1.0] - 2026-07-11
+
+### Added
+
+- **Read-only analysis runs**: internal analysis-only agent spawns (feasibility/clarity check, story point estimation) now use the harness's native read-only or plan mode when the CLI can enforce one (claude-code, codex, cursor, grok, opencode), and are never combined with permission-skip flags. Harnesses without native enforcement keep the previous unattended behavior, and a failed constrained run falls back to it automatically. `AGENT_ANALYSIS_ALLOWED_TOOLS` (comma-separated, harness tool naming) extends the analysis tool allowlist, e.g. to MCP servers. devpm task generation applies the same policy
+
+### Changed
+
+- **Antigravity CLI harness**: `AGENT_HARNESS=antigravity` (binary `agy`) replaces the retired Gemini CLI integration. Headless runs use `agy -p` with optional `--dangerously-skip-permissions`. Legacy `AGENT_HARNESS=gemini` (and `agy`) still resolve to Antigravity with a deprecation warning; the dead `gemini` binary is not spawned. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`. Antigravity has no headless read-only mode, so analysis runs use the default unattended path on this harness. Install: https://antigravity.google/docs/cli/install
+
+### Fixed
+
+- **Prompt delivery to agent CLIs**: the prompt is now passed on the command line (via each harness's prompt flag) instead of stdin, so TUI-first CLIs (grok, kimi, goose, qwen) no longer fail with "Device not configured" or hang waiting for a terminal in headless runs, and opencode no longer blocks on an unused stdin pipe
+- **Partial commits from monorepo subdirectories**: automatic commits now stage the entire repository (`git add -A`) instead of only the launch directory, and a post-commit guard verifies the working tree is clean — sweeping hook-generated files into the commit, or failing loudly — so a run can no longer push a partial commit or open a PR missing most of the implementation
 
 ## [2.0.0] - 2026-07-09
 

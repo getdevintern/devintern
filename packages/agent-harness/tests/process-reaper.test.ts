@@ -88,9 +88,9 @@ test("reapTree kills a still-running child and its children together", async () 
   });
 
   // Wait until the grandchild PID has been recorded.
-  expect(await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "")).toBe(
-    true,
-  );
+  expect(
+    await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== ""),
+  ).toBe(true);
   const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
   expect(isAlive(child.pid!)).toBe(true);
   expect(isAlive(grandchildPid)).toBe(true);

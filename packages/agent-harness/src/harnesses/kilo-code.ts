@@ -9,12 +9,15 @@
  * @see https://kilo.ai/docs
  */
 
+import { effectiveSkipPermissions, assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class KiloCodeHarness implements AgentHarness {
   readonly name = "kilo-code";
   readonly displayName = "Kilo Code";
   readonly defaultPath = "kilo";
+  /** No native plan/read-only enforcement documented for headless `kilo run`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `kilo run` subcommand flags for non-interactive execution.
@@ -23,9 +26,10 @@ export class KiloCodeHarness implements AgentHarness {
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = ["run"];
 
-    if (options.skipPermissions) {
+    if (effectiveSkipPermissions(options)) {
       args.push("--auto");
     }
 

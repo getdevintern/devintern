@@ -14,7 +14,7 @@
  *   5. Harness `defaultPath`
  */
 
-import { getHarness, listHarnesses } from "./registry.js";
+import { getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import type { ResolvedHarness } from "./types.js";
 
 export interface HarnessResolutionOptions {
@@ -27,14 +27,24 @@ export interface HarnessResolutionOptions {
    * Defaults to the harness name upper-cased with hyphens → underscores.
    */
   envPrefix?: string;
+  /**
+   * When false, suppress deprecation warnings for aliased harness names
+   * (e.g. `gemini` → `antigravity`). Defaults to true.
+   */
+  warnDeprecated?: boolean;
 }
 
 /**
  * Resolve which harness to use and the CLI executable path to invoke.
  *
  * Harness name: `options.harnessName` → `AGENT_HARNESS` → `"claude-code"`.
+ * Aliases (e.g. `agy` / deprecated `gemini` → `antigravity`) are applied before
+ * registry lookup; deprecated aliases emit a one-line console warning.
+ *
  * Executable path: `options.cliPath` → `AGENT_CLI_PATH` →
- * `{PREFIX}_CLI_PATH` → `CLAUDE_CLI_PATH` → harness `defaultPath`.
+ * `{PREFIX}_CLI_PATH` → harness-specific fallbacks (e.g. `AGY_CLI_PATH`,
+ * deprecated `GEMINI_CLI_PATH` for Antigravity) → `CLAUDE_CLI_PATH` →
+ * harness `defaultPath`.
  *
  * @param options - Optional overrides for harness name, CLI path, and env prefix.
  * @returns The resolved harness and executable path.
@@ -50,6 +60,11 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   }
   if (!harnessName) {
     harnessName = "claude-code";
+  }
+
+  const alias = HARNESS_ALIASES[harnessName];
+  if (alias?.deprecated && alias.warning && options?.warnDeprecated !== false) {
+    console.warn(`⚠️  ${alias.warning}`);
   }
 
   const harness = getHarness(harnessName);
@@ -68,13 +83,68 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   let path = options?.cliPath;
   if (!path) {
     const prefix = options?.envPrefix ?? harness.name.toUpperCase().replace(/-/g, "_");
-    path = env.AGENT_CLI_PATH || env[`${prefix}_CLI_PATH`] || env.CLAUDE_CLI_PATH; // backward compatibility
+    path =
+      env.AGENT_CLI_PATH ||
+      env[`${prefix}_CLI_PATH`] ||
+      // Antigravity: also accept AGY_CLI_PATH (binary name) and legacy GEMINI_CLI_PATH
+      (harness.name === "antigravity" ? env.AGY_CLI_PATH : undefined) ||
+      (harness.name === "antigravity" && env.GEMINI_CLI_PATH
+        ? warnAndMapLegacyGeminiCliPath(env.GEMINI_CLI_PATH, options?.warnDeprecated !== false)
+        : undefined) ||
+      env.CLAUDE_CLI_PATH; // backward compatibility
   }
   if (!path) {
     path = harness.defaultPath;
   }
 
+  // Never happily path to the retired bare `gemini` binary when using Antigravity.
+  if (harness.name === "antigravity" && isRetiredGeminiBinary(path)) {
+    if (options?.warnDeprecated !== false) {
+      console.warn(
+        `⚠️  CLI path "${path}" points at the retired Gemini CLI binary. ` +
+          `Using Antigravity default "agy" instead. Set AGENT_CLI_PATH, ` +
+          `ANTIGRAVITY_CLI_PATH, or AGY_CLI_PATH if agy is not on PATH.`,
+      );
+    }
+    path = harness.defaultPath;
+  }
+
   return { harness, path };
+}
+
+/**
+ * True when a path/command name is the deprecated consumer Gemini CLI binary.
+ *
+ * @param path - Resolved or configured CLI path.
+ * @returns Whether the path should not be the happy path for Antigravity runs.
+ */
+function isRetiredGeminiBinary(path: string): boolean {
+  const base = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  return base === "gemini" || base === "gemini.exe";
+}
+
+/**
+ * Map legacy `GEMINI_CLI_PATH` for Antigravity resolution with a deprecation warning.
+ *
+ * Bare `gemini` paths are discarded so we do not spawn a dead binary; custom
+ * install paths are kept with a warning (enterprise holdouts may still have a
+ * usable binary outside DevIntern's recommended path).
+ *
+ * @param geminiCliPath - Value of `GEMINI_CLI_PATH`.
+ * @param warn - Whether to print a deprecation warning.
+ * @returns Path to use, or `undefined` to fall through to the next candidate.
+ */
+function warnAndMapLegacyGeminiCliPath(geminiCliPath: string, warn: boolean): string | undefined {
+  if (warn) {
+    console.warn(
+      "⚠️  GEMINI_CLI_PATH is deprecated. Prefer AGENT_CLI_PATH, ANTIGRAVITY_CLI_PATH, or AGY_CLI_PATH " +
+        "pointing at the Antigravity CLI binary (agy).",
+    );
+  }
+  if (isRetiredGeminiBinary(geminiCliPath)) {
+    return undefined;
+  }
+  return geminiCliPath;
 }
 
 /**

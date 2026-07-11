@@ -11,10 +11,31 @@
  */
 
 // Types
-export type { AgentHarness, AgentRunOptions, AgentRunResult, ResolvedHarness } from "./types.js";
+export type {
+  AgentHarness,
+  AgentRunMode,
+  AgentRunOptions,
+  AgentRunResult,
+  ResolvedHarness,
+} from "./types.js";
+
+// Run modes (plan / readonly) and capability checks
+export {
+  UnsupportedAgentModeError,
+  assertModeSupported,
+  constrainedModeAllowsExternalTools,
+  effectiveSkipPermissions,
+  getSupportedModes,
+  isConstrainedMode,
+  isModeSupported,
+  type ConstrainedAgentRunMode,
+} from "./modes.js";
 
 // Registry
-export { registerHarness, getHarness, listHarnesses } from "./registry.js";
+export { registerHarness, getHarness, listHarnesses, HARNESS_ALIASES } from "./registry.js";
+
+// Prompt argument construction
+export { buildPromptArgs } from "./prompt-args.js";
 
 // Resolver
 export {
@@ -28,12 +49,16 @@ export {
 } from "./resolver.js";
 
 // Built-in harnesses
+export { AntigravityHarness } from "./harnesses/antigravity.js";
 export { ClaudeCodeHarness } from "./harnesses/claude-code.js";
 export { ClineHarness } from "./harnesses/cline.js";
 export { CodexHarness } from "./harnesses/codex.js";
 export { CursorHarness } from "./harnesses/cursor.js";
+export { DeepSeekHarness } from "./harnesses/deepseek.js";
+/** @deprecated Use {@link AntigravityHarness}. Re-exports AntigravityHarness. */
 export { GeminiHarness } from "./harnesses/gemini.js";
 export { GooseHarness } from "./harnesses/goose.js";
+export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";

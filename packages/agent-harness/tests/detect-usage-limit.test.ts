@@ -104,7 +104,8 @@ describe("detectUsageLimit", () => {
   });
 
   test("detects provider 'Rate limit reached' JSON error", () => {
-    const out = 'Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req"}}';
+    const out =
+      'Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req"}}';
     expect(detectUsageLimit(out, "").limited).toBe(true);
   });
 

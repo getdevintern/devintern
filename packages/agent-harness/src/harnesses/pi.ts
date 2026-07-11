@@ -9,6 +9,7 @@
  * @see https://pi.dev/docs/latest/quickstart
  */
 
+import { assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class PiHarness implements AgentHarness {
@@ -16,6 +17,8 @@ export class PiHarness implements AgentHarness {
   readonly displayName = "Pi";
   readonly defaultPath = "pi";
   readonly promptFlag = "-p";
+  /** No native plan/read-only enforcement documented for headless `pi`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `pi` CLI flags for non-interactive (`-p`) execution.
@@ -26,6 +29,7 @@ export class PiHarness implements AgentHarness {
    * @returns Empty args; prompt is supplied via {@link promptFlag}.
    */
   buildArgs(_options: AgentRunOptions): string[] {
+    assertModeSupported(this, _options.mode);
     const args: string[] = [];
 
     // Pi does not currently expose --model, --max-turns, or

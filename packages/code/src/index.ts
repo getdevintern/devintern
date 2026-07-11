@@ -16,20 +16,24 @@ import {
 } from "@devintern/auth";
 import { checkLicense, requireLicense } from "@devintern/license-check";
 import {
+  buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
   detectOpenQuestions,
   detectUsageLimit,
+  isConstrainedMode,
   resolveHarness,
   resolveExecutablePathStrict,
   resolveExecutablePathWithRetry,
   spawnReapable,
   reapTree,
   type AgentHarness,
+  type AgentRunOptions,
   type ResolvedHarness,
 } from "@devintern/agent-harness";
 import { isMarkdownFilePath, parseTrelloCardReference } from "@devintern/task-trackers";
 import { findEnvFile, resolveConfigDir } from "@devintern/utils";
+import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { TaskFormatter } from "./lib/task-formatter";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { TaskTrackerManager } from "./lib/task-tracker-manager";
@@ -186,7 +190,9 @@ JIRA_API_TOKEN=your-api-token-here
 # JIRA_API_TOKEN=your-email@company.com:your-api-token-here
 
 # Agent Harness Configuration
-# Which AI agent to use: claude-code | opencode | codex | cursor
+# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek
+# (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
+# Legacy: gemini still resolves to antigravity with a deprecation warning
 # Defaults to 'claude-code' if not specified
 AGENT_HARNESS=claude-code
 
@@ -198,6 +204,12 @@ AGENT_CLI_PATH=claude
 
 # Note: Agents will be run with --dangerously-skip-permissions and --max-turns (agent-specific)
 # This allows for elevated permissions and extended conversations for complex tasks
+
+# Optional: extra tools for the read-only analysis runs (clarity check, estimation).
+# Those runs use the harness's read-only mode when supported; web fetch/search stays
+# allowed on Claude Code, but MCP tools are blocked unless listed here
+# (comma-separated, harness tool naming; whole-server entries also allow its write tools).
+# AGENT_ANALYSIS_ALLOWED_TOOLS=mcp__notion,mcp__figma__get_design_context
 
 # Optional: Output Directory Configuration
 # Base directory for saving task-related files (defaults to /tmp/devintern-tasks)
@@ -1303,13 +1315,16 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       }
 
       try {
-        const assessment = await runClarityCheck(
-          clarityInputFile,
-          resolvedAgent.harness,
-          resolvedAgent.path,
-          workflowKey,
-          tracker,
-          options.skipComments,
+        const assessment = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
+          runClarityCheck(
+            clarityInputFile,
+            resolvedAgent.harness,
+            resolvedAgent.path,
+            workflowKey,
+            tracker,
+            options.skipComments,
+            runOptions,
+          ),
         );
 
         if (assessment && !assessment.isImplementable) {
@@ -1656,15 +1671,18 @@ async function main(): Promise<void> {
           );
 
           // Run estimation
-          const result = await runEstimation(
-            estimationFile,
-            resolvedAgent.harness,
-            resolvedAgent.path,
-            taskKey,
-            tracker,
-            projectSettings,
-            options.skipComments,
-            existingCommentId,
+          const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
+            runEstimation(
+              estimationFile,
+              resolvedAgent.harness,
+              resolvedAgent.path,
+              taskKey,
+              tracker,
+              projectSettings,
+              options.skipComments,
+              existingCommentId,
+              runOptions,
+            ),
           );
 
           // Clean up temp file
@@ -1823,6 +1841,9 @@ async function main(): Promise<void> {
  * @param taskKey - Task tracker issue key
  * @param tracker - Task tracker client
  * @param skipComments - When true, skip posting the assessment comment
+ * @param runOptions - Agent run options (mode/permissions); callers pass
+ *   these via {@link runAnalysisWithFallback} so a failing read-only run is
+ *   retried once in default mode
  */
 async function runClarityCheck(
   clarityFile: string,
@@ -1830,7 +1851,8 @@ async function runClarityCheck(
   executablePath: string,
   taskKey: string,
   tracker: TaskTrackerClient | undefined,
-  skipComments = false,
+  skipComments: boolean,
+  runOptions: AgentRunOptions,
 ): Promise<ClarityAssessment | null> {
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the clarity check.
@@ -1850,11 +1872,7 @@ async function runClarityCheck(
 
     const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-    const clarityArgs = harness.buildArgs({
-      maxTurns: 10,
-      skipPermissions: true,
-      workingDir: process.cwd(),
-    });
+    const clarityArgs = harness.buildArgs(runOptions);
     console.log(`🔍 Running feasibility assessment with ${harness.displayName}...`);
     console.log(`   Command: ${executablePath} ${clarityArgs.join(" ")}`);
     console.log(`   Input: ${clarityFile}`);
@@ -1864,9 +1882,16 @@ async function runClarityCheck(
     let timedOut = false;
 
     // Spawn agent process for clarity check
-    const clarityAgent: ChildProcess = spawnReapable(resolvedPath, clarityArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const clarityAgent: ChildProcess = spawnReapable(
+      resolvedPath,
+      [...clarityArgs, ...buildPromptArgs(harness, clarityContent)],
+      {
+        // Prompt goes on argv (via promptFlag when the harness defines one);
+        // stdin stays closed so TUI-first CLIs (grok, kimi, antigravity/agy) don't try
+        // to go interactive, and opencode doesn't block waiting for EOF.
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
 
     const timeout = setTimeout(
       () => {
@@ -2017,6 +2042,15 @@ async function runClarityCheck(
 
           resolve(assessment);
         } catch (parseError) {
+          // In read-only mode, unusable output may be the mode's fault (e.g.
+          // grok plan mode returning empty stdout with exit 0). Reject before
+          // posting failure comments so the fallback can retry in default mode.
+          if (isConstrainedMode(runOptions.mode)) {
+            reject(
+              new ReadonlyAnalysisError(`Clarity output unusable in read-only mode: ${parseError}`),
+            );
+            return;
+          }
           console.warn("Failed to parse clarity assessment response:", parseError);
           console.log("Raw Agent output:", stdoutOutput);
 
@@ -2080,12 +2114,6 @@ async function runClarityCheck(
         reject(new Error(`Agent clarity check exited with code ${code}`));
       }
     });
-
-    // Send clarity assessment content to Agent
-    if (clarityAgent.stdin) {
-      clarityAgent.stdin.write(clarityContent);
-      clarityAgent.stdin.end();
-    }
   });
 }
 
@@ -2211,8 +2239,9 @@ async function runEstimation(
   taskKey: string,
   tracker: TaskTrackerClient,
   settings: ProjectSettings | null,
-  skipComments = false,
-  existingCommentId?: string,
+  skipComments: boolean,
+  existingCommentId: string | undefined,
+  runOptions: AgentRunOptions,
 ): Promise<EstimationResult | null> {
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the estimation.
@@ -2229,11 +2258,7 @@ async function runEstimation(
     const estimationContent = readFileSync(estimationFile, "utf8");
     const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-    const estimationArgs = harness.buildArgs({
-      maxTurns: 10,
-      skipPermissions: true,
-      workingDir: process.cwd(),
-    });
+    const estimationArgs = harness.buildArgs(runOptions);
     console.log(`📊 Running story points estimation with ${harness.displayName}...`);
     console.log(`   Command: ${executablePath} ${estimationArgs.join(" ")}`);
 
@@ -2241,9 +2266,13 @@ async function runEstimation(
     let stderrOutput = "";
     let timedOut = false;
 
-    const estimationAgent: ChildProcess = spawnReapable(resolvedPath, estimationArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const estimationAgent: ChildProcess = spawnReapable(
+      resolvedPath,
+      [...estimationArgs, ...buildPromptArgs(harness, estimationContent)],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
 
     const timeout = setTimeout(
       () => {
@@ -2385,16 +2414,21 @@ async function runEstimation(
 
         resolve(result);
       } catch (parseError) {
+        // See runClarityCheck: let the fallback retry read-only failures in
+        // default mode instead of counting the task as failed.
+        if (isConstrainedMode(runOptions.mode)) {
+          reject(
+            new ReadonlyAnalysisError(
+              `Estimation output unusable in read-only mode: ${parseError}`,
+            ),
+          );
+          return;
+        }
         console.warn("Failed to parse estimation response:", parseError);
         console.log("Raw Agent output:", stdoutOutput);
         resolve(null);
       }
     });
-
-    if (estimationAgent.stdin) {
-      estimationAgent.stdin.write(estimationContent);
-      estimationAgent.stdin.end();
-    }
   });
 }
 
@@ -2696,9 +2730,13 @@ async function runAgentHarness(
     let timedOut = false;
 
     // Spawn agent process with enhanced permissions and max turns
-    const codeAgent: ChildProcess = spawnReapable(resolvedPath, agentArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const codeAgent: ChildProcess = spawnReapable(
+      resolvedPath,
+      [...agentArgs, ...buildPromptArgs(harness, taskContent)],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
 
     const timeout = setTimeout(
       () => {
@@ -3237,9 +3275,13 @@ async function runAgentHarness(
                   const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
                     displayName: harness.displayName,
                   });
-                  const retryProcess: ChildProcess = spawnReapable(retryResolvedPath, retryArgs, {
-                    stdio: ["pipe", "pipe", "pipe"],
-                  });
+                  const retryProcess: ChildProcess = spawnReapable(
+                    retryResolvedPath,
+                    [...retryArgs, ...buildPromptArgs(harness, implementationPrompt)],
+                    {
+                      stdio: ["ignore", "pipe", "pipe"],
+                    },
+                  );
 
                   let retryStdoutOutput = "";
                   let retryStderrOutput = "";
@@ -3258,11 +3300,6 @@ async function runAgentHarness(
                       retryStderrOutput += output;
                       process.stderr.write(output);
                     });
-                  }
-
-                  if (retryProcess.stdin) {
-                    retryProcess.stdin.write(implementationPrompt);
-                    retryProcess.stdin.end();
                   }
 
                   retryProcess.on("close", async (retryCode: number | null) => {
@@ -3485,12 +3522,6 @@ async function runAgentHarness(
         reject(new Error(`Agent exited with code ${code}`));
       }
     });
-
-    // Send task content to Agent
-    if (codeAgent.stdin) {
-      codeAgent.stdin.write(taskContent);
-      codeAgent.stdin.end();
-    }
   });
 }
 

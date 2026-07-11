@@ -2,7 +2,7 @@
   "name": "@devintern/agent-harness",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent harness abstraction for running AI coding agents (Claude Code, Opencode, etc.)",
+  "description": "Agent harness abstraction for running AI coding agents (Claude Code, Opencode, Grok, Antigravity, DeepSeek, etc.)",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -27,6 +27,11 @@
     "opencode",
     "codex",
     "cursor",
+    "grok",
+    "antigravity",
+    "agy",
+    "deepseek",
+    "reasonix",
     "cli",
     "harness"
   ]

@@ -12,6 +12,7 @@
  * @see https://goose-docs.ai/docs/guides/goose-cli-commands
  */
 
+import { effectiveSkipPermissions, assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class GooseHarness implements AgentHarness {
@@ -19,6 +20,8 @@ export class GooseHarness implements AgentHarness {
   readonly displayName = "Goose";
   readonly defaultPath = "goose";
   readonly promptFlag = "-t";
+  /** No native plan/read-only enforcement documented for headless `goose run`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `goose run` flags for non-interactive (`-t`) execution.
@@ -27,9 +30,10 @@ export class GooseHarness implements AgentHarness {
    * @returns Args starting with `run`; prompt is supplied via {@link promptFlag}.
    */
   buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = ["run"];
 
-    if (options.skipPermissions) {
+    if (effectiveSkipPermissions(options)) {
       // Goose defaults to Auto Mode (fully autonomous).
       // No explicit flag is required, but we add --no-session
       // to avoid creating a session file in unattended mode.

@@ -9,6 +9,7 @@
  * @see https://moonshotai.github.io/kimi-cli/
  */
 
+import { effectiveSkipPermissions, assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class KimiHarness implements AgentHarness {
@@ -16,6 +17,8 @@ export class KimiHarness implements AgentHarness {
   readonly displayName = "Kimi CLI";
   readonly defaultPath = "kimi";
   readonly promptFlag = "--prompt";
+  /** No native plan/read-only enforcement documented for headless `kimi --print`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `kimi --print` flags for non-interactive execution.
@@ -24,9 +27,10 @@ export class KimiHarness implements AgentHarness {
    * @returns Args including `--print`; prompt is supplied via {@link promptFlag}.
    */
   buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = ["--print"];
 
-    if (options.skipPermissions) {
+    if (effectiveSkipPermissions(options)) {
       args.push("--yolo");
     }
 

@@ -8,6 +8,7 @@
  * @see https://qwenlm.github.io/qwen-code-docs/
  */
 
+import { effectiveSkipPermissions, assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class QwenCodeHarness implements AgentHarness {
@@ -15,6 +16,8 @@ export class QwenCodeHarness implements AgentHarness {
   readonly displayName = "Qwen Code";
   readonly defaultPath = "qwen";
   readonly promptFlag = "-p";
+  /** No native plan/read-only enforcement documented for headless `qwen`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `qwen` CLI flags for headless (`-p`) execution.
@@ -23,9 +26,10 @@ export class QwenCodeHarness implements AgentHarness {
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = [];
 
-    if (options.skipPermissions) {
+    if (effectiveSkipPermissions(options)) {
       args.push("--yolo");
     }
 

@@ -369,8 +369,11 @@ export class Utils {
         };
       }
 
-      // Add all changes
-      const addResult = await Utils.executeGitCommand(["add", "."], {
+      // Add all changes. `-A` without a pathspec stages the entire working
+      // tree even when git runs from a subdirectory (e.g. a monorepo
+      // package), whereas `git add .` silently limits staging to the cwd and
+      // produces a partial commit.
+      const addResult = await Utils.executeGitCommand(["add", "-A"], {
         verbose,
         cwd,
       });
@@ -401,6 +404,27 @@ export class Utils {
         cwd,
       });
       if (commitResult.success) {
+        // Post-commit guard: the working tree must be clean now. A dirty tree
+        // means the commit is partial (e.g. hooks generated or modified files
+        // during the commit). Sweep the remainder into the same commit once;
+        // if the tree still isn't clean, fail loudly so callers don't push an
+        // incomplete commit or open an incomplete PR.
+        if (await Utils.hasUncommittedChanges(cwd)) {
+          const amendAdd = await Utils.executeGitCommand(["add", "-A"], { verbose, cwd });
+          const amendArgs = author
+            ? ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`]
+            : [];
+          amendArgs.push("commit", "--amend", "--no-edit");
+          const amendResult = amendAdd.success
+            ? await Utils.executeGitCommand(amendArgs, { verbose, cwd })
+            : amendAdd;
+          if (!amendResult.success || (await Utils.hasUncommittedChanges(cwd))) {
+            return {
+              success: false,
+              message: `Commit for ${taskKey} was created but the working tree still has uncommitted changes; refusing to continue with a partial commit. Please review and commit the remaining changes manually.`,
+            };
+          }
+        }
         return {
           success: true,
           message: `Successfully committed changes for ${taskKey}`,

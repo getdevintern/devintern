@@ -10,6 +10,8 @@ import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "./lib/co
 import { createBackend } from "./lib/backends";
 import type { TaskBackend } from "./lib/backends";
 import { runAgent } from "./lib/agent";
+import { dumpAgentOutput } from "./lib/agent-debug";
+import { parseAgentJson } from "./lib/agent-json";
 import { runInteractiveMode } from "./lib/components/interactive";
 import { initializeProject } from "./lib/init";
 import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
@@ -660,43 +662,54 @@ async function main() {
 
     if (storyResult.exitCode !== 0) {
       const errorDetail = storyResult.stderr.trim() || "Unknown agent error";
+      const dumpFile = await dumpAgentOutput("story-generation", storyResult, {
+        harness: config.agent.harness.name,
+        cliPath: config.agent.path,
+      });
+      const dumpHint = dumpFile ? `\nFull agent output: ${dumpFile}` : "";
       if (interactiveHandle) {
         await showInteractiveErrorAndRestart(
           interactiveHandle,
-          `Error: Failed to analyze ${sourceTypeLabel}\n${errorDetail}`,
+          `Error: Failed to analyze ${sourceTypeLabel}\n${errorDetail}${dumpHint}`,
         );
         return main();
       }
       console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
       console.error(storyResult.stderr);
+      if (dumpFile) {
+        console.error(`Full agent output: ${dumpFile}`);
+      }
       process.exit(1);
     }
 
-    // Parse JSON from Agent output (may be in code blocks)
+    // Parse JSON from Agent output (may be fenced or prefixed with prose)
     let storyData: StoryPayload;
     try {
-      let jsonText = storyResult.stdout.trim();
-      const jsonMatch = jsonText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (jsonMatch?.[1]) {
-        jsonText = jsonMatch[1];
-      }
-      storyData = JSON.parse(jsonText) as StoryPayload;
+      storyData = parseAgentJson<StoryPayload>(storyResult.stdout);
 
       if (!storyData.summary || !storyData.description) {
         throw new Error("Missing required fields: summary and description");
       }
     } catch (error) {
       const parseError = error instanceof Error ? error.message : String(error);
+      const dumpFile = await dumpAgentOutput("story-generation-parse", storyResult, {
+        harness: config.agent.harness.name,
+        cliPath: config.agent.path,
+      });
+      const dumpHint = dumpFile ? `\nFull agent output: ${dumpFile}` : "";
       if (interactiveHandle) {
         await showInteractiveErrorAndRestart(
           interactiveHandle,
-          `Error: Failed to parse story from agent output\n${parseError}`,
+          `Error: Failed to parse story from agent output\n${parseError}${dumpHint}`,
         );
         return main();
       }
       console.error("\n❌ Failed to parse story requirements from Agent output");
       console.error("Error:", parseError);
       console.error("Output:", storyResult.stdout);
+      if (dumpFile) {
+        console.error(`Full agent output (incl. stderr): ${dumpFile}`);
+      }
       process.exit(1);
     }
 
@@ -759,12 +772,7 @@ Please update the description based on the user's feedback. Keep the same title 
 
         // Parse updated JSON
         try {
-          let jsonText = editResult.stdout.trim();
-          const jsonMatch = jsonText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-          if (jsonMatch?.[1]) {
-            jsonText = jsonMatch[1];
-          }
-          const updatedData = JSON.parse(jsonText);
+          const updatedData = parseAgentJson<StoryPayload>(editResult.stdout);
 
           if (!updatedData.summary || !updatedData.description) {
             throw new Error("Missing required fields in update");
@@ -778,6 +786,13 @@ Please update the description based on the user's feedback. Keep the same title 
         } catch (error) {
           console.error("❌ Failed to parse updated task from Agent");
           console.error("Error:", error instanceof Error ? error.message : error);
+          const dumpFile = await dumpAgentOutput("story-edit-parse", editResult, {
+            harness: config.agent.harness.name,
+            cliPath: config.agent.path,
+          });
+          if (dumpFile) {
+            ui.setStatusMessage(`Update failed to parse — full agent output: ${dumpFile}`);
+          }
           // Loop will retry
         }
       }
@@ -876,12 +891,7 @@ Please update the description based on the user's feedback. Keep the same title 
     // Parse subtasks JSON from Agent output
     let subtasksData: DecompositionPayload;
     try {
-      let jsonText = decomposeResult.stdout.trim();
-      const jsonMatch = jsonText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (jsonMatch?.[1]) {
-        jsonText = jsonMatch[1];
-      }
-      subtasksData = JSON.parse(jsonText) as DecompositionPayload;
+      subtasksData = parseAgentJson<DecompositionPayload>(decomposeResult.stdout);
 
       if (!subtasksData.subtasks || !Array.isArray(subtasksData.subtasks)) {
         throw new Error("Expected subtasks array in response");
@@ -890,6 +900,13 @@ Please update the description based on the user's feedback. Keep the same title 
       console.error("\n❌ Failed to parse subtasks from Agent output");
       console.error("Error:", error instanceof Error ? error.message : error);
       console.error("Output:", decomposeResult.stdout);
+      const dumpFile = await dumpAgentOutput("decomposition-parse", decomposeResult, {
+        harness: config.agent.harness.name,
+        cliPath: config.agent.path,
+      });
+      if (dumpFile) {
+        console.error(`Full agent output (incl. stderr): ${dumpFile}`);
+      }
       process.exit(1);
     }
 

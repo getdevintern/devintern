@@ -8,6 +8,8 @@
 
 import { type ChildProcess } from "child_process";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { assertModeSupported } from "../modes.js";
+import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable, reapTree } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
@@ -25,7 +27,7 @@ export interface NodeRunnerOptions extends AgentRunOptions {
  * Spawn an agent CLI subprocess using Node `child_process` and collect output.
  *
  * Supports optional cwd, timeout, and real-time stdout/stderr streaming.
- * Default `inputMethod` is `"stdin"` (unlike the Bun runner, which defaults to `"arg"`).
+ * Default `inputMethod` is `"arg"`, matching the Bun runner.
  *
  * @param harness - Harness defining CLI flags via {@link AgentHarness.buildArgs}.
  * @param executablePath - Resolved path to the agent executable.
@@ -33,6 +35,7 @@ export interface NodeRunnerOptions extends AgentRunOptions {
  * @param options - Node-specific run options (cwd, timeout, displayRealtime, etc.).
  * @returns Captured stdout, stderr, and process exit code.
  * @throws {Error} When the executable is not found (`ENOENT`) or the process times out.
+ * @throws {UnsupportedAgentModeError} when `options.mode` is not supported.
  */
 export async function runAgentNode(
   harness: AgentHarness,
@@ -40,6 +43,8 @@ export async function runAgentNode(
   prompt: string,
   options: NodeRunnerOptions = {},
 ): Promise<AgentRunResult> {
+  assertModeSupported(harness, options.mode);
+
   // Wait out any in-progress CLI auto-update swap before spawning (see
   // resolveExecutablePathWithRetry), so a transient `spawn ENOENT` doesn't
   // abort the run.
@@ -49,15 +54,11 @@ export async function runAgentNode(
   });
 
   return new Promise((resolve, reject) => {
-    const inputMethod = options.inputMethod ?? "stdin";
+    const inputMethod = options.inputMethod ?? "arg";
     const args = [...harness.buildArgs(options)];
 
     if (inputMethod === "arg") {
-      if (harness.promptFlag) {
-        args.push(harness.promptFlag, prompt);
-      } else {
-        args.push(prompt);
-      }
+      args.push(...buildPromptArgs(harness, prompt));
     }
 
     const timeoutMinutes =

@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
+import { AntigravityHarness } from "../src/harnesses/antigravity.js";
 import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
 import { ClineHarness } from "../src/harnesses/cline.js";
 import { CodexHarness } from "../src/harnesses/codex.js";
 import { CursorHarness } from "../src/harnesses/cursor.js";
+import { DeepSeekHarness } from "../src/harnesses/deepseek.js";
 import { GeminiHarness } from "../src/harnesses/gemini.js";
 import { GooseHarness } from "../src/harnesses/goose.js";
+import { GrokHarness } from "../src/harnesses/grok.js";
 import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
@@ -118,13 +121,13 @@ describe("CursorHarness", () => {
   });
 });
 
-describe("GeminiHarness", () => {
-  const h = new GeminiHarness();
+describe("AntigravityHarness", () => {
+  const h = new AntigravityHarness();
 
   test("metadata", () => {
-    expect(h.name).toBe("gemini");
-    expect(h.displayName).toBe("Gemini CLI");
-    expect(h.defaultPath).toBe("gemini");
+    expect(h.name).toBe("antigravity");
+    expect(h.displayName).toBe("Antigravity CLI");
+    expect(h.defaultPath).toBe("agy");
     expect(h.promptFlag).toBe("-p");
   });
 
@@ -132,12 +135,26 @@ describe("GeminiHarness", () => {
     expect(h.buildArgs({})).toEqual([]);
   });
 
-  test("buildArgs with all options", () => {
-    expect(h.buildArgs({ skipPermissions: true, model: "gemini-pro" })).toEqual([
-      "--approval-mode=yolo",
-      "--model",
-      "gemini-pro",
-    ]);
+  test("buildArgs with skipPermissions", () => {
+    expect(h.buildArgs({ skipPermissions: true })).toEqual(["--dangerously-skip-permissions"]);
+  });
+
+  test("buildArgs does not emit yolo/skip flags when skipPermissions is false", () => {
+    expect(h.buildArgs({ skipPermissions: false })).toEqual([]);
+  });
+
+  test("buildArgs ignores model and maxTurns (not stable CLI flags)", () => {
+    expect(h.buildArgs({ model: "gemini-3.5-flash", maxTurns: 10 })).toEqual([]);
+  });
+});
+
+describe("GeminiHarness (deprecated re-export)", () => {
+  test("is AntigravityHarness (does not target the retired gemini binary)", () => {
+    const h = new GeminiHarness();
+    expect(h).toBeInstanceOf(AntigravityHarness);
+    expect(h.name).toBe("antigravity");
+    expect(h.defaultPath).toBe("agy");
+    expect(h.buildArgs({ skipPermissions: true })).toEqual(["--dangerously-skip-permissions"]);
   });
 });
 
@@ -228,9 +245,14 @@ describe("OpencodeHarness", () => {
   });
 
   test("buildArgs with all options", () => {
-    expect(
-      h.buildArgs({ skipPermissions: true, model: "gpt-4", workingDir: "/tmp/wt" }),
-    ).toEqual(["run", "--dangerously-skip-permissions", "--dir", "/tmp/wt", "--model", "gpt-4"]);
+    expect(h.buildArgs({ skipPermissions: true, model: "gpt-4", workingDir: "/tmp/wt" })).toEqual([
+      "run",
+      "--dangerously-skip-permissions",
+      "--dir",
+      "/tmp/wt",
+      "--model",
+      "gpt-4",
+    ]);
   });
 
   test("buildArgs forwards workingDir as --dir (opencode ignores spawn cwd)", () => {
@@ -277,5 +299,57 @@ describe("QwenCodeHarness", () => {
 
   test("buildArgs ignores model (not supported)", () => {
     expect(h.buildArgs({ model: "qwen-coder" })).toEqual([]);
+  });
+});
+
+describe("GrokHarness", () => {
+  const h = new GrokHarness();
+
+  test("metadata", () => {
+    expect(h.name).toBe("grok");
+    expect(h.displayName).toBe("Grok Build");
+    expect(h.defaultPath).toBe("grok");
+    expect(h.promptFlag).toBe("-p");
+  });
+
+  test("buildArgs empty", () => {
+    expect(h.buildArgs({})).toEqual(["--no-auto-update"]);
+  });
+
+  test("buildArgs with all options", () => {
+    expect(
+      h.buildArgs({
+        skipPermissions: true,
+        model: "grok-4.5",
+        workingDir: "/tmp/wt",
+      }),
+    ).toEqual(["--no-auto-update", "--always-approve", "-m", "grok-4.5", "--cwd", "/tmp/wt"]);
+  });
+
+  test("buildArgs ignores maxTurns (not supported)", () => {
+    expect(h.buildArgs({ maxTurns: 10 })).toEqual(["--no-auto-update"]);
+  });
+});
+
+describe("DeepSeekHarness", () => {
+  const h = new DeepSeekHarness();
+
+  test("metadata", () => {
+    expect(h.name).toBe("deepseek");
+    expect(h.displayName).toBe("Reasonix");
+    expect(h.defaultPath).toBe("reasonix");
+    expect(h.promptFlag).toBeUndefined();
+  });
+
+  test("buildArgs empty", () => {
+    expect(h.buildArgs({})).toEqual(["run"]);
+  });
+
+  test("buildArgs with model", () => {
+    expect(h.buildArgs({ model: "deepseek-pro" })).toEqual(["run", "--model", "deepseek-pro"]);
+  });
+
+  test("buildArgs ignores skipPermissions and maxTurns", () => {
+    expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["run"]);
   });
 });

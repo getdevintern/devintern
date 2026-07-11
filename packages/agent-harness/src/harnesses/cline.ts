@@ -9,12 +9,15 @@
  * @see https://docs.cline.bot/
  */
 
+import { effectiveSkipPermissions, assertModeSupported } from "../modes.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export class ClineHarness implements AgentHarness {
   readonly name = "cline";
   readonly displayName = "Cline";
   readonly defaultPath = "cline";
+  /** No native plan/read-only enforcement documented for headless `cline task`. */
+  readonly supportedModes = [] as const;
 
   /**
    * Build `cline task` subcommand flags for non-interactive execution.
@@ -23,9 +26,10 @@ export class ClineHarness implements AgentHarness {
    * @returns Args starting with `task`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = ["task"];
 
-    if (options.skipPermissions) {
+    if (effectiveSkipPermissions(options)) {
       args.push("--yolo");
     }
 

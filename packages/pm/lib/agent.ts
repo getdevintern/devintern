@@ -3,6 +3,8 @@
  */
 
 import {
+  constrainedModeAllowsExternalTools,
+  isModeSupported,
   runAgentBun,
   type AgentRunOptions,
   type AgentRunResult,
@@ -12,7 +14,28 @@ import {
 export interface RunAgentOptions extends AgentRunOptions {}
 
 /**
+ * Apply devpm's read-only policy to agent run options.
+ *
+ * devpm agents only draft task content on stdout; all tracker writes happen
+ * in devpm itself via the backend API. Use the harness's native read-only
+ * enforcement when available (never combined with permission-skip) — but
+ * only when that mode keeps network and MCP tools usable, since task
+ * generation may need web search or MCP access (e.g. Figma). Harnesses
+ * whose constrained modes restrict external tools keep the caller's
+ * unattended defaults.
+ */
+export function withReadonlyMode(harness: AgentHarness, options: RunAgentOptions): RunAgentOptions {
+  if (!isModeSupported(harness, "readonly") || !constrainedModeAllowsExternalTools(harness)) {
+    return options;
+  }
+  return { ...options, mode: "readonly", skipPermissions: false };
+}
+
+/**
  * Run an AI agent with the given harness and prompt.
+ *
+ * Always runs read-only where the harness can enforce it natively; see
+ * {@link withReadonlyMode}.
  *
  * @param harness - Agent harness identifier (e.g. `claude-code`).
  * @param executablePath - Path to the agent CLI executable.
@@ -26,7 +49,7 @@ export async function runAgent(
   prompt: string,
   options: RunAgentOptions,
 ): Promise<AgentRunResult> {
-  return runAgentBun(harness, executablePath, prompt, options);
+  return runAgentBun(harness, executablePath, prompt, withReadonlyMode(harness, options));
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "AI-powered task automation for Jira and other project management tools. Automatically implement tasks using your preferred AI agent with git integration and PR creation.",
   "type": "module",
   "main": "dist/index.js",

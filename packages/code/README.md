@@ -2,7 +2,7 @@
 
 AI-powered task automation for Jira and other project management tools. Automatically implements tasks using your preferred AI agent with git integration and PR creation.
 
-Supported agent harnesses: Claude Code, OpenCode, Codex, Cursor.
+Supported agent harnesses: Claude Code, OpenCode, Codex, Cursor, Grok Build, Reasonix (DeepSeek), and others.
 
 ## Install
 

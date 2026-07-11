@@ -1,45 +1,13 @@
 /**
- * Gemini CLI harness.
+ * @deprecated Gemini CLI (consumer) was retired on 2026-06-18 in favor of
+ * Antigravity CLI (`agy`). Use {@link AntigravityHarness} and
+ * `AGENT_HARNESS=antigravity` instead. The legacy harness name `gemini` still
+ * resolves to Antigravity via {@link resolveHarness} during the deprecation window.
  *
- * CLI: gemini -p <prompt> [--approval-mode=yolo] [--model <model>]
+ * This module re-exports Antigravity so existing imports of `GeminiHarness` do
+ * not spawn the dead `gemini` binary.
  *
- * Uses `gemini -p` for non-interactive scripting. The prompt is passed
- * explicitly via the `-p` flag.
- *
- * @see https://geminicli.com/docs/
+ * @see https://antigravity.google/docs/cli/gcli-migration
  */
 
-import type { AgentHarness, AgentRunOptions } from "../types.js";
-
-export class GeminiHarness implements AgentHarness {
-  readonly name = "gemini";
-  readonly displayName = "Gemini CLI";
-  readonly defaultPath = "gemini";
-  readonly promptFlag = "-p";
-
-  /**
-   * Build `gemini` CLI flags for non-interactive (`-p`) execution.
-   *
-   * @param options - Supports `skipPermissions` (`--approval-mode=yolo`) and `model`.
-   * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
-   */
-  buildArgs(options: AgentRunOptions): string[] {
-    const args: string[] = [];
-
-    if (options.skipPermissions) {
-      args.push("--approval-mode=yolo");
-    }
-
-    if (options.model) {
-      args.push("--model", options.model);
-    }
-
-    // Gemini CLI does not currently support --max-turns.
-    // If it adds support in the future, uncomment the following:
-    // if (options.maxTurns !== undefined) {
-    //   args.push("--max-turns", String(options.maxTurns));
-    // }
-
-    return args;
-  }
-}
+export { AntigravityHarness as GeminiHarness } from "./antigravity.js";
