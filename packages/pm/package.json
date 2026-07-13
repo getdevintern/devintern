@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/pm",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Automate story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues using your preferred AI agent.",
   "type": "module",
   "bin": {

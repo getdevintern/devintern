@@ -36,6 +36,8 @@ import { findEnvFile, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { TaskFormatter } from "./lib/task-formatter";
 import { GitHubAppAuth } from "./lib/github-app-auth";
+import { scaffoldProject } from "./lib/init-scaffold";
+import { isInteractive, runInitWizard } from "./lib/init-wizard";
 import { TaskTrackerManager } from "./lib/task-tracker-manager";
 import type { TaskTrackerClient } from "./lib/task-tracker-client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
@@ -136,257 +138,18 @@ interface EstimationResult {
 }
 
 /**
- * Scaffold `.devintern-code/` with env template, settings, and gitignore entries.
+ * Scaffold `.devintern-code/` with env template, settings, and gitignore
+ * entries (non-interactive fallback for `init --yes` / piped stdin).
  */
 async function initializeProject(): Promise<void> {
   const configDir = resolve(process.cwd(), ".devintern-code");
   const envFile = join(configDir, ".env");
-  const envSampleFile = join(configDir, ".env.example");
+  const settingsFile = join(configDir, "settings.json");
 
   console.log("🚀 Initializing @devintern/code for this project...");
 
-  // Check if .devintern-code folder already exists
-  if (existsSync(configDir)) {
-    console.log(`\n⚠️  Configuration folder already exists: ${configDir}`);
-
-    // Check if .env file exists
-    if (existsSync(envFile)) {
-      console.log("✅ .env file found");
-    } else {
-      console.log("⚠️  .env file not found");
-    }
-
-    console.log("\n💡 To reconfigure, either:");
-    console.log(`   1. Delete the folder: rm -rf ${configDir}`);
-    console.log("   2. Or edit the files directly");
+  if (!scaffoldProject()) {
     return;
-  }
-
-  // Create .devintern-code folder
-  try {
-    mkdirSync(configDir, { recursive: true });
-    console.log(`✅ Created configuration folder: ${configDir}`);
-  } catch (error) {
-    console.error(`❌ Failed to create configuration folder: ${error}`);
-    process.exit(1);
-  }
-
-  // Create .env.example file with template
-  const envSampleContent = `# @devintern/code Environment Configuration
-# Copy this file to .env and update with your actual values
-
-# JIRA Configuration
-# Your JIRA instance URL (without trailing slash)
-JIRA_BASE_URL=https://your-company.atlassian.net
-
-# Your JIRA email address
-JIRA_EMAIL=your-email@company.com
-
-# Your JIRA API token
-# Create one at: https://id.atlassian.com/manage-profile/security/api-tokens
-# Option 1: Just the API token (will be combined with email above)
-JIRA_API_TOKEN=your-api-token-here
-# Option 2: If your token already includes email, use format: email@company.com:api-token
-# JIRA_API_TOKEN=your-email@company.com:your-api-token-here
-
-# Agent Harness Configuration
-# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek
-# (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
-# Legacy: gemini still resolves to antigravity with a deprecation warning
-# Defaults to 'claude-code' if not specified
-AGENT_HARNESS=claude-code
-
-# Path to the agent CLI executable (defaults to harness-specific default if not specified)
-AGENT_CLI_PATH=claude
-
-# Backward compatibility: CLAUDE_CLI_PATH is still supported as a fallback
-# CLAUDE_CLI_PATH=claude
-
-# Note: Agents will be run with --dangerously-skip-permissions and --max-turns (agent-specific)
-# This allows for elevated permissions and extended conversations for complex tasks
-
-# Optional: extra tools for the read-only analysis runs (clarity check, estimation).
-# Those runs use the harness's read-only mode when supported; web fetch/search stays
-# allowed on Claude Code, but MCP tools are blocked unless listed here
-# (comma-separated, harness tool naming; whole-server entries also allow its write tools).
-# AGENT_ANALYSIS_ALLOWED_TOOLS=mcp__notion,mcp__figma__get_design_context
-
-# Optional: Output Directory Configuration
-# Base directory for saving task-related files (defaults to /tmp/devintern-tasks)
-# DEVINTERN_OUTPUT_DIR=/tmp/devintern-tasks
-
-# Optional: Enable verbose logging by default
-# VERBOSE=true
-
-# Optional: Pull Request Integration
-#
-# Option 1: GitHub Personal Access Token (for individual users)
-# Create at: https://github.com/settings/tokens
-# Required permissions:
-#   - Classic token: 'repo' scope (or 'public_repo' for public repos only)
-#   - Fine-grained token (recommended): 'Pull requests: Read and write' + 'Contents: Read'
-# GITHUB_TOKEN=your-github-token-here
-#
-# Option 2: GitHub App Authentication (for organizations)
-# Each organization creates their own GitHub App for centralized control.
-# Create at: https://github.com/settings/apps (or your org's settings)
-# Required App permissions:
-#   - Repository permissions:
-#     - Contents: Read (to check branches)
-#     - Pull requests: Read and write (to create PRs)
-# After creating the App, generate a private key and install the App on your repositories.
-#
-# GITHUB_APP_ID=123456
-# Private key can be provided as a file path:
-# GITHUB_APP_PRIVATE_KEY_PATH=/path/to/your-app.private-key.pem
-# Or as base64-encoded content (useful for CI/CD environments):
-# To encode: base64 -i your-key.pem (macOS) or base64 -w 0 your-key.pem (Linux)
-# GITHUB_APP_PRIVATE_KEY_BASE64=LS0tLS1CRUdJTi4uLg==
-#
-# Note: If both GITHUB_TOKEN and GitHub App credentials are set, GITHUB_TOKEN takes precedence.
-
-# Bitbucket app password for creating pull requests
-# Create at: https://bitbucket.org/account/settings/app-passwords/
-# Required permissions: 'Repositories: Write'
-# BITBUCKET_TOKEN=your-bitbucket-app-password-here
-
-# Note: Bitbucket workspace is automatically detected from your git remote URL
-
-# Optional: License Key
-# You can purchase a license at https://devintern.com/pricing
-# Required for unattended automation (systemd, cron, CI, webhook server); interactive use needs no license
-# License keys start with CODE-****
-# LICENSE_KEY=CODE-XXXX-XXXX-XXXX-XXXX
-`;
-
-  try {
-    writeFileSync(envSampleFile, envSampleContent, "utf8");
-    console.log(`✅ Created template file: ${envSampleFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create .env.example: ${error}`);
-    process.exit(1);
-  }
-
-  // Create empty .env file for user to fill in
-  try {
-    writeFileSync(envFile, envSampleContent, "utf8");
-    console.log(`✅ Created configuration file: ${envFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create .env file: ${error}`);
-    process.exit(1);
-  }
-
-  // Create settings.json for per-project configuration
-  const settingsFile = join(configDir, "settings.json");
-  const settingsContent = {
-    jira: {
-      projects: {
-        "PROJECT-KEY": {
-          inProgressStatus: "In Progress",
-          todoStatus: "To Do",
-          prStatus: "In Review",
-          storyPointsField: "customfield_10016",
-        },
-      },
-    },
-    linear: {
-      projects: {
-        "TEAM-KEY": {
-          inProgressStatus: "In Progress",
-          todoStatus: "Backlog",
-          prStatus: "In Review",
-        },
-      },
-    },
-    trello: {
-      projects: {
-        "BOARD-KEY": {
-          inProgressStatus: "Doing",
-          todoStatus: "To Do",
-          prStatus: "Code Review",
-        },
-      },
-    },
-    github: {
-      projects: {
-        "REPO-KEY": {
-          inProgressStatus: "in progress",
-          todoStatus: "todo",
-          prStatus: "in review",
-        },
-      },
-    },
-    "azure-devops": {
-      projects: {
-        "PROJECT-KEY": {
-          inProgressStatus: "Active",
-          todoStatus: "New",
-          prStatus: "Resolved",
-        },
-      },
-    },
-    asana: {
-      projects: {
-        "PROJECT-KEY": {
-          inProgressStatus: "In Progress",
-          todoStatus: "Backlog",
-          prStatus: "In Review",
-        },
-      },
-    },
-  };
-
-  const settingsJsonString = JSON.stringify(settingsContent, null, 2);
-
-  try {
-    writeFileSync(settingsFile, settingsJsonString, "utf8");
-    console.log(`✅ Created settings file: ${settingsFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create settings.json: ${error}`);
-    process.exit(1);
-  }
-
-  // Update .gitignore to exclude .devintern-code/.env, lock file, and review worktree
-  const gitignorePath = join(process.cwd(), ".gitignore");
-  const gitignoreEntries = [
-    ".devintern-code/.env",
-    ".devintern-code/.env.local",
-    ".devintern-code/.pid.lock",
-    ".devintern-code/.auth-session.json",
-  ];
-
-  try {
-    let gitignoreContent = "";
-    let gitignoreExists = false;
-
-    // Read existing .gitignore if it exists
-    if (existsSync(gitignorePath)) {
-      gitignoreContent = readFileSync(gitignorePath, "utf8");
-      gitignoreExists = true;
-    }
-
-    // Check if entries already exist
-    const entriesToAdd = gitignoreEntries.filter((entry) => !gitignoreContent.includes(entry));
-
-    if (entriesToAdd.length > 0) {
-      // Add entries to .gitignore
-      const newEntries = ["", "# @devintern/code - Keep credentials secure", ...entriesToAdd].join(
-        "\n",
-      );
-
-      // Ensure there's a newline at the end of existing content if it exists
-      if (gitignoreContent && !gitignoreContent.endsWith("\n")) {
-        gitignoreContent += "\n";
-      }
-
-      writeFileSync(gitignorePath, gitignoreContent + newEntries + "\n", "utf8");
-      console.log(`✅ Updated .gitignore to exclude ${entriesToAdd.join(", ")}`);
-    } else if (gitignoreExists) {
-      console.log("✅ .gitignore already excludes .devintern-code/.env");
-    }
-  } catch (error) {
-    console.warn(`⚠️  Could not update .gitignore automatically: ${error}`);
-    console.log("   Please manually add '.devintern-code/.env' to your .gitignore");
   }
 
   console.log("\n🎉 Project initialized successfully!");
@@ -639,7 +402,11 @@ migrateLegacyConfigDir();
 // This needs to happen early to avoid Commander treating them as task keys
 if (process.argv[2] === "init") {
   (async () => {
-    await initializeProject();
+    if (isInteractive(process.argv, process.stdin)) {
+      await runInitWizard();
+    } else {
+      await initializeProject();
+    }
     process.exit(0);
   })();
 } else if (process.argv[2] === "serve") {
@@ -891,6 +658,8 @@ Examples (Markdown tracker; set TASK_TRACKER=markdown and MARKDOWN_TASKS_DIR in 
 
 Subcommands:
   init                 Initialize .devintern-code configuration in current directory
+                       Interactive wizard in a terminal; pass --yes (or --no-interactive)
+                       to write the config templates without prompts
   serve                Start the webhook server to address PR review feedback
   address-review       Address review feedback on an existing pull request
   login [method]       Sign in (github | google | x | email; prompts if omitted)

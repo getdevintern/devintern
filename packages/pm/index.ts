@@ -14,6 +14,7 @@ import { dumpAgentOutput } from "./lib/agent-debug";
 import { parseAgentJson } from "./lib/agent-json";
 import { runInteractiveMode } from "./lib/components/interactive";
 import { initializeProject } from "./lib/init";
+import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
 import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
 
 /**
@@ -149,7 +150,7 @@ function parseArgs(): CLIArgs | null | "init" | "login" | "logout" | "whoami" {
 
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`
-Usage: devpm init
+Usage: devpm init [--yes]
        devpm login [method|email]
        devpm logout
        devpm whoami
@@ -160,6 +161,7 @@ Usage: devpm init
 
 Commands:
   init                 Initialize .devintern-pm configuration in current directory
+                       (guided wizard; --yes or --no-interactive writes the template instead)
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
@@ -400,9 +402,14 @@ async function main() {
   // Parse arguments - null means interactive mode, 'init' means run initialization
   const parsedArgs = parseArgs();
 
-  // Handle init command
+  // Handle init command: guided wizard in interactive terminals, template
+  // scaffold with `--yes` / `--no-interactive` / piped stdin.
   if (parsedArgs === "init") {
-    await initializeProject();
+    if (isInteractive(Bun.argv, process.stdin)) {
+      await runPmInitWizard();
+    } else {
+      await initializeProject();
+    }
     return;
   }
   if (parsedArgs === "login") {

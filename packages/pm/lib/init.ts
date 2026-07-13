@@ -113,7 +113,20 @@ export async function initializeProject(): Promise<void> {
   await Bun.write(envPath, envContent);
   console.log("✅ Created .env configuration file");
 
-  // Check if .gitignore exists and update it
+  await ensureGitignore(cwd);
+
+  console.log("\n✨ Initialization complete!");
+  console.log(`\nNext steps:`);
+  console.log(`1. Edit .devintern-pm/.env with your configuration`);
+  console.log(`2. Run devpm login to sign in`);
+  console.log(`3. Run devpm --interactive to create your first task`);
+}
+
+/**
+ * Update (or create) `.gitignore` in `cwd` to exclude `.devintern-pm` secret
+ * files. Shared by the non-interactive scaffold and the init wizard.
+ */
+export async function ensureGitignore(cwd: string, log: (m: string) => void = console.log) {
   const gitignorePath = join(cwd, ".gitignore");
   const gitignoreFile = Bun.file(gitignorePath);
 
@@ -131,16 +144,16 @@ export async function initializeProject(): Promise<void> {
         gitignoreContent +=
           "\n# devintern-pm configuration (contains secrets)\n.devintern-pm/.env\n.devintern-pm/.auth-session.json\n";
         await Bun.write(gitignorePath, gitignoreContent);
-        console.log("✅ Updated .gitignore to exclude @devintern/pm secret files");
+        log("✅ Updated .gitignore to exclude @devintern/pm secret files");
       } else {
-        console.log("ℹ️  .gitignore already contains .devintern-pm");
+        log("ℹ️  .gitignore already contains .devintern-pm");
       }
     } else {
       // Create new .gitignore
       const gitignoreContent =
         "# devintern-pm configuration (contains secrets)\n.devintern-pm/.env\n.devintern-pm/.auth-session.json\n";
       await Bun.write(gitignorePath, gitignoreContent);
-      console.log("✅ Created .gitignore with @devintern/pm secret files");
+      log("✅ Created .gitignore with @devintern/pm secret files");
     }
   } catch (error) {
     console.warn(
@@ -148,12 +161,6 @@ export async function initializeProject(): Promise<void> {
       error instanceof Error ? error.message : error,
     );
   }
-
-  console.log("\n✨ Initialization complete!");
-  console.log(`\nNext steps:`);
-  console.log(`1. Edit .devintern-pm/.env with your configuration`);
-  console.log(`2. Run devpm login to sign in`);
-  console.log(`3. Run devpm --interactive to create your first task`);
 }
 
 /**

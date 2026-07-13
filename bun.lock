@@ -35,7 +35,7 @@
     },
     "packages/code": {
       "name": "@getdevintern/code",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "bin": {
         "devintern": "dist/index.js",
       },
@@ -75,7 +75,7 @@
     },
     "packages/pm": {
       "name": "@getdevintern/pm",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "bin": {
         "devpm": "dist/index.js",
       },
