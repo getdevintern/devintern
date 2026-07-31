@@ -157,4 +157,24 @@ describe("Branch Creation Cleanup", () => {
     const readmeContent = require("fs").readFileSync(join(repoDir, "README.md"), "utf8");
     expect(readmeContent).toBe("# Test Repo\n");
   });
+
+  test("suffixes attempt-2 when the branch exists locally", async () => {
+    execSync("git branch feature/test-456", { cwd: repoDir });
+
+    const result = await Utils.createFeatureBranch("TEST-456", undefined, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    expect(result.branchName).toBe("feature/test-456-attempt-2");
+  });
+
+  test("suffixes attempt-2 when the branch exists only on the remote", async () => {
+    // Simulate a fresh clone where a previous attempt's branch lives only as
+    // a remote-tracking ref.
+    execSync("git update-ref refs/remotes/origin/feature/test-789 HEAD", { cwd: repoDir });
+
+    const result = await Utils.createFeatureBranch("TEST-789", undefined, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    expect(result.branchName).toBe("feature/test-789-attempt-2");
+  });
 });

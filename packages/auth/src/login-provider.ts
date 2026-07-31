@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline";
 import type { LoginMethod, OAuthProvider } from "./types";
 
 export type { LoginMethod, OAuthProvider } from "./types";
@@ -81,16 +82,48 @@ export function oauthProviderLabel(provider: OAuthProvider): string {
   return loginMethodLabel(provider);
 }
 
-/** Read one line from stdin (inherits TTY for interactive prompts). */
-async function readStdinLine(): Promise<string> {
-  const proc = Bun.spawn(["bash", "-c", 'read line && echo "$line"'], {
-    stdin: "inherit",
-    stdout: "pipe",
-    stderr: "inherit",
+/** Lines readline emitted past the one being awaited (piped multi-line input). */
+const pendingStdinLines: string[] = [];
+let stdinEnded = false;
+
+/**
+ * Read one line from stdin (for interactive prompts).
+ *
+ * @returns The next input line.
+ * @throws When stdin ends (Ctrl-D, closed pipe) before a line arrives.
+ */
+function readStdinLine(): Promise<string> {
+  const buffered = pendingStdinLines.shift();
+  if (buffered !== undefined) {
+    return Promise.resolve(buffered);
+  }
+  if (stdinEnded) {
+    return Promise.reject(new Error("Standard input closed before a response was entered."));
+  }
+
+  return new Promise((resolve, reject) => {
+    const rl = createInterface({ input: process.stdin });
+    let settled = false;
+    rl.on("line", (line) => {
+      // readline keeps emitting lines from an already-buffered chunk even
+      // after close(), so stash extras for the next call instead of dropping them.
+      if (settled) {
+        pendingStdinLines.push(line);
+        return;
+      }
+      settled = true;
+      // Resolve before close(): close() emits "close" synchronously.
+      resolve(line);
+      rl.close();
+    });
+    rl.once("close", () => {
+      if (!settled) {
+        settled = true;
+        stdinEnded = true;
+        reject(new Error("Standard input closed before a response was entered."));
+      }
+    });
   });
-  const output = await new Response(proc.stdout).text();
-  await proc.exited;
-  return output;
 }
 
 /**

@@ -1,16 +1,27 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { resolve, join } from "path";
 
+export interface LockStatus {
+  /** Whether the lock-holding process is still alive. */
+  running: boolean;
+  pid?: number;
+  /** ISO timestamp the lock was taken. */
+  startedAt?: string;
+}
+
 export class LockManager {
   private lockFilePath: string;
   private lockAcquired: boolean = false;
 
   /**
-   * Create a per-directory process lock under `.devintern-code/.pid.lock`.
+   * Create a per-directory process lock under `.devintern-code/`.
    *
    * @param workingDir - Project root used to locate the lock file
+   * @param lockFileName - Lock file name; the default guards CLI task runs,
+   *                       while the worker daemon uses its own lock so an
+   *                       idle daemon does not block manual runs
    */
-  constructor(workingDir: string = process.cwd()) {
+  constructor(workingDir: string = process.cwd(), lockFileName = ".pid.lock") {
     // Create lock file in .devintern-code directory
     const configDir = resolve(workingDir, ".devintern-code");
 
@@ -19,7 +30,7 @@ export class LockManager {
       mkdirSync(configDir, { recursive: true });
     }
 
-    this.lockFilePath = join(configDir, ".pid.lock");
+    this.lockFilePath = join(configDir, lockFileName);
   }
 
   /**
@@ -39,7 +50,7 @@ export class LockManager {
           const timestamp = lockData.timestamp;
 
           // Check if the process is still running
-          const isProcessRunning = this.isProcessRunning(pid);
+          const isProcessRunning = LockManager.isPidRunning(pid);
 
           if (isProcessRunning) {
             return {
@@ -101,11 +112,42 @@ export class LockManager {
   }
 
   /**
+   * Read a lock file's status without acquiring or touching it.
+   *
+   * @param workingDir - Project root used to locate the lock file
+   * @param lockFileName - Lock file name (e.g. `.worker.lock`)
+   * @returns Lock status, or `null` when no lock file exists (or it is unreadable)
+   */
+  static readLockStatus(
+    workingDir: string = process.cwd(),
+    lockFileName = ".pid.lock",
+  ): LockStatus | null {
+    const lockFilePath = join(resolve(workingDir, ".devintern-code"), lockFileName);
+    if (!existsSync(lockFilePath)) {
+      return null;
+    }
+    try {
+      const lockData = JSON.parse(readFileSync(lockFilePath, "utf8"));
+      const pid = lockData.pid;
+      if (typeof pid !== "number") {
+        return null;
+      }
+      return {
+        running: LockManager.isPidRunning(pid),
+        pid,
+        startedAt: typeof lockData.timestamp === "string" ? lockData.timestamp : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Check whether a process ID is still running.
    *
    * @param pid - Process ID from the lock file
    */
-  private isProcessRunning(pid: number): boolean {
+  private static isPidRunning(pid: number): boolean {
     try {
       // Sending signal 0 checks if process exists without actually sending a signal
       // This works cross-platform (Unix-like systems and Windows)

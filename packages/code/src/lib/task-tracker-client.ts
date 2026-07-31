@@ -86,16 +86,18 @@ export interface TaskTrackerClient {
   /** Post a clarity / feasibility assessment comment. */
   postClarityComment(taskKey: string, assessment: unknown): Promise<void>;
 
-  /** Post an incomplete-implementation comment and persist description for dedup. */
+  /** Post an incomplete-implementation comment. */
   postIncompleteImplementationComment(
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void>;
 
-  /** Check whether an incomplete comment already exists for the same description. */
-  hasIncompleteImplementationComment(taskKey: string, currentDescription: string): Promise<boolean>;
+  /**
+   * Check whether an incomplete-implementation marker comment exists on the
+   * task (retry bookkeeping itself lives in lib/retry-state.ts).
+   */
+  hasIncompleteImplementationMarker(taskKey: string): Promise<boolean>;
 
   /** Post a comment when an assessment fails (max turns or parse error). */
   postAssessmentFailure(

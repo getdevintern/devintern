@@ -4,16 +4,17 @@
  * Manually address PR review feedback by fetching comments and running an AI agent.
  */
 
-import { type ChildProcess } from "child_process";
 import {
   detectMaxTurnsReached,
   resolveHarness,
-  spawnReapable,
+  spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
+import { beginRun, endRun, recordRunStage } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
 import { Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
@@ -111,7 +112,7 @@ async function getLatestChangesRequestedReview(
  * @param verbose - When true, log command and timeout details
  * @returns Whether the agent succeeded, its combined output, and max-turns flag
  */
-async function runAgent(
+export async function runAgent(
   prompt: string,
   workDir: string,
   verbose: boolean,
@@ -125,83 +126,94 @@ async function runAgent(
   });
 
   return new Promise((resolve) => {
-    // Use high default like regular development (500 turns)
-    const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
+    (async () => {
+      // Use high default like regular development (500 turns)
+      const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-    const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
+      const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
 
-    if (verbose) {
-      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
-      console.log(`   Timeout: ${timeoutMinutes} minutes`);
-    }
+      if (verbose) {
+        console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
+        console.log(`   Timeout: ${timeoutMinutes} minutes`);
+      }
 
-    let stdoutOutput = "";
-    let stderrOutput = "";
-    let timedOut = false;
+      let stdoutOutput = "";
+      let stderrOutput = "";
+      let timedOut = false;
 
-    const agent: ChildProcess = spawnReapable(resolvedPath, agentArgs, {
-      cwd: workDir,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(agent, "SIGTERM");
-        setTimeout(() => {
-          if (!agent.killed) {
-            reapTree(agent, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
-
-    if (agent.stdout) {
-      agent.stdout.on("data", (data: Buffer) => {
-        const text = data.toString();
-        stdoutOutput += text;
-        process.stdout.write(text);
+      const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: agentArgs,
+        spawnOptions: { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
       });
-    }
 
-    if (agent.stderr) {
-      agent.stderr.on("data", (data: Buffer) => {
-        const text = data.toString();
-        stderrOutput += text;
-        process.stderr.write(text);
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
+          );
+          reapTree(agent, "SIGTERM");
+          setTimeout(() => {
+            if (!agent.killed) {
+              reapTree(agent, "SIGKILL");
+            }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
+
+      if (agent.stdout) {
+        agent.stdout.on("data", (data: Buffer) => {
+          const text = data.toString();
+          stdoutOutput += text;
+          process.stdout.write(text);
+        });
+      }
+
+      if (agent.stderr) {
+        agent.stderr.on("data", (data: Buffer) => {
+          const text = data.toString();
+          stderrOutput += text;
+          process.stderr.write(text);
+        });
+      }
+
+      agent.on("error", (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeout);
+        resolve({
+          success: false,
+          output: `Failed to run ${harness.displayName}: ${error.message}`,
+        });
       });
-    }
 
-    agent.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timeout);
+      agent.on("close", (code: number | null) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+        const output = stdoutOutput + stderrOutput;
+
+        resolve({
+          success: code === 0 && !maxTurnsReached && !timedOut,
+          output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
+          maxTurnsReached,
+        });
+      });
+
+      // Send prompt to Agent via stdin
+      if (agent.stdin) {
+        agent.stdin.write(prompt);
+        agent.stdin.end();
+      }
+    })().catch((error) => {
       resolve({
         success: false,
-        output: `Failed to run ${harness.displayName}: ${error.message}`,
+        output: `Failed to run ${harness.displayName}: ${error instanceof Error ? error.message : String(error)}`,
       });
     });
-
-    agent.on("close", (code: number | null) => {
-      clearTimeout(timeout);
-      const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
-      const output = stdoutOutput + stderrOutput;
-
-      resolve({
-        success: code === 0 && !maxTurnsReached && !timedOut,
-        output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
-        maxTurnsReached,
-      });
-    });
-
-    // Send prompt to Agent via stdin
-    if (agent.stdin) {
-      agent.stdin.write(prompt);
-      agent.stdin.end();
-    }
   });
 }
 
@@ -447,6 +459,24 @@ export async function addressReview(
     conversationComments:
       processedConversationComments.length > 0 ? processedConversationComments : undefined,
   };
+
+  // Run record: begun only once there is actual feedback to handle, so
+  // no-op invocations (nothing unaddressed) do not create run rows.
+  beginRun({
+    origin: "pr_mention",
+    repo: `${owner}/${repo}`,
+    prNumber,
+    branch: pr.head.ref,
+  });
+  recordRunStage("change_request", {
+    status: "succeeded",
+    summary: `addressing ${processedComments.length} review comment(s) and ${processedConversationComments.length} conversation comment(s) from @${review.reviewer}`,
+    detail: {
+      reviewer: review.reviewer,
+      reviewComments: processedComments.length,
+      conversationComments: processedConversationComments.length,
+    },
+  });
 
   // Prepare the review worktree
   console.log(`\n🌿 Preparing review worktree for branch: ${pr.head.ref}`);
@@ -732,6 +762,10 @@ export async function addressReview(
 
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
     console.log(`   View PR: ${prUrl}`);
+    endRun("succeeded");
+  } catch (error) {
+    endRun("failed", (error as Error).message);
+    throw error;
   } finally {
     // Clean up any untracked files left by linters/tools/agent
     const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], {

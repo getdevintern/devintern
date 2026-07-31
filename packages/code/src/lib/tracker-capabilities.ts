@@ -18,6 +18,8 @@ export interface TrackerCapabilities {
   queryExample?: string;
   /** Supports `--estimate` (native estimation field or estimation comments). */
   estimate: boolean;
+  /** Supports worker Mode 1 polling (a change detector is implemented). */
+  poll: boolean;
 }
 
 export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
@@ -27,6 +29,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: `project = PROJ AND status = 'To Do'`,
     estimate: true,
+    poll: true,
   },
   linear: {
     displayName: "Linear",
@@ -34,6 +37,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: `{"state":{"name":{"eq":"Todo"}}}`,
     estimate: true,
+    poll: true,
   },
   github: {
     displayName: "GitHub",
@@ -41,6 +45,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: "is:open label:bug",
     estimate: true,
+    poll: true,
   },
   "azure-devops": {
     displayName: "Azure DevOps",
@@ -48,6 +53,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'",
     estimate: true,
+    poll: true,
   },
   asana: {
     displayName: "Asana",
@@ -55,6 +61,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: `project:1200000000000000 section:"To Do" completed:false`,
     estimate: true,
+    poll: true,
   },
   trello: {
     displayName: "Trello",
@@ -62,6 +69,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: `list:"To Do" is:open`,
     estimate: false,
+    poll: true,
   },
   markdown: {
     displayName: "markdown",
@@ -69,6 +77,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     query: true,
     queryExample: "status=todo",
     estimate: false,
+    poll: true,
   },
 };
 
@@ -95,4 +104,14 @@ export function supportsQuery(trackerType: string): boolean {
 /** Whether `trackerType` supports `--estimate`. Unknown trackers report false. */
 export function supportsEstimate(trackerType: string): boolean {
   return TRACKER_CAPABILITIES[trackerType]?.estimate ?? false;
+}
+
+/** Whether `trackerType` supports worker polling. Unknown trackers report false. */
+export function supportsPolling(trackerType: string): boolean {
+  return TRACKER_CAPABILITIES[trackerType]?.poll ?? false;
+}
+
+/** Trackers that support worker polling, for help/error text. */
+export function trackersSupportingPolling(): string[] {
+  return Object.keys(TRACKER_CAPABILITIES).filter((t) => TRACKER_CAPABILITIES[t].poll);
 }

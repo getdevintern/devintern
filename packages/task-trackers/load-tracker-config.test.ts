@@ -342,6 +342,19 @@ describe("loadEnvFromConfigDir", () => {
     }
   });
 
+  test("searches from explicit baseDir instead of cwd", async () => {
+    const configDir = ".devintern-test";
+    const projectDir = join(tempRoot, "project");
+    mkdirSync(join(projectDir, configDir), { recursive: true });
+    writeFileSync(join(projectDir, configDir, ".env"), "JIRA_EMAIL=basedir@example.com\n");
+
+    // cwd (tempRoot) has no .env; only the explicit baseDir does.
+    delete process.env.JIRA_EMAIL;
+    await loadEnvFromConfigDir(configDir, projectDir);
+
+    expect(process.env.JIRA_EMAIL).toBe("basedir@example.com");
+  });
+
   test("finds plain .env when config dir .env is missing", async () => {
     const childDir = join(tempRoot, "src");
     mkdirSync(childDir, { recursive: true });

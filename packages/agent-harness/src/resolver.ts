@@ -14,6 +14,9 @@
  *   5. Harness `defaultPath`
  */
 
+import { execSync } from "child_process";
+import { existsSync } from "fs";
+import { resolve } from "path";
 import { getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import type { ResolvedHarness } from "./types.js";
 
@@ -157,14 +160,16 @@ function warnAndMapLegacyGeminiCliPath(geminiCliPath: string, warn: boolean): st
  */
 export function findInPath(command: string): string | null {
   try {
-    const { execSync } = require("child_process");
     const isWindows = process.platform === "win32";
     const whichCommand = isWindows ? "where" : "which";
     const result = execSync(`${whichCommand} ${command}`, {
       encoding: "utf8",
       stdio: "pipe",
+      // Bun's execSync snapshots the spawn env at startup; pass the live
+      // process.env so runtime PATH changes are honored.
+      env: process.env,
     });
-    return result.trim().split("\n")[0];
+    return result.trim().split("\n")[0] ?? null;
   } catch {
     return null;
   }
@@ -188,8 +193,6 @@ export function resolveExecutablePath(command: string, cwd: string = process.cwd
 
   // Relative path
   if (command.includes("/") || command.includes("\\")) {
-    const { resolve } = require("path");
-    const { existsSync } = require("fs");
     const resolved = resolve(cwd, command);
     if (existsSync(resolved)) {
       return resolved;
@@ -248,7 +251,6 @@ export async function resolveExecutablePathWithRetry(
   command: string,
   options: ResolveWithRetryOptions = {},
 ): Promise<string> {
-  const { existsSync } = require("fs");
   const cwd = options.cwd ?? process.cwd();
   const displayName = options.displayName ?? command;
   const retries = options.retries ?? parseInt(process.env.AGENT_SPAWN_ENOENT_RETRIES || "5", 10);

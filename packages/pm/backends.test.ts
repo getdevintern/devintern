@@ -1,5 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { join } from "node:path";
+import { readFile, pathExists, rm } from "./lib/runtime/fs.js";
+import { getModuleDir } from "./lib/runtime/path.js";
 import { MarkdownBackend } from "./lib/backends/markdown";
 import { LinearBackend } from "./lib/backends/linear";
 import { TrelloBackend } from "./lib/backends/trello";
@@ -7,28 +9,18 @@ import { AzureDevOpsBackend } from "./lib/backends/azure-devops";
 import { AsanaBackend } from "./lib/backends/asana";
 import { GitHubBackend } from "./lib/backends/github";
 
-const TEST_DIR = join(import.meta.dir, "tmp-test-tasks");
+const TEST_DIR = join(getModuleDir(import.meta.url), "tmp-test-tasks");
 
 describe("MarkdownBackend", () => {
   let backend: MarkdownBackend;
 
   beforeEach(async () => {
     backend = new MarkdownBackend({ directory: TEST_DIR });
-    // Clean up test directory before each test
-    try {
-      await Bun.$`rm -rf ${TEST_DIR}`;
-    } catch {
-      // Directory might not exist
-    }
+    await rm(TEST_DIR);
   });
 
   afterEach(async () => {
-    // Clean up test directory after each test
-    try {
-      await Bun.$`rm -rf ${TEST_DIR}`;
-    } catch {
-      // Directory might not exist
-    }
+    await rm(TEST_DIR);
   });
 
   test("should have correct name", () => {
@@ -55,10 +47,9 @@ describe("MarkdownBackend", () => {
       expect(result.url).toBeTruthy();
       expect(result.url.startsWith(TEST_DIR)).toBe(true);
 
-      const file = Bun.file(result.url);
-      expect(await file.exists()).toBe(true);
+      expect(await pathExists(result.url)).toBe(true);
 
-      const content = await file.text();
+      const content = await readFile(result.url);
       expect(content).toContain("# Add user authentication");
       expect(content).toContain("Implement OAuth 2.0 login with Google and GitHub providers.");
       expect(content).toContain("type: Story");
@@ -73,8 +64,7 @@ describe("MarkdownBackend", () => {
       );
 
       expect(result.url.startsWith(TEST_DIR)).toBe(true);
-      const file = Bun.file(result.url);
-      expect(await file.exists()).toBe(true);
+      expect(await pathExists(result.url)).toBe(true);
     });
 
     test("should sanitize filename from summary", async () => {
@@ -84,8 +74,7 @@ describe("MarkdownBackend", () => {
         "Task",
       );
 
-      const file = Bun.file(result.url);
-      expect(await file.exists()).toBe(true);
+      expect(await pathExists(result.url)).toBe(true);
 
       // Filename should be sanitized (lowercase, no special chars, truncated)
       const basename = result.url.split("/").pop() || "";
@@ -112,8 +101,7 @@ describe("MarkdownBackend", () => {
 
       expect(subtask.url).toBe(parent.url);
 
-      const file = Bun.file(parent.url);
-      const content = await file.text();
+      const content = await readFile(parent.url);
 
       expect(content).toContain("## Subtasks");
       expect(content).toContain("- [ ] **Setup database schema**");
@@ -126,8 +114,7 @@ describe("MarkdownBackend", () => {
       await backend.createSubtask(parent.key, "Subtask 1", "Details 1");
       await backend.createSubtask(parent.key, "Subtask 2", "Details 2");
 
-      const file = Bun.file(parent.url);
-      const content = await file.text();
+      const content = await readFile(parent.url);
 
       expect(content).toContain("- [ ] **Subtask 1**");
       expect(content).toContain("- [ ] **Subtask 2**");
@@ -138,8 +125,7 @@ describe("MarkdownBackend", () => {
 
       await backend.createSubtask(parent.key, "Simple subtask");
 
-      const file = Bun.file(parent.url);
-      const content = await file.text();
+      const content = await readFile(parent.url);
 
       expect(content).toContain("- [ ] **Simple subtask**");
     });
@@ -157,8 +143,7 @@ describe("MarkdownBackend", () => {
 
       await backend.linkToEpic(task.key, "EPIC-123");
 
-      const file = Bun.file(task.url);
-      const content = await file.text();
+      const content = await readFile(task.url);
 
       expect(content).toContain("epic: EPIC-123");
     });
@@ -169,8 +154,7 @@ describe("MarkdownBackend", () => {
       await backend.linkToEpic(task.key, "EPIC-123");
       await backend.linkToEpic(task.key, "EPIC-456");
 
-      const file = Bun.file(task.url);
-      const content = await file.text();
+      const content = await readFile(task.url);
 
       expect(content).toContain("epic: EPIC-456");
       expect(content).not.toContain("epic: EPIC-123");

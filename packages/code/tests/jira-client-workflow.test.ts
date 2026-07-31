@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "fs";
+import { rmSync } from "fs";
 import path from "path";
 import { JiraTaskTrackerClient as JiraClient } from "../src/lib/trackers/jira/jira-task-tracker-client";
 
@@ -84,19 +84,19 @@ describe("JiraClient workflow methods", () => {
     });
   });
 
-  test("postIncompleteImplementationComment saves task description for dedup", async () => {
-    client.jiraApiCall = async () => ({ id: "102" });
+  test("postIncompleteImplementationComment posts ADF incomplete body", async () => {
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+    client.jiraApiCall = async (method, url, body) => {
+      expect(method).toBe("POST");
+      capturedUrl = url;
+      capturedBody = body;
+      return { id: "102" };
+    };
 
-    const description = "Original task description text";
-    await client.postIncompleteImplementationComment(
-      "TEST-3",
-      "Could not finish",
-      "Summary line",
-      description,
-    );
+    await client.postIncompleteImplementationComment("TEST-3", "Could not finish", "Summary line");
 
-    const descriptionFile = path.join(tempDir, "test-3", "incomplete-task-description.txt");
-    expect(existsSync(descriptionFile)).toBe(true);
-    expect(readFileSync(descriptionFile, "utf8")).toBe(description);
+    expect(capturedUrl).toBe("/rest/api/3/issue/TEST-3/comment");
+    expect(JSON.stringify(capturedBody)).toContain("Implementation Incomplete");
   });
 });

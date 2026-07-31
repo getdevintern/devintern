@@ -7,7 +7,6 @@
  * review feedback using an AI agent.
  */
 
-import { type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { join } from "path";
@@ -17,13 +16,14 @@ import {
   detectUsageLimit,
   resetHintToMs,
   resolveHarness,
-  spawnReapable,
+  spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { getSandbox } from "./lib/sandbox";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
-import { WebhookQueue } from "./lib/webhook-queue";
+import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
 import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -269,6 +269,19 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
 
   debugLog(config, `Event type: ${eventType}`);
 
+  // Dedupe GitHub redeliveries by delivery id. Ids are marked processed at
+  // enqueue time — the queue row is durable from that point, so a redelivery
+  // (manual or automatic) must not enqueue the same work twice.
+  const deliveryId = request.headers.get("x-github-delivery");
+  if (
+    deliveryId &&
+    (eventType === "pull_request_review" || eventType === "issue_comment") &&
+    webhookQueue?.hasProcessed("github", deliveryId)
+  ) {
+    console.log(`⏭️  Skipping duplicate delivery ${deliveryId} (${eventType})`);
+    return jsonResponse({ success: true, message: "Duplicate delivery", deliveryId });
+  }
+
   // Parse payload
   let payload: unknown;
   try {
@@ -332,6 +345,9 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
     let eventId: string | undefined;
     if (webhookQueue) {
       eventId = webhookQueue.enqueue("pull_request_review", event);
+      if (deliveryId) {
+        webhookQueue.markProcessed("github", deliveryId);
+      }
       debugLog(config, `Persisted event ${eventId} to queue`);
     }
 
@@ -411,6 +427,9 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
     let eventId: string | undefined;
     if (webhookQueue) {
       eventId = webhookQueue.enqueue("issue_comment", event);
+      if (deliveryId) {
+        webhookQueue.markProcessed("github", deliveryId);
+      }
       debugLog(config, `Persisted event ${eventId} to queue`);
     }
 
@@ -540,7 +559,7 @@ async function processIssueCommentWithPersistence(
  * @param event - Issue comment webhook payload (already confirmed to be on a PR)
  * @param config - Server configuration
  */
-async function processIssueCommentAsync(
+export async function processIssueCommentAsync(
   event: IssueCommentEvent,
   config: WebhookServerConfig,
 ): Promise<void> {
@@ -731,6 +750,21 @@ async function processReviewAsync(
     if (botName) {
       console.log(`   Bot mention: @${botName} detected`);
     }
+
+    // Permission gate: only users who can push to the repo may direct the
+    // agent. Anyone can comment on a public repo; without this check a
+    // drive-by @mention from a read-only user would trigger an agent run.
+    // Fails closed on API errors.
+    const actor = event.review.user.login;
+    const actorHasPushAccess = await githubClient.userHasPushAccess(owner, repo, actor);
+    if (!actorHasPushAccess) {
+      console.log(
+        `⛔ Skipping review: @${actor} does not have push access to ${owner}/${repo} ` +
+          `(mention-triggered automation requires write, maintain, or admin permission)`,
+      );
+      return;
+    }
+    debugLog(config, `Permission gate passed for @${actor}`);
 
     // Process unaddressed comments for feedback
     const processedComments = rawComments.map(processReviewComment);
@@ -1221,116 +1255,127 @@ async function runAgentHarnessForReview(
   });
 
   return new Promise((resolve) => {
-    const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
+    (async () => {
+      const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-    const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
+      const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
 
-    console.log(`   Command: ${resolvedPath} ${agentArgs.join(" ")}`);
-    console.log(`   Timeout: ${timeoutMinutes} minutes`);
+      console.log(`   Command: ${resolvedPath} ${agentArgs.join(" ")}`);
+      console.log(`   Timeout: ${timeoutMinutes} minutes`);
 
-    let stdoutOutput = "";
-    let stderrOutput = "";
-    let timedOut = false;
+      let stdoutOutput = "";
+      let stderrOutput = "";
+      let timedOut = false;
 
-    const agent: ChildProcess = spawnReapable(resolvedPath, agentArgs, {
-      cwd: workDir,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(agent, "SIGTERM");
-        // Force kill the whole group after 10 seconds if SIGTERM doesn't work
-        setTimeout(() => {
-          if (!agent.killed) {
-            reapTree(agent, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
-
-    if (agent.stdout) {
-      agent.stdout.on("data", (data: Buffer) => {
-        const output = data.toString();
-        stdoutOutput += output;
-        process.stdout.write(output);
+      const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: agentArgs,
+        spawnOptions: { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
       });
-    }
 
-    if (agent.stderr) {
-      agent.stderr.on("data", (data: Buffer) => {
-        const output = data.toString();
-        stderrOutput += output;
-        process.stderr.write(output);
-      });
-    }
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
+          );
+          reapTree(agent, "SIGTERM");
+          // Force kill the whole group after 10 seconds if SIGTERM doesn't work
+          setTimeout(() => {
+            if (!agent.killed) {
+              reapTree(agent, "SIGKILL");
+            }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
 
-    agent.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timeout);
-      resolve({
-        success: false,
-        message: `Failed to run Agent: ${error.message}`,
-      });
-    });
-
-    agent.on("close", (code: number | null) => {
-      clearTimeout(timeout);
-      const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
-      const usage = detectUsageLimit(stdoutOutput, stderrOutput);
-      const output = stdoutOutput + stderrOutput;
-
-      if (timedOut) {
-        resolve({
-          success: false,
-          message: `Agent timed out after ${timeoutMinutes} minutes`,
-          output,
-          maxTurnsReached,
-        });
-      } else if (usage.limited) {
-        // A usage/rate limit is account-global — surface it so the caller can
-        // pause the queue until reset rather than treating it as a task failure.
-        resolve({
-          success: false,
-          message: `Agent hit a usage limit${usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""}`,
-          output,
-          usageLimited: true,
-          usageResetHint: usage.resetsAt,
-        });
-      } else if (maxTurnsReached) {
-        resolve({
-          success: false,
-          message: "Agent reached max turns limit",
-          output,
-          maxTurnsReached: true,
-        });
-      } else if (code === 0) {
-        resolve({
-          success: true,
-          message: "Agent completed successfully",
-          output,
-        });
-      } else {
-        resolve({
-          success: false,
-          message: `Agent exited with code ${code}`,
-          output,
-          maxTurnsReached,
+      if (agent.stdout) {
+        agent.stdout.on("data", (data: Buffer) => {
+          const output = data.toString();
+          stdoutOutput += output;
+          process.stdout.write(output);
         });
       }
-    });
 
-    // Send prompt content to Agent
-    if (agent.stdin) {
-      const promptContent = require("fs").readFileSync(promptFile, "utf8");
-      agent.stdin.write(promptContent);
-      agent.stdin.end();
-    }
+      if (agent.stderr) {
+        agent.stderr.on("data", (data: Buffer) => {
+          const output = data.toString();
+          stderrOutput += output;
+          process.stderr.write(output);
+        });
+      }
+
+      agent.on("error", (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeout);
+        resolve({
+          success: false,
+          message: `Failed to run Agent: ${error.message}`,
+        });
+      });
+
+      agent.on("close", (code: number | null) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const output = stdoutOutput + stderrOutput;
+
+        if (timedOut) {
+          resolve({
+            success: false,
+            message: `Agent timed out after ${timeoutMinutes} minutes`,
+            output,
+            maxTurnsReached,
+          });
+        } else if (usage.limited) {
+          // A usage/rate limit is account-global — surface it so the caller can
+          // pause the queue until reset rather than treating it as a task failure.
+          resolve({
+            success: false,
+            message: `Agent hit a usage limit${usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""}`,
+            output,
+            usageLimited: true,
+            usageResetHint: usage.resetsAt,
+          });
+        } else if (maxTurnsReached) {
+          resolve({
+            success: false,
+            message: "Agent reached max turns limit",
+            output,
+            maxTurnsReached: true,
+          });
+        } else if (code === 0) {
+          resolve({
+            success: true,
+            message: "Agent completed successfully",
+            output,
+          });
+        } else {
+          resolve({
+            success: false,
+            message: `Agent exited with code ${code}`,
+            output,
+            maxTurnsReached,
+          });
+        }
+      });
+
+      // Send prompt content to Agent
+      if (agent.stdin) {
+        const promptContent = require("fs").readFileSync(promptFile, "utf8");
+        agent.stdin.write(promptContent);
+        agent.stdin.end();
+      }
+    })().catch((error) => {
+      resolve({
+        success: false,
+        message: `Failed to run Agent: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    });
   });
 }
 
@@ -1383,7 +1428,9 @@ async function sendResponse(res: ServerResponse, response: Response): Promise<vo
  * @param config - Partial configuration merged with defaults and env vars
  * @throws Exits the process when `WEBHOOK_SECRET` is missing
  */
-export async function startWebhookServer(config: Partial<WebhookServerConfig> = {}): Promise<void> {
+export async function startWebhookServer(
+  config: Partial<WebhookServerConfig> = {},
+): Promise<import("http").Server> {
   const finalConfig: WebhookServerConfig = {
     ...DEFAULT_CONFIG,
     ...config,
@@ -1397,11 +1444,12 @@ export async function startWebhookServer(config: Partial<WebhookServerConfig> = 
   }
 
   // Initialize persistent webhook queue
-  const dbPath = process.env.WEBHOOK_QUEUE_DB || "/tmp/devintern-webhooks/queue.db";
+  const dbPath = resolveQueueDbPath();
   webhookQueue = new WebhookQueue({
     dbPath,
     maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
     verbose: finalConfig.debug,
+    legacyDbPath: LEGACY_DB_PATH,
   });
 
   console.log("🚀 Starting @devintern/code Webhook Server");
@@ -1426,6 +1474,10 @@ export async function startWebhookServer(config: Partial<WebhookServerConfig> = 
   } catch (error) {
     console.log(`   Bot username: (failed to determine)`);
   }
+
+  // Prune expired dedupe ids and stale failed events on startup
+  webhookQueue.cleanupProcessedEvents();
+  webhookQueue.cleanup();
 
   // Log queue stats and recover pending events
   const stats = webhookQueue.getStats();
@@ -1555,6 +1607,8 @@ export async function startWebhookServer(config: Partial<WebhookServerConfig> = 
   console.log(`   https://your-domain/webhooks/github`);
   console.log("");
   console.log("Press Ctrl+C to stop the server");
+
+  return server;
 }
 
 // CLI entry point

@@ -1,4 +1,3 @@
-import { dirname } from "node:path";
 import { createClient, type Session, type User } from "@supabase/supabase-js";
 import {
   AUTH_CALLBACK_TIMEOUT_MS,
@@ -12,6 +11,7 @@ import {
   resolveLogin,
   type OAuthProvider,
 } from "./login-provider";
+import { openBrowser, readTextFileIfExists, removeFileIfExists, writeTextFile } from "./runtime";
 import type { AuthenticatedUser, LoginMethod, SupabaseAuthConfig } from "./types";
 
 export type { AuthenticatedUser, LoginMethod, OAuthProvider, SupabaseAuthConfig } from "./types";
@@ -74,32 +74,27 @@ function createSupabaseClient(config: SupabaseAuthConfig) {
   });
 }
 
-/** Open a URL in the system default browser (macOS, Windows, or Linux). */
-async function openBrowser(url: string): Promise<void> {
-  const platform = process.platform;
-  const command =
-    platform === "darwin"
-      ? ["open", url]
-      : platform === "win32"
-        ? ["cmd", "/c", "start", "", url]
-        : ["xdg-open", url];
-
-  const proc = Bun.spawn(command, {
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  await proc.exited;
+/**
+ * Optional hooks for embedding login flows in non-CLI hosts (e.g. Electron).
+ *
+ * Defaults preserve CLI behavior: system browser + console status messages.
+ */
+export interface LoginHooks {
+  /** Open the sign-in URL (default: system browser). */
+  openUrl?: (url: string) => Promise<void>;
+  /** Receive human-readable progress messages (default: console.log). */
+  onStatus?: (message: string) => void;
 }
 
 /** Read and validate the persisted session file, or `null` if missing or corrupt. */
 async function readStoredSession(config: SupabaseAuthConfig): Promise<StoredSession | null> {
-  const file = Bun.file(config.sessionFilePath);
-  if (!(await file.exists())) {
+  const content = await readTextFileIfExists(config.sessionFilePath);
+  if (content === null) {
     return null;
   }
 
   try {
-    const parsed = JSON.parse(await file.text()) as StoredSession;
+    const parsed = JSON.parse(content) as StoredSession;
     if (!parsed.accessToken || !parsed.refreshToken) {
       return null;
     }
@@ -114,9 +109,7 @@ async function writeStoredSession(
   config: SupabaseAuthConfig,
   session: StoredSession,
 ): Promise<void> {
-  const sessionDir = dirname(config.sessionFilePath);
-  await Bun.$`mkdir -p ${sessionDir}`;
-  await Bun.write(config.sessionFilePath, JSON.stringify(session, null, 2));
+  await writeTextFile(config.sessionFilePath, JSON.stringify(session, null, 2));
 }
 
 /**
@@ -183,10 +176,13 @@ async function exchangeCodeAndPersist(
 export async function loginWithOAuth(
   config: SupabaseAuthConfig,
   provider: OAuthProvider,
+  hooks?: LoginHooks,
 ): Promise<AuthenticatedUser> {
+  const openUrl = hooks?.openUrl ?? openBrowser;
+  const onStatus = hooks?.onStatus ?? console.log;
   const client = createSupabaseClient(config);
   const providerName = loginMethodLabel(provider);
-  const callback = createAuthCallbackServer();
+  const callback = await createAuthCallbackServer();
 
   try {
     const { data, error } = await client.auth.signInWithOAuth({
@@ -203,9 +199,9 @@ export async function loginWithOAuth(
       throw new Error("Supabase did not return an OAuth URL.");
     }
 
-    console.log(`Opening ${providerName} login in your browser...`);
-    await openBrowser(data.url);
-    console.log("Waiting for authentication callback...");
+    onStatus(`Opening ${providerName} login in your browser...`);
+    await openUrl(data.url);
+    onStatus("Waiting for authentication callback...");
 
     const code = await callback.waitForCode(AUTH_CALLBACK_TIMEOUT_MS);
     return exchangeCodeAndPersist(config, client, code);
@@ -226,14 +222,16 @@ export async function loginWithOAuth(
 export async function loginWithEmail(
   config: SupabaseAuthConfig,
   email?: string,
+  hooks?: LoginHooks,
 ): Promise<AuthenticatedUser> {
+  const onStatus = hooks?.onStatus ?? console.log;
   const address = email?.trim() || (await promptForEmail());
   if (!address) {
     throw new Error("Email is required.");
   }
 
   const client = createSupabaseClient(config);
-  const callback = createAuthCallbackServer();
+  const callback = await createAuthCallbackServer();
 
   try {
     const { error } = await client.auth.signInWithOtp({
@@ -247,8 +245,8 @@ export async function loginWithEmail(
       throw new Error(`Could not send sign-in email: ${error.message}`);
     }
 
-    console.log(`Sign-in link sent to ${address}.`);
-    console.log("Check your email and open the link (waiting up to 10 minutes)...");
+    onStatus(`Sign-in link sent to ${address}.`);
+    onStatus("Check your email and open the link (waiting up to 10 minutes)...");
 
     const code = await callback.waitForCode(EMAIL_AUTH_CALLBACK_TIMEOUT_MS);
     return exchangeCodeAndPersist(config, client, code);
@@ -268,11 +266,12 @@ export async function loginWithEmail(
 export async function login(
   config: SupabaseAuthConfig,
   resolved: ResolvedLogin,
+  hooks?: LoginHooks,
 ): Promise<AuthenticatedUser> {
   if (resolved.method === "email") {
-    return loginWithEmail(config, resolved.email);
+    return loginWithEmail(config, resolved.email, hooks);
   }
-  return loginWithOAuth(config, resolved.method);
+  return loginWithOAuth(config, resolved.method, hooks);
 }
 
 /**
@@ -305,7 +304,7 @@ export async function logout(config: SupabaseAuthConfig): Promise<void> {
     refresh_token: stored.refreshToken,
   });
   await client.auth.signOut();
-  await Bun.$`rm -f ${config.sessionFilePath}`;
+  await removeFileIfExists(config.sessionFilePath);
 }
 
 /**

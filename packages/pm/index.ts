@@ -1,99 +1,24 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 /**
  * CLI utility to create tasks from Figma designs, logs, or prompts
  * and store them in Jira, Linear, Markdown files, or other backends.
  */
 
-import { join } from "node:path";
-import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "./lib/config";
-import { createBackend } from "./lib/backends";
-import type { TaskBackend } from "./lib/backends";
-import { runAgent } from "./lib/agent";
-import { dumpAgentOutput } from "./lib/agent-debug";
-import { parseAgentJson } from "./lib/agent-json";
+import { askConfirm } from "./lib/runtime/stdin.js";
+import { getArgs } from "./lib/runtime/args.js";
+import { configureTerminalEncoding } from "./lib/runtime/terminal.js";
+import { loadConfig, migrateLegacyConfigDir } from "./lib/config";
+import {
+  createEngine,
+  EngineError,
+  type PmEngine,
+  type SourceInput,
+  type StoryDraft,
+} from "./lib/engine";
 import { runInteractiveMode } from "./lib/components/interactive";
 import { initializeProject } from "./lib/init";
 import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
-import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
-
-/**
- * Load a prompt template from file and replace placeholders.
- *
- * @param sourceType - Source category (`figma`, `log`, or `prompt`) used to locate the template.
- * @param style - Prompt style subdirectory (`technical` or `pm`).
- * @param filename - Template filename within the style directory.
- * @param replacements - Placeholder keys (without braces) mapped to replacement values.
- * @returns The trimmed prompt text with all `{{key}}` placeholders substituted.
- */
-async function loadPrompt(
-  sourceType: SourceType,
-  style: "technical" | "pm",
-  filename: string,
-  replacements: Record<string, string>,
-): Promise<string> {
-  // Detect if we're running from dist/ (bundled) or from source
-  const isBundle = import.meta.dir.endsWith("/dist") || import.meta.dir.endsWith("\\dist");
-  const baseDir = isBundle ? join(import.meta.dir, "..") : import.meta.dir;
-
-  const promptPath = join(baseDir, "prompts", sourceType, style, filename);
-  const promptFile = Bun.file(promptPath);
-  let prompt = await promptFile.text();
-
-  // Replace all placeholders
-  for (const [key, value] of Object.entries(replacements)) {
-    prompt = prompt.replace(new RegExp(`{{${key}}}`, "g"), value);
-  }
-
-  return prompt.trim();
-}
-
-/**
- * Ask the user for yes/no confirmation on stdin.
- *
- * @param message - Prompt text displayed before `(Y/n)`.
- * @returns `true` for yes (including empty input), `false` for no or on read error.
- */
-async function askConfirm(message: string): Promise<boolean> {
-  while (true) {
-    process.stdout.write(`${message} (Y/n): `);
-
-    try {
-      // Use Bun's synchronous readline-like approach
-      const proc = Bun.spawn(["bash", "-c", 'read line && echo "$line"'], {
-        stdin: "inherit",
-        stdout: "pipe",
-        stderr: "inherit",
-      });
-
-      const output = await new Response(proc.stdout).text();
-      await proc.exited;
-
-      const answer = output.trim().toLowerCase();
-
-      // Empty input (just Enter) defaults to yes
-      if (answer === "" || answer === "y" || answer === "yes") {
-        return true;
-      } else if (answer === "n" || answer === "no") {
-        return false;
-      } else {
-        // Invalid input, loop and prompt again
-        process.stdout.write(`Please answer 'y' or 'n' (default: y): `);
-        continue;
-      }
-    } catch (error) {
-      console.error("\nError reading input:", error);
-      return false;
-    }
-  }
-}
-
-type SourceType = "figma" | "log" | "prompt";
-
-interface SourceInput {
-  type: SourceType;
-  content: string;
-}
 
 interface CLIArgs {
   source: SourceInput;
@@ -106,41 +31,18 @@ interface CLIArgs {
   issueType: string;
 }
 
-interface StoryPayload {
-  summary: string;
-  description: string;
-}
-
-interface SubtaskPayload {
-  summary: string;
-  description?: string;
-}
-
-interface DecompositionPayload {
-  subtasks: SubtaskPayload[];
-}
-
 /**
- * Parse CLI arguments from `Bun.argv`.
+ * Parse CLI arguments from `process.argv`.
  *
  * @returns Parsed task-creation args, `null` for interactive mode, a command sentinel
- *   (`init`, `login`, `logout`, `whoami`), or exits the process on `--help`/validation errors.
+ *   (`init`), or exits the process on `--help`/validation errors.
  */
-function parseArgs(): CLIArgs | null | "init" | "login" | "logout" | "whoami" {
-  const args = Bun.argv.slice(2);
+function parseArgs(): CLIArgs | null | "init" {
+  const args = getArgs();
 
   // Check for init command early
   if (args.includes("init") || args.includes("--init")) {
     return "init"; // Signal to run init
-  }
-  if (args.includes("login")) {
-    return "login";
-  }
-  if (args.includes("logout")) {
-    return "logout";
-  }
-  if (args.includes("whoami")) {
-    return "whoami";
   }
 
   // Check for interactive mode early
@@ -151,9 +53,6 @@ function parseArgs(): CLIArgs | null | "init" | "login" | "logout" | "whoami" {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`
 Usage: devpm init [--yes]
-       devpm login [method|email]
-       devpm logout
-       devpm whoami
        devpm --figma <url> [options]
        devpm --log <text> [options]
        devpm --prompt <text> [options]
@@ -162,9 +61,6 @@ Usage: devpm init [--yes]
 Commands:
   init                 Initialize .devintern-pm configuration in current directory
                        (guided wizard; --yes or --no-interactive writes the template instead)
-  login [method]       Sign in (github | google | x | email; prompts if omitted)
-  logout               Clear local auth session
-  whoami               Show current authenticated user
 
 Modes:
   --interactive        Interactive mode - step-by-step task creation (recommended)
@@ -369,12 +265,14 @@ function lastStderrLine(chunk: string): string | undefined {
 }
 
 /**
- * Show an interactive-mode error and wait for the user to restart the wizard.
+ * Show an interactive-mode error/success screen, wait for a key, then reset the wizard
+ * in-place (no remount) so create-another never leaves a blank terminal.
  *
  * @param handle - Active interactive mode handle.
- * @param message - Error text shown on the success/error screen.
+ * @param message - Error or status text shown on the success screen.
+ * @throws If the user cancels with Ctrl+C while waiting.
  */
-async function showInteractiveErrorAndRestart(
+async function showInteractiveMessageAndRestart(
   handle: Awaited<ReturnType<typeof runInteractiveMode>>,
   message: string,
 ): Promise<void> {
@@ -383,15 +281,25 @@ async function showInteractiveErrorAndRestart(
   handle.restart();
 }
 
+/** True when an interactive waiter rejected because the user cancelled (Ctrl+C / unmount). */
+function isInteractiveCancelled(error: unknown): boolean {
+  return error instanceof Error && error.message === "Interactive mode cancelled";
+}
+
 /**
  * CLI entry point: routes commands, runs interactive or batch task creation,
  * and orchestrates agent prompts with the configured task backend.
  *
- * @returns A promise that resolves when the command completes; may recurse in interactive mode.
+ * Interactive mode reuses a single Ink session across create-another cycles
+ * (success → keypress → wizard start) instead of remounting via recursive main().
+ *
+ * @returns A promise that resolves when the command completes.
  */
 async function main() {
+  configureTerminalEncoding();
+
   // Enable verbose API logging globally when --verbose or -v is passed
-  const args = Bun.argv.slice(2);
+  const args = getArgs();
   if (args.includes("--verbose") || args.includes("-v")) {
     process.env.DEVINTERN_VERBOSE = "1";
   }
@@ -405,42 +313,13 @@ async function main() {
   // Handle init command: guided wizard in interactive terminals, template
   // scaffold with `--yes` / `--no-interactive` / piped stdin.
   if (parsedArgs === "init") {
-    if (isInteractive(Bun.argv, process.stdin)) {
+    if (isInteractive(process.argv, process.stdin)) {
       await runPmInitWizard();
     } else {
       await initializeProject();
     }
     return;
   }
-  if (parsedArgs === "login") {
-    try {
-      const supabaseConfig = await loadSupabaseConfig();
-      const resolved = await resolveLogin(Bun.argv);
-      const user = await login(supabaseConfig, resolved);
-      console.log(`✅ Signed in as ${user.email || user.id}`);
-      process.exit(0);
-    } catch (error) {
-      console.error(`❌ ${(error as Error).message}`);
-      process.exit(1);
-    }
-  }
-  if (parsedArgs === "logout") {
-    const supabaseConfig = await loadSupabaseConfig();
-    await logout(supabaseConfig);
-    console.log("✅ Signed out");
-    return;
-  }
-  if (parsedArgs === "whoami") {
-    const supabaseConfig = await loadSupabaseConfig();
-    const user = await getAuthenticatedUser(supabaseConfig);
-    if (!user) {
-      console.log("Not signed in. Run `devpm login`.");
-      return;
-    }
-    console.log(`Signed in as ${user.email || user.id}`);
-    return;
-  }
-
   let source: SourceInput;
   let epicKey: string | undefined;
   let extraInstructions: string | undefined;
@@ -458,33 +337,26 @@ async function main() {
     // under FSL, so pm performs no license check.
     configForInteractive = await loadConfig();
 
+    const engine: PmEngine = await createEngine(configForInteractive, {
+      model: parsedArgs?.model,
+    });
+
     if (parsedArgs === null) {
       // Interactive mode with preview - setup once
       console.clear();
 
-      const backend = await createBackend(configForInteractive);
-
       // Fetch projects user has access to
       let projectsData: Array<{ key: string; name: string }> | undefined;
       try {
-        if (backend.getProjects) {
-          const projects = await backend.getProjects();
-          projectsData = projects.map((p) => ({ key: p.key, name: p.name }));
-        }
+        projectsData = await engine.listProjects();
       } catch {
-        console.error(`⚠️  Warning: Could not fetch projects from ${backend.name}`);
+        console.error(`⚠️  Warning: Could not fetch projects from ${engine.backendName}`);
       }
 
       // Determine which project to use for fetching issue types.
       // Prefer the configured default key, but if projectsData is available and the key isn't in
       // it (e.g. misconfigured or no access), fall back to the first accessible project.
-      const configuredKey =
-        configForInteractive.jira?.defaultProjectKey ||
-        configForInteractive.linear?.defaultTeamKey ||
-        configForInteractive.trello?.defaultBoardId ||
-        configForInteractive.azureDevOps?.defaultProject ||
-        configForInteractive.asana?.defaultProjectGid ||
-        configForInteractive.github?.repository;
+      const configuredKey = engine.defaultProjectKey;
       const firstProjectKey =
         projectsData && projectsData.length > 0 ? projectsData[0]?.key : undefined;
       const projectKeyForIssueTypes =
@@ -495,12 +367,9 @@ async function main() {
       // Fetch issue types from backend for the default project (initial load).
       // Only fetch if the backend actually supports issue type selection.
       let issueTypeNames: string[] | undefined;
-      if (backend.supportsIssueTypes) {
+      if (engine.supportsIssueTypes) {
         try {
-          if (backend.getIssueTypes) {
-            const issueTypesData = await backend.getIssueTypes(projectKeyForIssueTypes);
-            issueTypeNames = issueTypesData;
-          }
+          issueTypeNames = await engine.listIssueTypes(projectKeyForIssueTypes);
         } catch (err) {
           // Fetch failed — fall back to defaults so undefined unambiguously means "not supported"
           const reason = err instanceof Error ? err.message : String(err);
@@ -509,12 +378,8 @@ async function main() {
               ? " — your API user has no project access; add them to the project in your tracker's settings"
               : "";
           console.error(
-            `⚠️  Warning: Could not fetch issue types from ${backend.name}, using defaults (${reason}${hint})`,
+            `⚠️  Warning: Could not fetch issue types from ${engine.backendName}, using defaults (${reason}${hint})`,
           );
-          issueTypeNames = ["Task", "Story", "Bug", "Epic"];
-        }
-        // If getIssueTypes is not defined on a supporting backend, use defaults
-        if (!issueTypeNames) {
           issueTypeNames = ["Task", "Story", "Bug", "Epic"];
         }
       }
@@ -522,27 +387,17 @@ async function main() {
       try {
         interactiveHandle = await runInteractiveMode({
           projects: projectsData,
-          defaultProjectKey:
-            configForInteractive.jira?.defaultProjectKey ||
-            configForInteractive.linear?.defaultTeamKey ||
-            configForInteractive.trello?.defaultBoardId ||
-            configForInteractive.azureDevOps?.defaultProject ||
-            configForInteractive.asana?.defaultProjectGid ||
-            (configForInteractive.github ? configForInteractive.github.repository : undefined),
+          defaultProjectKey: engine.defaultProjectKey,
           issueTypes: issueTypeNames,
-          fetchIssueTypes:
-            backend.supportsIssueTypes && backend.getIssueTypes
-              ? async (projectKey: string) => {
-                  const types = await backend.getIssueTypes!(projectKey);
-                  return types;
-                }
-              : undefined,
-          backendName: backend.name,
+          fetchIssueTypes: engine.supportsIssueTypes
+            ? (projectKey: string) => engine.listIssueTypes(projectKey)
+            : undefined,
+          backendName: engine.backendName,
           harnessDisplayName: configForInteractive.agent.harness.displayName,
-          supportsEpicLinking: backend.supportsEpicLinking,
+          supportsEpicLinking: engine.supportsEpicLinking,
         });
       } catch (error) {
-        if (error instanceof Error && error.message === "Interactive mode cancelled") {
+        if (isInteractiveCancelled(error)) {
           console.log("\nBye!");
           process.exit(0);
         }
@@ -553,46 +408,141 @@ async function main() {
         process.exit(1);
       }
 
-      // Get initial config (before preview)
-      const interactiveConfig = await interactiveHandle.waitForCompletion();
+      // Create-another loop: reuse the same Ink session. Remounting via main()
+      // previously left a blank screen (old instance not cleaned up + console.clear).
+      const config = configForInteractive;
 
-      // Convert interactive config to CLI args format
-      if (!interactiveConfig.sourceType || !interactiveConfig.sourceContent) {
-        console.error("❌ Interactive mode was cancelled or incomplete");
-        process.exit(1);
+      while (true) {
+        let interactiveConfig;
+        try {
+          interactiveConfig = await interactiveHandle.waitForCompletion();
+        } catch (error) {
+          if (isInteractiveCancelled(error)) {
+            interactiveHandle.cleanup();
+            console.log("\nBye!");
+            process.exit(0);
+          }
+          throw error;
+        }
+
+        if (!interactiveConfig.sourceType || !interactiveConfig.sourceContent) {
+          console.error("❌ Interactive mode was cancelled or incomplete");
+          interactiveHandle.cleanup();
+          process.exit(1);
+        }
+
+        source = {
+          type: interactiveConfig.sourceType,
+          content: interactiveConfig.sourceContent,
+        };
+        epicKey = interactiveConfig.epicKey;
+        extraInstructions = interactiveConfig.customInstructions;
+        promptStyle = interactiveConfig.promptStyle;
+        decompose = interactiveConfig.decompose;
+        confirm = false; // Interactive mode handles confirmation differently
+        model = undefined;
+        issueType = interactiveConfig.issueType;
+        projectKey = interactiveConfig.projectKey;
+
+        const shouldContinue = await runCreateFlow({
+          source,
+          epicKey,
+          extraInstructions,
+          promptStyle,
+          decompose,
+          confirm,
+          model,
+          issueType,
+          projectKey,
+          interactiveHandle,
+          config,
+          engine,
+        });
+
+        if (!shouldContinue) {
+          interactiveHandle.cleanup();
+          return;
+        }
+        // handle.restart() already ran inside runCreateFlow; loop for next task
       }
-
-      source = {
-        type: interactiveConfig.sourceType,
-        content: interactiveConfig.sourceContent,
-      };
-      epicKey = interactiveConfig.epicKey;
-      extraInstructions = interactiveConfig.customInstructions;
-      promptStyle = interactiveConfig.promptStyle;
-      decompose = interactiveConfig.decompose;
-      confirm = false; // Interactive mode handles confirmation differently
-      model = undefined;
-      issueType = interactiveConfig.issueType;
-      projectKey = interactiveConfig.projectKey;
-    } else {
-      // CLI mode
-      source = parsedArgs.source;
-      epicKey = parsedArgs.epicKey;
-      extraInstructions = parsedArgs.extraInstructions;
-      promptStyle = parsedArgs.promptStyle;
-      decompose = parsedArgs.decompose;
-      confirm = parsedArgs.confirm;
-      model = parsedArgs.model;
-      issueType = parsedArgs.issueType;
-      projectKey = undefined; // CLI mode uses default project
     }
 
-    // Config already loaded and verified early; reuse for both modes
+    // CLI mode (one-shot)
+    source = parsedArgs.source;
+    epicKey = parsedArgs.epicKey;
+    extraInstructions = parsedArgs.extraInstructions;
+    promptStyle = parsedArgs.promptStyle;
+    decompose = parsedArgs.decompose;
+    confirm = parsedArgs.confirm;
+    model = parsedArgs.model;
+    issueType = parsedArgs.issueType;
+    projectKey = undefined; // CLI mode uses default project
+
+    // Config already loaded and verified early
     const config = configForInteractive!;
 
-    // Initialize task backend
-    const backend = await createBackend(config);
+    await runCreateFlow({
+      source,
+      epicKey,
+      extraInstructions,
+      promptStyle,
+      decompose,
+      confirm,
+      model,
+      issueType,
+      projectKey,
+      interactiveHandle: null,
+      config,
+      engine,
+    });
+  } catch (error) {
+    if (isInteractiveCancelled(error)) {
+      interactiveHandle?.cleanup();
+      console.log("\nBye!");
+      process.exit(0);
+    }
+    console.error("\n❌ Error:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
 
+interface CreateFlowParams {
+  source: SourceInput;
+  epicKey?: string;
+  extraInstructions?: string;
+  promptStyle: "technical" | "pm";
+  decompose: boolean;
+  confirm: boolean;
+  model?: string;
+  issueType: string;
+  projectKey?: string;
+  interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null;
+  config: Awaited<ReturnType<typeof loadConfig>>;
+  engine: PmEngine;
+}
+
+/**
+ * Runs agent generation + task creation for one CLI or interactive create cycle.
+ *
+ * @returns `true` when interactive mode should loop for another task; `false` when done.
+ */
+async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
+  const {
+    source,
+    epicKey,
+    extraInstructions,
+    promptStyle,
+    decompose,
+    confirm,
+    model,
+    issueType,
+    projectKey,
+    interactiveHandle,
+    config,
+    engine,
+  } = params;
+
+  try {
     // Step 1: Run Agent to create story from source
     const sourceTypeLabel =
       source.type === "figma"
@@ -601,7 +551,7 @@ async function main() {
           ? "error log"
           : "free-form prompt";
     if (!interactiveHandle) {
-      console.log(`Step 1: Creating ${backend.name} story from ${sourceTypeLabel}\n`);
+      console.log(`Step 1: Creating ${engine.backendName} story from ${sourceTypeLabel}\n`);
       console.log(`Source type: ${source.type}`);
       if (source.type === "figma") {
         console.log(`Figma URL: ${source.content}`);
@@ -625,99 +575,65 @@ async function main() {
       }
     }
 
-    // Prepare replacements based on source type
-    const replacements: Record<string, string> = {
-      epicContext: epicKey ? `\nThis story will be part of epic: ${epicKey}` : "",
-      extraInstructions: extraInstructions ? `\nAdditional instructions: ${extraInstructions}` : "",
-    };
-
-    if (source.type === "figma") {
-      replacements.figmaUrl = source.content;
-    } else if (source.type === "log") {
-      replacements.logContent = source.content;
-    } else if (source.type === "prompt") {
-      replacements.promptContent = source.content;
-    }
-
-    const storyPrompt = await loadPrompt(
-      source.type,
-      promptStyle,
-      "story-generation.txt",
-      replacements,
-    );
-
     // In interactive mode, show generating state
     const interactiveUi = interactiveHandle;
     if (interactiveUi) {
       interactiveUi.setGenerating();
+    } else {
+      console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
     }
 
-    const storyResult = await runAgent(config.agent.harness, config.agent.path, storyPrompt, {
-      maxTurns: 100,
-      skipPermissions: true,
-      model,
-      silent: !!interactiveUi,
-      onStderr: interactiveUi
-        ? (chunk) => {
-            const line = lastStderrLine(chunk);
-            if (line) {
-              interactiveUi.setStatusMessage(line);
-            }
-          }
-        : undefined,
-    });
-
-    if (storyResult.exitCode !== 0) {
-      const errorDetail = storyResult.stderr.trim() || "Unknown agent error";
-      const dumpFile = await dumpAgentOutput("story-generation", storyResult, {
-        harness: config.agent.harness.name,
-        cliPath: config.agent.path,
-      });
-      const dumpHint = dumpFile ? `\nFull agent output: ${dumpFile}` : "";
-      if (interactiveHandle) {
-        await showInteractiveErrorAndRestart(
-          interactiveHandle,
-          `Error: Failed to analyze ${sourceTypeLabel}\n${errorDetail}${dumpHint}`,
-        );
-        return main();
-      }
-      console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
-      console.error(storyResult.stderr);
-      if (dumpFile) {
-        console.error(`Full agent output: ${dumpFile}`);
-      }
-      process.exit(1);
-    }
-
-    // Parse JSON from Agent output (may be fenced or prefixed with prose)
-    let storyData: StoryPayload;
+    let storyData: StoryDraft;
     try {
-      storyData = parseAgentJson<StoryPayload>(storyResult.stdout);
-
-      if (!storyData.summary || !storyData.description) {
-        throw new Error("Missing required fields: summary and description");
-      }
+      storyData = await engine.generateStory(
+        { source, promptStyle, epicKey, extraInstructions },
+        {
+          onAgentChunk: interactiveUi
+            ? (chunk, stream) => {
+                if (stream !== "stderr") return;
+                const line = lastStderrLine(chunk);
+                if (line) {
+                  interactiveUi.setStatusMessage(line);
+                }
+              }
+            : undefined,
+        },
+      );
     } catch (error) {
-      const parseError = error instanceof Error ? error.message : String(error);
-      const dumpFile = await dumpAgentOutput("story-generation-parse", storyResult, {
-        harness: config.agent.harness.name,
-        cliPath: config.agent.path,
-      });
-      const dumpHint = dumpFile ? `\nFull agent output: ${dumpFile}` : "";
-      if (interactiveHandle) {
-        await showInteractiveErrorAndRestart(
-          interactiveHandle,
-          `Error: Failed to parse story from agent output\n${parseError}${dumpHint}`,
-        );
-        return main();
+      if (error instanceof EngineError && error.code === "agent-failed") {
+        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+        if (interactiveHandle) {
+          await showInteractiveMessageAndRestart(
+            interactiveHandle,
+            `Error: Failed to analyze ${sourceTypeLabel}\n${error.detail}${dumpHint}`,
+          );
+          return true; // continue create-another loop
+        }
+        console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
+        console.error(error.detail);
+        if (error.dumpFile) {
+          console.error(`Full agent output: ${error.dumpFile}`);
+        }
+        process.exit(1);
       }
-      console.error("\n❌ Failed to parse story requirements from Agent output");
-      console.error("Error:", parseError);
-      console.error("Output:", storyResult.stdout);
-      if (dumpFile) {
-        console.error(`Full agent output (incl. stderr): ${dumpFile}`);
+      if (error instanceof EngineError && error.code === "parse-failed") {
+        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+        if (interactiveHandle) {
+          await showInteractiveMessageAndRestart(
+            interactiveHandle,
+            `Error: Failed to parse story from agent output\n${error.message}${dumpHint}`,
+          );
+          return true; // continue create-another loop
+        }
+        console.error("\n❌ Failed to parse story requirements from Agent output");
+        console.error("Error:", error.message);
+        console.error("Output:", error.detail);
+        if (error.dumpFile) {
+          console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
+        }
+        process.exit(1);
       }
-      process.exit(1);
+      throw error;
     }
 
     // In interactive mode, show preview and wait for confirmation or edits
@@ -738,67 +654,40 @@ async function main() {
         }
 
         // User requested an edit
-        const editPrompt = `You are helping revise a ${issueType.toLowerCase()} description.
-
-Current Title: ${editRequest.currentSummary}
-
-Current Description:
-${editRequest.currentDescription}
-
-User's edit request: ${editRequest.editPrompt}
-
-Please update the description based on the user's feedback. Keep the same title unless the user specifically asks to change it. Return ONLY valid JSON in this exact format:
-
-\`\`\`json
-{
-  "summary": "Updated or same title",
-  "description": "Updated description in markdown format"
-}
-\`\`\``;
-
         ui.setStatusMessage("Updating task description...");
 
-        const editResult = await runAgent(config.agent.harness, config.agent.path, editPrompt, {
-          maxTurns: 100,
-          skipPermissions: true,
-          model,
-          silent: true,
-          onStderr: (chunk) => {
-            const line = lastStderrLine(chunk);
-            if (line) {
-              ui.setStatusMessage(line);
-            }
-          },
-        });
-
-        if (editResult.exitCode !== 0) {
-          const errorDetail = editResult.stderr.trim() || "Unknown agent error";
-          ui.setStatusMessage(`Update failed: ${errorDetail}`);
-          continue;
-        }
-
-        // Parse updated JSON
         try {
-          const updatedData = parseAgentJson<StoryPayload>(editResult.stdout);
-
-          if (!updatedData.summary || !updatedData.description) {
-            throw new Error("Missing required fields in update");
-          }
-
-          // Update storyData with the new content
-          storyData = updatedData;
+          storyData = await engine.editStory(
+            {
+              current: {
+                summary: editRequest.currentSummary,
+                description: editRequest.currentDescription,
+              },
+              editPrompt: editRequest.editPrompt,
+              issueType,
+            },
+            {
+              onAgentChunk: (chunk, stream) => {
+                if (stream !== "stderr") return;
+                const line = lastStderrLine(chunk);
+                if (line) {
+                  ui.setStatusMessage(line);
+                }
+              },
+            },
+          );
 
           // Show updated preview
           ui.setPreviewData(storyData.summary, storyData.description);
         } catch (error) {
+          if (error instanceof EngineError && error.code === "agent-failed") {
+            ui.setStatusMessage(`Update failed: ${error.detail}`);
+            continue;
+          }
           console.error("❌ Failed to parse updated task from Agent");
           console.error("Error:", error instanceof Error ? error.message : error);
-          const dumpFile = await dumpAgentOutput("story-edit-parse", editResult, {
-            harness: config.agent.harness.name,
-            cliPath: config.agent.path,
-          });
-          if (dumpFile) {
-            ui.setStatusMessage(`Update failed to parse — full agent output: ${dumpFile}`);
+          if (error instanceof EngineError && error.dumpFile) {
+            ui.setStatusMessage(`Update failed to parse — full agent output: ${error.dumpFile}`);
           }
           // Loop will retry
         }
@@ -806,41 +695,30 @@ Please update the description based on the user's feedback. Keep the same title 
     }
 
     if (!interactiveHandle) {
-      console.log(`\n📝 Creating ${backend.name} ${issueType.toLowerCase()}...`);
+      console.log(`\n📝 Creating ${engine.backendName} ${issueType.toLowerCase()}...`);
       console.log(`   Title: ${storyData.summary}`);
     }
 
-    // Create the task via backend
-    const createdTask = await backend.createTask(
-      storyData.summary,
-      storyData.description,
-      issueType,
-      projectKey,
-    );
+    // Create the task via backend (links to epic when supported by the tracker;
+    // trackers without epic support skip linking silently so we never create a
+    // misleading attachment/text reference).
+    const createResult = await engine.createTask(storyData, { issueType, projectKey, epicKey });
+    const createdTask = createResult.task;
 
     if (!interactiveHandle) {
-      console.log(`\n✅ ${backend.name} ${issueType.toLowerCase()} created: ${createdTask.url}`);
+      console.log(
+        `\n✅ ${engine.backendName} ${issueType.toLowerCase()} created: ${createdTask.url}`,
+      );
     }
 
-    // Link to epic if provided and the tracker can persist a real link.
-    // Trackers without epic support (e.g. Trello, GitHub, Markdown) skip this
-    // silently so we never create a misleading attachment/text reference.
-    if (epicKey && backend.supportsEpicLinking && backend.linkToEpic) {
+    if (createResult.epicLinked && !interactiveHandle) {
+      console.log(`🔗 Linking story to epic ${epicKey}...`);
+      console.log(`✅ Story linked to epic ${epicKey}`);
+    }
+    if (createResult.epicLinkError) {
+      console.error(`⚠️  Warning: Failed to link to epic: ${createResult.epicLinkError}`);
       if (!interactiveHandle) {
-        console.log(`🔗 Linking story to epic ${epicKey}...`);
-      }
-      try {
-        await backend.linkToEpic(createdTask.key, epicKey);
-        if (!interactiveHandle) {
-          console.log(`✅ Story linked to epic ${epicKey}`);
-        }
-      } catch (error) {
-        console.error(
-          `⚠️  Warning: Failed to link to epic: ${error instanceof Error ? error.message : error}`,
-        );
-        if (!interactiveHandle) {
-          console.log("Continuing with task decomposition...");
-        }
+        console.log("Continuing with task decomposition...");
       }
     }
     if (!interactiveHandle) {
@@ -859,85 +737,70 @@ Please update the description based on the user's feedback. Keep the same title 
         console.log("\n🎉 Done!");
       }
 
-      // In interactive mode, show success and wait for user to restart
+      // In interactive mode, show success and wait for user to start another task
       if (interactiveHandle) {
-        interactiveHandle.showSuccess(`Task created: ${createdTask.url}`);
-        // Wait for user key press to restart
-        await interactiveHandle.waitForRestart();
-        // Restart the flow
-        return main();
+        await showInteractiveMessageAndRestart(
+          interactiveHandle,
+          `Task created: ${createdTask.url}`,
+        );
+        return true; // continue create-another loop (same Ink session)
       }
-      return;
+      return false;
     }
 
     // Step 2: Run Agent to decompose the story into tasks
     console.log("Step 2: Decomposing story into tasks\n");
+    console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
 
-    const decomposePrompt = await loadPrompt(source.type, promptStyle, "decomposition.txt", {
-      storySummary: storyData.summary,
-      storyDescription: storyData.description,
-    });
-
-    const decomposeResult = await runAgent(
-      config.agent.harness,
-      config.agent.path,
-      decomposePrompt,
-      {
-        maxTurns: 100,
-        skipPermissions: true,
-        model,
-      },
-    );
-
-    if (decomposeResult.exitCode !== 0) {
-      console.error("❌ Failed to decompose story");
-      console.error(decomposeResult.stderr);
-      process.exit(1);
-    }
-
-    // Parse subtasks JSON from Agent output
-    let subtasksData: DecompositionPayload;
+    let subtasks: Awaited<ReturnType<PmEngine["decomposeStory"]>>;
     try {
-      subtasksData = parseAgentJson<DecompositionPayload>(decomposeResult.stdout);
-
-      if (!subtasksData.subtasks || !Array.isArray(subtasksData.subtasks)) {
-        throw new Error("Expected subtasks array in response");
-      }
-    } catch (error) {
-      console.error("\n❌ Failed to parse subtasks from Agent output");
-      console.error("Error:", error instanceof Error ? error.message : error);
-      console.error("Output:", decomposeResult.stdout);
-      const dumpFile = await dumpAgentOutput("decomposition-parse", decomposeResult, {
-        harness: config.agent.harness.name,
-        cliPath: config.agent.path,
+      subtasks = await engine.decomposeStory({
+        story: storyData,
+        sourceType: source.type,
+        promptStyle,
       });
-      if (dumpFile) {
-        console.error(`Full agent output (incl. stderr): ${dumpFile}`);
+    } catch (error) {
+      if (error instanceof EngineError && error.code === "agent-failed") {
+        console.error("❌ Failed to decompose story");
+        console.error(error.detail);
+        if (error.dumpFile) {
+          console.error(`Full agent output: ${error.dumpFile}`);
+        }
+        process.exit(1);
       }
-      process.exit(1);
+      if (error instanceof EngineError && error.code === "parse-failed") {
+        console.error("\n❌ Failed to parse subtasks from Agent output");
+        console.error("Error:", error.message);
+        console.error("Output:", error.detail);
+        if (error.dumpFile) {
+          console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
+        }
+        process.exit(1);
+      }
+      throw error;
     }
 
-    console.log(`\n✅ Agent suggested ${subtasksData.subtasks.length} subtasks\n`);
+    console.log(`\n✅ Agent suggested ${subtasks.length} subtasks\n`);
 
     if (confirm) {
       console.log("📝 Review and confirm each subtask:\n");
     } else {
-      console.log(`📝 Creating subtasks in ${backend.name}...\n`);
+      console.log(`📝 Creating subtasks in ${engine.backendName}...\n`);
     }
 
     // Create each subtask via API
     const createdSubtasks = [];
     const skippedSubtasks = [];
 
-    for (let i = 0; i < subtasksData.subtasks.length; i++) {
-      const subtask = subtasksData.subtasks[i];
+    for (let i = 0; i < subtasks.length; i++) {
+      const subtask = subtasks[i];
       if (!subtask) continue;
 
       // If confirmation mode is enabled, ask user
       if (confirm) {
         // Visual separator between tasks
         console.log("\n" + "─".repeat(80));
-        console.log(`\n📋 Task ${i + 1}/${subtasksData.subtasks.length}`);
+        console.log(`\n📋 Task ${i + 1}/${subtasks.length}`);
         console.log(`   ${subtask.summary}\n`);
 
         if (subtask.description) {
@@ -965,15 +828,7 @@ Please update the description based on the user's feedback. Keep the same title 
       }
 
       try {
-        // Ensure we have a description, use summary as fallback
-        const description = subtask.description?.trim() || subtask.summary;
-
-        const created = await backend.createSubtask(
-          createdTask.key,
-          subtask.summary,
-          description,
-          projectKey,
-        );
+        const created = await engine.createSubtask(createdTask.key, subtask, projectKey);
         createdSubtasks.push(created);
         if (confirm) {
           console.log(`✅ Created: ${created.key}\n`);
@@ -1003,24 +858,24 @@ Please update the description based on the user's feedback. Keep the same title 
     }
     console.log("\n🎉 Done!");
 
-    // In interactive mode, show success and wait for user to restart
+    // In interactive mode, show success and wait for user to start another task
     if (interactiveHandle) {
-      interactiveHandle.showSuccess(`Task created: ${createdTask.url}`);
-      // Wait for user key press to restart
-      await interactiveHandle.waitForRestart();
-      // Restart the flow
-      return main();
+      await showInteractiveMessageAndRestart(interactiveHandle, `Task created: ${createdTask.url}`);
+      return true; // continue create-another loop (same Ink session)
     }
+    return false;
   } catch (error) {
+    if (isInteractiveCancelled(error)) {
+      throw error;
+    }
     console.error("\n❌ Error:", error instanceof Error ? error.message : error);
-    // In interactive mode, show error and wait for user to restart
+    // In interactive mode, show error and wait for user to restart in-place
     if (interactiveHandle) {
-      interactiveHandle.showSuccess(
+      await showInteractiveMessageAndRestart(
+        interactiveHandle,
         `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
-      // Wait for user key press to restart
-      await interactiveHandle.waitForRestart();
-      return main();
+      return true; // continue create-another loop
     }
     process.exit(1);
   }

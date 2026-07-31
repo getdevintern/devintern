@@ -1185,14 +1185,22 @@ export class Utils {
         }
       }
 
-      // Find an available branch name by checking for existing branches
+      // Find an available branch name by checking for existing branches.
+      // Remote refs count as taken too: on a fresh clone, a previous attempt's
+      // branch (and its PR) exists only as origin/<name>.
       while (true) {
-        const branchExists = await Utils.executeGitCommand(
+        const localExists = await Utils.executeGitCommand(
           ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
           gitOpts,
         );
+        const remoteExists = localExists.success
+          ? { success: true }
+          : await Utils.executeGitCommand(
+              ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branchName}`],
+              gitOpts,
+            );
 
-        if (!branchExists.success) {
+        if (!localExists.success && !remoteExists.success) {
           // Branch doesn't exist, we can use this name
           break;
         }
@@ -1425,15 +1433,15 @@ export class Utils {
         console.log(`   Worktree path: ${worktreePath}`);
       }
 
-      // Fetch latest from origin (shallow fetch to minimize data transfer)
+      // Fetch latest from origin. Never with --depth: a depth-limited fetch
+      // into a full clone marks the WHOLE repository shallow (.git/shallow),
+      // breaking merge-base and future merges in the user's own checkout.
+      // An incremental fetch only transfers missing objects anyway.
       if (verbose) {
-        console.log(`   Fetching branch ${branch} from origin (shallow)...`);
+        console.log(`   Fetching branch ${branch} from origin...`);
       }
 
-      const fetchResult = await Utils.executeGitCommand(
-        ["fetch", "origin", branch, "--depth=1"],
-        repoOpts,
-      );
+      const fetchResult = await Utils.executeGitCommand(["fetch", "origin", branch], repoOpts);
 
       if (verbose) {
         console.log(`   ✓ Fetch completed (success: ${fetchResult.success})`);

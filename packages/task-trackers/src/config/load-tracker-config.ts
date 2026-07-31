@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { findEnvFile } from "@devintern/utils";
 import type { TrackerConfig, TrackerType } from "./types.ts";
 
@@ -54,24 +55,27 @@ export function parseGitHubRepo(
 /**
  * Load environment variables from the nearest `.env` file.
  *
- * Searches upward from the current working directory, checking
+ * Searches upward from `baseDir` (default: current working directory), checking
  * `{configDirName}/.env` first, then a plain `.env`, at each level.
  * Existing process env vars are overwritten for keys present in the file.
  * Missing or unreadable files are ignored.
  *
  * @param configDirName - Config folder name (e.g. `.devintern-pm`).
+ * @param baseDir - Directory to start the upward search from (defaults to cwd).
  * @returns Resolves when loading completes.
  */
-export async function loadEnvFromConfigDir(configDirName: string): Promise<void> {
-  const envPath = findEnvFile({ configDirName });
+export async function loadEnvFromConfigDir(
+  configDirName: string,
+  baseDir: string = process.cwd(),
+): Promise<void> {
+  const envPath = findEnvFile({ configDirName, startDir: baseDir });
 
   if (!envPath) {
     return;
   }
 
   try {
-    const envFile = Bun.file(envPath);
-    const envContent = await envFile.text();
+    const envContent = await readFile(envPath, "utf8");
     for (const line of envContent.split("\n")) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) {
@@ -275,11 +279,15 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
  *
  * Reads `{configDirName}/.env` first, then validates backend-specific required vars.
  *
- * @param configDirName - Config folder name relative to cwd (e.g. `.devintern-pm`).
+ * @param configDirName - Config folder name (e.g. `.devintern-pm`).
+ * @param baseDir - Directory to start the upward search from (defaults to cwd).
  * @returns Fully resolved {@link TrackerConfig} for the selected task tracker.
  * @throws When required environment variables for the chosen backend are missing or invalid.
  */
-export async function loadTrackerConfig(configDirName: string): Promise<TrackerConfig> {
-  await loadEnvFromConfigDir(configDirName);
+export async function loadTrackerConfig(
+  configDirName: string,
+  baseDir?: string,
+): Promise<TrackerConfig> {
+  await loadEnvFromConfigDir(configDirName, baseDir);
   return parseTrackerConfigFromEnv();
 }

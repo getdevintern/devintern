@@ -5,7 +5,7 @@
 import {
   constrainedModeAllowsExternalTools,
   isModeSupported,
-  runAgentBun,
+  runAgentNode,
   type AgentRunOptions,
   type AgentRunResult,
   type AgentHarness,
@@ -49,7 +49,11 @@ export async function runAgent(
   prompt: string,
   options: RunAgentOptions,
 ): Promise<AgentRunResult> {
-  return runAgentBun(harness, executablePath, prompt, withReadonlyMode(harness, options));
+  return runAgentNode(harness, executablePath, prompt, {
+    inputMethod: "arg",
+    verbose: process.env.DEVINTERN_VERBOSE === "1",
+    ...withReadonlyMode(harness, options),
+  });
 }
 
 /**

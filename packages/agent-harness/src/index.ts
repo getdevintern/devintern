@@ -72,6 +72,35 @@ export { runAgentNode, type NodeRunnerOptions } from "./runners/node.js";
 // Process-group reaper (prevents orphaned dev servers / watchers)
 export { spawnReapable, reapTree } from "./process-reaper.js";
 
+// Sandbox providers (opt-in OS-level isolation for the agent subprocess)
+export type {
+  ResolvedSandbox,
+  SandboxDetection,
+  SandboxPolicy,
+  SandboxProvider,
+  WrappedCommand,
+} from "./sandbox/types.js";
+export {
+  registerSandboxProvider,
+  getSandboxProvider,
+  listSandboxProviders,
+} from "./sandbox/registry.js";
+export { resolveSandbox, type SandboxResolutionOptions } from "./sandbox/resolver.js";
+export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
+export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
+export { NativeSandboxProvider } from "./sandbox/providers/native.js";
+export { NonoSandboxProvider } from "./sandbox/providers/nono.js";
+export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
+export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
+export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
+export {
+  spawnAgent,
+  applyNestingGuard,
+  buildDefaultSandboxPolicy,
+  type SpawnAgentOptions,
+  type SpawnedAgent,
+} from "./spawn-agent.js";
+
 // Max-turns detection
 export { detectMaxTurnsReached } from "./detect-max-turns.js";
 

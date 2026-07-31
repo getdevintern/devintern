@@ -1,5 +1,51 @@
 # @devintern/code Changelog
 
+## [2.2.0] - 2026-07-31
+
+The server-automation release: a single `devintern worker` daemon that picks up ready tasks, reacts to PR reviews, and reports on itself through a local dashboard — plus OS-level sandboxing for every agent spawn.
+
+### Added
+
+- **`devintern worker`: one daemon for unattended automation**. Replaces the standalone webhook server as the entry point for server-side runs: a worker-specific single-instance lock (manual CLI runs are never blocked), an automation-license gate checked at startup, an acquirer registry, and graceful `SIGINT`/`SIGTERM` shutdown. `--listen` folds the webhook server into the daemon; `devintern serve` remains as a deprecated alias. Mention-triggered automation is now permission-gated: the review or comment author must have push access (write/maintain/admin) to the repo, checked via the collaborators API and failing closed — previously any commenter on a public repo could direct the agent with an `@mention`
+- **Polling mode — pick up ready tasks with no webhooks, on all seven trackers**: `devintern worker --query '<query>'` (or `WORKER_TASK_QUERY`) runs a detect-then-evaluate loop — a cheap per-tracker change detector answers "did anything change since the cursor", and only then does the worker re-run your query to find ready work. Detectors ship for all seven trackers: relative-window queries for Jira (JQL), Linear, GitHub Issues, and Azure DevOps (WIQL), the board-actions feed for Trello, the Events API with sync tokens for Asana, and an mtime scan for markdown. Work is deduped by (task key, updated stamp), so a failing task cannot loop every tick and re-enters only when the ticket actually changes; cursors persist per source, so a crash mid-tick re-detects on restart without double execution. Tasks run sequentially through the normal CLI pipeline as a subprocess (`WORKER_TASK_ARGS`, default `--create-pr`), so locks, licensing, transitions, PR creation, and run records all apply unchanged
+- **Review polling on the agent's own PRs**: the worker watches the PRs it opened and runs `address-review` when a human requests changes or leaves new inline comments — no `@mention` needed on the agent's own work. Uses ETag conditional requests (304s are rate-limit-free), so watching many PRs at 60-second intervals stays cheap; closed and merged PRs are unwatched automatically, and one failing PR does not stop the others. On by default in polling mode with GitHub credentials, off under `--listen` where webhooks already deliver reviews
+- **Repo-wide `@mention` sweep**: two since-cursor requests per tick (regardless of open-PR count) surface bot mentions on *any* PR, not just the agent's own, feeding the same review pipeline the webhook server uses. Fork PRs without `maintainer_can_modify` are skipped with an explanatory comment, pushes stay fast-forward-only so a human moving the branch is never overwritten, and mentions predating the first worker start are not dug up. Requires a resolvable bot identity (GitHub App auth); dormant otherwise
+- **Local observability dashboard**: `devintern dashboard` (or `devintern worker --ui`) serves run history, per-run stage timelines, and aggregate stats from `.devintern-code/queue.db` over a localhost JSON API, with the React UI bundled into the published package. Stores open read-only for the dashboard, so it reads safely alongside a live worker and standalone after it stops
+- **Structured run records**: every task attempt now writes a run row plus per-stage records (feasibility verdict, implementation harness/duration/incomplete detection, auto-review iterations and approval, terminal outcome — succeeded / failed / deferred on usage limits / escalated / abandoned) and the created PR's repo, number, and URL. The implementation stage also stores an excerpt of the agent's own report, so the dashboard shows *what* was implemented or why a run escalated. Recording is best-effort and never fails a run; stage detail is capped so transcripts cannot bloat the database
+- **OS-level agent sandboxing**: every agent spawn can now be wrapped in an isolation layer via `AGENT_SANDBOX` (`.devintern-code/.env`, default `none`) or the per-run `--sandbox <name>` flag. Five providers: `native` (the harness's own built-in sandbox: Claude Code's sandboxed Bash tool, Codex's `--sandbox workspace-write`, zero install), `nono` and `srt` ([Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime), process wrappers that work with any harness), `docker` ([Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) via the standalone `sbx` CLI), and `smolvm` (microVM with in-VM browser support). `AGENT_SANDBOX=auto` picks the best available option (`native` > `nono` > `srt`; `docker`/`smolvm` need per-user setup and are never auto-selected) and warns once if nothing is available; an explicitly requested but unavailable or harness-incompatible provider fails the run instead of silently running unsandboxed. Tunable via `AGENT_SANDBOX_WRITABLE_PATHS`, `AGENT_SANDBOX_ALLOWED_DOMAINS`, and `AGENT_SANDBOX_NONO_PROFILE`.
+- **`devintern sandbox` doctor command**: reports which providers are installed, the one-time setup steps each still needs, what `auto` would pick, and a "next run" line stating exactly what the current configuration will do (including a precise reason and non-zero exit code when the configured provider would make the run fail, so scripts and CI can gate on it).
+
+- **Automatic merge-conflict resolution on the agent's PRs**: when a watched PR conflicts with its base branch, the worker merges the base in; conflicted merges are resolved by the agent (with a check that nothing is left unmerged before committing), then pushed without force. Failed resolutions abort the merge, comment on the PR, and retry only after the branch or base moves. Manual equivalent: `devintern resolve-conflicts <pr-url>`
+
+- **`devintern worker init`**: guided server-automation setup. Prompts for the ready-tasks query and validates it against your tracker with a live dry run, chooses polling vs. webhook mode (generating a `WEBHOOK_SECRET` when needed), checks the automation license up front instead of failing on the first unattended poll, writes the `WORKER_*` configuration into `.devintern-code/.env`, and can emit a ready-to-install systemd service file
+
+- **Comment-unlocked retries**: a task whose previous attempt was reported incomplete now re-runs when any new comment is posted on the ticket, not only when the description is edited. Deleting the bot's incomplete comment also unlocks a retry.
+- **Retry-aware prompts**: re-runs tell the agent which attempt this is, why the previous attempt stopped (from run records), and which comments are new since then.
+- **`--force` flag**: re-run a task locally even if a previous attempt was reported incomplete and the ticket is unchanged (manual use only; do not add to `WORKER_TASK_ARGS`).
+- **Attempt numbers**: run records (`runs` table) now carry a per-task attempt number; branch probing also checks `origin/*` refs so fresh clones don't collide with a previous attempt's remote branch.
+
+### Changed
+
+- **Durable state moved to `.devintern-code/queue.db`**: the webhook queue database moves out of `/tmp/devintern-webhooks/queue.db` (wiped on every reboot); a one-time migration copies the legacy database on first start, and `WEBHOOK_QUEUE_DB` still overrides the location. The same database now also holds worker cursors, the agent PR registry, run records, and retry state. Add `.devintern-code/queue.db` to `.gitignore` if you whitelist the `.devintern-code` directory
+- **`devintern serve` is deprecated** in favor of `devintern worker --listen`; the old command still works and prints a deprecation notice
+- **Retry bookkeeping moved to `.devintern-code/queue.db`** (`task_retry_state` table). The old `incomplete-task-description.txt` marker under the output directory is no longer written or read; pre-existing files are ignored, so the first pickup after upgrading may re-run one previously-skipped task (it then posts a fresh incomplete comment and is gated again). Everything under `DEVINTERN_OUTPUT_DIR` is now purely a debug artifact.
+
+### Fixed
+
+- **Review fetch no longer shallows the project clone**: preparing the review worktree used `git fetch --depth=1`, which marks the entire repository shallow (`.git/shallow`) and silently breaks `merge-base` and merges in the user's own checkout. The fetch is now a normal incremental fetch; repos already shallowed (by older versions or CI checkouts) are unshallowed on demand before conflict-resolution merges
+- **Webhook redeliveries no longer re-run a review**: GitHub delivery ids are recorded in a `processed_events` table and deduped, with retention independent of the event rows; startup also prunes expired dedupe ids and stale failed events
+
+## [2.1.1] - 2026-07-13
+
+### Added
+
+- **Interactive `devintern init` wizard**: running `init` in a terminal now starts a guided setup that asks which task tracker you use, links directly to the provider's token-creation page plus the matching setup guide on devintern.com, and validates the connection (retry / edit / skip) before writing `.devintern-code/.env`. `--yes` / `--no-interactive` (or piped stdin) keeps the old template-scaffold behavior for scripted use
+- **Sibling-config fast track**: if `.devintern-pm/.env` is already configured in the same project, `devintern init` detects it and offers to reuse those tracker credentials, skipping the tracker menu and credential prompts (only asking for steps the existing config doesn't cover) before still re-validating the connection. `devpm init` does the same in reverse, reading `.devintern-code/.env`
+
+### Fixed
+
+- **`AGENT_CLI_PATH` regression**: the init wizard was writing an active `AGENT_CLI_PATH=claude` line into generated env files, overriding the PATH-detection default. Generated files now ship it commented out again, matching the documented "leave unset" guidance
+
 ## [2.1.0] - 2026-07-11
 
 ### Added

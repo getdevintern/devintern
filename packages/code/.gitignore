@@ -86,7 +86,7 @@ jspm_packages/
 
 dist/
 
-# @devintern/code - Keep credentials and lock files secure
-.devintern-code/.env
-.devintern-code/.env.local
-.devintern-code/.pid.lock
+# @devintern/code - runtime state and secrets live here; only commit explicit config
+.devintern-code/*
+!.devintern-code/settings.json
+!.devintern-code/.env.example

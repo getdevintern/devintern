@@ -71,6 +71,44 @@ describe("extractLoginProviderFromArgv", () => {
   });
 });
 
+describe("promptForLoginMethod", () => {
+  // Regression test: readStdinLine once resolved "" for every entry because
+  // rl.close() emitted "close" (and its resolve("")) before resolve(line) ran,
+  // making the prompt reject all input. Exercise the real stdin path.
+  async function runPrompt(fn: string, stdin: string): Promise<string> {
+    const proc = Bun.spawn(
+      ["bun", "-e", `import { ${fn} } from "./src/login-provider";
+console.log("RESULT:" + JSON.stringify(await ${fn}()));`],
+      { cwd: new URL("..", import.meta.url).pathname, stdin: "pipe", stdout: "pipe" },
+    );
+    proc.stdin.write(stdin);
+    proc.stdin.end();
+    const output = await new Response(proc.stdout).text();
+    await proc.exited;
+    const result = output.split("RESULT:")[1];
+    if (!result) throw new Error(`No result in output:\n${output}`);
+    return result.trim();
+  }
+
+  test("accepts a numeric choice from stdin", async () => {
+    expect(JSON.parse(await runPrompt("promptForLoginMethod", "1\n"))).toEqual({
+      method: "github",
+    });
+  });
+
+  test("accepts a method name from stdin after an invalid entry", async () => {
+    expect(JSON.parse(await runPrompt("promptForLoginMethod", "nope\ngoogle\n"))).toEqual({
+      method: "google",
+    });
+  });
+
+  test("promptForEmail accepts an address from stdin", async () => {
+    expect(JSON.parse(await runPrompt("promptForEmail", "you@company.com\n"))).toBe(
+      "you@company.com",
+    );
+  });
+});
+
 describe("loginMethodLabel", () => {
   test("returns display names", () => {
     expect(loginMethodLabel("github")).toBe("GitHub");

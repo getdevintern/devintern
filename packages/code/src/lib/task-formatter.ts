@@ -7,6 +7,19 @@ import { FormattedTaskDetails, DetailedRelatedIssue } from "../types/task-tracke
 /** Converts tracker-native rich content (e.g. Jira ADF) to markdown for agent prompts. */
 export type RichContentConverter = (content: unknown) => string;
 
+/** Context for re-runs of a task whose previous attempt was incomplete. */
+export interface RetryPromptContext {
+  /** 1-based attempt number. */
+  attempt: number;
+  /** Why the previous attempt stopped (run record outcome or stage summary). */
+  previousFailureSummary?: string;
+  /** Comments created after this epoch-ms stamp are tagged as new guidance. */
+  newSinceMs?: number;
+}
+
+/** Cap the previous-failure excerpt so it cannot crowd out the task itself. */
+const MAX_FAILURE_SUMMARY_LENGTH = 2000;
+
 export class TaskFormatter {
   private static turndownService = new TurndownService({
     headingStyle: "atx",
@@ -86,6 +99,7 @@ export class TaskFormatter {
     attachmentMap?: Map<string, string>,
     outputPath?: string,
     richContentConverter: RichContentConverter = convertADFToMarkdown,
+    retryContext?: RetryPromptContext,
   ): string {
     const {
       key,
@@ -113,6 +127,24 @@ export class TaskFormatter {
     }
     if (components.length > 0) {
       prompt += `- **Components**: ${components.join(", ")}\n`;
+    }
+
+    // Retry attempts get the previous failure up front so the agent does not
+    // repeat the same mistake.
+    if (retryContext) {
+      prompt += `\n## Previous Attempt
+
+This is attempt ${retryContext.attempt} at this task. A previous attempt was reported incomplete.
+`;
+      if (retryContext.previousFailureSummary) {
+        prompt += `
+Why the last attempt stopped:
+
+${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
+`;
+      }
+      prompt +=
+        "\nRead the comments below for clarifications added since that attempt and prioritize them.\n";
     }
 
     prompt += "\n## Task Description\n";
@@ -238,8 +270,16 @@ export class TaskFormatter {
     // Add comments if they exist
     if (comments.length > 0) {
       prompt += "## Comments and Discussion\n\n";
+      if (retryContext?.newSinceMs !== undefined) {
+        prompt +=
+          "Comments marked *(new since last attempt)* were added after the previous " +
+          "incomplete attempt — treat them as the latest guidance.\n\n";
+      }
       comments.forEach((comment, index) => {
-        prompt += `### Comment ${index + 1} by ${comment.author}\n`;
+        const isNew =
+          retryContext?.newSinceMs !== undefined &&
+          Date.parse(comment.created) > retryContext.newSinceMs;
+        prompt += `### Comment ${index + 1} by ${comment.author}${isNew ? " (new since last attempt)" : ""}\n`;
         prompt += `*Posted: ${new Date(comment.created).toLocaleString()}*\n\n`;
 
         if (comment.renderedBody) {
@@ -387,6 +427,7 @@ If you need clarification on any requirements or if the task description is uncl
     trackerBaseUrl?: string,
     attachmentMap?: Map<string, string>,
     richContentConverter: RichContentConverter = convertADFToMarkdown,
+    retryContext?: RetryPromptContext,
   ): string {
     const formattedContent = this.formatTaskForAgent(
       taskDetails,
@@ -394,6 +435,7 @@ If you need clarification on any requirements or if the task description is uncl
       attachmentMap,
       outputPath,
       richContentConverter,
+      retryContext,
     );
     writeFileSync(outputPath, formattedContent, "utf8");
     return outputPath;

@@ -13,7 +13,7 @@ import {
   sanitizeMarkdownTaskKey,
   updateMarkdownFrontmatterField,
 } from "@devintern/task-trackers";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import type {
   Comment,
@@ -119,12 +119,21 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
       status: frontmatter.status ?? "Unknown",
       reporter: "local",
       created: frontmatter.created_at ?? "",
-      updated: frontmatter.created_at ?? "",
+      updated: this.fileModifiedIso(filePath) ?? frontmatter.created_at ?? "",
       labels: [],
       components: [],
       fixVersions: [],
       raw,
     };
+  }
+
+  /** File mtime as ISO string, used as the task's `updated` stamp. */
+  private fileModifiedIso(filePath: string): string | null {
+    try {
+      return statSync(filePath).mtime.toISOString();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -271,15 +280,11 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
     _taskKey: string,
     _agentOutput: string,
     _taskSummary?: string,
-    _taskDescription?: string,
   ): Promise<void> {
     /* no-op */
   }
 
-  async hasIncompleteImplementationComment(
-    _taskKey: string,
-    _currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(_taskKey: string): Promise<boolean> {
     return false;
   }
 

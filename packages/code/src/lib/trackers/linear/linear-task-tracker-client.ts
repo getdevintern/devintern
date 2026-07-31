@@ -27,8 +27,6 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  matchesSavedIncompleteDescription,
-  persistIncompleteDescription,
   type ClarityAssessmentLike,
   type EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
@@ -279,25 +277,15 @@ export class LinearTaskTrackerClient implements TaskTrackerClient {
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void> {
     const issueId = await this.requireIssueId(taskKey);
     const body = formatIncompleteImplementationCommentMarkdown(agentOutput, taskSummary);
     await this.linearClient.createComment(issueId, body);
     console.log(`✅ Successfully posted incomplete implementation comment to ${taskKey}`);
-
-    if (taskDescription) {
-      persistIncompleteDescription(taskKey, taskDescription);
-    }
   }
 
-  async hasIncompleteImplementationComment(
-    taskKey: string,
-    currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
-      if (!matchesSavedIncompleteDescription(taskKey, currentDescription)) return false;
-
       const comments = await this.fetchRawComments(taskKey);
       return comments.some((c) => isIncompleteImplementationCommentText(c.body));
     } catch (error) {

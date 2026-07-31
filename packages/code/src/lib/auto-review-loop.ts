@@ -13,10 +13,11 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
   type AgentHarness,
-  spawnReapable,
+  spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { getSandbox } from "./sandbox";
 import {
   type AutoReviewLoopOptions,
   type AutoReviewLoopResult,
@@ -335,65 +336,71 @@ async function runAgentPrompt(
   });
 
   return new Promise((resolve, reject) => {
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
+    (async () => {
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-    const agentArgs = harness.buildArgs({
-      maxTurns: 500,
-      skipPermissions: true,
-      workingDir,
-    });
-    const agentProcess = spawnReapable(resolvedPath, agentArgs, {
-      cwd: workingDir,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+      const agentArgs = harness.buildArgs({
+        maxTurns: 500,
+        skipPermissions: true,
+        workingDir,
+      });
+      const { child: agentProcess, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: agentArgs,
+        spawnOptions: { cwd: workingDir, stdio: ["pipe", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
+      });
 
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
 
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(agentProcess, "SIGTERM");
-        setTimeout(() => {
-          if (!agentProcess.killed) {
-            reapTree(agentProcess, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
+          );
+          reapTree(agentProcess, "SIGTERM");
+          setTimeout(() => {
+            if (!agentProcess.killed) {
+              reapTree(agentProcess, "SIGKILL");
+            }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
 
-    agentProcess.stdout?.on("data", (data) => {
-      stdout += data.toString();
-    });
+      agentProcess.stdout?.on("data", (data) => {
+        stdout += data.toString();
+      });
 
-    agentProcess.stderr?.on("data", (data) => {
-      stderr += data.toString();
-    });
+      agentProcess.stderr?.on("data", (data) => {
+        stderr += data.toString();
+      });
 
-    agentProcess.on("close", (code) => {
-      clearTimeout(timeout);
-      if (timedOut) {
-        reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
-      } else if (code !== 0) {
-        reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
-      } else {
-        resolve(stdout);
-      }
-    });
+      agentProcess.on("close", (code) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+        if (timedOut) {
+          reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+        } else if (code !== 0) {
+          reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
+        } else {
+          resolve(stdout);
+        }
+      });
 
-    agentProcess.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(new Error(`Failed to spawn ${harness.displayName}: ${error}`));
-    });
+      agentProcess.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(new Error(`Failed to spawn ${harness.displayName}: ${error}`));
+      });
 
-    // Send prompt to stdin
-    agentProcess.stdin?.write(prompt);
-    agentProcess.stdin?.end();
+      // Send prompt to stdin
+      agentProcess.stdin?.write(prompt);
+      agentProcess.stdin?.end();
+    })().catch(reject);
   });
 }
 

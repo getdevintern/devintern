@@ -34,8 +34,6 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  matchesSavedIncompleteDescription,
-  persistIncompleteDescription,
   type ClarityAssessmentLike,
   type EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
@@ -276,24 +274,14 @@ export class AsanaTaskTrackerClient implements TaskTrackerClient {
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void> {
     const body = formatIncompleteImplementationCommentMarkdown(agentOutput, taskSummary);
     await this.asanaClient.createStory(this.toTaskGid(taskKey), body);
     console.log(`✅ Successfully posted incomplete implementation comment to ${taskKey}`);
-
-    if (taskDescription) {
-      persistIncompleteDescription(taskKey, taskDescription);
-    }
   }
 
-  async hasIncompleteImplementationComment(
-    taskKey: string,
-    currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
-      if (!matchesSavedIncompleteDescription(taskKey, currentDescription)) return false;
-
       const stories = await this.asanaClient.getStories(this.toTaskGid(taskKey));
       return stories.some((s) =>
         isIncompleteImplementationCommentText(s.text || s.html_text || ""),

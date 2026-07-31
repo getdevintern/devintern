@@ -4,6 +4,7 @@ import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { MarkdownText } from "./MarkdownText";
 import { PromptInput } from "./PromptInput";
 import { getDefaultIssueType } from "../issue-types";
+import { uiSymbols } from "../runtime/terminal.js";
 
 interface Task {
   summary: string;
@@ -88,6 +89,66 @@ const TEXT_ENTRY_STEPS = new Set<InteractiveState["step"]>([
   "edit-prompt",
 ]);
 
+type WizardStep = InteractiveState["step"];
+
+interface StepNavFlags {
+  hasEpicStep: boolean;
+  hasIssueTypeStep: boolean;
+}
+
+/**
+ * Returns the previous reachable wizard step for Esc/back navigation.
+ *
+ * Mirrors forward skip logic (`hasEpicStep` / `hasIssueTypeStep`) so back edges
+ * never land on disabled epic or issue-type steps. Returns `null` when Esc
+ * should not change the step (root, async agent steps, preview, success).
+ *
+ * @param step - Current wizard step.
+ * @param flags - Which optional config steps are enabled for this backend.
+ * @returns Previous step, or `null` if Esc is a no-op on this step.
+ */
+export function getPreviousStep(step: WizardStep, flags: StepNavFlags): WizardStep | null {
+  switch (step) {
+    case "source-type":
+      return null;
+    case "project":
+      return "source-type";
+    case "source-input":
+      return "source-type";
+    case "custom":
+      return "source-input";
+    case "epic":
+      return "custom";
+    case "issue-type":
+      return flags.hasEpicStep ? "epic" : "custom";
+    case "style":
+      if (flags.hasIssueTypeStep) return "issue-type";
+      if (flags.hasEpicStep) return "epic";
+      return "custom";
+    case "confirm":
+      return "style";
+    case "edit-prompt":
+      return "preview";
+    // Preview stays put: index.ts holds a waitForCompletion/waitForEdit race;
+    // navigating away without resolving either promise would strand the agent loop.
+    // Generating/regenerating/done: agent is in flight — Esc cannot cancel safely.
+    // Success: any-key restart is handled separately in useInput.
+    case "preview":
+    case "generating":
+    case "regenerating":
+    case "done":
+    case "success":
+      return null;
+    default:
+      return "source-type";
+  }
+}
+
+/** Whether the header should advertise Esc as Back for the current step. */
+export function canNavigateBack(step: WizardStep, flags: StepNavFlags): boolean {
+  return getPreviousStep(step, flags) !== null;
+}
+
 /**
  * Launches the multi-step Ink interactive wizard for creating PM tasks.
  *
@@ -102,14 +163,41 @@ export async function runInteractiveMode(
 ): Promise<InteractiveModeHandle> {
   return new Promise((resolve, reject) => {
     let completed = false;
+    let cancelled = false;
     let updateState: ((updates: Partial<InteractiveState>) => void) | null = null;
     let completePromiseResolve: ((config: InteractiveState) => void) | null = null;
+    let completePromiseReject: ((error: Error) => void) | null = null;
     let editPromiseResolve:
       | ((data: { editPrompt: string; currentSummary: string; currentDescription: string }) => void)
       | null = null;
+    let editPromiseReject: ((error: Error) => void) | null = null;
     let restartPromiseResolve: (() => void) | null = null;
+    let restartPromiseReject: ((error: Error) => void) | null = null;
     let currentStep: InteractiveState["step"] = "source-type";
     let visiblePreviewDataRef: { summary: string; description: string } | null = null;
+
+    const cancelError = () => new Error("Interactive mode cancelled");
+
+    /** Rejects any pending orchestrator waiters when the Ink app unmounts (e.g. Ctrl+C). */
+    const rejectPendingWaiters = () => {
+      cancelled = true;
+      const error = cancelError();
+      if (completePromiseReject) {
+        completePromiseReject(error);
+        completePromiseReject = null;
+        completePromiseResolve = null;
+      }
+      if (editPromiseReject) {
+        editPromiseReject(error);
+        editPromiseReject = null;
+        editPromiseResolve = null;
+      }
+      if (restartPromiseReject) {
+        restartPromiseReject(error);
+        restartPromiseReject = null;
+        restartPromiseResolve = null;
+      }
+    };
 
     // Use provided projects or empty array
     const allProjects = options?.projects || [];
@@ -164,6 +252,7 @@ export async function runInteractiveMode(
       })();
       const [isLoadingIssueTypes, setIsLoadingIssueTypes] = useState(false);
       const scrollViewRef = useRef<ScrollViewRef>(null);
+      const sym = uiSymbols();
       const bufferedPreviewData = useRef<{ summary: string; description: string } | null>(null);
       const prevStepRef = useRef<InteractiveState["step"]>(state.step);
       const stateRef = useRef(state);
@@ -216,6 +305,21 @@ export async function runInteractiveMode(
         prevStepRef.current = nextStep;
       }, [state.step]);
 
+      // If a skipped step is ever set (stale state / future callers), redirect
+      // to a reachable step so renderStep never shows an empty body.
+      React.useEffect(() => {
+        if (state.step === "epic" && !hasEpicStep) {
+          setState((prev) => ({
+            ...prev,
+            step: hasIssueTypeStep ? "issue-type" : "style",
+          }));
+          return;
+        }
+        if (state.step === "issue-type" && !hasIssueTypeStep) {
+          setState((prev) => ({ ...prev, step: "style" }));
+        }
+      }, [state.step, hasEpicStep, hasIssueTypeStep]);
+
       // Keep imperative refs in sync with state for external readers
       useEffect(() => {
         stateRef.current = state;
@@ -242,8 +346,12 @@ export async function runInteractiveMode(
         updateState = (updates) => {
           setState((prev) => {
             // Buffer previewData updates when user is actively editing so
-            // the description preview is not rewritten mid-typing.
-            if (updates.previewData && prev.step === "edit-prompt") {
+            // the description preview is not rewritten mid-typing. When the
+            // same update also moves the step away from edit-prompt, apply it
+            // atomically instead — buffering it just to re-apply one render
+            // later would flash the stale preview for a frame.
+            const staysInEditPrompt = (updates.step ?? prev.step) === "edit-prompt";
+            if (updates.previewData && prev.step === "edit-prompt" && staysInEditPrompt) {
               bufferedPreviewData.current = updates.previewData;
               const { previewData: _, ...rest } = updates;
               return { ...prev, ...rest };
@@ -316,21 +424,15 @@ export async function runInteractiveMode(
             return;
           }
 
-          // Success screen - any key restarts
+          // Success screen - any key signals the orchestrator to start another task.
+          // State reset is owned by handle.restart() so we never flash the wizard
+          // before the create-another loop is ready to waitForCompletion again.
           if (state.step === "success") {
-            setState({
-              step: "source-type",
-              projectKey: defaultProjectKey,
-              promptStyle: "pm",
-              issueType: getDefaultIssueType(defaultIssueTypes),
-              decompose: false,
-              tasks: [],
-            });
-            resetInput();
-            // Resolve restart promise if waiting
             if (restartPromiseResolve) {
-              restartPromiseResolve();
+              const resolveRestart = restartPromiseResolve;
               restartPromiseResolve = null;
+              restartPromiseReject = null;
+              resolveRestart();
             }
             return;
           }
@@ -444,6 +546,10 @@ export async function runInteractiveMode(
             }
 
             if (state.step === "preview") {
+              // Ignore action keys until preview content is available (avoids blank/stuck states).
+              if (!state.previewData) {
+                return;
+              }
               if (inputChar.toLowerCase() === "e") {
                 setState((prev) => ({ ...prev, step: "edit-prompt" }));
                 resetInput();
@@ -559,58 +665,54 @@ export async function runInteractiveMode(
         }
       };
 
-      /** Navigates to the previous wizard step when the user presses Escape. */
-      const handleEscape = () => {
-        switch (state.step) {
-          case "source-type":
-            // Can't go back from source-type, it's the first step
-            break;
-          case "project":
-            resetInput();
-            setState((prev) => ({ ...prev, step: "source-type" }));
-            break;
+      const navFlags: StepNavFlags = { hasEpicStep, hasIssueTypeStep };
+
+      /**
+       * Seed value for the text input when navigating back to a text-entry step.
+       * Keeps prior answers editable instead of clearing the field.
+       */
+      const inputSeedForStep = (step: WizardStep): string => {
+        switch (step) {
           case "source-input":
-            resetInput();
-            setState((prev) => ({ ...prev, step: "source-type" }));
-            break;
+            return state.sourceContent || "";
           case "custom":
-            resetInput(state.sourceContent || "");
-            setState((prev) => ({ ...prev, step: "source-input" }));
-            break;
+            return state.customInstructions || "";
           case "epic":
-            resetInput(state.customInstructions || "");
-            setState((prev) => ({ ...prev, step: "custom" }));
-            break;
-          case "issue-type":
-            if (hasEpicStep) {
-              resetInput(state.epicKey || "");
-              setState((prev) => ({ ...prev, step: "epic" }));
-            } else {
-              resetInput(state.customInstructions || "");
-              setState((prev) => ({ ...prev, step: "custom" }));
-            }
-            break;
-          case "style": {
-            const back = hasIssueTypeStep ? "issue-type" : hasEpicStep ? "epic" : "custom";
-            resetInput(back === "custom" ? state.customInstructions || "" : "");
-            setState((prev) => ({ ...prev, step: back }));
-            break;
-          }
-          case "confirm":
-            resetInput();
-            setState((prev) => ({ ...prev, step: "style" }));
-            break;
-          case "preview":
-            break;
-          case "edit-prompt":
-            resetInput();
-            setState((prev) => ({ ...prev, step: "preview" }));
-            break;
+            return state.epicKey || "";
+          default:
+            return "";
         }
       };
 
-      /** Handles Enter key on numeric/yes-no selection steps (non text-input steps). */
+      /**
+       * Navigates to the previous wizard step when the user presses Escape.
+       * Uses the shared back-edge map so skipped epic/issue-type steps are never entered.
+       * Does not clear previewData (including when leaving edit-prompt).
+       */
+      const handleEscape = () => {
+        const previous = getPreviousStep(state.step, navFlags);
+        if (previous === null) {
+          return;
+        }
+        resetInput(inputSeedForStep(previous));
+        setState((prev) => ({ ...prev, step: previous }));
+      };
+
+      /**
+       * Handles Enter on selection / yes-no steps (non text-input steps).
+       * Agent and terminal steps ignore Enter so accidental keypresses never blank the UI.
+       */
       const handleEnter = () => {
+        // Do not act on Enter while the agent is running or the wizard is finished.
+        if (
+          state.step === "generating" ||
+          state.step === "regenerating" ||
+          state.step === "done" ||
+          state.step === "success"
+        ) {
+          return;
+        }
+
         const trimmedInput = input.trim();
 
         switch (state.step) {
@@ -628,6 +730,9 @@ export async function runInteractiveMode(
             break;
 
           case "issue-type": {
+            if (!hasIssueTypeStep) {
+              break;
+            }
             if (trimmedInput === "") {
               setState((prev) => ({ ...prev, step: "style" }));
               resetInput();
@@ -673,6 +778,11 @@ export async function runInteractiveMode(
             break;
 
           case "preview":
+            // Enter alone accepts the draft (same as Y). Only act when preview data exists
+            // so we never resolve completion while still showing "Waiting for task preview...".
+            if (!state.previewData) {
+              break;
+            }
             if (["y", "n", ""].includes(trimmedInput.toLowerCase())) {
               if (trimmedInput.toLowerCase() === "y" || trimmedInput === "") {
                 setState((prev) => ({ ...prev, step: "done" }));
@@ -700,8 +810,9 @@ export async function runInteractiveMode(
 
       /**
        * Renders the UI for the current wizard step.
+       * Always returns a non-null layout so the body under the chrome is never blank.
        *
-       * @returns Step-specific Ink layout, or null for hidden steps.
+       * @returns Step-specific Ink layout (including skip/recovery placeholders).
        */
       const renderStep = () => {
         switch (state.step) {
@@ -776,7 +887,14 @@ export async function runInteractiveMode(
             );
 
           case "epic":
-            if (!hasEpicStep) return null;
+            // Skipped steps are redirected by effect; show a non-null body while redirecting.
+            if (!hasEpicStep) {
+              return (
+                <Box flexDirection="column" paddingY={1}>
+                  <Text dimColor>Skipping epic step…</Text>
+                </Box>
+              );
+            }
             return (
               <Box flexDirection="column" paddingY={1}>
                 <Text bold>Epic key (optional, press Enter to skip):</Text>
@@ -791,7 +909,13 @@ export async function runInteractiveMode(
             );
 
           case "issue-type":
-            if (!hasIssueTypeStep) return null;
+            if (!hasIssueTypeStep) {
+              return (
+                <Box flexDirection="column" paddingY={1}>
+                  <Text dimColor>Skipping issue type step…</Text>
+                </Box>
+              );
+            }
             const defaultIssueType = orderedIssueTypes[0];
             return (
               <Box flexDirection="column" paddingY={1}>
@@ -910,7 +1034,9 @@ export async function runInteractiveMode(
                 </Box>
                 <Box flexDirection="column">
                   <Text bold>📝 Description:</Text>
-                  <Text dimColor>(Use arrow keys ↑↓ to scroll, PgUp/PgDn for fast scroll)</Text>
+                  <Text dimColor>
+                    (Use arrow keys {sym.scrollArrows} to scroll, PgUp/PgDn for fast scroll)
+                  </Text>
                   <Box
                     borderStyle="single"
                     borderColor="gray"
@@ -927,7 +1053,7 @@ export async function runInteractiveMode(
                 <Box paddingTop={1}>
                   <Text bold>
                     Create this {state.issueType.toLowerCase()} in{" "}
-                    {options?.backendName || "task tracker"}? (Y/n) • Press E to edit
+                    {options?.backendName || "task tracker"}? (Y/n){sym.sep}Press E to edit
                   </Text>
                 </Box>
               </Box>
@@ -945,7 +1071,9 @@ export async function runInteractiveMode(
                 </Box>
                 <Box flexDirection="column">
                   <Text bold>📝 Current Description:</Text>
-                  <Text dimColor>(Use arrow keys ↑↓ to scroll, PgUp/PgDn for fast scroll)</Text>
+                  <Text dimColor>
+                    (Use arrow keys {sym.scrollArrows} to scroll, PgUp/PgDn for fast scroll)
+                  </Text>
                   <Box
                     borderStyle="single"
                     borderColor="gray"
@@ -1043,7 +1171,15 @@ export async function runInteractiveMode(
             );
 
           default:
-            return null;
+            // Never render null for a reachable step — recovery path if step graph drifts.
+            return (
+              <Box flexDirection="column" paddingY={1}>
+                <Text bold color="yellow">
+                  This step could not be displayed.
+                </Text>
+                <Text dimColor>Press Esc to return to the start, or Ctrl+C to exit.</Text>
+              </Box>
+            );
         }
       };
 
@@ -1063,13 +1199,22 @@ export async function runInteractiveMode(
             <Box flexDirection="row" gap={1}>
               <Text dimColor>Project: </Text>
               <Text color="cyan">{currentProjectDisplay}</Text>
-              {projects.length > 0 && <Text dimColor> • Ctrl+P: Change Project</Text>}
+              {projects.length > 0 && <Text dimColor>{sym.sep}Ctrl+P: Change Project</Text>}
             </Box>
             <Box flexDirection="row" gap={1}>
               <Text dimColor>Agent: </Text>
               <Text color="cyan">{options?.harnessDisplayName || "None"}</Text>
             </Box>
-            <Text dimColor>ESC: Back • Ctrl+C: Exit</Text>
+            <Text dimColor>
+              {canNavigateBack(state.step, navFlags) ? `ESC: Back${sym.sep}` : ""}
+              {state.step === "success"
+                ? `Any key: New task${sym.sep}Ctrl+C: Exit`
+                : state.step === "preview"
+                  ? `Y: Create${sym.sep}N: Discard${sym.sep}E: Edit${sym.sep}Ctrl+C: Exit`
+                  : state.step === "generating" || state.step === "regenerating"
+                    ? "Ctrl+C: Cancel"
+                    : "Ctrl+C: Exit"}
+            </Text>
           </Box>
           {renderStep()}
         </Box>
@@ -1082,8 +1227,9 @@ export async function runInteractiveMode(
     );
 
     waitUntilExit().then(() => {
+      rejectPendingWaiters();
       if (!completed) {
-        reject(new Error("Interactive mode cancelled"));
+        reject(cancelError());
       }
     });
 
@@ -1093,11 +1239,17 @@ export async function runInteractiveMode(
      * @returns Resolved interactive state when the user proceeds to generation or creation.
      */
     const waitForCompletion = (): Promise<InteractiveState> => {
-      return new Promise((resolveComplete) => {
+      if (cancelled) {
+        return Promise.reject(cancelError());
+      }
+      return new Promise((resolveComplete, rejectComplete) => {
         completePromiseResolve = (config) => {
-          // Don't unmount - keep UI running for preview
+          // Don't unmount - keep UI running for preview / create-another cycles
+          completePromiseResolve = null;
+          completePromiseReject = null;
           resolveComplete(config);
         };
+        completePromiseReject = rejectComplete;
       });
     };
 
@@ -1154,8 +1306,16 @@ export async function runInteractiveMode(
       currentSummary: string;
       currentDescription: string;
     }> => {
-      return new Promise((resolveEdit) => {
-        editPromiseResolve = resolveEdit;
+      if (cancelled) {
+        return Promise.reject(cancelError());
+      }
+      return new Promise((resolveEdit, rejectEdit) => {
+        editPromiseResolve = (data) => {
+          editPromiseResolve = null;
+          editPromiseReject = null;
+          resolveEdit(data);
+        };
+        editPromiseReject = rejectEdit;
       });
     };
 
@@ -1166,7 +1326,7 @@ export async function runInteractiveMode(
      */
     const showSuccess = (message: string) => {
       if (updateState) {
-        updateState({ successMessage: message, step: "success" });
+        updateState({ successMessage: message, step: "success", statusMessage: undefined });
       }
     };
 
@@ -1174,25 +1334,43 @@ export async function runInteractiveMode(
      * Waits until the user presses any key on the success screen to start another task.
      *
      * @returns Resolves when the user requests a new wizard run.
+     * @throws If the user cancels with Ctrl+C / the Ink app unmounts.
      */
     const waitForRestart = (): Promise<void> => {
-      return new Promise((resolveRestart) => {
-        restartPromiseResolve = resolveRestart;
+      if (cancelled) {
+        return Promise.reject(cancelError());
+      }
+      return new Promise((resolveRestart, rejectRestart) => {
+        restartPromiseResolve = () => {
+          restartPromiseResolve = null;
+          restartPromiseReject = null;
+          resolveRestart();
+        };
+        restartPromiseReject = rejectRestart;
       });
     };
 
-    /** Resets wizard state to the first step without unmounting the Ink tree. */
+    /**
+     * Resets wizard state to the first step without unmounting the Ink tree.
+     * Used after success/error so create-another reuses the same interactive session.
+     */
     const restart = () => {
       if (updateState) {
         updateState({
           step: "source-type",
-          projectKey: defaultProjectKey, // Reset to default project
+          projectKey: defaultProjectKey,
           sourceType: undefined,
           sourceContent: undefined,
           customInstructions: undefined,
           epicKey: undefined,
+          promptStyle: "pm",
+          issueType: getDefaultIssueType(defaultIssueTypes),
+          decompose: false,
+          tasks: [],
           previewData: undefined,
           successMessage: undefined,
+          statusMessage: undefined,
+          editPrompt: undefined,
         });
       }
     };

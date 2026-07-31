@@ -150,3 +150,28 @@ describe("LockManager", () => {
     lock.release();
   });
 });
+
+describe("LockManager custom lock file", () => {
+  test("worker lock does not conflict with the CLI task lock", () => {
+    const dir = join(
+      tmpdir(),
+      `lock-manager-custom-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(dir, { recursive: true });
+    try {
+      const taskLock = new LockManager(dir);
+      const workerLock = new LockManager(dir, ".worker.lock");
+
+      expect(taskLock.acquire().success).toBe(true);
+      // A second task lock is blocked, but the worker lock is independent.
+      expect(new LockManager(dir).acquire().success).toBe(false);
+      expect(workerLock.acquire().success).toBe(true);
+      expect(existsSync(join(dir, ".devintern-code", ".worker.lock"))).toBe(true);
+
+      taskLock.release();
+      workerLock.release();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

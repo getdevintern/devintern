@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { readFile, writeFile, pathExists, mkdir } from "../runtime/fs.js";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
 
 export interface MarkdownBackendConfig {
@@ -57,7 +58,7 @@ export class MarkdownBackend implements TaskBackend {
    * @returns Resolves when the directory is created or already present.
    */
   private async ensureDir(): Promise<void> {
-    await Bun.$`mkdir -p ${this.dir}`;
+    await mkdir(this.dir);
   }
 
   /**
@@ -102,7 +103,7 @@ created_at: ${now}
 ${description}
 `;
 
-    await Bun.write(filePath, content);
+    await writeFile(filePath, content);
     return {
       key: filename,
       url: filePath,
@@ -128,13 +129,12 @@ ${description}
     await this.ensureDir();
 
     const parentPath = join(this.dir, `${parentKey}.md`);
-    const parentFile = Bun.file(parentPath);
 
-    if (!(await parentFile.exists())) {
+    if (!(await pathExists(parentPath))) {
       throw new Error(`Parent task not found: ${parentKey}`);
     }
 
-    let parentContent = await parentFile.text();
+    let parentContent = await readFile(parentPath);
     const subtaskSection = "\n## Subtasks\n\n";
 
     if (!parentContent.includes(subtaskSection)) {
@@ -147,7 +147,7 @@ ${description}
 
     parentContent += subtaskLine;
 
-    await Bun.write(parentPath, parentContent);
+    await writeFile(parentPath, parentContent);
 
     return {
       key: `${parentKey}-subtask`,
@@ -164,13 +164,12 @@ ${description}
    */
   async linkToEpic(storyKey: string, epicKey: string): Promise<void> {
     const filePath = join(this.dir, `${storyKey}.md`);
-    const file = Bun.file(filePath);
 
-    if (!(await file.exists())) {
+    if (!(await pathExists(filePath))) {
       throw new Error(`Task not found: ${storyKey}`);
     }
 
-    let content = await file.text();
+    let content = await readFile(filePath);
 
     if (content.startsWith("---")) {
       const frontmatterEnd = content.indexOf("---", 3);
@@ -188,13 +187,13 @@ ${description}
         }
 
         content = updatedFrontmatter + rest;
-        await Bun.write(filePath, content);
+        await writeFile(filePath, content);
         return;
       }
     }
 
     content = `> Epic: ${epicKey}\n\n${content}`;
-    await Bun.write(filePath, content);
+    await writeFile(filePath, content);
   }
 
   /**

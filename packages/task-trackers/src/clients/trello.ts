@@ -356,6 +356,37 @@ export class TrelloClient {
    * @returns Matching cards (first 100) and total count of returned cards.
    * @throws When the Trello API request fails.
    */
+  /**
+   * List recent actions on a board (newest first).
+   *
+   * Purpose-built for polling: pass the last seen action id as `since` to
+   * receive only newer actions. An empty result means nothing changed.
+   *
+   * @param boardId - Trello board ID.
+   * @param options - `since`: action id or ISO date lower bound; `limit`: page size (default 50).
+   * @returns Actions newer than `since`, newest first.
+   * @throws When the Trello API request fails.
+   */
+  async getBoardActions(
+    boardId: string,
+    options: { since?: string; limit?: number } = {},
+  ): Promise<TrelloAction[]> {
+    const params: Record<string, string> = { limit: String(options.limit ?? 50) };
+    if (options.since) {
+      params.since = options.since;
+    }
+
+    const url = this.buildUrl(`/boards/${boardId}/actions`, params);
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Trello API error (${response.status}): ${errorText}`);
+    }
+
+    return (await response.json()) as TrelloAction[];
+  }
+
   async searchCards(
     query: string,
     boardId?: string,

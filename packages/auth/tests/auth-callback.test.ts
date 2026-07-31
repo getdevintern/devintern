@@ -3,20 +3,20 @@ import { createAuthCallbackServer } from "../src/auth-callback";
 
 describe("createAuthCallbackServer", () => {
   test("returns a valid redirect URL with localhost", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     expect(server.redirectTo).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
     await server.stop(0);
   });
 
   test("returns 404 for non-callback paths", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const res = await fetch(`http://127.0.0.1:${new URL(server.redirectTo).port}/other`);
     expect(res.status).toBe(404);
     await server.stop(0);
   });
 
   test("resolves waitForCode on valid callback and returns styled success HTML", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const port = new URL(server.redirectTo).port;
 
     const waitPromise = server.waitForCode();
@@ -36,7 +36,7 @@ describe("createAuthCallbackServer", () => {
   });
 
   test("rejects waitForCode on OAuth error and returns styled error HTML", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const port = new URL(server.redirectTo).port;
 
     const waitPromise = server.waitForCode();
@@ -57,7 +57,7 @@ describe("createAuthCallbackServer", () => {
   });
 
   test("rejects waitForCode on missing code and returns styled error HTML", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const port = new URL(server.redirectTo).port;
 
     const waitPromise = server.waitForCode();
@@ -76,7 +76,7 @@ describe("createAuthCallbackServer", () => {
   });
 
   test("escapes HTML in OAuth error description to prevent XSS", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const port = new URL(server.redirectTo).port;
 
     const waitPromise = server.waitForCode();
@@ -97,13 +97,13 @@ describe("createAuthCallbackServer", () => {
   });
 
   test("times out when no callback is received", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     await expect(server.waitForCode(50)).rejects.toThrow("Timed out waiting for sign-in callback");
     await server.stop(0);
   });
 
   test("stop does not resolve synchronously", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const promise = server.stop(100);
     let resolved = false;
     promise.then(() => {
@@ -116,7 +116,7 @@ describe("createAuthCallbackServer", () => {
   });
 
   test("stop deduplicates multiple calls to the same promise", async () => {
-    const server = createAuthCallbackServer();
+    const server = await createAuthCallbackServer();
     const p1 = server.stop(50);
     const p2 = server.stop(50);
     expect(p1).toBe(p2);

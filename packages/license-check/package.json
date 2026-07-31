@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./polar": "./src/polar.ts"
   },
   "scripts": {
     "build": "echo 'license-check: source-only package'",

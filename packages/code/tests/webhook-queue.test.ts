@@ -3,7 +3,7 @@ import { existsSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { WebhookQueue, resolveQueueDbPath } from "../src/lib/webhook-queue";
 
 describe("WebhookQueue", () => {
   let dbPath: string;
@@ -93,5 +93,120 @@ describe("WebhookQueue", () => {
       const pending = queue.getPendingEvents();
       expect(pending.some((e) => e.id === id)).toBe(true);
     });
+  });
+
+  describe("processed_events dedupe", () => {
+    test("hasProcessed is false for unseen ids", () => {
+      expect(queue.hasProcessed("github", "delivery-1")).toBe(false);
+    });
+
+    test("markProcessed round-trips and is idempotent", () => {
+      queue.markProcessed("github", "delivery-1");
+      queue.markProcessed("github", "delivery-1"); // duplicate insert must not throw
+      expect(queue.hasProcessed("github", "delivery-1")).toBe(true);
+    });
+
+    test("ids are scoped per source", () => {
+      queue.markProcessed("github", "id-1");
+      expect(queue.hasProcessed("linear", "id-1")).toBe(false);
+    });
+
+    test("dedupe state survives event completion and restart", () => {
+      const id = queue.enqueue("pull_request_review", {});
+      queue.markProcessed("github", "delivery-2");
+      queue.markProcessing(id);
+      queue.markCompleted(id); // event row is deleted...
+
+      const reopened = new WebhookQueue({ dbPath });
+      expect(reopened.getEvent(id)).toBeNull();
+      expect(reopened.hasProcessed("github", "delivery-2")).toBe(true); // ...dedupe state is not
+    });
+
+    test("cleanupProcessedEvents removes only expired ids", () => {
+      queue.markProcessed("github", "old-id");
+      queue.markProcessed("github", "fresh-id");
+
+      // Everything is younger than the window → nothing removed.
+      expect(queue.cleanupProcessedEvents()).toBe(0);
+      // Zero-age window → everything removed.
+      expect(queue.cleanupProcessedEvents(-1)).toBe(2);
+      expect(queue.hasProcessed("github", "fresh-id")).toBe(false);
+    });
+  });
+
+  describe("legacy database migration", () => {
+    let legacyPath: string;
+    let newPath: string;
+
+    beforeEach(() => {
+      const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      legacyPath = join(tmpdir(), `wq-legacy-${suffix}.db`);
+      newPath = join(tmpdir(), `wq-new-${suffix}.db`);
+    });
+
+    afterEach(() => {
+      for (const base of [legacyPath, newPath]) {
+        for (const suffix of ["", "-wal", "-shm"]) {
+          rmSync(`${base}${suffix}`, { force: true });
+        }
+      }
+    });
+
+    test("copies the legacy database when the target does not exist", () => {
+      const legacy = new WebhookQueue({ dbPath: legacyPath });
+      const id = legacy.enqueue("pull_request_review", { pr: 1 });
+      legacy.setRateLimit("claude-code", 123);
+      legacy.close();
+
+      const migrated = new WebhookQueue({ dbPath: newPath, legacyDbPath: legacyPath });
+      expect(migrated.getEvent(id)?.eventType).toBe("pull_request_review");
+      expect(migrated.getRateLimit("claude-code")).toBe(123);
+      migrated.close();
+    });
+
+    test("does not overwrite an existing target database", () => {
+      const existing = new WebhookQueue({ dbPath: newPath });
+      const keptId = existing.enqueue("issue_comment", {});
+      existing.close();
+
+      const legacy = new WebhookQueue({ dbPath: legacyPath });
+      const legacyId = legacy.enqueue("pull_request_review", {});
+      legacy.close();
+
+      const reopened = new WebhookQueue({ dbPath: newPath, legacyDbPath: legacyPath });
+      expect(reopened.getEvent(keptId)).not.toBeNull();
+      expect(reopened.getEvent(legacyId)).toBeNull();
+      reopened.close();
+    });
+
+    test("starts fresh when no legacy database exists", () => {
+      const fresh = new WebhookQueue({ dbPath: newPath, legacyDbPath: legacyPath });
+      expect(fresh.getPendingEvents()).toEqual([]);
+      fresh.close();
+    });
+  });
+});
+
+describe("resolveQueueDbPath", () => {
+  const originalEnv = process.env.WEBHOOK_QUEUE_DB;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.WEBHOOK_QUEUE_DB;
+    } else {
+      process.env.WEBHOOK_QUEUE_DB = originalEnv;
+    }
+  });
+
+  test("honors the WEBHOOK_QUEUE_DB override", () => {
+    process.env.WEBHOOK_QUEUE_DB = "/custom/queue.db";
+    expect(resolveQueueDbPath("/some/project")).toBe("/custom/queue.db");
+  });
+
+  test("defaults to .devintern-code/queue.db under the project directory", () => {
+    delete process.env.WEBHOOK_QUEUE_DB;
+    expect(resolveQueueDbPath("/some/project")).toBe(
+      join("/some/project", ".devintern-code", "queue.db"),
+    );
   });
 });

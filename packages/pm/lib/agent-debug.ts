@@ -9,6 +9,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRunResult } from "@devintern/agent-harness";
+import { writeFile } from "./runtime/fs.js";
 
 /**
  * Write the raw agent result to a timestamped log file in the OS temp dir.
@@ -41,7 +42,7 @@ export async function dumpAgentOutput(
     "",
   ].join("\n");
   try {
-    await Bun.write(file, content);
+    await writeFile(file, content);
     return file;
   } catch {
     return null;

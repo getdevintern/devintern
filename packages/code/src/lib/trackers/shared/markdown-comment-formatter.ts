@@ -8,9 +8,6 @@
  * across trackers.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import path from "path";
-
 /** Marker strings identifying comments posted by @devintern/code automation. */
 export const DEVINTERN_MARKERS = [
   "Implementation Completed by @devintern/code",
@@ -197,48 +194,6 @@ export function formatEstimationCommentMarkdown(result: EstimationResultLike): s
   }
 
   return lines.join("\n").trimEnd();
-}
-
-// ---------------------------------------------------------------------------
-// Incomplete-description persistence (dedup across runs)
-// ---------------------------------------------------------------------------
-
-function incompleteDescriptionFile(taskKey: string): string {
-  const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-  const taskDir = path.join(baseOutputDir, taskKey.toLowerCase());
-  return path.join(taskDir, "incomplete-task-description.txt");
-}
-
-/**
- * Persist the task description alongside an incomplete-implementation comment
- * so a later run can detect it has already reported the same failure.
- */
-export function persistIncompleteDescription(taskKey: string, taskDescription: string): void {
-  try {
-    const descriptionFile = incompleteDescriptionFile(taskKey);
-    mkdirSync(path.dirname(descriptionFile), { recursive: true });
-    writeFileSync(descriptionFile, taskDescription, "utf8");
-  } catch (saveError) {
-    console.warn(`⚠️  Failed to save task description for duplicate detection: ${saveError}`);
-  }
-}
-
-/**
- * True when the previously persisted incomplete description matches
- * `currentDescription` exactly.
- */
-export function matchesSavedIncompleteDescription(
-  taskKey: string,
-  currentDescription: string,
-): boolean {
-  try {
-    const descriptionFile = incompleteDescriptionFile(taskKey);
-    if (!existsSync(descriptionFile)) return false;
-    return readFileSync(descriptionFile, "utf8") === currentDescription;
-  } catch (error) {
-    console.warn(`Failed to check for duplicate comments: ${error}`);
-    return false;
-  }
 }
 
 /** Markers indicating an incomplete-implementation comment already exists. */

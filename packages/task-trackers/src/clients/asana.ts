@@ -77,6 +77,15 @@ const TASK_DETAIL_FIELDS =
   "name,notes,html_notes,completed,permalink_url,assignee.name,created_at,modified_at,created_by.name,tags.name,memberships.project.gid,memberships.project.name,memberships.section.gid,memberships.section.name,custom_fields.gid,custom_fields.name,custom_fields.type,custom_fields.number_value";
 
 /** Parsed filters for {@link AsanaClient.searchTasks} mini-syntax. */
+export interface AsanaEvent {
+  action: string;
+  resource?: {
+    gid: string;
+    resource_type?: string;
+  };
+  created_at?: string;
+}
+
 export interface AsanaTaskFilters {
   projectGid?: string;
   sectionName?: string;
@@ -484,5 +493,51 @@ export class AsanaClient {
     });
 
     return { tasks: matches, total: matches.length };
+  }
+
+  /**
+   * Fetch change events for a resource via the Events API (purpose-built for
+   * polling).
+   *
+   * Asana's Events API is sync-token based: the first call (no token) and any
+   * call with an expired token return HTTP 412 with a fresh token and no
+   * events — reported here as `fullSync: true`, meaning the gap since the
+   * last token is unknown and callers should treat everything as changed.
+   *
+   * @param resourceGid - Project (or task) GID to watch.
+   * @param syncToken - Token from the previous call, if any.
+   * @returns Events since the token, the next token, and the full-sync flag.
+   * @throws When the API request fails with a status other than 412.
+   */
+  async getEvents(
+    resourceGid: string,
+    syncToken?: string,
+  ): Promise<{ events: AsanaEvent[]; sync: string; fullSync: boolean }> {
+    const url = new URL(`${this.baseUrl}/events`);
+    url.searchParams.set("resource", resourceGid);
+    if (syncToken) {
+      url.searchParams.set("sync", syncToken);
+    }
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${this.apiToken}`,
+        Accept: "application/json",
+      },
+    });
+
+    // 412 Precondition Failed carries the fresh sync token in its body.
+    if (response.status === 412) {
+      const json = (await response.json()) as { sync?: string };
+      return { events: [], sync: json.sync ?? "", fullSync: true };
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Asana API error (${response.status}): ${errorText}`);
+    }
+
+    const json = (await response.json()) as { data?: AsanaEvent[]; sync?: string };
+    return { events: json.data ?? [], sync: json.sync ?? "", fullSync: false };
   }
 }

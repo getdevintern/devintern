@@ -23,8 +23,6 @@ import type {
 } from "../../../types/task-tracker";
 import type { TaskTrackerClient } from "../../task-tracker-client";
 import { JiraFormatter } from "./jira-formatter";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "fs";
-import path from "path";
 
 export class JiraTaskTrackerClient implements TaskTrackerClient {
   private jiraClient: BaseJiraClient;
@@ -166,7 +164,6 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void> {
     const content = JiraFormatter.createIncompleteImplementationCommentADF(
       agentOutput,
@@ -174,39 +171,10 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
     );
     await this.jiraClient.postCommentADF(taskKey, content);
     console.log(`✅ Successfully posted incomplete implementation comment to ${taskKey}`);
-
-    if (taskDescription) {
-      try {
-        const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-        const taskDir = path.join(baseOutputDir, taskKey.toLowerCase());
-        const descriptionFile = path.join(taskDir, "incomplete-task-description.txt");
-
-        mkdirSync(taskDir, { recursive: true });
-        writeFileSync(descriptionFile, taskDescription, "utf8");
-      } catch (saveError) {
-        console.warn(`⚠️  Failed to save task description for duplicate detection: ${saveError}`);
-      }
-    }
   }
 
-  async hasIncompleteImplementationComment(
-    taskKey: string,
-    currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
-      const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-      const taskDir = path.join(baseOutputDir, taskKey.toLowerCase());
-      const descriptionFile = path.join(taskDir, "incomplete-task-description.txt");
-
-      if (!existsSync(descriptionFile)) {
-        return false;
-      }
-
-      const savedDescription = readFileSync(descriptionFile, "utf8");
-      if (savedDescription !== currentDescription) {
-        return false;
-      }
-
       const comments = await this.jiraClient.getIssueComments(taskKey);
       return comments.some((comment) => this.isIncompleteImplementationComment(comment));
     } catch (error) {

@@ -7,8 +7,8 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import { copyFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -27,10 +27,37 @@ export interface WebhookQueueConfig {
   dbPath: string;
   maxRetries?: number;
   verbose?: boolean;
+  /**
+   * Path of a pre-relocation queue database. When the target `dbPath` does not
+   * exist yet but this legacy file does, it is copied over once so pending
+   * events and rate-limit state survive the move out of /tmp.
+   */
+  legacyDbPath?: string;
+  /**
+   * Open the DB read-only without creating dirs/tables or migrating (dashboard
+   * reads alongside a live worker; throws when the file does not exist).
+   */
+  readonly?: boolean;
 }
 
-const DEFAULT_DB_PATH = "/tmp/devintern-webhooks/queue.db";
+/** Old default location; /tmp is wiped on reboot so durable state cannot live there. */
+export const LEGACY_DB_PATH = "/tmp/devintern-webhooks/queue.db";
+
+/** How long processed-event ids are retained for dedupe (90 days). */
+const PROCESSED_EVENTS_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
 const DEFAULT_MAX_RETRIES = 3;
+
+/**
+ * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
+ * `.devintern-code/queue.db` under the project directory so queue state,
+ * cursors, and run records persist across reboots.
+ *
+ * @param projectDir - Project root (defaults to the current working directory)
+ */
+export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
+  return process.env.WEBHOOK_QUEUE_DB || join(projectDir, ".devintern-code", "queue.db");
+}
 
 /**
  * SQLite-backed webhook queue for durable event processing.
@@ -46,9 +73,15 @@ export class WebhookQueue {
    * @param config - Database path, retry limit, and verbosity
    */
   constructor(config: Partial<WebhookQueueConfig> = {}) {
-    const dbPath = config.dbPath || DEFAULT_DB_PATH;
+    const dbPath = config.dbPath || resolveQueueDbPath();
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.verbose = config.verbose ?? false;
+
+    if (config.readonly) {
+      this.db = new Database(dbPath, { readonly: true });
+      this.db.run("PRAGMA busy_timeout = 5000");
+      return;
+    }
 
     // Ensure directory exists
     const dir = dirname(dbPath);
@@ -56,8 +89,35 @@ export class WebhookQueue {
       mkdirSync(dir, { recursive: true });
     }
 
+    this.migrateLegacyDb(dbPath, config.legacyDbPath);
+
     this.db = new Database(dbPath);
     this.initializeSchema();
+  }
+
+  /**
+   * One-time copy of a legacy queue database (e.g. the old /tmp location) to
+   * the new path, so pending events and rate-limit state are not lost.
+   */
+  private migrateLegacyDb(dbPath: string, legacyDbPath?: string): void {
+    if (
+      !legacyDbPath ||
+      legacyDbPath === dbPath ||
+      existsSync(dbPath) ||
+      !existsSync(legacyDbPath)
+    ) {
+      return;
+    }
+    copyFileSync(legacyDbPath, dbPath);
+    // Carry over WAL/SHM companions if a previous process left them behind.
+    for (const suffix of ["-wal", "-shm"]) {
+      if (existsSync(`${legacyDbPath}${suffix}`)) {
+        copyFileSync(`${legacyDbPath}${suffix}`, `${dbPath}${suffix}`);
+      }
+    }
+    if (this.verbose) {
+      console.log(`[WebhookQueue] Migrated legacy queue database from ${legacyDbPath}`);
+    }
   }
 
   /** Create tables and indexes if they do not exist. */
@@ -86,6 +146,18 @@ export class WebhookQueue {
       CREATE TABLE IF NOT EXISTS webhook_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )
+    `);
+
+    // Provider delivery/comment ids already handled. Retention here is
+    // independent of the events table (completed event rows are deleted;
+    // dedupe state must outlive them).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS processed_events (
+        source TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        processed_at INTEGER NOT NULL,
+        PRIMARY KEY (source, external_id)
       )
     `);
 
@@ -133,6 +205,45 @@ export class WebhookQueue {
     }
     const ms = Number(row.value);
     return Number.isFinite(ms) ? ms : null;
+  }
+
+  /**
+   * Check whether a provider-issued event id was already handled.
+   *
+   * @param source - Event origin (e.g. `github`)
+   * @param externalId - Provider delivery/comment/review id
+   */
+  hasProcessed(source: string, externalId: string): boolean {
+    const row = this.db
+      .query(`SELECT 1 FROM processed_events WHERE source = ? AND external_id = ?`)
+      .get(source, externalId);
+    return row !== null && row !== undefined;
+  }
+
+  /**
+   * Record a provider-issued event id as handled (idempotent).
+   *
+   * @param source - Event origin (e.g. `github`)
+   * @param externalId - Provider delivery/comment/review id
+   */
+  markProcessed(source: string, externalId: string): void {
+    this.db.run(
+      `INSERT INTO processed_events (source, external_id, processed_at) VALUES (?, ?, ?)
+       ON CONFLICT(source, external_id) DO NOTHING`,
+      [source, externalId, Date.now()],
+    );
+  }
+
+  /**
+   * Delete processed-event ids older than the retention window.
+   *
+   * @param maxAgeMs - Maximum age before deletion (default 90 days)
+   * @returns Number of rows deleted
+   */
+  cleanupProcessedEvents(maxAgeMs = PROCESSED_EVENTS_MAX_AGE_MS): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const result = this.db.run(`DELETE FROM processed_events WHERE processed_at < ?`, [cutoff]);
+    return result.changes;
   }
 
   /** Generate a unique event id (`timestamp-random`). */

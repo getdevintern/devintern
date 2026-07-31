@@ -4,35 +4,9 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-@devintern/code - AI tool for automatically implementing JIRA tasks using Claude Code. Supports single/batch task processing via JQL queries, fetches JIRA details, formats for Claude, and automates git workflow + PR creation.
-
-## Development Commands
-
-- `bun start [TASK-KEYS...]` - Run with Bun
-- `bun run build` - Build to `dist/` for distribution
-- `bun run typecheck` - Type check without compilation
-- `bun test` - Run test suite
-- `bun run install-global` - Build and install globally for testing
+`@getdevintern/code` - AI tool for automatically implementing JIRA tasks using Claude Code. Supports single/batch task processing via JQL queries, fetches JIRA details, formats for Claude, and automates git workflow + PR creation.
 
 ## Architecture
-
-### Core Components
-
-- **[src/index.ts](src/index.ts)** - Main entry, CLI parsing, orchestrates workflow: fetch → format → git → claude → commit → PR
-- **[src/lib/task-tracker-client.ts](src/lib/task-tracker-client.ts)** - Interface for all task tracker clients (JIRA, Linear, Trello, etc.)
-- **[src/lib/task-tracker-manager.ts](src/lib/task-tracker-manager.ts)** - Factory that resolves the concrete tracker from the `TASK_TRACKER` environment variable (defaults to JIRA)
-- **[src/lib/trackers/jira/jira-task-tracker-client.ts](src/lib/trackers/jira/jira-task-tracker-client.ts)** - JIRA implementation of `TaskTrackerClient`; delegates HTTP to `JiraClient` and issue parsing to `@devintern/task-trackers`
-- **[src/lib/trackers/jira/jira-formatter.ts](src/lib/trackers/jira/jira-formatter.ts)** - JIRA-specific ADF comment formatting for @devintern/code automation
-- **[src/lib/task-formatter.ts](src/lib/task-formatter.ts)** - Formats task tracker data (ADF/HTML → Markdown) for LLM prompts
-- **[src/lib/utils.ts](src/lib/utils.ts)** - Git operations, file handling utilities
-- **[src/lib/github-reviews.ts](src/lib/github-reviews.ts)** - GitHub API client for PR reviews
-- **[src/lib/review-formatter.ts](src/lib/review-formatter.ts)** - Formats PR review feedback for Claude
-- **[src/lib/address-review.ts](src/lib/address-review.ts)** - Handles PR review responses
-- **[src/lib/auto-review-loop.ts](src/lib/auto-review-loop.ts)** - Automatic PR self-review and improvement loop
-- **[src/webhook-server.ts](src/webhook-server.ts)** - Webhook server for automated PR review handling
-- **[src/types/](src/types/)** - TypeScript interfaces
-  - `task-tracker.ts` - Platform-agnostic domain types (`Task`, `Comment`, `FormattedTaskDetails`, etc.)
-  - `jira.ts` - JIRA-specific type aliases (re-exports generic types for backward compatibility)
 
 ### Key Workflows
 
@@ -65,6 +39,10 @@ This file provides guidance to Claude Code when working with this repository.
 - `BITBUCKET_TOKEN` - Bitbucket auth
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)
+- `AGENT_SANDBOX` - OS-level sandbox for spawned agent processes: `none` (default), `auto`, `native`, `nono`, `srt`, `docker`, or `smolvm`; overridden per-run by the `--sandbox <name>` CLI flag. Run `devintern sandbox` for a doctor report (detected providers, setup steps, what `auto` would pick)
+- `AGENT_SANDBOX_WRITABLE_PATHS` - Extra paths (beyond the project workspace) the sandbox allows writes to
+- `AGENT_SANDBOX_ALLOWED_DOMAINS` - Extra network allowlist entries for sandbox providers that restrict egress (e.g. `srt`)
+- `AGENT_SANDBOX_NONO_PROFILE` - Overrides the `nono` provider's isolation profile
 
 **Project Settings (.devintern-code/settings.json):**
 
@@ -96,43 +74,7 @@ Tracker-specific sections are supported. The tool resolves configuration based o
 
 Legacy top-level `projects` is still honored as a Jira fallback for backward compatibility.
 
-### Output Structure
-
-```
-{output-dir}/{task-key}/
-├── task-details.md                      # Formatted task for Claude
-├── feasibility-assessment.md            # Clarity check results
-├── implementation-summary.md            # Success output
-├── implementation-summary-incomplete.md # Failure output
-├── auto-review-summary.json             # Auto-review loop results
-├── iteration-{N}/                       # Auto-review iteration artifacts
-│   ├── feedback.json                    # Structured review feedback
-│   └── review-prompt.txt                # Prompt sent to Claude
-└── attachments/                         # JIRA attachments
-```
-
-## Query Language per Tracker
-
-The `--query` flag (canonical) or `--jql` (deprecated alias) passes a query string to the active tracker's `searchTasks()` implementation.
-
-| Tracker | Query Language | Status | Notes |
-|---------|---------------|--------|-------|
-| **Jira** | JQL | Implemented | `GET /rest/api/3/search/jql`. Example: `project = PROJ AND status = 'To Do'` |
-| **Linear** | GraphQL IssueFilter | Implemented | JSON IssueFilter object (e.g. `{"state":{"name":{"eq":"Todo"}}}`) or plain text title search. See https://studio.linear.app/graphql |
-| **GitHub Issues** | GitHub search syntax | Implemented | Qualifiers like `is:open label:bug`, auto-scoped to `repo:{GITHUB_REPO} is:issue`. First 100 results |
-| **Azure DevOps** | WIQL (SQL-like) | Implemented | `SELECT [System.Id] FROM WorkItems WHERE ...`, scoped to AZURE_DEVOPS_PROJECT, first 100 results |
-| **Asana** | Mini-syntax field filters | Implemented | `project:<gid> section:"To Do" assignee:<name> completed:false <text>`; project defaults to `ASANA_DEFAULT_PROJECT_GID`; lists project tasks (first 100) with client-side filtering (workspace search API is Premium-only) |
-| **Trello** | Trello search operators | Implemented | `list:"To Do" is:open <text>`, scoped to `TRELLO_DEFAULT_BOARD_ID` when set. First 100 results |
-| **Markdown** | Frontmatter filters | Implemented | `status=todo type=bug <text>` matched against frontmatter fields in `MARKDOWN_TASKS_DIR`; free text matches titles |
-
-All trackers support `--query`; the capability map in `src/lib/tracker-capabilities.ts` is the source of truth.
-
-## Testing
-
-- Uses Bun's native test runner (`bun:test` API)
-- Tests in `tests/` directory use isolated temp directories for parallel execution
-- Import from `bun:test`: `describe`, `test`, `expect`, `beforeEach`, `afterEach`
-- Use `beforeEach`/`afterEach` for setup/cleanup to enable parallel test runs
+Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state) lives in `.devintern-code/queue.db`; the retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
 
 ## Key Implementation Details
 

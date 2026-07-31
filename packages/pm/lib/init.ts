@@ -3,6 +3,9 @@
  */
 
 import { join } from "node:path";
+import { readFile, writeFile, pathExists, mkdir } from "./runtime/fs.js";
+import { getModuleDir } from "./runtime/path.js";
+import { askConfirm } from "./runtime/stdin.js";
 
 /**
  * Initialize `.devintern-pm` configuration in the current directory.
@@ -21,7 +24,7 @@ export async function initializeProject(): Promise<void> {
 
   // Check if .devintern-pm already exists
   try {
-    const stat = await Bun.file(join(devinternPmDir, ".")).exists();
+    const stat = await pathExists(devinternPmDir);
     if (stat) {
       console.log("⚠️  .devintern-pm directory already exists");
       const shouldOverwrite = await askConfirm("Overwrite existing configuration?");
@@ -35,14 +38,14 @@ export async function initializeProject(): Promise<void> {
   }
 
   // Create .devintern-pm directory
-  await Bun.$`mkdir -p ${devinternPmDir}`;
+  await mkdir(devinternPmDir);
   console.log("✅ Created .devintern-pm directory");
 
   // Copy .env.example from the script's directory
-  const scriptDir = import.meta.dir;
+  const scriptDir = getModuleDir(import.meta.url);
   const projectRoot = join(scriptDir, "..");
   const envExamplePath = join(projectRoot, ".env.example");
-  const envExampleContent = await Bun.file(envExamplePath).text();
+  const envExampleContent = await readFile(envExamplePath);
 
   // Check for existing .devintern-code configuration
   const devinternCodeDir = join(cwd, ".devintern-code");
@@ -55,10 +58,9 @@ export async function initializeProject(): Promise<void> {
   let agentCliPath = "";
 
   try {
-    const devinternCodeEnvFile = Bun.file(devinternCodeEnvPath);
-    if (await devinternCodeEnvFile.exists()) {
+    if (await pathExists(devinternCodeEnvPath)) {
       console.log("📋 Found existing .devintern-code configuration");
-      const devinternCodeEnv = await devinternCodeEnvFile.text();
+      const devinternCodeEnv = await readFile(devinternCodeEnvPath);
 
       // Extract JIRA_* and agent configuration values
       const lines = devinternCodeEnv.split("\n");
@@ -110,7 +112,7 @@ export async function initializeProject(): Promise<void> {
   }
 
   // Write .env file
-  await Bun.write(envPath, envContent);
+  await writeFile(envPath, envContent);
   console.log("✅ Created .env configuration file");
 
   await ensureGitignore(cwd);
@@ -118,8 +120,7 @@ export async function initializeProject(): Promise<void> {
   console.log("\n✨ Initialization complete!");
   console.log(`\nNext steps:`);
   console.log(`1. Edit .devintern-pm/.env with your configuration`);
-  console.log(`2. Run devpm login to sign in`);
-  console.log(`3. Run devpm --interactive to create your first task`);
+  console.log(`2. Run devpm --interactive to create your first task`);
 }
 
 /**
@@ -128,11 +129,10 @@ export async function initializeProject(): Promise<void> {
  */
 export async function ensureGitignore(cwd: string, log: (m: string) => void = console.log) {
   const gitignorePath = join(cwd, ".gitignore");
-  const gitignoreFile = Bun.file(gitignorePath);
 
   try {
-    if (await gitignoreFile.exists()) {
-      let gitignoreContent = await gitignoreFile.text();
+    if (await pathExists(gitignorePath)) {
+      let gitignoreContent = await readFile(gitignorePath);
 
       const hasEnvIgnored = gitignoreContent.includes(".devintern-pm/.env");
       const hasSessionIgnored = gitignoreContent.includes(".devintern-pm/.auth-session.json");
@@ -143,7 +143,7 @@ export async function ensureGitignore(cwd: string, log: (m: string) => void = co
         }
         gitignoreContent +=
           "\n# devintern-pm configuration (contains secrets)\n.devintern-pm/.env\n.devintern-pm/.auth-session.json\n";
-        await Bun.write(gitignorePath, gitignoreContent);
+        await writeFile(gitignorePath, gitignoreContent);
         log("✅ Updated .gitignore to exclude @devintern/pm secret files");
       } else {
         log("ℹ️  .gitignore already contains .devintern-pm");
@@ -152,7 +152,7 @@ export async function ensureGitignore(cwd: string, log: (m: string) => void = co
       // Create new .gitignore
       const gitignoreContent =
         "# devintern-pm configuration (contains secrets)\n.devintern-pm/.env\n.devintern-pm/.auth-session.json\n";
-      await Bun.write(gitignorePath, gitignoreContent);
+      await writeFile(gitignorePath, gitignoreContent);
       log("✅ Created .gitignore with @devintern/pm secret files");
     }
   } catch (error) {
@@ -160,42 +160,5 @@ export async function ensureGitignore(cwd: string, log: (m: string) => void = co
       "⚠️  Could not update .gitignore:",
       error instanceof Error ? error.message : error,
     );
-  }
-}
-
-/**
- * Ask the user for yes/no confirmation on stdin.
- *
- * @param message - Prompt text displayed before `(Y/n)`.
- * @returns `true` for yes (including empty input), `false` for no or on read error.
- */
-async function askConfirm(message: string): Promise<boolean> {
-  while (true) {
-    process.stdout.write(`${message} (Y/n): `);
-
-    try {
-      const proc = Bun.spawn(["bash", "-c", 'read line && echo "$line"'], {
-        stdin: "inherit",
-        stdout: "pipe",
-        stderr: "inherit",
-      });
-
-      const output = await new Response(proc.stdout).text();
-      await proc.exited;
-
-      const answer = output.trim().toLowerCase();
-
-      if (answer === "" || answer === "y" || answer === "yes") {
-        return true;
-      } else if (answer === "n" || answer === "no") {
-        return false;
-      } else {
-        process.stdout.write(`Please answer 'y' or 'n' (default: y): `);
-        continue;
-      }
-    } catch (error) {
-      console.error("\nError reading input:", error);
-      return false;
-    }
   }
 }

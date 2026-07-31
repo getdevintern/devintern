@@ -28,8 +28,6 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  matchesSavedIncompleteDescription,
-  persistIncompleteDescription,
   type ClarityAssessmentLike,
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
@@ -227,24 +225,14 @@ export class TrelloTaskTrackerClient implements TaskTrackerClient {
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void> {
     const body = formatIncompleteImplementationCommentMarkdown(agentOutput, taskSummary);
     await this.trelloClient.postCardComment(taskKey, body);
     console.log(`✅ Successfully posted incomplete implementation comment to ${taskKey}`);
-
-    if (taskDescription) {
-      persistIncompleteDescription(taskKey, taskDescription);
-    }
   }
 
-  async hasIncompleteImplementationComment(
-    taskKey: string,
-    currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
-      if (!matchesSavedIncompleteDescription(taskKey, currentDescription)) return false;
-
       const actions = await this.trelloClient.getCardComments(taskKey);
       return actions.some((a) => isIncompleteImplementationCommentText(a.data?.text || ""));
     } catch (error) {

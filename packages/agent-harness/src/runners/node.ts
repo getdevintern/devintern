@@ -23,6 +23,16 @@ export interface NodeRunnerOptions extends AgentRunOptions {
   displayRealtime?: boolean;
 }
 
+function isVerbose(options: NodeRunnerOptions): boolean {
+  return options.verbose === true || process.env.DEVINTERN_VERBOSE === "1";
+}
+
+function logAgent(message: string, options: NodeRunnerOptions): void {
+  if (isVerbose(options)) {
+    process.stderr.write(`[agent] ${message}\n`);
+  }
+}
+
 /**
  * Spawn an agent CLI subprocess using Node `child_process` and collect output.
  *
@@ -64,6 +74,20 @@ export async function runAgentNode(
     const timeoutMinutes =
       options.timeoutMinutes ?? parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
+    if (!options.silent) {
+      console.log(`\n🤖 Running ${harness.displayName}...\n`);
+    }
+
+    logAgent(
+      `Spawning ${harness.displayName}: ${resolvedPath} ${args
+        .map((arg) => (arg === prompt ? `<prompt:${prompt.length} chars>` : arg))
+        .join(" ")} (input: ${inputMethod})`,
+      options,
+    );
+
+    const startedAt = Date.now();
+    let gotOutput = false;
+
     const proc: ChildProcess = spawnReapable(resolvedPath, args, {
       cwd: options.cwd,
       // Only pipe stdin when feeding the prompt that way. An open stdin pipe (even
@@ -71,9 +95,21 @@ export async function runAgentNode(
       stdio: [inputMethod === "stdin" ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
+    logAgent(`${harness.displayName} pid ${proc.pid ?? "unknown"} started`, options);
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+
+    const markOutput = (stream: "stdout" | "stderr", chunk: string): void => {
+      if (!gotOutput && chunk.length > 0) {
+        gotOutput = true;
+        logAgent(
+          `First ${stream} from ${harness.displayName} after ${((Date.now() - startedAt) / 1000).toFixed(1)}s (${chunk.length} bytes)`,
+          options,
+        );
+      }
+    };
 
     const timeout = setTimeout(
       () => {
@@ -95,6 +131,7 @@ export async function runAgentNode(
       proc.stdout.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stdout += chunk;
+        markOutput("stdout", chunk);
         if (options.displayRealtime) {
           process.stdout.write(chunk);
         }
@@ -105,6 +142,7 @@ export async function runAgentNode(
       proc.stderr.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stderr += chunk;
+        markOutput("stderr", chunk);
         if (options.displayRealtime) {
           process.stderr.write(chunk);
         }

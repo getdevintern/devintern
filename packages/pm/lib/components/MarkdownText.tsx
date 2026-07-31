@@ -1,5 +1,6 @@
 import React from "react";
 import { Text, Box } from "ink";
+import { uiSymbols } from "../runtime/terminal.js";
 
 interface MarkdownTextProps {
   children: string;
@@ -14,6 +15,7 @@ interface MarkdownTextProps {
  * @returns Vertical stack of formatted Ink Text and Box elements.
  */
 export const MarkdownText: React.FC<MarkdownTextProps> = ({ children }) => {
+  const { listBullet } = uiSymbols();
   const lines = children.split("\n");
   const elements: React.ReactNode[] = [];
 
@@ -84,7 +86,9 @@ export const MarkdownText: React.FC<MarkdownTextProps> = ({ children }) => {
       const content = line.substring(indent + 2);
       elements.push(
         <Box key={i} paddingLeft={Math.floor(indent / 2)}>
-          <Text>• {renderInlineMarkdown(content)}</Text>
+          <Text>
+            {listBullet} {renderInlineMarkdown(content)}
+          </Text>
         </Box>,
       );
       continue;

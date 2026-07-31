@@ -23,6 +23,7 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { ensureGitignore } from "./init";
+import { pathExists, readFile, writeFile } from "./runtime/fs.js";
 
 export { isInteractive } from "@devintern/task-trackers";
 
@@ -232,7 +233,7 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
   try {
     const configDir = join(cwd, ".devintern-pm");
     const envPath = join(configDir, ".env");
-    if (await Bun.file(envPath).exists()) {
+    if (await pathExists(envPath)) {
       log(`\n⚠️  Configuration already exists: ${envPath}`);
       const answer = (await prompt("Overwrite it? (y/N): ")).trim().toLowerCase();
       if (answer !== "y" && answer !== "yes") {
@@ -246,9 +247,9 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
 
     // Fast track: reuse tracker credentials from an existing @devintern/code
     // config in the same project (env var names are shared).
-    const codeEnvFile = Bun.file(join(cwd, ".devintern-code", ".env"));
-    if (await codeEnvFile.exists()) {
-      const existing = extractExistingTrackerConfig(await codeEnvFile.text(), PM_TRACKER_SETUP);
+    const codeEnvPath = join(cwd, ".devintern-code", ".env");
+    if (await pathExists(codeEnvPath)) {
+      const existing = extractExistingTrackerConfig(await readFile(codeEnvPath), PM_TRACKER_SETUP);
       if (existing) {
         const reused = await promptReuseExistingConfig(existing, {
           sourceLabel: "@devintern/code configuration (.devintern-code/.env)",
@@ -290,17 +291,16 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
       await validateConnection(trackerId, values, steps, prompt, probe, log, ".devintern-pm/.env");
     }
 
-    await Bun.write(envPath, renderPmEnvFile(trackerId, values));
+    await writeFile(envPath, renderPmEnvFile(trackerId, values));
     log(`\n✅ Created configuration file: ${envPath}`);
 
     await ensureGitignore(cwd, log);
 
     log("\n🎉 Project initialized successfully!");
     log("\n📝 Next steps:");
-    log("   1. Run 'devpm login' to sign in");
-    log("   2. Run 'devpm --interactive' to create your first task");
+    log("   1. Run 'devpm --interactive' to create your first task");
     if (docs) {
-      log(`   3. Read the setup guide if anything is unclear: ${docs}`);
+      log(`   2. Read the setup guide if anything is unclear: ${docs}`);
     }
   } finally {
     rl?.close();

@@ -34,8 +34,6 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  matchesSavedIncompleteDescription,
-  persistIncompleteDescription,
   type ClarityAssessmentLike,
   type EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
@@ -322,7 +320,6 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
     taskKey: string,
     agentOutput: string,
     taskSummary?: string,
-    taskDescription?: string,
   ): Promise<void> {
     const markdown = formatIncompleteImplementationCommentMarkdown(agentOutput, taskSummary);
     await this.azureClient.addComment(
@@ -330,19 +327,10 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
       markdownToHtmlDescription(markdown),
     );
     console.log(`✅ Successfully posted incomplete implementation comment to ${taskKey}`);
-
-    if (taskDescription) {
-      persistIncompleteDescription(taskKey, taskDescription);
-    }
   }
 
-  async hasIncompleteImplementationComment(
-    taskKey: string,
-    currentDescription: string,
-  ): Promise<boolean> {
+  async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
-      if (!matchesSavedIncompleteDescription(taskKey, currentDescription)) return false;
-
       const comments = await this.fetchRawComments(taskKey);
       return comments.some((c) => isIncompleteImplementationCommentText(c.text || ""));
     } catch (error) {

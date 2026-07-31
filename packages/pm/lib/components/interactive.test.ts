@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { EventEmitter } from "node:events";
-import { runInteractiveMode } from "./interactive";
+import { canNavigateBack, getPreviousStep, runInteractiveMode } from "./interactive";
 
 class FakeStdin extends EventEmitter {
   isTTY = true;
@@ -45,6 +45,13 @@ const waitFor = (condition: () => boolean, { timeout = 2000, interval = 10 } = {
  *  Kept very small (5 ms) because FakeStdin is synchronous; this just yields to the microtask queue.
  */
 const sleep = (ms = 5) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Under `bun test` stdout is a pipe with no columns, so every Ink render
+// falls back to terminal-size's synchronous `tput` subprocess. Pin a width
+// to keep renders fast and reduce timing skew in the step-transition waits.
+if (!process.stdout.columns) {
+  Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+}
 
 describe("runInteractiveMode", () => {
   let handle: Awaited<ReturnType<typeof runInteractiveMode>>;
@@ -116,7 +123,11 @@ describe("runInteractiveMode", () => {
     expect(handle.getStep()).toBe("edit-prompt");
 
     handle.setPreviewData("New Summary", "New Description");
-    await waitFor(() => handle.getStep() === "preview");
+    // Wait for the data, not just the step: applying buffered previewData can
+    // take an extra render after the step flips to preview.
+    await waitFor(
+      () => handle.getStep() === "preview" && handle.getPreviewData()?.summary === "New Summary",
+    );
     expect(handle.getPreviewData()).toEqual({
       summary: "New Summary",
       description: "New Description",
@@ -166,7 +177,12 @@ describe("runInteractiveMode", () => {
     // Transition to preview via Escape (no new previewData).
     // The buffered data from updatePreviewData should be applied.
     stdin.write("\x1b");
-    await waitFor(() => handle.getStep() === "preview");
+    // Wait for the data, not just the step: the buffered previewData is
+    // applied by an effect one render after the step leaves edit-prompt.
+    await waitFor(
+      () =>
+        handle.getStep() === "preview" && handle.getPreviewData()?.summary === "Buffered Summary",
+    );
 
     expect(handle.getPreviewData()).toEqual({
       summary: "Buffered Summary",
@@ -234,5 +250,337 @@ describe("runInteractiveMode", () => {
       currentSummary: "Summary",
       currentDescription: "Description",
     });
+  });
+
+  test("Esc from preview after setPreviewData stays on preview with data (no blank step)", async () => {
+    handle.setPreviewData("Story Title", "Long markdown description");
+    await waitFor(() => handle.getStep() === "preview");
+    expect(handle.getPreviewData()).toEqual({
+      summary: "Story Title",
+      description: "Long markdown description",
+    });
+
+    // Esc is intentional no-op on preview (orchestrator holds waitForCompletion/waitForEdit).
+    stdin.write("\x1b");
+    await sleep(50);
+
+    expect(handle.getStep()).toBe("preview");
+    expect(handle.getPreviewData()).toEqual({
+      summary: "Story Title",
+      description: "Long markdown description",
+    });
+  });
+
+  test("Esc from edit-prompt returns to preview with last known title/description", async () => {
+    handle.setPreviewData("Keep Me", "Keep this description");
+    await waitFor(() => handle.getStep() === "preview");
+
+    stdin.write("e");
+    await waitFor(() => handle.getStep() === "edit-prompt");
+
+    stdin.write("partial edit text");
+    await sleep(30);
+    stdin.write("\x1b");
+
+    await waitFor(() => handle.getStep() === "preview");
+    expect(handle.getPreviewData()).toEqual({
+      summary: "Keep Me",
+      description: "Keep this description",
+    });
+  });
+
+  test("Esc from edit-prompt with buffered updatePreviewData applies buffer on return to preview", async () => {
+    handle.setPreviewData("Initial", "Initial body");
+    await waitFor(() => handle.getStep() === "preview");
+
+    stdin.write("e");
+    await waitFor(() => handle.getStep() === "edit-prompt");
+
+    handle.updatePreviewData("Buffered Title", "Buffered body");
+    await sleep(30);
+
+    stdin.write("\x1b");
+    await waitFor(
+      () => handle.getStep() === "preview" && handle.getPreviewData()?.summary === "Buffered Title",
+    );
+
+    expect(handle.getPreviewData()).toEqual({
+      summary: "Buffered Title",
+      description: "Buffered body",
+    });
+  });
+
+  test("Esc during generating keeps loading step (non-blank, no cancel)", async () => {
+    handle.setGenerating();
+    await waitFor(() => handle.getStep() === "generating");
+
+    stdin.write("\x1b");
+    await sleep(50);
+
+    expect(handle.getStep()).toBe("generating");
+  });
+
+  test("Esc during regenerating keeps loading step", async () => {
+    handle.setPreviewData("S", "D");
+    await waitFor(() => handle.getStep() === "preview");
+
+    stdin.write("e");
+    await waitFor(() => handle.getStep() === "edit-prompt");
+
+    stdin.write("change it");
+    await sleep(30);
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "regenerating");
+
+    stdin.write("\x1b");
+    await sleep(50);
+    expect(handle.getStep()).toBe("regenerating");
+  });
+
+  test("Enter on preview without data does not leave preview or resolve completion", async () => {
+    // Stay on source-type-adjacent path: force preview step without data via setGenerating
+    // then manually only check Enter does not advance from generating.
+    handle.setGenerating();
+    await waitFor(() => handle.getStep() === "generating");
+
+    stdin.write("\r");
+    await sleep(50);
+    expect(handle.getStep()).toBe("generating");
+  });
+
+  test("Enter on preview with data accepts (Y) and moves to done", async () => {
+    handle.setPreviewData("Title", "Body");
+    await waitFor(() => handle.getStep() === "preview");
+
+    const completion = handle.waitForCompletion();
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "done");
+    await completion;
+    expect(handle.getStep()).toBe("done");
+  });
+
+  test("showSuccess transitions to success step", async () => {
+    handle.showSuccess("Task created: https://example.com/TASK-1");
+    await waitFor(() => handle.getStep() === "success");
+    expect(handle.getStep()).toBe("success");
+  });
+
+  test("Enter on success resolves waitForRestart without leaving success until restart()", async () => {
+    handle.showSuccess("Task created: https://example.com/TASK-1");
+    await waitFor(() => handle.getStep() === "success");
+
+    const restartPromise = handle.waitForRestart();
+    // Stay on success until orchestrator calls restart() — avoids blank remount races
+    stdin.write("\r");
+    await restartPromise;
+
+    expect(handle.getStep()).toBe("success");
+
+    handle.restart();
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("any advertised key on success resolves waitForRestart", async () => {
+    handle.showSuccess("Task created: https://example.com/TASK-2");
+    await waitFor(() => handle.getStep() === "success");
+
+    const restartPromise = handle.waitForRestart();
+    stdin.write(" ");
+    await restartPromise;
+
+    handle.restart();
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("restart clears preview data and returns to source-type ready for next create", async () => {
+    handle.setPreviewData("Done summary", "Done description");
+    await waitFor(() => handle.getStep() === "preview");
+    expect(handle.getPreviewData()).toEqual({
+      summary: "Done summary",
+      description: "Done description",
+    });
+
+    handle.showSuccess("Task created: https://example.com/TASK-3");
+    await waitFor(() => handle.getStep() === "success");
+
+    handle.restart();
+    await waitFor(() => handle.getStep() === "source-type");
+
+    expect(handle.getStep()).toBe("source-type");
+    expect(handle.getPreviewData()).toBeUndefined();
+  });
+
+  test("after success restart, a second waitForCompletion cycle works end-to-end", async () => {
+    // First cycle: jump to success as if a task was just created
+    handle.showSuccess("Task created: https://example.com/TASK-1");
+    await waitFor(() => handle.getStep() === "success");
+
+    const firstRestart = handle.waitForRestart();
+    stdin.write("\r");
+    await firstRestart;
+    handle.restart();
+    await waitFor(() => handle.getStep() === "source-type");
+
+    // Second cycle: user confirms config → agent preview → accept create
+    // Drive wizard to confirm via source-type → ... is heavy; simulate completion
+    // the way the orchestrator does after generation by setting preview and accepting.
+    handle.setPreviewData("Second task", "Second description");
+    await waitFor(() => handle.getStep() === "preview");
+
+    const secondCompletion = handle.waitForCompletion();
+    stdin.write("y");
+    const secondConfig = await secondCompletion;
+
+    expect(secondConfig.previewData).toEqual({
+      summary: "Second task",
+      description: "Second description",
+    });
+    await waitFor(() => handle.getStep() === "done");
+    expect(handle.getStep()).toBe("done");
+  });
+
+  test("rapid keypresses on success resolve waitForRestart once without leaving success", async () => {
+    handle.showSuccess("Task created: https://example.com/TASK-4");
+    await waitFor(() => handle.getStep() === "success");
+
+    const restartPromise = handle.waitForRestart();
+    stdin.write("\r");
+    stdin.write("\r");
+    stdin.write("x");
+    await restartPromise;
+
+    // Still on success — orchestrator owns the transition via restart()
+    expect(handle.getStep()).toBe("success");
+
+    handle.restart();
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("cleanup rejects pending waitForRestart so cancel exits cleanly", async () => {
+    handle.showSuccess("Task created: https://example.com/TASK-5");
+    await waitFor(() => handle.getStep() === "success");
+
+    const restartPromise = handle.waitForRestart();
+    handle.cleanup();
+
+    await expect(restartPromise).rejects.toThrow("Interactive mode cancelled");
+  });
+});
+
+describe("getPreviousStep / canNavigateBack", () => {
+  test("mirrors forward skip edges when epic and issue-type are disabled", () => {
+    const flags = { hasEpicStep: false, hasIssueTypeStep: false };
+    expect(getPreviousStep("style", flags)).toBe("custom");
+    expect(getPreviousStep("confirm", flags)).toBe("style");
+    expect(getPreviousStep("custom", flags)).toBe("source-input");
+    expect(getPreviousStep("edit-prompt", flags)).toBe("preview");
+    expect(getPreviousStep("preview", flags)).toBeNull();
+    expect(getPreviousStep("generating", flags)).toBeNull();
+    expect(canNavigateBack("preview", flags)).toBe(false);
+    expect(canNavigateBack("edit-prompt", flags)).toBe(true);
+  });
+
+  test("back from style lands on issue-type when available", () => {
+    expect(getPreviousStep("style", { hasEpicStep: true, hasIssueTypeStep: true })).toBe(
+      "issue-type",
+    );
+    expect(getPreviousStep("style", { hasEpicStep: true, hasIssueTypeStep: false })).toBe("epic");
+    expect(getPreviousStep("issue-type", { hasEpicStep: false, hasIssueTypeStep: true })).toBe(
+      "custom",
+    );
+  });
+});
+
+describe("Esc config-step chain with skipped steps", () => {
+  let handle: Awaited<ReturnType<typeof runInteractiveMode>>;
+  let stdin: FakeStdin;
+
+  afterEach(() => {
+    handle?.cleanup();
+  });
+
+  test("Esc from style with no epic and no issue-types goes to custom (never epic/issue-type)", async () => {
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      supportsEpicLinking: false,
+      // issueTypes omitted → no issue-type step
+    });
+
+    // source-type → prompt → source-input → custom → style
+    stdin.write("3");
+    await waitFor(() => handle.getStep() === "source-input");
+    stdin.write("requirements text");
+    await sleep(20);
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "custom");
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "style");
+
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "custom");
+    expect(handle.getStep()).toBe("custom");
+
+    // Esc further should not hit skipped steps
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "source-input");
+    expect(handle.getStep()).toBe("source-input");
+  });
+
+  test("Esc from style with epic only (no issue types) goes to epic", async () => {
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      supportsEpicLinking: true,
+    });
+
+    stdin.write("3");
+    await waitFor(() => handle.getStep() === "source-input");
+    stdin.write("req");
+    await sleep(20);
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "custom");
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "epic");
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "style");
+
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "epic");
+    expect(handle.getStep()).toBe("epic");
+  });
+
+  test("Esc from style with epic and issue-types goes to issue-type", async () => {
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      supportsEpicLinking: true,
+      issueTypes: ["Story", "Task"],
+    });
+
+    stdin.write("3");
+    await waitFor(() => handle.getStep() === "source-input");
+    stdin.write("req");
+    await sleep(20);
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "custom");
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "epic");
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "issue-type");
+    // accept default issue type
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "style");
+
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "issue-type");
+    expect(handle.getStep()).toBe("issue-type");
+
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "epic");
+    expect(handle.getStep()).toBe("epic");
   });
 });

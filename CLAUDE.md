@@ -8,6 +8,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------- |
 | `@getdevintern/code`        | CLI for task automation (`devintern`): Jira + multi-PM support, configurable AI agent                                   | yes             |
 | `@getdevintern/pm`          | CLI for PM task/story creation (`devpm`): supports Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, Markdown   | yes             |
+| `@devintern/pm-desktop`     | Electron desktop app for `@getdevintern/pm`: single-screen AI task creation for your tracker                            | no, private     |
 | `@devintern/agent-harness`  | Shared agent harness abstraction                                                                                        | no, source-only |
 | `@devintern/auth`           | Shared Supabase auth utilities (CLI login/session)                                                                      | no, source-only |
 | `@devintern/license-check`  | Shared license checking                                                                                                 | no, source-only |
@@ -52,6 +53,12 @@ bun run --filter @getdevintern/pm build
 - Uses `ink` (React for CLI) + `react`: JSX/TSX files in `lib/`
 - Build: `bun build index.ts --target=bun --outdir=dist --format=esm --external=ink --external=react --external=ink-scroll-view --minify`
 - Run locally: `bun run index.ts`
+
+### `@devintern/pm-desktop`
+
+- Electron app built with electron-vite; React + shadcn/ui renderer
+- Dev: `bun run dev`; build: `bun run build` (output in `out/`, not committed)
+- Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`
 
 ### Source-only shared packages
 

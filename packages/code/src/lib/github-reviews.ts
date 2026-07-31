@@ -28,11 +28,15 @@ export interface PullRequestInfo {
   head: {
     ref: string;
     sha: string;
+    /** Head repository; differs from the base repo for fork PRs. */
+    repo?: { full_name: string } | null;
   };
   base: {
     ref: string;
   };
   html_url: string;
+  /** Whether maintainers may push to a fork PR's branch. */
+  maintainer_can_modify?: boolean;
 }
 
 export interface FileContent {
@@ -188,6 +192,59 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Conditional GET with a stored ETag.
+   *
+   * A `304 Not Modified` response does not count against the GitHub rate
+   * limit, which is what makes polling many PRs on a short interval cheap.
+   *
+   * @param path - API path (starting with `/repos/...`)
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param etag - ETag from the previous response, if any
+   * @returns `notModified: true` (data null) on 304; otherwise the parsed
+   *          body and the new ETag to store
+   */
+  async conditionalGet<T>(
+    path: string,
+    owner: string,
+    repo: string,
+    etag?: string,
+  ): Promise<{ data: T | null; etag?: string; notModified: boolean }> {
+    const token = await this.getToken(owner, repo);
+    const url = `${this.baseUrl}${path}`;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "devintern",
+    };
+    if (etag) {
+      headers["If-None-Match"] = etag;
+    }
+
+    const response = await Utils.fetchWithRetry(url, { method: "GET", headers });
+
+    if (response.status === 304) {
+      return { data: null, etag, notModified: true };
+    }
+
+    if (!response.ok) {
+      const error = (await response.json().catch(() => ({
+        message: "Unknown error",
+      }))) as { message?: string };
+      throw new Error(
+        `GitHub API error (${response.status}): ${error.message || response.statusText}`,
+      );
+    }
+
+    return {
+      data: (await response.json()) as T,
+      etag: response.headers.get("etag") ?? undefined,
+      notModified: false,
+    };
+  }
+
+  /**
    * Fetch pull request metadata.
    *
    * @param owner - Repository owner
@@ -201,6 +258,50 @@ export class GitHubReviewsClient {
       owner,
       repo,
     );
+  }
+
+  /**
+   * Fetch a user's permission level on a repository.
+   *
+   * Used to gate mention-triggered automation: only users who can push
+   * (write/maintain/admin) may direct the agent.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param username - GitHub login to check
+   * @returns `admin`, `write`, `read`, or `none`; `role_name` carries
+   *          fine-grained roles like `maintain`/`triage` when present
+   */
+  async getCollaboratorPermission(
+    owner: string,
+    repo: string,
+    username: string,
+  ): Promise<{ permission: string; roleName?: string }> {
+    const response = await this.apiRequest<{
+      permission: string;
+      role_name?: string;
+    }>("GET", `/repos/${owner}/${repo}/collaborators/${username}/permission`, owner, repo);
+    return { permission: response.permission, roleName: response.role_name };
+  }
+
+  /**
+   * Check whether a user can push to the repository (write/maintain/admin).
+   * Fails closed: an API error is reported as no push access.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param username - GitHub login to check
+   */
+  async userHasPushAccess(owner: string, repo: string, username: string): Promise<boolean> {
+    try {
+      const { permission, roleName } = await this.getCollaboratorPermission(owner, repo, username);
+      if (permission === "admin" || permission === "write") {
+        return true;
+      }
+      return roleName === "maintain" || roleName === "write" || roleName === "admin";
+    } catch {
+      return false;
+    }
   }
 
   /**

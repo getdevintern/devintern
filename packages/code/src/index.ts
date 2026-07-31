@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 
-import { type ChildProcess, execSync } from "child_process";
+import { execSync } from "child_process";
 import { Option, program } from "commander";
 import { config } from "dotenv";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
@@ -20,21 +28,24 @@ import {
   detectIncompleteImplementation,
   detectMaxTurnsReached,
   detectOpenQuestions,
+  detectSandboxProviders,
   detectUsageLimit,
   isConstrainedMode,
   resolveHarness,
   resolveExecutablePathStrict,
   resolveExecutablePathWithRetry,
-  spawnReapable,
+  spawnAgent,
   reapTree,
   type AgentHarness,
   type AgentRunOptions,
   type ResolvedHarness,
 } from "@devintern/agent-harness";
+import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
 import { isMarkdownFilePath, parseTrelloCardReference } from "@devintern/task-trackers";
 import { findEnvFile, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
-import { TaskFormatter } from "./lib/task-formatter";
+import { TaskFormatter, type RetryPromptContext } from "./lib/task-formatter";
+import { resolveOutputDir } from "./lib/output-dir";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
@@ -59,6 +70,10 @@ import { parseGitHubIssueReference } from "./lib/trackers/github/github-task-tra
 import { parseLinearIssueReference } from "./lib/trackers/linear/linear-task-tracker-client";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
+import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
+import { shouldSkipRetry } from "./lib/retry-gate";
+import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
@@ -110,9 +125,11 @@ interface ProgramOptions {
   query?: string; // Generic query for batch processing
   jql?: string; // Deprecated alias for --query
   skipComments: boolean; // Skip posting comments to task tracker
+  force: boolean; // Bypass the retry gate (re-run an unchanged incomplete task)
   skipJiraComments: boolean; // Deprecated alias for --skip-comments
   hookRetries: string; // Number of retries for git hook failures
   estimate: boolean; // Run in estimation mode to add story points
+  sandbox?: string; // Sandbox provider for the agent process
 }
 
 interface ClarityAssessment {
@@ -150,6 +167,24 @@ async function initializeProject(): Promise<void> {
 
   if (!scaffoldProject()) {
     return;
+  }
+
+  // Surface installed sandbox providers so users know isolation is available.
+  try {
+    const detections = await detectSandboxProviders();
+    const available = detections.filter((d) => d.detection.available);
+    if (available.length > 0) {
+      const names = available
+        .map((d) => `${d.provider.name}${d.detection.version ? ` (${d.detection.version})` : ""}`)
+        .join(", ");
+      console.log(`\n🔒 Sandbox providers detected: ${names}`);
+      console.log("   Set AGENT_SANDBOX=auto in .devintern-code/.env to run agents isolated.");
+    } else {
+      console.log("\n🔓 No sandbox provider detected — agents will run unsandboxed.");
+      console.log("   Run 'devintern sandbox' for install options.");
+    }
+  } catch {
+    // Detection is best-effort; init must not fail because of it.
   }
 
   console.log("\n🎉 Project initialized successfully!");
@@ -409,9 +444,404 @@ if (process.argv[2] === "init") {
     }
     process.exit(0);
   })();
+} else if (process.argv[2] === "worker") {
+  // Handle worker command - long-running daemon (webhook listener now;
+  // polling acquirers register here as they land)
+  (async () => {
+    loadedEnvPath = loadEnvironment();
+
+    const args = process.argv.slice(3);
+
+    if (args[0] === "init") {
+      const { runWorkerInit } = await import("./lib/worker-init");
+      const { isInteractive } = await import("./lib/init-wizard");
+      if (!isInteractive(args, process.stdin)) {
+        console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
+        console.log("   Non-interactive setup: set WORKER_TASK_QUERY, WORKER_POLL_INTERVAL, and");
+        console.log("   (for --listen) WEBHOOK_SECRET in .devintern-code/.env by hand.");
+        process.exit(1);
+      }
+      const trackerManager = new TaskTrackerManager();
+      const ok = await runWorkerInit({
+        dryRunQuery: async (query) => {
+          const result = await trackerManager.getClient().searchTasks(query);
+          return result.tasks.length;
+        },
+        checkAutomationLicense: async () => {
+          const result = await checkLicense({
+            productKey: "devintern/code",
+            supabaseConfig: loadSupabaseConfig(),
+            requireAutomation: true,
+          });
+          return result.valid ? null : result.message;
+        },
+      });
+      process.exit(ok ? 0 : 1);
+    }
+
+    let listen = false;
+    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
+    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
+    let intervalSeconds = parseInt(process.env.WORKER_POLL_INTERVAL || "60", 10);
+    let workerQuery = process.env.WORKER_TASK_QUERY;
+    let verbose = false;
+    let ui = false;
+    let uiPort: number | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--listen") {
+        listen = true;
+      } else if (args[i] === "--port" && args[i + 1]) {
+        port = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--host" && args[i + 1]) {
+        host = args[i + 1];
+        i++;
+      } else if (args[i] === "--interval" && args[i + 1]) {
+        intervalSeconds = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--query" && args[i + 1]) {
+        workerQuery = args[i + 1];
+        i++;
+      } else if (args[i] === "--ui") {
+        ui = true;
+      } else if (args[i] === "--ui-port" && args[i + 1]) {
+        ui = true;
+        uiPort = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--sandbox" && args[i + 1]) {
+        setSandboxOverride(args[i + 1]);
+        i++;
+      } else if (args[i] === "-v" || args[i] === "--verbose") {
+        verbose = true;
+      } else if (args[i] === "--help" || args[i] === "-h") {
+        console.log("Usage: devintern worker [init] [options]");
+        console.log("");
+        console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
+        console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
+        console.log("");
+        console.log("Subcommands:");
+        console.log("  init                Guided server-automation setup: ready-tasks query");
+        console.log("                      (with a live dry run), webhook secret, license check,");
+        console.log("                      and an optional systemd unit");
+        console.log("");
+        console.log("Options:");
+        console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
+        console.log("                      (same query language as batch --query runs)");
+        console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
+        console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
+        console.log(
+          "  --host <host>       Webhook listener host (default: 0.0.0.0 or WEBHOOK_HOST)",
+        );
+        console.log("  --interval <secs>   Polling interval in seconds (default: 60)");
+        console.log("  --ui                Also serve the local observability dashboard");
+        console.log("                      (localhost only; see also `devintern dashboard`)");
+        console.log("  --ui-port <port>    Dashboard port (default: 4400 or DASHBOARD_PORT)");
+        console.log("  --sandbox <name>    Sandbox agent runs: none | auto | native | nono |");
+        console.log("                      srt | docker | smolvm (overrides AGENT_SANDBOX)");
+        console.log("  -v, --verbose       Verbose logging");
+        console.log("  -h, --help          Display this help message");
+        console.log("");
+        console.log("Environment variables:");
+        console.log(
+          "  WEBHOOK_SECRET       (required with --listen) GitHub webhook signature secret",
+        );
+        console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
+        console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
+        console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
+        process.exit(0);
+      }
+    }
+
+    // License check — the worker is unattended automation, so it always
+    // requires an automation entitlement.
+    const supabaseConfig = loadSupabaseConfig();
+    const licenseResult = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    requireLicense(licenseResult);
+
+    const { startWorker } = await import("./worker");
+    const { WorkerState } = await import("./lib/worker-state");
+    const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
+      await import("./lib/webhook-queue");
+    const dbPath = resolveQueueDbPath();
+    const acquirers = [];
+
+    if (workerQuery) {
+      const trackerType = process.env.TASK_TRACKER || "jira";
+      const { supportsPolling, trackersSupportingPolling } =
+        await import("./lib/tracker-capabilities");
+      if (!supportsPolling(trackerType)) {
+        console.error(
+          `❌ Worker polling is not available for tracker '${trackerType}' yet.\n` +
+            `   Trackers with polling support: ${trackersSupportingPolling().join(", ")}\n` +
+            `   You can still use --listen for webhook-driven review handling.`,
+        );
+        process.exit(1);
+      }
+
+      const { TaskPollingAcquirer, runTaskViaCli } = await import("./lib/task-polling-acquirer");
+      const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
+
+      const tracker = new TaskTrackerManager().getClient();
+
+      const { createChangeDetector } = await import("./lib/change-detector");
+      const detector = createChangeDetector(trackerType, (q) => tracker.searchTasks(q));
+      if (!detector) {
+        console.error(
+          `❌ Could not initialize the ${trackerType} change detector. ` +
+            `Check the tracker's required environment variables.`,
+        );
+        process.exit(1);
+      }
+
+      acquirers.push(
+        new TaskPollingAcquirer({
+          trackerType,
+          query: workerQuery,
+          intervalSeconds,
+          detector,
+          workerState: new WorkerState(dbPath),
+          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+          searchTasks: (q) => tracker.searchTasks(q),
+          executeTask: (taskKey) => runTaskViaCli(taskKey),
+          verbose,
+        }),
+      );
+    }
+
+    // Tier 1 review polling: watch the agent's own PRs (agent_prs registry)
+    // and address review feedback without an @mention. Skipped with --listen
+    // (webhooks already deliver reviews there — polling too would double-run)
+    // and without GitHub credentials.
+    if (!listen && (process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID)) {
+      const { ReviewPollingAcquirer, runAddressReviewViaCli, runResolveConflictsViaCli } =
+        await import("./lib/review-polling-acquirer");
+      const { GitHubReviewsClient } = await import("./lib/github-reviews");
+      const gh = new GitHubReviewsClient({ preferAppAuth: true });
+      const ownerOf = (repo: string) => repo.split("/")[0] as string;
+      const nameOf = (repo: string) => repo.split("/")[1] as string;
+
+      acquirers.push(
+        new ReviewPollingAcquirer({
+          intervalSeconds,
+          workerState: new WorkerState(dbPath),
+          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+          github: {
+            fetchPr: (repo, n, etag) =>
+              gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
+            fetchReviews: (repo, n, etag) =>
+              gh.conditionalGet(
+                `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
+                ownerOf(repo),
+                nameOf(repo),
+                etag,
+              ),
+            fetchReviewCommentsSince: async (repo, n, sinceIso) => {
+              const result = await gh.conditionalGet<
+                Array<{ id: number; user: { login: string; type: string }; created_at: string }>
+              >(
+                `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
+                ownerOf(repo),
+                nameOf(repo),
+              );
+              return result.data ?? [];
+            },
+          },
+          addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
+          resolveConflicts: (repo, n) => runResolveConflictsViaCli(repo, n),
+          verbose,
+        }),
+      );
+
+      // Tier 2 mention sweep: react to @mentions on ANY PR in the repo (two
+      // since-cursor requests per tick). Permission + mention gates apply in
+      // the shared review pipeline; fork PRs without maintainer_can_modify
+      // are skipped with an explanatory comment.
+      const repoSlug =
+        process.env.GITHUB_REPO ||
+        (await new PRManager()
+          .detectRepository()
+          .then((r) => (r.platform === "github" ? r.repository : "")));
+      if (repoSlug) {
+        const { MentionSweepAcquirer } = await import("./lib/mention-sweep-acquirer");
+        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
+        const [repoOwner, repoName] = repoSlug.split("/") as [string, string];
+        const sweepUser = (user: { login: string; type: string }) => ({
+          login: user.login,
+          id: 0,
+          avatar_url: "",
+          type: user.type as "User" | "Bot" | "Organization",
+        });
+
+        acquirers.push(
+          new MentionSweepAcquirer({
+            repo: repoSlug,
+            intervalSeconds,
+            workerState: new WorkerState(dbPath),
+            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+            github: {
+              fetchIssueCommentsSince: async (sinceIso) => {
+                const result = await gh.conditionalGet<
+                  Array<{
+                    id: number;
+                    body: string | null;
+                    user: { login: string; type: string };
+                    created_at: string;
+                    html_url: string;
+                    issue_url?: string;
+                  }>
+                >(
+                  `/repos/${repoSlug}/issues/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
+                  repoOwner,
+                  repoName,
+                );
+                return result.data ?? [];
+              },
+              fetchReviewCommentsSince: async (sinceIso) => {
+                const result = await gh.conditionalGet<
+                  Array<{
+                    id: number;
+                    body: string | null;
+                    user: { login: string; type: string };
+                    created_at: string;
+                    html_url: string;
+                    pull_request_url?: string;
+                  }>
+                >(
+                  `/repos/${repoSlug}/pulls/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
+                  repoOwner,
+                  repoName,
+                );
+                return result.data ?? [];
+              },
+              getBotUsername: () => gh.getBotUsername(repoOwner, repoName),
+              getPr: async (prNumber) => {
+                const pr = await gh.getPullRequest(repoOwner, repoName, prNumber);
+                return {
+                  number: pr.number,
+                  state: pr.state,
+                  headRepoFullName: pr.head.repo?.full_name,
+                  maintainerCanModify: pr.maintainer_can_modify,
+                };
+              },
+              postComment: (prNumber, body) =>
+                gh.postPullRequestComment(repoOwner, repoName, prNumber, body).then(() => {}),
+            },
+            handleMention: (comment, prNumber) =>
+              processIssueCommentAsync(
+                {
+                  action: "created",
+                  issue: {
+                    number: prNumber,
+                    title: "",
+                    state: "open",
+                    user: sweepUser(comment.user),
+                    pull_request: { url: "", html_url: comment.html_url },
+                  },
+                  comment: {
+                    id: comment.id,
+                    body: comment.body,
+                    user: sweepUser(comment.user),
+                    html_url: comment.html_url,
+                    created_at: comment.created_at,
+                  },
+                  repository: {
+                    id: 0,
+                    name: repoName,
+                    full_name: repoSlug,
+                    private: false,
+                    owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
+                    html_url: `https://github.com/${repoSlug}`,
+                    default_branch: "main",
+                  },
+                  sender: sweepUser(comment.user),
+                },
+                DEFAULT_CONFIG,
+              ),
+            verbose,
+          }),
+        );
+      } else if (verbose) {
+        console.log("   Mention sweep disabled: could not determine the GitHub repo slug.");
+      }
+    }
+
+    // Local observability dashboard alongside the daemon (same server module
+    // as the standalone `devintern dashboard` command; reads the DB read-only).
+    if (ui) {
+      const { startDashboardServer } = await import("./dashboard-server");
+      startDashboardServer({ port: uiPort });
+    }
+
+    await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
+  })();
+} else if (process.argv[2] === "dashboard") {
+  // Local observability dashboard, standalone: reads the worker's SQLite
+  // read-only, so it works whether or not the worker is running.
+  (async () => {
+    loadedEnvPath = loadEnvironment();
+
+    const args = process.argv.slice(3);
+    let port: number | undefined;
+    let host: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--port" && args[i + 1]) {
+        port = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--host" && args[i + 1]) {
+        host = args[i + 1];
+        i++;
+      } else if (args[i] === "--help" || args[i] === "-h") {
+        console.log("Usage: devintern dashboard [options]");
+        console.log("");
+        console.log("Serve the local observability dashboard: run history, per-run stage");
+        console.log("timelines, and aggregate stats, read from the worker's local database.");
+        console.log("Works with the worker running or stopped; data never leaves this machine.");
+        console.log("");
+        console.log("Options:");
+        console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
+        console.log("  --host <host>  Host to bind to (default: 127.0.0.1; no authentication,");
+        console.log("                 so binding beyond localhost is not recommended)");
+        console.log("  -h, --help     Display this help message");
+        process.exit(0);
+      }
+    }
+
+    // Same entitlement as the worker: the dashboard is part of the
+    // automation tier.
+    const supabaseConfig = loadSupabaseConfig();
+    const licenseResult = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    requireLicense(licenseResult);
+
+    const { startDashboardServer } = await import("./dashboard-server");
+    const server = startDashboardServer({ port, host });
+
+    const shutdown = (): void => {
+      console.log("\n👋 Dashboard stopped");
+      server.stop();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  })();
 } else if (process.argv[2] === "serve") {
   // Handle serve command - start webhook server
+  // Deprecated alias for `devintern worker --listen`.
   (async () => {
+    console.warn(
+      "⚠️  `devintern serve` is deprecated; use `devintern worker --listen` instead.\n" +
+        "   The worker daemon also supports tracker polling (no webhook setup needed).",
+    );
+
     // Load environment for webhook server
     loadedEnvPath = loadEnvironment();
 
@@ -526,6 +956,65 @@ if (process.argv[2] === "init") {
     try {
       await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
+      // Close any run record addressReview opened before it failed (no-op
+      // when none is active — addressReview also ends runs it completes).
+      endRun("failed", (error as Error).message);
+      console.error(`❌ Error: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  })();
+} else if (process.argv[2] === "resolve-conflicts") {
+  // Catch a PR branch up with its base, resolving merge conflicts with the
+  // agent when needed. Also invoked by the worker for its own PRs.
+  (async () => {
+    loadedEnvPath = loadEnvironment();
+
+    const args = process.argv.slice(3);
+    let prUrl: string | undefined;
+    let noPush = false;
+    let verbose = false;
+
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--no-push") {
+        noPush = true;
+      } else if (args[i] === "-v" || args[i] === "--verbose") {
+        verbose = true;
+      } else if (args[i] === "--help" || args[i] === "-h") {
+        console.log("Usage: devintern resolve-conflicts <pr-url> [options]");
+        console.log("");
+        console.log("Merge the PR's base branch into its branch, resolving merge");
+        console.log("conflicts with the agent when needed, then push (never forced).");
+        console.log("");
+        console.log("Arguments:");
+        console.log(
+          "  pr-url         GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)",
+        );
+        console.log("");
+        console.log("Options:");
+        console.log("  --no-push      Resolve and commit locally but don't push");
+        console.log("  -v, --verbose  Enable verbose logging");
+        console.log("  -h, --help     Display this help message");
+        process.exit(0);
+      } else if (!args[i].startsWith("-")) {
+        prUrl = args[i];
+      }
+    }
+
+    if (!prUrl) {
+      console.error("❌ Error: PR URL is required");
+      console.error("");
+      console.error("Usage: devintern resolve-conflicts <pr-url>");
+      process.exit(1);
+    }
+
+    const { resolveConflictsOnPr } = await import("./lib/conflict-resolver");
+    try {
+      const result = await resolveConflictsOnPr(prUrl, { noPush, verbose });
+      if (result.outcome === "skipped") {
+        console.log(`⏭️  Skipped: ${result.message}`);
+      }
+      process.exit(result.outcome === "failed" ? 1 : 0);
+    } catch (error) {
       console.error(`❌ Error: ${(error as Error).message}`);
       process.exit(1);
     }
@@ -549,6 +1038,37 @@ if (process.argv[2] === "init") {
     await logout(supabaseConfig);
     console.log("✅ Signed out");
     process.exit(0);
+  })();
+} else if (process.argv[2] === "sandbox") {
+  // Doctor command: providers on this machine, remaining setup steps, and
+  // what the next run will do with the current configuration.
+  (async () => {
+    loadedEnvPath = loadEnvironment();
+    const detections = await detectSandboxProviders();
+    const configured = process.env.AGENT_SANDBOX || "none";
+    // Attribute the value to the .env file only when that file actually sets
+    // it; dotenv merges into process.env, so the two are indistinguishable
+    // after loading.
+    const envFileSetsIt = (() => {
+      try {
+        return loadedEnvPath
+          ? /^\s*AGENT_SANDBOX\s*=/m.test(readFileSync(loadedEnvPath, "utf-8"))
+          : false;
+      } catch {
+        return false;
+      }
+    })();
+    const configuredSource = process.env.AGENT_SANDBOX
+      ? envFileSetsIt
+        ? (loadedEnvPath as string)
+        : "environment"
+      : "default";
+    const harnessName = resolveHarness().harness.name;
+    const report = buildSandboxDoctorReport(detections, configured, configuredSource, harnessName);
+    console.log(report.lines.join("\n"));
+    // Non-zero exit when the configured provider guarantees a failed run, so
+    // scripts and CI can gate on 'devintern sandbox'.
+    process.exit(report.nextRunFails ? 1 : 0);
   })();
 } else if (process.argv[2] === "whoami") {
   (async () => {
@@ -606,11 +1126,19 @@ program
   .option("--auto-review", "Run automatic PR review loop after creating PR (requires --create-pr)")
   .option("--auto-review-iterations <number>", "Maximum iterations for auto-review loop", "5")
   .option("--skip-comments", "Skip posting comments to the task tracker (for testing)")
+  .option(
+    "--force",
+    "Re-run a task even if a previous attempt was reported incomplete and the ticket is unchanged",
+  )
   .addOption(new Option("--skip-jira-comments", "Skip posting comments to JIRA").hideHelp())
   .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
   .option(
     "--estimate",
     "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub posts comment-only estimates)",
+  )
+  .option(
+    "--sandbox <provider>",
+    "Run the agent inside a sandbox: none | auto | native | nono | srt | docker | smolvm (overrides AGENT_SANDBOX; run 'devintern sandbox' to see what is available)",
   );
 
 program.addHelpText(
@@ -660,25 +1188,44 @@ Subcommands:
   init                 Initialize .devintern-code configuration in current directory
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
-  serve                Start the webhook server to address PR review feedback
+  worker               Run the worker daemon (webhook listener via --listen);
+                       'worker init' runs a guided server-automation setup
+  dashboard            Serve the local observability dashboard (run history and stats)
+  serve                Deprecated alias for 'worker --listen'
   address-review       Address review feedback on an existing pull request
+  resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
+  sandbox              Sandbox doctor: providers, remaining setup steps, and what
+                       the next run will do (exit 1 if it would fail)
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`,
 );
 
 // Only parse with Commander if we're not running a subcommand
-const isSubcommand = ["init", "serve", "address-review", "login", "logout", "whoami"].includes(
-  process.argv[2],
-);
+const isSubcommand = [
+  "init",
+  "worker",
+  "dashboard",
+  "serve",
+  "address-review",
+  "resolve-conflicts",
+  "login",
+  "logout",
+  "whoami",
+  "sandbox",
+].includes(process.argv[2]);
 if (!isSubcommand) {
   program.parse();
 }
 
 const options = isSubcommand ? ({} as ProgramOptions) : program.opts<ProgramOptions>();
 const taskKeys = isSubcommand ? [] : program.args;
+
+if (options.sandbox) {
+  setSandboxOverride(options.sandbox);
+}
 
 // Map deprecated options to their canonical equivalents
 if (options.jql && !options.query) {
@@ -784,24 +1331,34 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     const projectSettings = loadProjectSettings();
     const projectKey = resolveProjectKey(workflowKey, task);
 
-    // Check if incomplete implementation comment exists with unchanged description
-    // If so, skip processing to avoid redundant work
-    if (!options.skipComments && !isMarkdownTaskTracker(tracker)) {
+    // Fetch comments before the retry gate: a new comment since the last
+    // incomplete attempt counts as a clarification and unlocks a retry.
+    if (!isMarkdownTaskTracker(tracker)) {
+      console.log("💬 Fetching comments...");
+    }
+    const comments = await tracker.getComments(workflowKey);
+    if (!isMarkdownTaskTracker(tracker)) {
+      console.log(`✅ Successfully fetched ${comments.length} comments`);
+    }
+
+    // Retry gate: skip only when a previous attempt was reported incomplete
+    // and nothing about the ticket has changed since (see lib/retry-gate.ts).
+    const descriptionText = tracker.extractDescriptionText(task);
+    const priorRetryState = isMarkdownTaskTracker(tracker) ? null : getRetryState(workflowKey);
+    if (!isMarkdownTaskTracker(tracker)) {
       console.log("🔍 Checking for previous incomplete implementation attempts...");
 
-      const descriptionText = tracker.extractDescriptionText(task);
+      const decision = await shouldSkipRetry({
+        taskKey: workflowKey,
+        state: priorRetryState,
+        description: descriptionText,
+        comments,
+        tracker,
+        force: options.force,
+      });
 
-      const hasDuplicate = await tracker.hasIncompleteImplementationComment(
-        workflowKey,
-        descriptionText,
-      );
-
-      if (hasDuplicate) {
-        console.log(
-          `\n⏭️  Skipping ${workflowKey} - incomplete implementation comment already exists`,
-        );
-        console.log("   Task description hasn't changed since last incomplete attempt");
-        console.log("   Please update the task description with more details before retrying");
+      if (decision.skip) {
+        console.log(`\n⏭️  Skipping ${workflowKey} - ${decision.reason}`);
         console.log();
 
         // For batch processing, just return to continue with next task
@@ -815,18 +1372,18 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
         }
         process.exit(0);
       }
+
+      if (priorRetryState) {
+        console.log(`🔁 Retrying ${workflowKey}: ${decision.reason}`);
+      }
     }
 
-    if (!isMarkdownTaskTracker(tracker)) {
-      if (options.verbose) {
-        console.log("💬 Fetching comments...");
-      }
-      console.log("💬 Fetching comments...");
-    }
-    const comments = await tracker.getComments(workflowKey);
-    if (!isMarkdownTaskTracker(tracker)) {
-      console.log(`✅ Successfully fetched ${comments.length} comments`);
-    }
+    // Structured run record for this attempt (skips above are not attempts).
+    beginRun({
+      origin: "task",
+      taskKey: workflowKey,
+      tracker: process.env.TASK_TRACKER || "jira",
+    });
 
     if (!isMarkdownTaskTracker(tracker)) {
       if (options.verbose) {
@@ -915,7 +1472,6 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // This allows per-task branch targeting via patterns like "Target branch: develop"
     // Falls back to --pr-target-branch CLI option (default: main)
     let effectiveTargetBranch = options.prTargetBranch;
-    const descriptionText = tracker.extractDescriptionText(task);
     const extractedBranch = Utils.extractTargetBranch(descriptionText);
 
     if (extractedBranch) {
@@ -958,7 +1514,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     // Create unified task-specific directory structure
-    const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
+    const baseOutputDir = resolveOutputDir();
     const taskDir = join(baseOutputDir, workflowKey.toLowerCase());
     const taskFileName = "task-details.md";
 
@@ -1021,11 +1577,32 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.log(`\n💾 Saved task details to: ${outputFile}`);
     } else {
       console.log(`\n💾 Saving formatted task details to: ${outputFile}`);
+
+      // On a retry, tell the agent it is a retry, why the last attempt
+      // stopped, and which comments arrived since.
+      let retryContext: RetryPromptContext | undefined;
+      if (priorRetryState) {
+        retryContext = {
+          attempt: priorRetryState.attemptCount + 1,
+          newSinceMs: priorRetryState.reportedAt,
+        };
+        try {
+          const lastRun = new RunStore()
+            .listRuns({ taskKey: workflowKey, limit: 10 })
+            .find((run) => run.status === "escalated" || run.status === "failed");
+          retryContext.previousFailureSummary = lastRun?.outcomeReason;
+        } catch {
+          // Prompt context only — proceed without it.
+        }
+      }
+
       TaskFormatter.saveFormattedTask(
         taskDetails,
         outputFile,
         process.env.JIRA_BASE_URL!,
         attachmentMap,
+        undefined,
+        retryContext,
       );
     }
 
@@ -1053,6 +1630,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.error(`   devintern ${taskKey} --no-git`);
         }
 
+        endRun("abandoned", "feature branch creation failed");
         // Release lock before exiting
         if (lockManager) {
           lockManager.release();
@@ -1096,12 +1674,19 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           ),
         );
 
+        recordRunStage("feasibility", {
+          status: assessment ? (assessment.isImplementable ? "succeeded" : "failed") : "skipped",
+          summary: assessment?.summary,
+          detail: assessment ?? undefined,
+        });
+
         if (assessment && !assessment.isImplementable) {
           if (totalTasks > 1) {
             console.log(
               `\n⚠️  Task ${workflowKey} failed clarity assessment but continuing with batch processing...`,
             );
           } else {
+            endRun("abandoned", "failed feasibility assessment");
             if (lockManager) {
               lockManager.release();
             }
@@ -1117,6 +1702,10 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           }
         }
       } catch (clarityError) {
+        recordRunStage("feasibility", {
+          status: "failed",
+          summary: `assessment errored: ${(clarityError as Error).message}`,
+        });
         console.warn("⚠️  Feasibility check failed, continuing with implementation:", clarityError);
         console.log("   You can skip feasibility checks with --skip-clarity-check");
 
@@ -1188,6 +1777,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     console.log(`\n🤖 Running ${resolvedAgent.harness.displayName} with task details...`);
+    const implementationStartedAt = Date.now();
     await runAgentHarness(
       outputFile,
       resolvedAgent.harness,
@@ -1208,13 +1798,57 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       Number.parseInt(options.autoReviewIterations),
     );
 
+    // An incomplete-summary file written during this run means the agent
+    // stopped short and handed back to a human (mtime check guards against
+    // stale files from earlier attempts in the same task directory).
+    const incompleteSummaryPath = join(taskDir, "implementation-summary-incomplete.md");
+    const implementationIncomplete =
+      existsSync(incompleteSummaryPath) &&
+      statSync(incompleteSummaryPath).mtimeMs >= implementationStartedAt;
+
+    // Persist the agent's own report (implementation-summary[-incomplete].md)
+    // in the run record: the output directory is an ephemeral debug artifact,
+    // and for escalated runs this text is the "why" a human needs.
+    const REPORT_EXCERPT_LENGTH = 10_000;
+    const reportPath = implementationIncomplete
+      ? incompleteSummaryPath
+      : join(taskDir, "implementation-summary.md");
+    let implementationReport: string | undefined;
+    try {
+      if (existsSync(reportPath) && statSync(reportPath).mtimeMs >= implementationStartedAt) {
+        implementationReport = readFileSync(reportPath, "utf8").slice(0, REPORT_EXCERPT_LENGTH);
+      }
+    } catch {
+      /* best-effort: recording must never fail a run */
+    }
+
+    recordRunStage("implementation", {
+      status: implementationIncomplete ? "failed" : "succeeded",
+      summary: implementationIncomplete
+        ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
+        : `implemented with ${resolvedAgent.harness.displayName}`,
+      detail: {
+        harness: resolvedAgent.harness.displayName,
+        durationMs: Date.now() - implementationStartedAt,
+        ...(implementationReport === undefined ? {} : { report: implementationReport }),
+      },
+    });
+
     if (isMarkdownTaskTracker(tracker)) {
       await tracker.markDoneIfSuccessful(workflowKey, taskDir);
+    }
+    if (implementationIncomplete) {
+      endRun("escalated", "implementation incomplete; handed back to a human");
+    } else {
+      endRun("succeeded");
+      // A later reopen of the ticket starts with a clean retry slate.
+      clearRetryState(workflowKey);
     }
   } catch (error) {
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
+      endRun("deferred", error.message);
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       if (totalTasks > 1) {
         throw error;
@@ -1226,6 +1860,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     const err = error as Error;
+    endRun("failed", err.message);
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
     console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
     if (options.verbose && err.stack) {
@@ -1630,259 +2265,261 @@ async function runClarityCheck(
   });
 
   return new Promise((resolve, reject) => {
-    // Check if clarity file exists
-    if (!existsSync(clarityFile)) {
-      reject(new Error(`Clarity assessment file not found: ${clarityFile}`));
-      return;
-    }
-
-    // Read the clarity assessment content
-    const clarityContent = readFileSync(clarityFile, "utf8");
-
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-
-    const clarityArgs = harness.buildArgs(runOptions);
-    console.log(`🔍 Running feasibility assessment with ${harness.displayName}...`);
-    console.log(`   Command: ${executablePath} ${clarityArgs.join(" ")}`);
-    console.log(`   Input: ${clarityFile}`);
-
-    let stdoutOutput = "";
-    let stderrOutput = "";
-    let timedOut = false;
-
-    // Spawn agent process for clarity check
-    const clarityAgent: ChildProcess = spawnReapable(
-      resolvedPath,
-      [...clarityArgs, ...buildPromptArgs(harness, clarityContent)],
-      {
-        // Prompt goes on argv (via promptFlag when the harness defines one);
-        // stdin stays closed so TUI-first CLIs (grok, kimi, antigravity/agy) don't try
-        // to go interactive, and opencode doesn't block waiting for EOF.
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(clarityAgent, "SIGTERM");
-        setTimeout(() => {
-          if (!clarityAgent.killed) {
-            reapTree(clarityAgent, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
-
-    // Capture stdout for parsing JSON response
-    if (clarityAgent.stdout) {
-      clarityAgent.stdout.on("data", (data: Buffer) => {
-        stdoutOutput += data.toString();
-      });
-    }
-
-    // Capture stderr for error handling
-    if (clarityAgent.stderr) {
-      clarityAgent.stderr.on("data", (data: Buffer) => {
-        stderrOutput += data.toString();
-      });
-    }
-
-    // Handle errors
-    clarityAgent.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timeout);
-      if (error.code === "ENOENT") {
-        reject(
-          new Error(
-            `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
-          ),
-        );
-      } else {
-        reject(new Error(`Failed to run ${harness.displayName} clarity check: ${error.message}`));
-      }
-    });
-
-    // Handle process exit
-    clarityAgent.on("close", async (code: number | null) => {
-      clearTimeout(timeout);
-      if (timedOut) {
-        reject(
-          new Error(
-            `${harness.displayName} clarity check timed out after ${timeoutMinutes} minutes`,
-          ),
-        );
+    (async () => {
+      // Check if clarity file exists
+      if (!existsSync(clarityFile)) {
+        reject(new Error(`Clarity assessment file not found: ${clarityFile}`));
         return;
       }
-      if (code === 0) {
-        try {
-          // Parse the JSON response from agent
-          const assessment = parseClarityResponse(stdoutOutput);
 
-          // Save assessment results to task directory for debugging
-          try {
-            const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-            const taskDir = join(baseOutputDir, taskKey.toLowerCase());
-            const assessmentResultFile = join(taskDir, "feasibility-assessment.md");
+      // Read the clarity assessment content
+      const clarityContent = readFileSync(clarityFile, "utf8");
 
-            // Format assessment as readable markdown
-            let assessmentContent = `# Feasibility Assessment Results\n\n`;
-            assessmentContent += `**Status**: ${assessment.isImplementable ? "✅ Implementable" : "❌ Not Implementable"}\n`;
-            assessmentContent += `**Clarity Score**: ${assessment.clarityScore}/10\n\n`;
-            assessmentContent += `## Summary\n\n${assessment.summary}\n\n`;
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-            if (assessment.issues.length > 0) {
-              assessmentContent += `## Issues\n\n`;
-              assessment.issues.forEach((issue) => {
-                const severityIcon =
-                  issue.severity === "critical" ? "🔴" : issue.severity === "major" ? "🟡" : "🔵";
-                assessmentContent += `### ${severityIcon} ${issue.category} (${issue.severity})\n\n`;
-                assessmentContent += `${issue.description}\n\n`;
-              });
+      const clarityArgs = harness.buildArgs(runOptions);
+      console.log(`🔍 Running feasibility assessment with ${harness.displayName}...`);
+      console.log(`   Command: ${executablePath} ${clarityArgs.join(" ")}`);
+      console.log(`   Input: ${clarityFile}`);
+
+      let stdoutOutput = "";
+      let stderrOutput = "";
+      let timedOut = false;
+
+      // Spawn agent process for clarity check
+      const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: [...clarityArgs, ...buildPromptArgs(harness, clarityContent)],
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
+      });
+
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
+          );
+          reapTree(clarityAgent, "SIGTERM");
+          setTimeout(() => {
+            if (!clarityAgent.killed) {
+              reapTree(clarityAgent, "SIGKILL");
             }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
 
-            if (assessment.recommendations.length > 0) {
-              assessmentContent += `## Recommendations\n\n`;
-              assessment.recommendations.forEach((rec, index) => {
-                assessmentContent += `${index + 1}. ${rec}\n`;
-              });
-              assessmentContent += `\n`;
-            }
-
-            // Also save raw JSON for programmatic access
-            assessmentContent += `## Raw JSON\n\n\`\`\`json\n${JSON.stringify(assessment, null, 2)}\n\`\`\`\n`;
-
-            writeFileSync(assessmentResultFile, assessmentContent, "utf8");
-            console.log(`\n💾 Saved feasibility assessment to: ${assessmentResultFile}`);
-          } catch (saveError) {
-            console.warn(`⚠️  Failed to save feasibility assessment: ${saveError}`);
-          }
-
-          if (assessment.isImplementable) {
-            console.log("\n✅ Task feasibility assessment passed");
-            console.log(`📊 Clarity Score: ${assessment.clarityScore}/10 (threshold: 4/10)`);
-            console.log(`📝 Summary: ${assessment.summary}`);
-            if (assessment.clarityScore < 7) {
-              console.log("💡 Note: Some details may need to be inferred from existing codebase");
-            }
-
-            // Post successful assessment to task tracker as well for feedback
-            if (tracker && !skipComments) {
-              console.log("\n💬 Posting feasibility assessment to task tracker...");
-              await postClarityComment(tracker, taskKey, assessment);
-            } else {
-              console.log("\n⏭️  Skipping feasibility assessment comment (--skip-comments)");
-            }
-          } else {
-            console.log("\n❌ Task feasibility assessment failed");
-            console.log(`📊 Clarity Score: ${assessment.clarityScore}/10 (threshold: 4/10)`);
-            console.log(`📝 Summary: ${assessment.summary}`);
-
-            if (assessment.issues.length > 0) {
-              console.log("\n🚨 Critical issues identified:");
-              assessment.issues.forEach((issue) => {
-                const severityIcon =
-                  issue.severity === "critical" ? "🔴" : issue.severity === "major" ? "🟡" : "🔵";
-                console.log(`   ${severityIcon} ${issue.category}: ${issue.description}`);
-              });
-            }
-
-            if (assessment.recommendations.length > 0) {
-              console.log("\n💡 Recommendations:");
-              assessment.recommendations.forEach((rec, index) => {
-                console.log(`   ${index + 1}. ${rec}`);
-              });
-            }
-
-            // Post comment to task tracker with clarity issues
-            if (tracker && !skipComments) {
-              await postClarityComment(tracker, taskKey, assessment);
-            } else {
-              console.log("\n⏭️  Skipping failed assessment comment (--skip-comments)");
-            }
-
-            console.log("\n🛑 Stopping execution - fundamental requirements unclear");
-            console.log("   Please address the critical issues and run again");
-            console.log("   Or use --skip-clarity-check to bypass this assessment");
-          }
-
-          resolve(assessment);
-        } catch (parseError) {
-          // In read-only mode, unusable output may be the mode's fault (e.g.
-          // grok plan mode returning empty stdout with exit 0). Reject before
-          // posting failure comments so the fallback can retry in default mode.
-          if (isConstrainedMode(runOptions.mode)) {
-            reject(
-              new ReadonlyAnalysisError(`Clarity output unusable in read-only mode: ${parseError}`),
-            );
-            return;
-          }
-          console.warn("Failed to parse clarity assessment response:", parseError);
-          console.log("Raw Agent output:", stdoutOutput);
-
-          // Save failed assessment output for debugging
-          try {
-            const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-            const taskDir = join(baseOutputDir, taskKey.toLowerCase());
-            const failedAssessmentFile = join(taskDir, "feasibility-assessment-failed.txt");
-
-            writeFileSync(failedAssessmentFile, stdoutOutput, "utf8");
-            console.log(`\n💾 Saved failed assessment output to: ${failedAssessmentFile}`);
-          } catch (saveError) {
-            console.warn(`⚠️  Failed to save assessment output: ${saveError}`);
-          }
-
-          // Check if Agent reached max turns or had other issues
-          if (detectMaxTurnsReached(stdoutOutput, stderrOutput)) {
-            console.log("\n⚠️  Clarity assessment reached maximum conversation turns");
-            console.log("   This may indicate task complexity or insufficient details");
-            if (!skipComments) {
-              console.log(
-                "   Will attempt to proceed with implementation but posting failure to task tracker...\n",
-              );
-
-              // Post assessment failure to task tracker
-              try {
-                if (tracker)
-                  await postAssessmentFailure(tracker, taskKey, "max-turns", stdoutOutput);
-              } catch (trackerError) {
-                console.warn("Failed to post assessment failure to task tracker:", trackerError);
-              }
-            } else {
-              console.log(
-                "   Will attempt to proceed with implementation (skipping tracker comment)...\n",
-              );
-            }
-          } else {
-            console.log("\n⚠️  Could not parse clarity assessment response");
-            if (!skipComments) {
-              console.log(
-                "   Will attempt to proceed with implementation but posting failure to task tracker...\n",
-              );
-
-              // Post assessment failure to task tracker
-              try {
-                if (tracker)
-                  await postAssessmentFailure(tracker, taskKey, "parse-error", stdoutOutput);
-              } catch (trackerError) {
-                console.warn("Failed to post assessment failure to task tracker:", trackerError);
-              }
-            } else {
-              console.log(
-                "   Will attempt to proceed with implementation (skipping tracker comment)...\n",
-              );
-            }
-          }
-
-          resolve(null); // Continue with implementation if parsing fails
-        }
-      } else {
-        reject(new Error(`Agent clarity check exited with code ${code}`));
+      // Capture stdout for parsing JSON response
+      if (clarityAgent.stdout) {
+        clarityAgent.stdout.on("data", (data: Buffer) => {
+          stdoutOutput += data.toString();
+        });
       }
-    });
+
+      // Capture stderr for error handling
+      if (clarityAgent.stderr) {
+        clarityAgent.stderr.on("data", (data: Buffer) => {
+          stderrOutput += data.toString();
+        });
+      }
+
+      // Handle errors
+      clarityAgent.on("error", (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeout);
+        if (error.code === "ENOENT") {
+          reject(
+            new Error(
+              `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+            ),
+          );
+        } else {
+          reject(new Error(`Failed to run ${harness.displayName} clarity check: ${error.message}`));
+        }
+      });
+
+      // Handle process exit
+      clarityAgent.on("close", async (code: number | null) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+        if (timedOut) {
+          reject(
+            new Error(
+              `${harness.displayName} clarity check timed out after ${timeoutMinutes} minutes`,
+            ),
+          );
+          return;
+        }
+        if (code === 0) {
+          try {
+            // Parse the JSON response from agent
+            const assessment = parseClarityResponse(stdoutOutput);
+
+            // Save assessment results to task directory for debugging
+            try {
+              const baseOutputDir = resolveOutputDir();
+              const taskDir = join(baseOutputDir, taskKey.toLowerCase());
+              const assessmentResultFile = join(taskDir, "feasibility-assessment.md");
+
+              // Format assessment as readable markdown
+              let assessmentContent = `# Feasibility Assessment Results\n\n`;
+              assessmentContent += `**Status**: ${assessment.isImplementable ? "✅ Implementable" : "❌ Not Implementable"}\n`;
+              assessmentContent += `**Clarity Score**: ${assessment.clarityScore}/10\n\n`;
+              assessmentContent += `## Summary\n\n${assessment.summary}\n\n`;
+
+              if (assessment.issues.length > 0) {
+                assessmentContent += `## Issues\n\n`;
+                assessment.issues.forEach((issue) => {
+                  const severityIcon =
+                    issue.severity === "critical" ? "🔴" : issue.severity === "major" ? "🟡" : "🔵";
+                  assessmentContent += `### ${severityIcon} ${issue.category} (${issue.severity})\n\n`;
+                  assessmentContent += `${issue.description}\n\n`;
+                });
+              }
+
+              if (assessment.recommendations.length > 0) {
+                assessmentContent += `## Recommendations\n\n`;
+                assessment.recommendations.forEach((rec, index) => {
+                  assessmentContent += `${index + 1}. ${rec}\n`;
+                });
+                assessmentContent += `\n`;
+              }
+
+              // Also save raw JSON for programmatic access
+              assessmentContent += `## Raw JSON\n\n\`\`\`json\n${JSON.stringify(assessment, null, 2)}\n\`\`\`\n`;
+
+              writeFileSync(assessmentResultFile, assessmentContent, "utf8");
+              console.log(`\n💾 Saved feasibility assessment to: ${assessmentResultFile}`);
+            } catch (saveError) {
+              console.warn(`⚠️  Failed to save feasibility assessment: ${saveError}`);
+            }
+
+            if (assessment.isImplementable) {
+              console.log("\n✅ Task feasibility assessment passed");
+              console.log(`📊 Clarity Score: ${assessment.clarityScore}/10 (threshold: 4/10)`);
+              console.log(`📝 Summary: ${assessment.summary}`);
+              if (assessment.clarityScore < 7) {
+                console.log("💡 Note: Some details may need to be inferred from existing codebase");
+              }
+
+              // Post successful assessment to task tracker as well for feedback
+              if (tracker && !skipComments) {
+                console.log("\n💬 Posting feasibility assessment to task tracker...");
+                await postClarityComment(tracker, taskKey, assessment);
+              } else {
+                console.log("\n⏭️  Skipping feasibility assessment comment (--skip-comments)");
+              }
+            } else {
+              console.log("\n❌ Task feasibility assessment failed");
+              console.log(`📊 Clarity Score: ${assessment.clarityScore}/10 (threshold: 4/10)`);
+              console.log(`📝 Summary: ${assessment.summary}`);
+
+              if (assessment.issues.length > 0) {
+                console.log("\n🚨 Critical issues identified:");
+                assessment.issues.forEach((issue) => {
+                  const severityIcon =
+                    issue.severity === "critical" ? "🔴" : issue.severity === "major" ? "🟡" : "🔵";
+                  console.log(`   ${severityIcon} ${issue.category}: ${issue.description}`);
+                });
+              }
+
+              if (assessment.recommendations.length > 0) {
+                console.log("\n💡 Recommendations:");
+                assessment.recommendations.forEach((rec, index) => {
+                  console.log(`   ${index + 1}. ${rec}`);
+                });
+              }
+
+              // Post comment to task tracker with clarity issues
+              if (tracker && !skipComments) {
+                await postClarityComment(tracker, taskKey, assessment);
+              } else {
+                console.log("\n⏭️  Skipping failed assessment comment (--skip-comments)");
+              }
+
+              console.log("\n🛑 Stopping execution - fundamental requirements unclear");
+              console.log("   Please address the critical issues and run again");
+              console.log("   Or use --skip-clarity-check to bypass this assessment");
+            }
+
+            resolve(assessment);
+          } catch (parseError) {
+            // In read-only mode, unusable output may be the mode's fault (e.g.
+            // grok plan mode returning empty stdout with exit 0). Reject before
+            // posting failure comments so the fallback can retry in default mode.
+            if (isConstrainedMode(runOptions.mode)) {
+              reject(
+                new ReadonlyAnalysisError(
+                  `Clarity output unusable in read-only mode: ${parseError}`,
+                ),
+              );
+              return;
+            }
+            console.warn("Failed to parse clarity assessment response:", parseError);
+            console.log("Raw Agent output:", stdoutOutput);
+
+            // Save failed assessment output for debugging
+            try {
+              const baseOutputDir = resolveOutputDir();
+              const taskDir = join(baseOutputDir, taskKey.toLowerCase());
+              const failedAssessmentFile = join(taskDir, "feasibility-assessment-failed.txt");
+
+              writeFileSync(failedAssessmentFile, stdoutOutput, "utf8");
+              console.log(`\n💾 Saved failed assessment output to: ${failedAssessmentFile}`);
+            } catch (saveError) {
+              console.warn(`⚠️  Failed to save assessment output: ${saveError}`);
+            }
+
+            // Check if Agent reached max turns or had other issues
+            if (detectMaxTurnsReached(stdoutOutput, stderrOutput)) {
+              console.log("\n⚠️  Clarity assessment reached maximum conversation turns");
+              console.log("   This may indicate task complexity or insufficient details");
+              if (!skipComments) {
+                console.log(
+                  "   Will attempt to proceed with implementation but posting failure to task tracker...\n",
+                );
+
+                // Post assessment failure to task tracker
+                try {
+                  if (tracker)
+                    await postAssessmentFailure(tracker, taskKey, "max-turns", stdoutOutput);
+                } catch (trackerError) {
+                  console.warn("Failed to post assessment failure to task tracker:", trackerError);
+                }
+              } else {
+                console.log(
+                  "   Will attempt to proceed with implementation (skipping tracker comment)...\n",
+                );
+              }
+            } else {
+              console.log("\n⚠️  Could not parse clarity assessment response");
+              if (!skipComments) {
+                console.log(
+                  "   Will attempt to proceed with implementation but posting failure to task tracker...\n",
+                );
+
+                // Post assessment failure to task tracker
+                try {
+                  if (tracker)
+                    await postAssessmentFailure(tracker, taskKey, "parse-error", stdoutOutput);
+                } catch (trackerError) {
+                  console.warn("Failed to post assessment failure to task tracker:", trackerError);
+                }
+              } else {
+                console.log(
+                  "   Will attempt to proceed with implementation (skipping tracker comment)...\n",
+                );
+              }
+            }
+
+            resolve(null); // Continue with implementation if parsing fails
+          }
+        } else {
+          reject(new Error(`Agent clarity check exited with code ${code}`));
+        }
+      });
+    })().catch(reject);
   });
 }
 
@@ -2019,185 +2656,188 @@ async function runEstimation(
   });
 
   return new Promise((resolve, reject) => {
-    if (!existsSync(estimationFile)) {
-      reject(new Error(`Estimation file not found: ${estimationFile}`));
-      return;
-    }
+    (async () => {
+      if (!existsSync(estimationFile)) {
+        reject(new Error(`Estimation file not found: ${estimationFile}`));
+        return;
+      }
 
-    const estimationContent = readFileSync(estimationFile, "utf8");
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
+      const estimationContent = readFileSync(estimationFile, "utf8");
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-    const estimationArgs = harness.buildArgs(runOptions);
-    console.log(`📊 Running story points estimation with ${harness.displayName}...`);
-    console.log(`   Command: ${executablePath} ${estimationArgs.join(" ")}`);
+      const estimationArgs = harness.buildArgs(runOptions);
+      console.log(`📊 Running story points estimation with ${harness.displayName}...`);
+      console.log(`   Command: ${executablePath} ${estimationArgs.join(" ")}`);
 
-    let stdoutOutput = "";
-    let stderrOutput = "";
-    let timedOut = false;
+      let stdoutOutput = "";
+      let stderrOutput = "";
+      let timedOut = false;
 
-    const estimationAgent: ChildProcess = spawnReapable(
-      resolvedPath,
-      [...estimationArgs, ...buildPromptArgs(harness, estimationContent)],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} estimation timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(estimationAgent, "SIGTERM");
-        setTimeout(() => {
-          if (!estimationAgent.killed) {
-            reapTree(estimationAgent, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
-
-    if (estimationAgent.stdout) {
-      estimationAgent.stdout.on("data", (data: Buffer) => {
-        stdoutOutput += data.toString();
+      const { child: estimationAgent, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: [...estimationArgs, ...buildPromptArgs(harness, estimationContent)],
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
       });
-    }
 
-    if (estimationAgent.stderr) {
-      estimationAgent.stderr.on("data", (data: Buffer) => {
-        stderrOutput += data.toString();
-      });
-    }
-
-    estimationAgent.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timeout);
-      if (error.code === "ENOENT") {
-        reject(
-          new Error(
-            `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
-          ),
-        );
-      } else {
-        reject(new Error(`Failed to run ${harness.displayName} estimation: ${error.message}`));
-      }
-    });
-
-    estimationAgent.on("close", async (code: number | null) => {
-      clearTimeout(timeout);
-
-      if (timedOut) {
-        reject(new Error(`Agent estimation timed out after ${timeoutMinutes} minutes`));
-        return;
-      }
-
-      const usage = detectUsageLimit(stdoutOutput, stderrOutput);
-      if (usage.limited) {
-        reject(new UsageLimitError(usage.resetsAt));
-        return;
-      }
-
-      if (code !== 0) {
-        reject(new Error(`Agent estimation exited with code ${code}`));
-        return;
-      }
-
-      try {
-        // Parse JSON from Agent's response
-        const result = parseEstimationResponse(stdoutOutput);
-
-        console.log(`\n📊 Estimation Result for ${taskKey}:`);
-        console.log(`   Story Points: ${result.storyPoints}`);
-        console.log(`   Confidence: ${result.confidence}`);
-        const implLabel =
-          result.implementationConfidence >= 9
-            ? "Almost certain"
-            : result.implementationConfidence >= 7
-              ? "High chance"
-              : result.implementationConfidence >= 5
-                ? "May need guidance"
-                : result.implementationConfidence >= 3
-                  ? "Significant ambiguity"
-                  : "Needs human judgment";
-        console.log(`   AI Can Implement: ${result.implementationConfidence}/10 — ${implLabel}`);
-        console.log(`   Summary: ${result.summary}`);
-
-        if (result.risks.length > 0) {
-          console.log(`   Risks: ${result.risks.join("; ")}`);
-        }
-        if (result.unclearAreas.length > 0) {
-          console.log(`   Unclear Areas: ${result.unclearAreas.join("; ")}`);
-        }
-
-        // Discover or use configured estimation field
-        const projectKey = taskKey.split("-")[0];
-        const configuredField = getStoryPointsFieldForProject(projectKey, settings);
-        if (configuredField) {
-          console.log(`📊 Using configured story points field: ${configuredField}`);
-        }
-        const fieldId = configuredField || (await tracker.discoverEstimationField(taskKey));
-
-        // Update story points
-        if (fieldId) {
-          try {
-            await tracker.updateEstimation(taskKey, fieldId, result.storyPoints);
-          } catch (updateError) {
-            console.warn(`⚠️  Failed to set story points field: ${updateError}`);
-          }
-        } else {
-          console.log("⚠️  No story points field found — skipping field update");
-          console.log(
-            '   Configure storyPointsField in .devintern-code/settings.json or ensure your tracker has a "Story Points" field',
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} estimation timed out after ${timeoutMinutes} minutes, killing...`,
           );
-        }
-
-        // Post or update estimation comment
-        if (!skipComments) {
-          try {
-            if (existingCommentId) {
-              await tracker.updateEstimationComment(taskKey, existingCommentId, result);
-            } else {
-              await tracker.postEstimationComment(taskKey, result);
+          reapTree(estimationAgent, "SIGTERM");
+          setTimeout(() => {
+            if (!estimationAgent.killed) {
+              reapTree(estimationAgent, "SIGKILL");
             }
-          } catch (commentError) {
-            console.warn(
-              `⚠️  Failed to ${existingCommentId ? "update" : "post"} estimation comment: ${commentError}`,
-            );
-          }
-        } else {
-          console.log("⏭️  Skipping estimation comment (--skip-comments)");
-        }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
 
-        // Save estimation result to task directory
-        try {
-          const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-          const taskDir = join(baseOutputDir, taskKey.toLowerCase());
-          mkdirSync(taskDir, { recursive: true });
-          const resultFile = join(taskDir, "estimation-result.json");
-          writeFileSync(resultFile, JSON.stringify(result, null, 2), "utf8");
-          console.log(`💾 Saved estimation result to: ${resultFile}`);
-        } catch (saveError) {
-          console.warn(`⚠️  Failed to save estimation result: ${saveError}`);
-        }
+      if (estimationAgent.stdout) {
+        estimationAgent.stdout.on("data", (data: Buffer) => {
+          stdoutOutput += data.toString();
+        });
+      }
 
-        resolve(result);
-      } catch (parseError) {
-        // See runClarityCheck: let the fallback retry read-only failures in
-        // default mode instead of counting the task as failed.
-        if (isConstrainedMode(runOptions.mode)) {
+      if (estimationAgent.stderr) {
+        estimationAgent.stderr.on("data", (data: Buffer) => {
+          stderrOutput += data.toString();
+        });
+      }
+
+      estimationAgent.on("error", (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeout);
+        if (error.code === "ENOENT") {
           reject(
-            new ReadonlyAnalysisError(
-              `Estimation output unusable in read-only mode: ${parseError}`,
+            new Error(
+              `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
             ),
           );
+        } else {
+          reject(new Error(`Failed to run ${harness.displayName} estimation: ${error.message}`));
+        }
+      });
+
+      estimationAgent.on("close", async (code: number | null) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+
+        if (timedOut) {
+          reject(new Error(`Agent estimation timed out after ${timeoutMinutes} minutes`));
           return;
         }
-        console.warn("Failed to parse estimation response:", parseError);
-        console.log("Raw Agent output:", stdoutOutput);
-        resolve(null);
-      }
-    });
+
+        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          reject(new UsageLimitError(usage.resetsAt));
+          return;
+        }
+
+        if (code !== 0) {
+          reject(new Error(`Agent estimation exited with code ${code}`));
+          return;
+        }
+
+        try {
+          // Parse JSON from Agent's response
+          const result = parseEstimationResponse(stdoutOutput);
+
+          console.log(`\n📊 Estimation Result for ${taskKey}:`);
+          console.log(`   Story Points: ${result.storyPoints}`);
+          console.log(`   Confidence: ${result.confidence}`);
+          const implLabel =
+            result.implementationConfidence >= 9
+              ? "Almost certain"
+              : result.implementationConfidence >= 7
+                ? "High chance"
+                : result.implementationConfidence >= 5
+                  ? "May need guidance"
+                  : result.implementationConfidence >= 3
+                    ? "Significant ambiguity"
+                    : "Needs human judgment";
+          console.log(`   AI Can Implement: ${result.implementationConfidence}/10 — ${implLabel}`);
+          console.log(`   Summary: ${result.summary}`);
+
+          if (result.risks.length > 0) {
+            console.log(`   Risks: ${result.risks.join("; ")}`);
+          }
+          if (result.unclearAreas.length > 0) {
+            console.log(`   Unclear Areas: ${result.unclearAreas.join("; ")}`);
+          }
+
+          // Discover or use configured estimation field
+          const projectKey = taskKey.split("-")[0];
+          const configuredField = getStoryPointsFieldForProject(projectKey, settings);
+          if (configuredField) {
+            console.log(`📊 Using configured story points field: ${configuredField}`);
+          }
+          const fieldId = configuredField || (await tracker.discoverEstimationField(taskKey));
+
+          // Update story points
+          if (fieldId) {
+            try {
+              await tracker.updateEstimation(taskKey, fieldId, result.storyPoints);
+            } catch (updateError) {
+              console.warn(`⚠️  Failed to set story points field: ${updateError}`);
+            }
+          } else {
+            console.log("⚠️  No story points field found — skipping field update");
+            console.log(
+              '   Configure storyPointsField in .devintern-code/settings.json or ensure your tracker has a "Story Points" field',
+            );
+          }
+
+          // Post or update estimation comment
+          if (!skipComments) {
+            try {
+              if (existingCommentId) {
+                await tracker.updateEstimationComment(taskKey, existingCommentId, result);
+              } else {
+                await tracker.postEstimationComment(taskKey, result);
+              }
+            } catch (commentError) {
+              console.warn(
+                `⚠️  Failed to ${existingCommentId ? "update" : "post"} estimation comment: ${commentError}`,
+              );
+            }
+          } else {
+            console.log("⏭️  Skipping estimation comment (--skip-comments)");
+          }
+
+          // Save estimation result to task directory
+          try {
+            const baseOutputDir = resolveOutputDir();
+            const taskDir = join(baseOutputDir, taskKey.toLowerCase());
+            mkdirSync(taskDir, { recursive: true });
+            const resultFile = join(taskDir, "estimation-result.json");
+            writeFileSync(resultFile, JSON.stringify(result, null, 2), "utf8");
+            console.log(`💾 Saved estimation result to: ${resultFile}`);
+          } catch (saveError) {
+            console.warn(`⚠️  Failed to save estimation result: ${saveError}`);
+          }
+
+          resolve(result);
+        } catch (parseError) {
+          // See runClarityCheck: let the fallback retry read-only failures in
+          // default mode instead of counting the task as failed.
+          if (isConstrainedMode(runOptions.mode)) {
+            reject(
+              new ReadonlyAnalysisError(
+                `Estimation output unusable in read-only mode: ${parseError}`,
+              ),
+            );
+            return;
+          }
+          console.warn("Failed to parse estimation response:", parseError);
+          console.log("Raw Agent output:", stdoutOutput);
+          resolve(null);
+        }
+      });
+    })().catch(reject);
   });
 }
 
@@ -2289,7 +2929,7 @@ function logHookErrorToFile(
   fixed: boolean,
 ): void {
   try {
-    const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
+    const baseOutputDir = resolveOutputDir();
     const taskDir = join(baseOutputDir, taskKey.toLowerCase());
     const hookErrorFile = join(taskDir, "git-hook-errors.log");
 
@@ -2465,148 +3105,239 @@ async function runAgentHarness(
   });
 
   return new Promise((resolve, reject) => {
-    // Check if task file exists
-    if (!existsSync(taskFile)) {
-      reject(new Error(`Task file not found: ${taskFile}`));
-      return;
-    }
-
-    // Load project settings
-    const projectSettings = loadProjectSettings();
-
-    // Read the task content
-    const taskContent = readFileSync(taskFile, "utf8");
-
-    const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-
-    const agentArgs = harness.buildArgs({
-      maxTurns,
-      skipPermissions: true,
-      workingDir: process.cwd(),
-    });
-    console.log(`🚀 Launching ${harness.displayName}...`);
-    console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
-    console.log(`   Input: ${taskFile}`);
-    console.log(`   Timeout: ${timeoutMinutes} minutes`);
-    console.log(
-      `   Output: All ${harness.displayName} output will be displayed below in real-time`,
-    );
-    console.log("\n" + "=".repeat(60));
-
-    // Capture stderr to detect max turns error and stdout for JIRA comment
-    let stderrOutput = "";
-    let stdoutOutput = "";
-    let timedOut = false;
-
-    // Spawn agent process with enhanced permissions and max turns
-    const codeAgent: ChildProcess = spawnReapable(
-      resolvedPath,
-      [...agentArgs, ...buildPromptArgs(harness, taskContent)],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        console.error(
-          `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
-        );
-        reapTree(codeAgent, "SIGTERM");
-        setTimeout(() => {
-          if (!codeAgent.killed) {
-            reapTree(codeAgent, "SIGKILL");
-          }
-        }, 10_000);
-      },
-      timeoutMinutes * 60 * 1000,
-    );
-
-    // Capture and display stdout output
-    if (codeAgent.stdout) {
-      codeAgent.stdout.on("data", (data: Buffer) => {
-        const output = data.toString();
-        stdoutOutput += output;
-        process.stdout.write(output);
-      });
-    }
-
-    // Capture stderr output for error detection while ensuring it's visible to user
-    if (codeAgent.stderr) {
-      codeAgent.stderr.on("data", (data: Buffer) => {
-        const output = data.toString();
-        stderrOutput += output;
-        process.stderr.write(output);
-      });
-    }
-
-    // Handle errors
-    codeAgent.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timeout);
-      if (error.code === "ENOENT") {
-        reject(
-          new Error(
-            `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
-          ),
-        );
-      } else {
-        reject(new Error(`Failed to run ${harness.displayName}: ${error.message}`));
+    (async () => {
+      // Check if task file exists
+      if (!existsSync(taskFile)) {
+        reject(new Error(`Task file not found: ${taskFile}`));
+        return;
       }
-    });
 
-    // Handle process exit
-    codeAgent.on("close", async (code: number | null) => {
-      clearTimeout(timeout);
+      // Load project settings
+      const projectSettings = loadProjectSettings();
+
+      // Read the task content
+      const taskContent = readFileSync(taskFile, "utf8");
+
+      const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
+
+      const agentArgs = harness.buildArgs({
+        maxTurns,
+        skipPermissions: true,
+        workingDir: process.cwd(),
+      });
+      console.log(`🚀 Launching ${harness.displayName}...`);
+      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
+      console.log(`   Input: ${taskFile}`);
+      console.log(`   Timeout: ${timeoutMinutes} minutes`);
+      console.log(
+        `   Output: All ${harness.displayName} output will be displayed below in real-time`,
+      );
       console.log("\n" + "=".repeat(60));
 
-      if (timedOut) {
-        console.log(`⏰ ${harness.displayName} timed out after ${timeoutMinutes} minutes`);
-        reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
-        return;
+      // Capture stderr to detect max turns error and stdout for JIRA comment
+      let stderrOutput = "";
+      let stdoutOutput = "";
+      let timedOut = false;
+
+      // Spawn agent process with enhanced permissions and max turns
+      const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
+        resolvedPath,
+        args: [...agentArgs, ...buildPromptArgs(harness, taskContent)],
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        sandbox: await getSandbox(harness.name),
+      });
+
+      const timeout = setTimeout(
+        () => {
+          timedOut = true;
+          console.error(
+            `\n⏰ ${harness.displayName} process timed out after ${timeoutMinutes} minutes, killing...`,
+          );
+          reapTree(codeAgent, "SIGTERM");
+          setTimeout(() => {
+            if (!codeAgent.killed) {
+              reapTree(codeAgent, "SIGKILL");
+            }
+            sandboxCleanup().catch(() => {});
+          }, 10_000);
+        },
+        timeoutMinutes * 60 * 1000,
+      );
+
+      // Capture and display stdout output
+      if (codeAgent.stdout) {
+        codeAgent.stdout.on("data", (data: Buffer) => {
+          const output = data.toString();
+          stdoutOutput += output;
+          process.stdout.write(output);
+        });
       }
 
-      // A usage/rate limit is account-global — abort the batch rather than
-      // treating this task as a normal failure (every other task would fail too).
-      const usage = detectUsageLimit(stdoutOutput, stderrOutput);
-      if (usage.limited) {
-        console.log(
-          `\n⏳ ${harness.displayName} hit a usage limit${
-            usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""
-          }`,
-        );
-        reject(new UsageLimitError(usage.resetsAt));
-        return;
+      // Capture stderr output for error detection while ensuring it's visible to user
+      if (codeAgent.stderr) {
+        codeAgent.stderr.on("data", (data: Buffer) => {
+          const output = data.toString();
+          stderrOutput += output;
+          process.stderr.write(output);
+        });
       }
 
-      const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+      // Handle errors
+      codeAgent.on("error", (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeout);
+        if (error.code === "ENOENT") {
+          reject(
+            new Error(
+              `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+            ),
+          );
+        } else {
+          reject(new Error(`Failed to run ${harness.displayName}: ${error.message}`));
+        }
+      });
 
-      if (maxTurnsReached) {
-        console.log("⚠️  Agent reached maximum turns limit without completing the task");
-        console.log("   The task may be too complex or require more turns to complete");
-        console.log("   Consider breaking it into smaller tasks or increasing the max-turns limit");
+      // Handle process exit
+      codeAgent.on("close", async (code: number | null) => {
+        clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
+        console.log("\n" + "=".repeat(60));
 
-        // Save incomplete implementation for analysis
-        if (taskKey && stdoutOutput.trim()) {
-          try {
-            const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-            const taskDir = join(baseOutputDir, taskKey.toLowerCase());
-            const summaryFile = join(taskDir, "implementation-summary-incomplete.md");
+        if (timedOut) {
+          console.log(`⏰ ${harness.displayName} timed out after ${timeoutMinutes} minutes`);
+          reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+          return;
+        }
 
-            writeFileSync(summaryFile, stdoutOutput, "utf8");
-            console.log(`\n💾 Saved incomplete implementation to: ${summaryFile}`);
+        // A usage/rate limit is account-global — abort the batch rather than
+        // treating this task as a normal failure (every other task would fail too).
+        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          console.log(
+            `\n⏳ ${harness.displayName} hit a usage limit${
+              usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""
+            }`,
+          );
+          reject(new UsageLimitError(usage.resetsAt));
+          return;
+        }
+
+        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+
+        if (maxTurnsReached) {
+          console.log("⚠️  Agent reached maximum turns limit without completing the task");
+          console.log("   The task may be too complex or require more turns to complete");
+          console.log(
+            "   Consider breaking it into smaller tasks or increasing the max-turns limit",
+          );
+
+          // Save incomplete implementation for analysis
+          if (taskKey && stdoutOutput.trim()) {
+            try {
+              const baseOutputDir = resolveOutputDir();
+              const taskDir = join(baseOutputDir, taskKey.toLowerCase());
+              const summaryFile = join(taskDir, "implementation-summary-incomplete.md");
+
+              writeFileSync(summaryFile, stdoutOutput, "utf8");
+              console.log(`\n💾 Saved incomplete implementation to: ${summaryFile}`);
+
+              // Post incomplete implementation comment (no duplicate check here
+              // since we already skip tasks with existing incomplete comments)
+              if (tracker && !skipComments && task) {
+                try {
+                  await tracker.postIncompleteImplementationComment(
+                    taskKey,
+                    stdoutOutput,
+                    taskSummary,
+                  );
+                  recordIncompleteAttempt(
+                    taskKey,
+                    process.env.TASK_TRACKER || "jira",
+                    tracker.extractDescriptionText(task),
+                  );
+                } catch (commentError) {
+                  console.warn(
+                    `⚠️  Failed to post incomplete implementation comment to JIRA: ${commentError}`,
+                  );
+                }
+              }
+
+              // Transition back to "To Do" status if configured
+              if (tracker && !skipComments && taskKey && projectSettings) {
+                const projectKey = resolveProjectKey(taskKey, task);
+                const todoStatus = getTodoStatusForProject(projectKey, projectSettings);
+                if (todoStatus && todoStatus.trim()) {
+                  try {
+                    console.log(
+                      `\n🔄 Moving ${taskKey} back to '${todoStatus}' due to max turns reached...`,
+                    );
+                    await tracker.transitionStatus(taskKey, todoStatus.trim());
+                    console.log(`✅ Task moved to '${todoStatus}'`);
+                  } catch (statusError) {
+                    console.warn(
+                      `⚠️  Failed to transition task to '${todoStatus}': ${
+                        (statusError as Error).message
+                      }`,
+                    );
+                  }
+                }
+              }
+            } catch (saveError) {
+              console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
+            }
+          }
+
+          console.log("\n⏭️  Skipping commit and moving to next task (if any)...");
+
+          // Resolve instead of reject to allow batch processing to continue
+          resolve();
+          return;
+        }
+
+        if (code === 0) {
+          // Even if exit code is 0, check if Agent actually completed meaningful work.
+          // Only inspect stdout: stderr often contains transient "Error:" lines from
+          // recovered tool failures (especially with Cursor CLI).
+          const { incomplete: seemsIncomplete, reasons: incompleteReasons } =
+            detectIncompleteImplementation(stdoutOutput);
+
+          // Save implementation summary to task directory (even if incomplete for analysis)
+          if (taskKey && stdoutOutput.trim()) {
+            try {
+              const baseOutputDir = resolveOutputDir();
+              const taskDir = join(baseOutputDir, taskKey.toLowerCase());
+              const summaryFile = join(
+                taskDir,
+                seemsIncomplete
+                  ? "implementation-summary-incomplete.md"
+                  : "implementation-summary.md",
+              );
+
+              writeFileSync(summaryFile, stdoutOutput, "utf8");
+              console.log(`\n💾 Saved implementation summary to: ${summaryFile}`);
+            } catch (saveError) {
+              console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
+            }
+          }
+
+          if (seemsIncomplete) {
+            console.log("⚠️  Agent execution completed but appears to be incomplete or failed");
+            console.log(`   Reasons: ${incompleteReasons.join("; ")}`);
+            console.log("   Check the output above for specific issues");
+            console.log("\n⏭️  Skipping commit and moving to next task (if any)...");
 
             // Post incomplete implementation comment (no duplicate check here
             // since we already skip tasks with existing incomplete comments)
-            if (tracker && !skipComments && task) {
+            if (tracker && !skipComments && taskKey && stdoutOutput.trim() && task) {
               try {
-                const descriptionText = tracker.extractDescriptionText(task);
-
                 await tracker.postIncompleteImplementationComment(
                   taskKey,
                   stdoutOutput,
                   taskSummary,
-                  descriptionText,
+                );
+                recordIncompleteAttempt(
+                  taskKey,
+                  process.env.TASK_TRACKER || "jira",
+                  tracker.extractDescriptionText(task),
                 );
               } catch (commentError) {
                 console.warn(
@@ -2622,7 +3353,7 @@ async function runAgentHarness(
               if (todoStatus && todoStatus.trim()) {
                 try {
                   console.log(
-                    `\n🔄 Moving ${taskKey} back to '${todoStatus}' due to max turns reached...`,
+                    `\n🔄 Moving ${taskKey} back to '${todoStatus}' due to incomplete implementation...`,
                   );
                   await tracker.transitionStatus(taskKey, todoStatus.trim());
                   console.log(`✅ Task moved to '${todoStatus}'`);
@@ -2635,610 +3366,579 @@ async function runAgentHarness(
                 }
               }
             }
-          } catch (saveError) {
-            console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
+
+            // Don't commit or continue processing when implementation is incomplete
+            // Just resolve to allow batch processing to continue
+            resolve();
+            return;
+          } else {
+            console.log("✅ Agent execution completed successfully");
           }
-        }
 
-        console.log("\n⏭️  Skipping commit and moving to next task (if any)...");
-
-        // Resolve instead of reject to allow batch processing to continue
-        resolve();
-        return;
-      }
-
-      if (code === 0) {
-        // Even if exit code is 0, check if Agent actually completed meaningful work.
-        // Only inspect stdout: stderr often contains transient "Error:" lines from
-        // recovered tool failures (especially with Cursor CLI).
-        const { incomplete: seemsIncomplete, reasons: incompleteReasons } =
-          detectIncompleteImplementation(stdoutOutput);
-
-        // Save implementation summary to task directory (even if incomplete for analysis)
-        if (taskKey && stdoutOutput.trim()) {
-          try {
-            const baseOutputDir = process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-            const taskDir = join(baseOutputDir, taskKey.toLowerCase());
-            const summaryFile = join(
-              taskDir,
-              seemsIncomplete
-                ? "implementation-summary-incomplete.md"
-                : "implementation-summary.md",
-            );
-
-            writeFileSync(summaryFile, stdoutOutput, "utf8");
-            console.log(`\n💾 Saved implementation summary to: ${summaryFile}`);
-          } catch (saveError) {
-            console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
-          }
-        }
-
-        if (seemsIncomplete) {
-          console.log("⚠️  Agent execution completed but appears to be incomplete or failed");
-          console.log(`   Reasons: ${incompleteReasons.join("; ")}`);
-          console.log("   Check the output above for specific issues");
-          console.log("\n⏭️  Skipping commit and moving to next task (if any)...");
-
-          // Post incomplete implementation comment (no duplicate check here
-          // since we already skip tasks with existing incomplete comments)
-          if (tracker && !skipComments && taskKey && stdoutOutput.trim() && task) {
-            try {
-              const descriptionText = tracker.extractDescriptionText(task);
-
-              await tracker.postIncompleteImplementationComment(
-                taskKey,
-                stdoutOutput,
-                taskSummary,
-                descriptionText,
-              );
-            } catch (commentError) {
-              console.warn(
-                `⚠️  Failed to post incomplete implementation comment to JIRA: ${commentError}`,
-              );
+          // Agent finished by asking the user questions instead of implementing.
+          // Committing here would ship an answer nobody gave, so surface the
+          // questions and stop before the git/PR flow.
+          const openQuestions = detectOpenQuestions(stdoutOutput);
+          if (openQuestions.awaitingInput) {
+            console.log("\n⏸️  Agent is asking questions and needs your input before proceeding:");
+            for (const question of openQuestions.questions) {
+              console.log(`   • ${question}`);
             }
-          }
 
-          // Transition back to "To Do" status if configured
-          if (tracker && !skipComments && taskKey && projectSettings) {
-            const projectKey = resolveProjectKey(taskKey, task);
-            const todoStatus = getTodoStatusForProject(projectKey, projectSettings);
-            if (todoStatus && todoStatus.trim()) {
+            if (tracker && !skipComments && taskKey) {
               try {
-                console.log(
-                  `\n🔄 Moving ${taskKey} back to '${todoStatus}' due to incomplete implementation...`,
-                );
-                await tracker.transitionStatus(taskKey, todoStatus.trim());
-                console.log(`✅ Task moved to '${todoStatus}'`);
-              } catch (statusError) {
-                console.warn(
-                  `⚠️  Failed to transition task to '${todoStatus}': ${
-                    (statusError as Error).message
-                  }`,
-                );
+                const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
+                await tracker.postComment(taskKey, {
+                  format: "markdown",
+                  body:
+                    `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
+                    `Answer in the task description or a comment, then re-run devintern.`,
+                });
+                console.log("💬 Posted the questions as a comment on the task");
+              } catch (commentError) {
+                console.warn(`⚠️  Failed to post questions comment: ${commentError}`);
               }
             }
+
+            console.log("\n⏭️  Skipping commit and PR until the questions are answered...");
+            resolve();
+            return;
           }
 
-          // Don't commit or continue processing when implementation is incomplete
-          // Just resolve to allow batch processing to continue
-          resolve();
-          return;
-        } else {
-          console.log("✅ Agent execution completed successfully");
-        }
-
-        // Agent finished by asking the user questions instead of implementing.
-        // Committing here would ship an answer nobody gave, so surface the
-        // questions and stop before the git/PR flow.
-        const openQuestions = detectOpenQuestions(stdoutOutput);
-        if (openQuestions.awaitingInput) {
-          console.log("\n⏸️  Agent is asking questions and needs your input before proceeding:");
-          for (const question of openQuestions.questions) {
-            console.log(`   • ${question}`);
-          }
-
-          if (tracker && !skipComments && taskKey) {
-            try {
-              const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
-              await tracker.postComment(taskKey, {
-                format: "markdown",
-                body:
-                  `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
-                  `Answer in the task description or a comment, then re-run devintern.`,
-              });
-              console.log("💬 Posted the questions as a comment on the task");
-            } catch (commentError) {
-              console.warn(`⚠️  Failed to post questions comment: ${commentError}`);
-            }
-          }
-
-          console.log("\n⏭️  Skipping commit and PR until the questions are answered...");
-          resolve();
-          return;
-        }
-
-        // --- Shared helpers for hook validation, push, and PR creation ---
-        const validatePrePushHook = async (phase: string) => {
-          let attempt = 0;
-          while (attempt <= hookRetries) {
-            attempt++;
-            const hookResult = await Utils.runPrePushHookLocally({
-              verbose: options.verbose,
-            });
-            if (hookResult.success) {
-              if (attempt === 1) {
-                console.log(`✅ ${hookResult.message}`);
-              } else {
-                console.log(`✅ Pre-push hook passed after ${attempt} attempt(s)`);
-              }
-              return { success: true, result: hookResult };
-            }
-            if (hookResult.hookError && attempt <= hookRetries) {
-              console.log(
-                `\n⚠️  Pre-push hook failed during ${phase} (attempt ${attempt}/${hookRetries + 1})`,
-              );
-              const fixed = await runAgentHarnessToFixGitHook(
-                "push",
-                harness,
-                executablePath,
-                maxTurns,
-              );
-              logHookErrorToFile(
-                taskKey ?? "unknown",
-                "push-local-validation",
-                attempt,
-                hookResult.hookError,
-                fixed,
-              );
-              if (fixed) {
-                console.log(
-                  `\n🔄 Retrying local hook validation after ${harness.displayName} fixed the issues...`,
-                );
-                continue;
-              } else {
-                console.log("\n❌ Could not fix pre-push hook errors automatically");
-                return { success: false, result: hookResult };
-              }
-            } else {
-              if (attempt > hookRetries) {
-                console.log(`\n❌ Max retries (${hookRetries}) exceeded for pre-push hook fixes`);
-              }
-              console.log(`⚠️  ${hookResult.message}`);
-              return { success: false, result: hookResult };
-            }
-          }
-          return {
-            success: false,
-            result: { message: "Max retries exceeded" },
-          };
-        };
-
-        const pushWithHookRetry = async () => {
-          console.log("\n📤 Pushing branch to remote...");
-          let attempt = 0;
-          while (attempt <= hookRetries) {
-            attempt++;
-            const pushResult = await Utils.pushCurrentBranch({
-              verbose: options.verbose,
-            });
-            if (pushResult.success) {
-              console.log(`✅ ${pushResult.message}`);
-              return { success: true, result: pushResult };
-            }
-            if (pushResult.hookError && attempt <= hookRetries) {
-              console.log(
-                `\n⚠️  Git pre-push hook failed during push (attempt ${attempt}/${hookRetries + 1})`,
-              );
-              const fixed = await runAgentHarnessToFixGitHook(
-                "push",
-                harness,
-                executablePath,
-                maxTurns,
-              );
-              logHookErrorToFile(
-                taskKey ?? "unknown",
-                "push",
-                attempt,
-                pushResult.hookError,
-                fixed,
-              );
-              if (fixed) {
-                console.log(
-                  `\n🔄 Retrying push after ${harness.displayName} fixed and amended the commit...`,
-                );
-                continue;
-              } else {
-                console.log("\n❌ Could not fix git pre-push hook errors automatically");
-                return { success: false, result: pushResult };
-              }
-            } else {
-              if (attempt > hookRetries) {
-                console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
-              }
-              console.log(`⚠️  ${pushResult.message}`);
-              return { success: false, result: pushResult };
-            }
-          }
-          return {
-            success: false,
-            result: { message: "Max retries exceeded" },
-          };
-        };
-
-        const createPrAndTransition = async (
-          implementationOutput: string,
-          autoReviewRan = false,
-        ) => {
-          console.log("\n🔀 Creating pull request...");
-          try {
-            const prManager = new PRManager();
-            const branchForPr = await Utils.getCurrentBranch();
-
-            if (!branchForPr) {
-              console.log("⚠️  Could not determine current branch for PR creation");
-              return;
-            }
-            if (await Utils.isProtectedBranch(branchForPr)) {
-              console.error(`\n❌ Cannot create PR from protected branch '${branchForPr}'`);
-              console.error("   This indicates a bug - feature branch was not created properly.");
-              return;
-            }
-
-            // Ensure the PR target branch actually exists on the remote. A wrong or
-            // missing target (e.g. `--pr-target-branch main` on a `master` repo) makes
-            // GitHub reject the PR with "Validation Failed", leaving a pushed branch
-            // and no PR. Fall back to the repo's real default branch in that case.
-            let effectivePrTargetBranch = prTargetBranch;
-            if (!(await Utils.remoteBranchExists(prTargetBranch, { verbose: options.verbose }))) {
-              const defaultBranch = await Utils.getMainBranchName();
-              if (defaultBranch !== prTargetBranch) {
-                console.log(
-                  `⚠️  Target branch '${prTargetBranch}' not found on remote, falling back to '${defaultBranch}'`,
-                );
-                effectivePrTargetBranch = defaultBranch;
-              }
-            }
-
-            const prResult = await prManager.createPullRequest(
-              task,
-              branchForPr,
-              effectivePrTargetBranch,
-              implementationOutput,
-            );
-
-            if (prResult.success) {
-              console.log(`✅ Pull request created: ${prResult.url}`);
-
-              if (taskKey && tracker && !skipComments) {
-                const projectKey = resolveProjectKey(taskKey, task);
-                const prStatus = getPrStatusForProject(projectKey, projectSettings);
-                if (prStatus && prStatus.trim()) {
-                  try {
-                    console.log("\n🔄 Transitioning JIRA status after PR creation...");
-                    await tracker.transitionStatus(taskKey, prStatus.trim());
-                  } catch (statusError) {
-                    console.warn(
-                      `⚠️  Failed to transition JIRA status: ${(statusError as Error).message}`,
-                    );
-                    console.log("   PR was created successfully, but status transition failed");
-                  }
-                }
-              } else if (skipComments) {
-                console.log("\n⏭️  Skipping task tracker status transition (--skip-comments)");
-              }
-
-              if (autoReviewRan) {
-                console.log(
-                  "\n✅ Auto-review was completed before push (see summary file for details)",
-                );
-              }
-            } else {
-              console.log(`⚠️  PR creation failed: ${prResult.message}`);
-            }
-          } catch (prError) {
-            console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
-          }
-        };
-        // --- End shared helpers ---
-
-        // Commit changes if git is enabled and we have task details
-        if (enableGit && taskKey && taskSummary) {
-          console.log("\n📝 Committing changes...");
-
-          // Try committing with retry logic for git hook failures
-          const handleCommitWithRetry = async () => {
+          // --- Shared helpers for hook validation, push, and PR creation ---
+          const validatePrePushHook = async (phase: string) => {
             let attempt = 0;
-
             while (attempt <= hookRetries) {
               attempt++;
-              const commitResult = await Utils.commitChanges(taskKey, taskSummary, {
+              const hookResult = await Utils.runPrePushHookLocally({
                 verbose: options.verbose,
-                author: gitAuthor,
               });
-
-              if (commitResult.success) {
-                console.log(`✅ ${commitResult.message}`);
-                return { success: true, result: commitResult };
+              if (hookResult.success) {
+                if (attempt === 1) {
+                  console.log(`✅ ${hookResult.message}`);
+                } else {
+                  console.log(`✅ Pre-push hook passed after ${attempt} attempt(s)`);
+                }
+                return { success: true, result: hookResult };
               }
-
-              // Check if this is a git hook error that we can try to fix
-              if (commitResult.hookError && attempt <= hookRetries) {
-                console.log(`\n⚠️  Git hook failed (attempt ${attempt}/${hookRetries + 1})`);
-
-                // Try to fix the hook error with agent
+              if (hookResult.hookError && attempt <= hookRetries) {
+                console.log(
+                  `\n⚠️  Pre-push hook failed during ${phase} (attempt ${attempt}/${hookRetries + 1})`,
+                );
                 const fixed = await runAgentHarnessToFixGitHook(
-                  "commit",
+                  "push",
                   harness,
                   executablePath,
                   maxTurns,
                 );
-
-                // Log the hook error to file
-                logHookErrorToFile(taskKey, "commit", attempt, commitResult.hookError, fixed);
-
+                logHookErrorToFile(
+                  taskKey ?? "unknown",
+                  "push-local-validation",
+                  attempt,
+                  hookResult.hookError,
+                  fixed,
+                );
                 if (fixed) {
-                  if (await isCommitAlreadyComplete()) {
-                    console.log("✅ Commit already completed during hook fix");
-                    return {
-                      success: true,
-                      result: {
-                        message: `Successfully committed changes for ${taskKey} (via hook fix)`,
-                      },
-                    };
-                  }
-
-                  console.log("\n🔄 Retrying commit after Agent fixed the issues...");
+                  console.log(
+                    `\n🔄 Retrying local hook validation after ${harness.displayName} fixed the issues...`,
+                  );
                   continue;
                 } else {
-                  console.log("\n❌ Could not fix git hook errors automatically");
-                  return { success: false, result: commitResult };
+                  console.log("\n❌ Could not fix pre-push hook errors automatically");
+                  return { success: false, result: hookResult };
                 }
               } else {
-                // Not a hook error or out of retries
                 if (attempt > hookRetries) {
-                  console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
+                  console.log(`\n❌ Max retries (${hookRetries}) exceeded for pre-push hook fixes`);
                 }
-                console.log(`⚠️  ${commitResult.message}`);
-                return { success: false, result: commitResult };
+                console.log(`⚠️  ${hookResult.message}`);
+                return { success: false, result: hookResult };
               }
             }
-
             return {
               success: false,
               result: { message: "Max retries exceeded" },
             };
           };
 
-          handleCommitWithRetry()
-            .then(async ({ success, result }) => {
-              if (!success) {
-                // Check if this is a "plan only" scenario - Agent created a plan but didn't implement
-                const noChangesToCommit = result.message === "No changes to commit";
-                const planPath = noChangesToCommit ? detectPlanOnlyBehavior(stdoutOutput) : null;
-
-                if (noChangesToCommit && planPath && !isPlanRetry) {
-                  // Agent only created a plan - run it again with instructions to implement
-                  console.log(
-                    "\n🔄 Agent created a plan but didn't implement it. Re-running to execute the plan...",
-                  );
-
-                  if (planPath !== "PLAN_DETECTED_NO_PATH") {
-                    console.log(`   Plan file detected: ${planPath}`);
-                  }
-
-                  // Create a new prompt to implement the plan
-                  const implementationPrompt = createPlanImplementationPrompt(
-                    planPath,
-                    taskContent,
-                  );
-
-                  // Spawn agent again with the implementation prompt. Re-resolve
-                  // the CLI path here (rather than reusing the first spawn's) — a
-                  // long agent run may straddle an auto-update, so wait out any
-                  // swap in progress before this second spawn.
-                  const retryArgs = harness.buildArgs({
-                    maxTurns,
-                    skipPermissions: true,
-                    workingDir: process.cwd(),
-                  });
-                  const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
-                    displayName: harness.displayName,
-                  });
-                  const retryProcess: ChildProcess = spawnReapable(
-                    retryResolvedPath,
-                    [...retryArgs, ...buildPromptArgs(harness, implementationPrompt)],
-                    {
-                      stdio: ["ignore", "pipe", "pipe"],
-                    },
-                  );
-
-                  let retryStdoutOutput = "";
-                  let retryStderrOutput = "";
-
-                  if (retryProcess.stdout) {
-                    retryProcess.stdout.on("data", (data: Buffer) => {
-                      const output = data.toString();
-                      retryStdoutOutput += output;
-                      process.stdout.write(output);
-                    });
-                  }
-
-                  if (retryProcess.stderr) {
-                    retryProcess.stderr.on("data", (data: Buffer) => {
-                      const output = data.toString();
-                      retryStderrOutput += output;
-                      process.stderr.write(output);
-                    });
-                  }
-
-                  retryProcess.on("close", async (retryCode: number | null) => {
-                    console.log("\n" + "=".repeat(60));
-
-                    if (retryCode === 0) {
-                      console.log("✅ Plan implementation completed");
-
-                      // Save updated implementation summary
-                      if (taskKey && retryStdoutOutput.trim()) {
-                        try {
-                          const summaryFile = join(dirname(taskFile), "implementation-summary.md");
-                          writeFileSync(
-                            summaryFile,
-                            `# Plan Implementation Output\n\n${retryStdoutOutput}`,
-                            "utf8",
-                          );
-                          console.log(`\n💾 Updated implementation summary: ${summaryFile}`);
-                        } catch (saveError) {
-                          console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
-                        }
-                      }
-
-                      // Try to commit the changes from plan implementation
-                      console.log("\n📝 Committing plan implementation changes...");
-                      const retryCommitResult = await Utils.commitChanges(taskKey, taskSummary, {
-                        verbose: options.verbose,
-                        author: gitAuthor,
-                      });
-
-                      if (retryCommitResult.success) {
-                        console.log(`✅ ${retryCommitResult.message}`);
-
-                        // Continue with PR creation if requested
-                        if (createPr && task) {
-                          // Validate pre-push hook locally BEFORE pushing
-                          console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
-                          const planHookValidation = await validatePrePushHook(
-                            "plan implementation validation",
-                          );
-                          if (!planHookValidation.success) {
-                            console.log(
-                              "   Cannot proceed without passing pre-push hook validation",
-                            );
-                            resolve();
-                            return;
-                          }
-
-                          const planPushOutcome = await pushWithHookRetry();
-
-                          if (planPushOutcome.success) {
-                            if (tracker && !skipComments && retryStdoutOutput.trim()) {
-                              try {
-                                await postImplementationComment(
-                                  tracker,
-                                  taskKey,
-                                  retryStdoutOutput,
-                                  taskSummary,
-                                );
-                              } catch (commentError) {
-                                console.warn(
-                                  `⚠️  Failed to post implementation comment: ${commentError}`,
-                                );
-                              }
-                            }
-
-                            await createPrAndTransition(retryStdoutOutput);
-                          }
-                        }
-                      } else {
-                        console.log(`⚠️  ${retryCommitResult.message}`);
-                        console.log(
-                          'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
-                        );
-                      }
-                    } else {
-                      console.log("⚠️  Plan implementation failed");
-                    }
-
-                    resolve();
-                  });
-
-                  retryProcess.on("error", (error: Error) => {
-                    console.error(`❌ Failed to re-run Agent: ${error.message}`);
-                    resolve();
-                  });
-
-                  return;
-                }
-
+          const pushWithHookRetry = async () => {
+            console.log("\n📤 Pushing branch to remote...");
+            let attempt = 0;
+            while (attempt <= hookRetries) {
+              attempt++;
+              const pushResult = await Utils.pushCurrentBranch({
+                verbose: options.verbose,
+              });
+              if (pushResult.success) {
+                console.log(`✅ ${pushResult.message}`);
+                return { success: true, result: pushResult };
+              }
+              if (pushResult.hookError && attempt <= hookRetries) {
                 console.log(
-                  'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
+                  `\n⚠️  Git pre-push hook failed during push (attempt ${attempt}/${hookRetries + 1})`,
                 );
-                resolve();
+                const fixed = await runAgentHarnessToFixGitHook(
+                  "push",
+                  harness,
+                  executablePath,
+                  maxTurns,
+                );
+                logHookErrorToFile(
+                  taskKey ?? "unknown",
+                  "push",
+                  attempt,
+                  pushResult.hookError,
+                  fixed,
+                );
+                if (fixed) {
+                  console.log(
+                    `\n🔄 Retrying push after ${harness.displayName} fixed and amended the commit...`,
+                  );
+                  continue;
+                } else {
+                  console.log("\n❌ Could not fix git pre-push hook errors automatically");
+                  return { success: false, result: pushResult };
+                }
+              } else {
+                if (attempt > hookRetries) {
+                  console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
+                }
+                console.log(`⚠️  ${pushResult.message}`);
+                return { success: false, result: pushResult };
+              }
+            }
+            return {
+              success: false,
+              result: { message: "Max retries exceeded" },
+            };
+          };
+
+          const createPrAndTransition = async (
+            implementationOutput: string,
+            autoReviewRan = false,
+          ) => {
+            console.log("\n🔀 Creating pull request...");
+            try {
+              const prManager = new PRManager();
+              const branchForPr = await Utils.getCurrentBranch();
+
+              if (!branchForPr) {
+                console.log("⚠️  Could not determine current branch for PR creation");
+                return;
+              }
+              if (await Utils.isProtectedBranch(branchForPr)) {
+                console.error(`\n❌ Cannot create PR from protected branch '${branchForPr}'`);
+                console.error("   This indicates a bug - feature branch was not created properly.");
                 return;
               }
 
-              // Create pull request if requested
-              if (createPr && task) {
-                // Step 1: Validate pre-push hook locally BEFORE any push
-                console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
-                const initialHookValidation = await validatePrePushHook("initial validation");
+              // Ensure the PR target branch actually exists on the remote. A wrong or
+              // missing target (e.g. `--pr-target-branch main` on a `master` repo) makes
+              // GitHub reject the PR with "Validation Failed", leaving a pushed branch
+              // and no PR. Fall back to the repo's real default branch in that case.
+              let effectivePrTargetBranch = prTargetBranch;
+              if (!(await Utils.remoteBranchExists(prTargetBranch, { verbose: options.verbose }))) {
+                const defaultBranch = await Utils.getMainBranchName();
+                if (defaultBranch !== prTargetBranch) {
+                  console.log(
+                    `⚠️  Target branch '${prTargetBranch}' not found on remote, falling back to '${defaultBranch}'`,
+                  );
+                  effectivePrTargetBranch = defaultBranch;
+                }
+              }
 
-                if (!initialHookValidation.success) {
-                  console.log("   Cannot proceed without passing pre-push hook validation");
+              const prResult = await prManager.createPullRequest(
+                task,
+                branchForPr,
+                effectivePrTargetBranch,
+                implementationOutput,
+              );
+
+              if (prResult.success) {
+                console.log(`✅ Pull request created: ${prResult.url}`);
+
+                // Register the PR so worker review-polling watches it automatically.
+                if (prResult.url) {
+                  recordAgentPrFromUrl(prResult.url, branchForPr, taskKey);
+                  recordRunPr({ ...(parseGitHubPrUrl(prResult.url) ?? {}), url: prResult.url });
+                }
+
+                if (taskKey && tracker && !skipComments) {
+                  const projectKey = resolveProjectKey(taskKey, task);
+                  const prStatus = getPrStatusForProject(projectKey, projectSettings);
+                  if (prStatus && prStatus.trim()) {
+                    try {
+                      console.log("\n🔄 Transitioning JIRA status after PR creation...");
+                      await tracker.transitionStatus(taskKey, prStatus.trim());
+                    } catch (statusError) {
+                      console.warn(
+                        `⚠️  Failed to transition JIRA status: ${(statusError as Error).message}`,
+                      );
+                      console.log("   PR was created successfully, but status transition failed");
+                    }
+                  }
+                } else if (skipComments) {
+                  console.log("\n⏭️  Skipping task tracker status transition (--skip-comments)");
+                }
+
+                if (autoReviewRan) {
+                  console.log(
+                    "\n✅ Auto-review was completed before push (see summary file for details)",
+                  );
+                }
+              } else {
+                console.log(`⚠️  PR creation failed: ${prResult.message}`);
+              }
+            } catch (prError) {
+              console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
+            }
+          };
+          // --- End shared helpers ---
+
+          // Commit changes if git is enabled and we have task details
+          if (enableGit && taskKey && taskSummary) {
+            console.log("\n📝 Committing changes...");
+
+            // Try committing with retry logic for git hook failures
+            const handleCommitWithRetry = async () => {
+              let attempt = 0;
+
+              while (attempt <= hookRetries) {
+                attempt++;
+                const commitResult = await Utils.commitChanges(taskKey, taskSummary, {
+                  verbose: options.verbose,
+                  author: gitAuthor,
+                });
+
+                if (commitResult.success) {
+                  console.log(`✅ ${commitResult.message}`);
+                  return { success: true, result: commitResult };
+                }
+
+                // Check if this is a git hook error that we can try to fix
+                if (commitResult.hookError && attempt <= hookRetries) {
+                  console.log(`\n⚠️  Git hook failed (attempt ${attempt}/${hookRetries + 1})`);
+
+                  // Try to fix the hook error with agent
+                  const fixed = await runAgentHarnessToFixGitHook(
+                    "commit",
+                    harness,
+                    executablePath,
+                    maxTurns,
+                  );
+
+                  // Log the hook error to file
+                  logHookErrorToFile(taskKey, "commit", attempt, commitResult.hookError, fixed);
+
+                  if (fixed) {
+                    if (await isCommitAlreadyComplete()) {
+                      console.log("✅ Commit already completed during hook fix");
+                      return {
+                        success: true,
+                        result: {
+                          message: `Successfully committed changes for ${taskKey} (via hook fix)`,
+                        },
+                      };
+                    }
+
+                    console.log("\n🔄 Retrying commit after Agent fixed the issues...");
+                    continue;
+                  } else {
+                    console.log("\n❌ Could not fix git hook errors automatically");
+                    return { success: false, result: commitResult };
+                  }
+                } else {
+                  // Not a hook error or out of retries
+                  if (attempt > hookRetries) {
+                    console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
+                  }
+                  console.log(`⚠️  ${commitResult.message}`);
+                  return { success: false, result: commitResult };
+                }
+              }
+
+              return {
+                success: false,
+                result: { message: "Max retries exceeded" },
+              };
+            };
+
+            handleCommitWithRetry()
+              .then(async ({ success, result }) => {
+                if (!success) {
+                  // Check if this is a "plan only" scenario - Agent created a plan but didn't implement
+                  const noChangesToCommit = result.message === "No changes to commit";
+                  const planPath = noChangesToCommit ? detectPlanOnlyBehavior(stdoutOutput) : null;
+
+                  if (noChangesToCommit && planPath && !isPlanRetry) {
+                    // Agent only created a plan - run it again with instructions to implement
+                    console.log(
+                      "\n🔄 Agent created a plan but didn't implement it. Re-running to execute the plan...",
+                    );
+
+                    if (planPath !== "PLAN_DETECTED_NO_PATH") {
+                      console.log(`   Plan file detected: ${planPath}`);
+                    }
+
+                    // Create a new prompt to implement the plan
+                    const implementationPrompt = createPlanImplementationPrompt(
+                      planPath,
+                      taskContent,
+                    );
+
+                    // Spawn agent again with the implementation prompt. Re-resolve
+                    // the CLI path here (rather than reusing the first spawn's) — a
+                    // long agent run may straddle an auto-update, so wait out any
+                    // swap in progress before this second spawn.
+                    const retryArgs = harness.buildArgs({
+                      maxTurns,
+                      skipPermissions: true,
+                      workingDir: process.cwd(),
+                    });
+                    const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
+                      displayName: harness.displayName,
+                    });
+                    const { child: retryProcess, cleanup: retrySandboxCleanup } = await spawnAgent({
+                      resolvedPath: retryResolvedPath,
+                      args: [...retryArgs, ...buildPromptArgs(harness, implementationPrompt)],
+                      spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+                      sandbox: await getSandbox(harness.name),
+                    });
+
+                    let retryStdoutOutput = "";
+                    let retryStderrOutput = "";
+
+                    if (retryProcess.stdout) {
+                      retryProcess.stdout.on("data", (data: Buffer) => {
+                        const output = data.toString();
+                        retryStdoutOutput += output;
+                        process.stdout.write(output);
+                      });
+                    }
+
+                    if (retryProcess.stderr) {
+                      retryProcess.stderr.on("data", (data: Buffer) => {
+                        const output = data.toString();
+                        retryStderrOutput += output;
+                        process.stderr.write(output);
+                      });
+                    }
+
+                    retryProcess.on("close", async (retryCode: number | null) => {
+                      retrySandboxCleanup().catch(() => {});
+                      console.log("\n" + "=".repeat(60));
+
+                      if (retryCode === 0) {
+                        console.log("✅ Plan implementation completed");
+
+                        // Save updated implementation summary
+                        if (taskKey && retryStdoutOutput.trim()) {
+                          try {
+                            const summaryFile = join(
+                              dirname(taskFile),
+                              "implementation-summary.md",
+                            );
+                            writeFileSync(
+                              summaryFile,
+                              `# Plan Implementation Output\n\n${retryStdoutOutput}`,
+                              "utf8",
+                            );
+                            console.log(`\n💾 Updated implementation summary: ${summaryFile}`);
+                          } catch (saveError) {
+                            console.warn(`⚠️  Failed to save implementation summary: ${saveError}`);
+                          }
+                        }
+
+                        // Try to commit the changes from plan implementation
+                        console.log("\n📝 Committing plan implementation changes...");
+                        const retryCommitResult = await Utils.commitChanges(taskKey, taskSummary, {
+                          verbose: options.verbose,
+                          author: gitAuthor,
+                        });
+
+                        if (retryCommitResult.success) {
+                          console.log(`✅ ${retryCommitResult.message}`);
+
+                          // Continue with PR creation if requested
+                          if (createPr && task) {
+                            // Validate pre-push hook locally BEFORE pushing
+                            console.log(
+                              "\n🔍 Validating pre-push hook locally (before pushing)...",
+                            );
+                            const planHookValidation = await validatePrePushHook(
+                              "plan implementation validation",
+                            );
+                            if (!planHookValidation.success) {
+                              console.log(
+                                "   Cannot proceed without passing pre-push hook validation",
+                              );
+                              resolve();
+                              return;
+                            }
+
+                            const planPushOutcome = await pushWithHookRetry();
+
+                            if (planPushOutcome.success) {
+                              if (tracker && !skipComments && retryStdoutOutput.trim()) {
+                                try {
+                                  await postImplementationComment(
+                                    tracker,
+                                    taskKey,
+                                    retryStdoutOutput,
+                                    taskSummary,
+                                  );
+                                } catch (commentError) {
+                                  console.warn(
+                                    `⚠️  Failed to post implementation comment: ${commentError}`,
+                                  );
+                                }
+                              }
+
+                              await createPrAndTransition(retryStdoutOutput);
+                            }
+                          }
+                        } else {
+                          console.log(`⚠️  ${retryCommitResult.message}`);
+                          console.log(
+                            'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
+                          );
+                        }
+                      } else {
+                        console.log("⚠️  Plan implementation failed");
+                      }
+
+                      resolve();
+                    });
+
+                    retryProcess.on("error", (error: Error) => {
+                      retrySandboxCleanup().catch(() => {});
+                      console.error(`❌ Failed to re-run Agent: ${error.message}`);
+                      resolve();
+                    });
+
+                    return;
+                  }
+
+                  console.log(
+                    'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
+                  );
                   resolve();
                   return;
                 }
 
-                // Step 2: Run auto-review with skipPush if enabled
-                const currentBranch = await Utils.getCurrentBranch();
-                let autoReviewRan = false;
+                // Create pull request if requested
+                if (createPr && task) {
+                  // Step 1: Validate pre-push hook locally BEFORE any push
+                  console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
+                  const initialHookValidation = await validatePrePushHook("initial validation");
 
-                if (autoReview && currentBranch) {
-                  try {
-                    console.log("\n🔄 Running auto-review loop (without pushing)...");
-
-                    const baseOutputDir =
-                      process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";
-                    const taskDir = taskKey
-                      ? join(baseOutputDir, taskKey.toLowerCase())
-                      : join(baseOutputDir, `auto-review-${Date.now()}`);
-
-                    const autoReviewResult = await runAutoReviewLoop({
-                      repository: "local/repo",
-                      prNumber: 0,
-                      prBranch: currentBranch,
-                      baseBranch: prTargetBranch,
-                      harness,
-                      executablePath,
-                      maxIterations: autoReviewIterations,
-                      minPriority: "medium",
-                      workingDir: process.cwd(),
-                      outputDir: taskDir,
-                      skipPush: true,
-                    });
-
-                    const summaryPath = join(taskDir, "auto-review-summary.json");
-                    writeFileSync(summaryPath, JSON.stringify(autoReviewResult, null, 2));
-                    console.log(`\n📄 Auto-review summary saved to: ${summaryPath}`);
-
-                    autoReviewRan = true;
-
-                    // Step 3: After auto-review, validate hooks again
-                    console.log(
-                      "\n🔍 Re-validating pre-push hook after auto-review improvements...",
-                    );
-                    const postAutoReviewValidation = await validatePrePushHook(
-                      "post auto-review validation",
-                    );
-
-                    if (!postAutoReviewValidation.success) {
-                      console.log(
-                        "   Cannot proceed - auto-review changes failed pre-push hook validation",
-                      );
-                      resolve();
-                      return;
-                    }
-                  } catch (autoReviewError) {
-                    console.warn(
-                      `\n⚠️  Auto-review loop failed: ${(autoReviewError as Error).message}`,
-                    );
-                    console.log("   Continuing with push and PR creation...");
+                  if (!initialHookValidation.success) {
+                    console.log("   Cannot proceed without passing pre-push hook validation");
+                    resolve();
+                    return;
                   }
-                }
 
-                // Step 4: Push with hook retry
-                const pushOutcome = await pushWithHookRetry();
+                  // Step 2: Run auto-review with skipPush if enabled
+                  const currentBranch = await Utils.getCurrentBranch();
+                  let autoReviewRan = false;
 
-                if (pushOutcome.success) {
+                  if (autoReview && currentBranch) {
+                    try {
+                      console.log("\n🔄 Running auto-review loop (without pushing)...");
+
+                      const baseOutputDir = resolveOutputDir();
+                      const taskDir = taskKey
+                        ? join(baseOutputDir, taskKey.toLowerCase())
+                        : join(baseOutputDir, `auto-review-${Date.now()}`);
+
+                      const autoReviewResult = await runAutoReviewLoop({
+                        repository: "local/repo",
+                        prNumber: 0,
+                        prBranch: currentBranch,
+                        baseBranch: prTargetBranch,
+                        harness,
+                        executablePath,
+                        maxIterations: autoReviewIterations,
+                        minPriority: "medium",
+                        workingDir: process.cwd(),
+                        outputDir: taskDir,
+                        skipPush: true,
+                      });
+
+                      const summaryPath = join(taskDir, "auto-review-summary.json");
+                      writeFileSync(summaryPath, JSON.stringify(autoReviewResult, null, 2));
+                      console.log(`\n📄 Auto-review summary saved to: ${summaryPath}`);
+
+                      recordRunStage("auto_review", {
+                        status: autoReviewResult.success ? "succeeded" : "failed",
+                        summary: `${autoReviewResult.iterations} iteration(s), ${
+                          autoReviewResult.success ? "approved" : "incomplete"
+                        }`,
+                        detail: {
+                          iterations: autoReviewResult.iterations,
+                          success: autoReviewResult.success,
+                          finalFeedback: autoReviewResult.finalFeedback,
+                        },
+                      });
+
+                      autoReviewRan = true;
+
+                      // Step 3: After auto-review, validate hooks again
+                      console.log(
+                        "\n🔍 Re-validating pre-push hook after auto-review improvements...",
+                      );
+                      const postAutoReviewValidation = await validatePrePushHook(
+                        "post auto-review validation",
+                      );
+
+                      if (!postAutoReviewValidation.success) {
+                        console.log(
+                          "   Cannot proceed - auto-review changes failed pre-push hook validation",
+                        );
+                        resolve();
+                        return;
+                      }
+                    } catch (autoReviewError) {
+                      recordRunStage("auto_review", {
+                        status: "failed",
+                        summary: `loop errored: ${(autoReviewError as Error).message}`,
+                      });
+                      console.warn(
+                        `\n⚠️  Auto-review loop failed: ${(autoReviewError as Error).message}`,
+                      );
+                      console.log("   Continuing with push and PR creation...");
+                    }
+                  }
+
+                  // Step 4: Push with hook retry
+                  const pushOutcome = await pushWithHookRetry();
+
+                  if (pushOutcome.success) {
+                    if (taskKey && tracker && stdoutOutput.trim() && !skipComments) {
+                      try {
+                        console.log("\n💬 Posting implementation summary to task tracker...");
+                        await postImplementationComment(
+                          tracker,
+                          taskKey,
+                          stdoutOutput,
+                          taskSummary,
+                        );
+                      } catch (commentError) {
+                        console.warn(
+                          `⚠️  Failed to post implementation comment to task tracker: ${commentError}`,
+                        );
+                        console.log("   Push succeeded, but task tracker comment failed");
+                      }
+                    } else if (skipComments && taskKey) {
+                      console.log("\n⏭️  Skipping task tracker comment posting (--skip-comments)");
+                    }
+
+                    await createPrAndTransition(stdoutOutput, autoReviewRan);
+                  } else {
+                    console.log("   Cannot create PR without pushing branch to remote");
+                  }
+                } else {
+                  // No PR requested, but commit succeeded - post to task tracker here
                   if (taskKey && tracker && stdoutOutput.trim() && !skipComments) {
                     try {
                       console.log("\n💬 Posting implementation summary to task tracker...");
@@ -3247,50 +3947,31 @@ async function runAgentHarness(
                       console.warn(
                         `⚠️  Failed to post implementation comment to task tracker: ${commentError}`,
                       );
-                      console.log("   Push succeeded, but task tracker comment failed");
+                      console.log("   Commit succeeded, but task tracker comment failed");
                     }
                   } else if (skipComments && taskKey) {
                     console.log("\n⏭️  Skipping task tracker comment posting (--skip-comments)");
                   }
-
-                  await createPrAndTransition(stdoutOutput, autoReviewRan);
-                } else {
-                  console.log("   Cannot create PR without pushing branch to remote");
                 }
-              } else {
-                // No PR requested, but commit succeeded - post to task tracker here
-                if (taskKey && tracker && stdoutOutput.trim() && !skipComments) {
-                  try {
-                    console.log("\n💬 Posting implementation summary to task tracker...");
-                    await postImplementationComment(tracker, taskKey, stdoutOutput, taskSummary);
-                  } catch (commentError) {
-                    console.warn(
-                      `⚠️  Failed to post implementation comment to task tracker: ${commentError}`,
-                    );
-                    console.log("   Commit succeeded, but task tracker comment failed");
-                  }
-                } else if (skipComments && taskKey) {
-                  console.log("\n⏭️  Skipping task tracker comment posting (--skip-comments)");
-                }
-              }
-              resolve();
-            })
-            .catch((commitError) => {
-              console.log(`⚠️  Failed to commit changes: ${commitError.message}`);
-              console.log(
-                'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
-              );
-              resolve(); // Still resolve since Agent succeeded
-            });
+                resolve();
+              })
+              .catch((commitError) => {
+                console.log(`⚠️  Failed to commit changes: ${commitError.message}`);
+                console.log(
+                  'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
+                );
+                resolve(); // Still resolve since Agent succeeded
+              });
+          } else {
+            resolve();
+          }
         } else {
-          resolve();
+          console.log(`❌ Agent exited with non-zero code ${code}`);
+          console.log("   No JIRA comment will be posted due to execution failure");
+          reject(new Error(`Agent exited with code ${code}`));
         }
-      } else {
-        console.log(`❌ Agent exited with non-zero code ${code}`);
-        console.log("   No JIRA comment will be posted due to execution failure");
-        reject(new Error(`Agent exited with code ${code}`));
-      }
-    });
+      });
+    })().catch(reject);
   });
 }
 

@@ -2,6 +2,7 @@ export { AsanaClient, parseAsanaTaskFilters } from "./asana.ts";
 export type {
   AsanaAttachment,
   AsanaCustomField,
+  AsanaEvent,
   AsanaProject,
   AsanaSection,
   AsanaStory,

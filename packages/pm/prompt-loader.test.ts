@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { join } from "node:path";
+import { readFile, pathExists } from "./lib/runtime/fs.js";
+import { getModuleDir } from "./lib/runtime/path.js";
 
 /**
  * Test prompt loading from different execution contexts
@@ -13,12 +15,12 @@ async function loadPrompt(
   replacements: Record<string, string> = {},
 ): Promise<string> {
   // Detect if we're running from dist/ (bundled) or from source
-  const isBundle = import.meta.dir.endsWith("/dist") || import.meta.dir.endsWith("\\dist");
-  const baseDir = isBundle ? join(import.meta.dir, "..") : import.meta.dir;
+  const moduleDir = getModuleDir(import.meta.url);
+  const isBundle = moduleDir.endsWith("/dist") || moduleDir.endsWith("\\dist");
+  const baseDir = isBundle ? join(moduleDir, "..") : moduleDir;
 
   const promptPath = join(baseDir, "prompts", sourceType, style, filename);
-  const promptFile = Bun.file(promptPath);
-  let prompt = await promptFile.text();
+  let prompt = await readFile(promptPath);
 
   // Replace all placeholders
   for (const [key, value] of Object.entries(replacements)) {
@@ -35,9 +37,8 @@ async function loadPromptLocal(
   filename: string,
   replacements: Record<string, string> = {},
 ): Promise<string> {
-  const promptPath = join(import.meta.dir, "prompts", sourceType, style, filename);
-  const promptFile = Bun.file(promptPath);
-  let prompt = await promptFile.text();
+  const promptPath = join(getModuleDir(import.meta.url), "prompts", sourceType, style, filename);
+  let prompt = await readFile(promptPath);
 
   // Replace all placeholders
   for (const [key, value] of Object.entries(replacements)) {
@@ -87,7 +88,7 @@ describe("Prompt Loading", () => {
 
   describe("Path resolution check", () => {
     test("should identify current execution context", () => {
-      const currentDir = import.meta.dir;
+      const currentDir = getModuleDir(import.meta.url);
       const isInDist = currentDir.endsWith("/dist") || currentDir.endsWith("\\dist");
 
       console.log("Current directory:", currentDir);
@@ -99,7 +100,7 @@ describe("Prompt Loading", () => {
     });
 
     test("should check if prompts directory exists at both possible locations", async () => {
-      const currentDir = import.meta.dir;
+      const currentDir = getModuleDir(import.meta.url);
 
       // Check with ".." (for bundled/dist scenario)
       const pathWithParent = join(
@@ -110,11 +111,11 @@ describe("Prompt Loading", () => {
         "pm",
         "story-generation.txt",
       );
-      const existsWithParent = await Bun.file(pathWithParent).exists();
+      const existsWithParent = await pathExists(pathWithParent);
 
       // Check without ".." (for local development)
       const pathWithoutParent = join(currentDir, "prompts", "figma", "pm", "story-generation.txt");
-      const existsWithoutParent = await Bun.file(pathWithoutParent).exists();
+      const existsWithoutParent = await pathExists(pathWithoutParent);
 
       console.log("\nPath resolution test:");
       console.log("  With '..':", pathWithParent, "-> exists:", existsWithParent);

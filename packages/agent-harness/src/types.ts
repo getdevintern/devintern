@@ -55,6 +55,8 @@ export interface AgentRunOptions {
   verbose?: boolean;
   /** How to feed the prompt to the agent. */
   inputMethod?: "arg" | "stdin";
+  /** Called with each stdout chunk as the agent runs (for live output streaming). */
+  onStdout?: (chunk: string) => void;
   /** Called with each stderr chunk as the agent runs (for live status updates). */
   onStderr?: (chunk: string) => void;
 }

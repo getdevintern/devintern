@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { Config } from "../config";
 import { AsanaBackend } from "./asana";
 import { AzureDevOpsBackend } from "./azure-devops";
@@ -14,10 +15,12 @@ export type { TaskBackend, CreatedTask, ProjectInfo } from "./types";
  * Create a {@link TaskBackend} implementation for the configured task tracker.
  *
  * @param config - Loaded application configuration.
+ * @param baseDir - Base directory for resolving relative paths like the
+ *   markdown tasks directory (defaults to cwd; desktop hosts pass the project dir).
  * @returns Backend instance for Jira, Linear, Trello, Azure DevOps, Asana, GitHub, or Markdown.
  * @throws When the backend type is unknown or required backend config is missing.
  */
-export async function createBackend(config: Config): Promise<TaskBackend> {
+export async function createBackend(config: Config, baseDir?: string): Promise<TaskBackend> {
   switch (config.backend.type) {
     case "jira": {
       if (!config.jira) {
@@ -75,7 +78,10 @@ export async function createBackend(config: Config): Promise<TaskBackend> {
     }
     case "markdown": {
       return new MarkdownBackend({
-        directory: config.backend.directory || ".devintern-pm/tasks",
+        directory: resolve(
+          baseDir ?? process.cwd(),
+          config.backend.directory || ".devintern-pm/tasks",
+        ),
       });
     }
     default:
