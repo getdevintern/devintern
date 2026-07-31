@@ -72,7 +72,7 @@ const MISSING_UI_PAGE =
   "devintern dashboard: UI assets not found.\n\n" +
   "The JSON API is available under /api (try /api/runs, /api/stats, /api/worker).\n" +
   "If you are running from source, build the UI first:\n" +
-  "  bun run --filter dashboard-ui build\n";
+  "  bun run --filter @devintern/dashboard-ui build\n";
 
 /**
  * Start the dashboard HTTP server.

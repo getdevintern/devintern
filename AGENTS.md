@@ -10,6 +10,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | `@getdevintern/pm`          | CLI for PM task/story creation (`devpm`): supports Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, Markdown   | yes             |
 | `@devintern/pm-desktop`     | Electron desktop app for `@getdevintern/pm`: single-screen AI task creation for your tracker                            | no, private     |
 | `@devintern/agent-harness`  | Shared agent harness abstraction                                                                                        | no, source-only |
+| `@devintern/dashboard-ui`   | Local observability dashboard UI (Vite + React), bundled into `@getdevintern/code` at build time                        | no, source-only |
 | `@devintern/auth`           | Shared Supabase auth utilities (CLI login/session)                                                                      | no, source-only |
 | `@devintern/license-check`  | Shared license checking                                                                                                 | no, source-only |
 | `@devintern/text-formatter` | Shared text formatting                                                                                                  | no, source-only |

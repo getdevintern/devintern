@@ -1,0 +1,100 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+/*
+ * Theme variables mirror the marketing site's global stylesheet
+ * ("Synthesized Intelligence" palette) so the dashboard matches the brand.
+ * Dark mode follows the OS preference.
+ */
+
+@theme inline {
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --font-sans: "Inter Variable", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+}
+
+:root {
+  --background: #f6f7ff;
+  --foreground: #1a1f3a;
+  --card: #ffffff;
+  --card-foreground: #1a1f3a;
+  --primary: #494bd6;
+  --primary-foreground: #ffffff;
+  --secondary: #04b4a2;
+  --secondary-foreground: #ffffff;
+  --muted: #eef0fa;
+  --muted-foreground: #5b6285;
+  --accent: #eef0fa;
+  --accent-foreground: #1a1f3a;
+  --destructive: #c4344c;
+  --border: #e1e4f0;
+  --input: #e1e4f0;
+  --ring: #494bd6;
+  --chart-1: #494bd6;
+  --chart-2: #04b4a2;
+  --chart-3: #ff516a;
+  --chart-4: #1a8a5c;
+  --chart-5: #b56b00;
+  --radius: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b1326;
+    --foreground: #dae2fd;
+    --card: #131b2e;
+    --card-foreground: #dae2fd;
+    --primary: #c0c1ff;
+    --primary-foreground: #1000a9;
+    --secondary: #4fdbc8;
+    --secondary-foreground: #003731;
+    --muted: #171f33;
+    --muted-foreground: #c7c4d7;
+    --accent: #222a3d;
+    --accent-foreground: #dae2fd;
+    --destructive: #ffb4ab;
+    --border: #464554;
+    --input: #2d3449;
+    --ring: #c0c1ff;
+    --chart-1: #c0c1ff;
+    --chart-2: #4fdbc8;
+    --chart-3: #ffb2b7;
+    --chart-4: #6ee7a3;
+    --chart-5: #ffbd6b;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
