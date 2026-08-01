@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { WebhookQueue, resolveQueueDbPath } from "../src/lib/webhook-queue";
+import { execSync, spawnSync } from "child_process";
+
+import {
+  WebhookQueue,
+  prepareQueueDbDirectory,
+  resolveQueueDbPath,
+} from "../src/lib/webhook-queue";
 
 describe("WebhookQueue", () => {
   let dbPath: string;
@@ -208,5 +214,47 @@ describe("resolveQueueDbPath", () => {
     expect(resolveQueueDbPath("/some/project")).toBe(
       join("/some/project", ".devintern-code", "queue.db"),
     );
+  });
+
+  test("keeps the state database out of git via .git/info/exclude", () => {
+    delete process.env.WEBHOOK_QUEUE_DB;
+
+    const projectDir = join(
+      tmpdir(),
+      `queue-ignore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(projectDir, { recursive: true });
+    execSync("git init -q .", { cwd: projectDir });
+
+    try {
+      const dbPath = resolveQueueDbPath(projectDir);
+      prepareQueueDbDirectory(dbPath);
+      writeFileSync(dbPath, "state\n", "utf8");
+
+      // Untracked-but-ignored: `git add -A` cannot sweep it into a commit and
+      // `git clean` cannot delete it.
+      expect(execSync("git status --porcelain", { cwd: projectDir }).toString()).toBe("");
+      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reuses the project database when run from a subdirectory", () => {
+    delete process.env.WEBHOOK_QUEUE_DB;
+
+    const projectDir = join(
+      tmpdir(),
+      `queue-path-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const subDir = join(projectDir, "packages", "app");
+    mkdirSync(join(projectDir, ".devintern-code"), { recursive: true });
+    mkdirSync(subDir, { recursive: true });
+
+    try {
+      expect(resolveQueueDbPath(subDir)).toBe(join(projectDir, ".devintern-code", "queue.db"));
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 });

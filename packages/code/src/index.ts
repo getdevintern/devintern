@@ -1386,9 +1386,6 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
-      if (options.verbose) {
-        console.log("🔗 Extracting linked resources...");
-      }
       console.log("🔗 Extracting linked resources...");
     }
     const linkedResources = tracker.extractLinkedResources(task);

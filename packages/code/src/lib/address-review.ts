@@ -16,7 +16,7 @@ import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
 import { beginRun, endRun, recordRunStage } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
-import { Utils } from "./utils";
+import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import type {
   ProcessedReviewComment,
@@ -790,7 +790,7 @@ export async function addressReview(
 
         // Use git clean to remove all untracked files and directories
         // -f: force, -d: directories
-        await Utils.executeGitCommand(["clean", "-fd"], {
+        await Utils.executeGitCommand(GIT_CLEAN_ARGS, {
           verbose: false,
           cwd: workDir,
         });

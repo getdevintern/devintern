@@ -16,10 +16,7 @@
 
 import { createHash } from "crypto";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
-
-import { resolveQueueDbPath } from "./webhook-queue";
+import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export interface RetryState {
   taskKey: string;
@@ -48,10 +45,7 @@ export class RetryStateStore {
    * @param dbPath - Database path (defaults to the shared queue DB)
    */
   constructor(dbPath: string = resolveQueueDbPath()) {
-    const dir = dirname(dbPath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
     // The webhook queue / run store may hold connections to the same file.

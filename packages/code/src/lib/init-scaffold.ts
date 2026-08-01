@@ -425,13 +425,15 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     process.exit(1);
   }
 
-  // Update .gitignore to exclude .devintern-code/.env, lock file, and review worktree
+  // Ignore everything under .devintern-code/ and whitelist the two files worth
+  // committing. Credentials, the lock file, and local state (queue.db) are
+  // covered by default, so a new state file never lands in git — or gets wiped
+  // by `git clean`.
   const gitignorePath = join(cwd, ".gitignore");
   const gitignoreEntries = [
-    ".devintern-code/.env",
-    ".devintern-code/.env.local",
-    ".devintern-code/.pid.lock",
-    ".devintern-code/.auth-session.json",
+    ".devintern-code/*",
+    "!.devintern-code/settings.json",
+    "!.devintern-code/.env.example",
   ];
 
   try {
@@ -443,25 +445,29 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
       gitignoreExists = true;
     }
 
-    const entriesToAdd = gitignoreEntries.filter((entry) => !gitignoreContent.includes(entry));
+    // The entries only work as an ordered block (the negations must follow the
+    // wildcard), so they are added all-or-nothing.
+    const alreadyConfigured = gitignoreContent.includes(".devintern-code/*");
 
-    if (entriesToAdd.length > 0) {
-      const newEntries = ["", "# @devintern/code - Keep credentials secure", ...entriesToAdd].join(
-        "\n",
-      );
+    if (!alreadyConfigured) {
+      const newEntries = [
+        "",
+        "# @devintern/code - Keep credentials and local state out of git",
+        ...gitignoreEntries,
+      ].join("\n");
 
       if (gitignoreContent && !gitignoreContent.endsWith("\n")) {
         gitignoreContent += "\n";
       }
 
       writeFileSync(gitignorePath, gitignoreContent + newEntries + "\n", "utf8");
-      console.log(`✅ Updated .gitignore to exclude ${entriesToAdd.join(", ")}`);
+      console.log(`✅ Updated .gitignore to exclude ${gitignoreEntries.join(", ")}`);
     } else if (gitignoreExists) {
-      console.log("✅ .gitignore already excludes .devintern-code/.env");
+      console.log("✅ .gitignore already excludes .devintern-code/");
     }
   } catch (error) {
     console.warn(`⚠️  Could not update .gitignore automatically: ${error}`);
-    console.log("   Please manually add '.devintern-code/.env' to your .gitignore");
+    console.log("   Please manually add '.devintern-code/*' to your .gitignore");
   }
 
   return true;

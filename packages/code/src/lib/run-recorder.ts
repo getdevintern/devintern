@@ -13,10 +13,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
-
-import { resolveQueueDbPath } from "./webhook-queue";
+import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export type RunOrigin = "task" | "pr_mention";
 
@@ -159,10 +156,7 @@ export class RunStore {
       return;
     }
 
-    const dir = dirname(dbPath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
     // The webhook queue / worker state may hold connections to the same file.

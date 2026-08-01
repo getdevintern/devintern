@@ -287,13 +287,19 @@ describe("CLI Init Command", () => {
       // Read .gitignore and verify all entries are present
       const gitignoreContent = readFileSync(gitignorePath, "utf8");
 
-      // Should contain all the expected entries
-      expect(gitignoreContent).toContain(".devintern-code/.env");
-      expect(gitignoreContent).toContain(".devintern-code/.env.local");
-      expect(gitignoreContent).toContain(".devintern-code/.pid.lock");
+      // Everything under .devintern-code/ is ignored (credentials, lock file,
+      // and the queue.db state database that `git clean` must not delete)…
+      expect(gitignoreContent).toContain(".devintern-code/*");
+      // …except the two files worth committing, whitelisted after the wildcard
+      expect(gitignoreContent.indexOf("!.devintern-code/settings.json")).toBeGreaterThan(
+        gitignoreContent.indexOf(".devintern-code/*"),
+      );
+      expect(gitignoreContent).toContain("!.devintern-code/.env.example");
 
       // Should have the comment header
-      expect(gitignoreContent).toContain("@devintern/code - Keep credentials secure");
+      expect(gitignoreContent).toContain(
+        "@devintern/code - Keep credentials and local state out of git",
+      );
     } finally {
       // Clean up temp directory
       try {

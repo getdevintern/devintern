@@ -1,11 +1,14 @@
 /**
- * Output-panel state machine.
+ * Output-panel state machine (per ticket workspace).
  *
- * Form state lives outside this store (plain controlled inputs, always
- * editable). This reducer owns the generate → preview → edit → create →
- * decompose lifecycle on the right-hand panel. A "restart" keeps the form
- * and just resets the panel — the desktop equivalent of the CLI's
+ * Form state lives outside this store (plain controlled inputs on each
+ * ticket workspace). This reducer owns the generate → preview → edit →
+ * create → decompose lifecycle on the right-hand panel. A "restart" keeps
+ * the form and just resets the panel — the desktop equivalent of the CLI's
  * wait-for-restart loop against the stateless engine.
+ *
+ * Multi-ticket routing (which workspace receives which action / agent
+ * chunk) lives in `ticket-workspaces.ts`.
  */
 
 import type {

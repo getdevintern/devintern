@@ -3,6 +3,17 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import { basename, dirname, join } from "path";
 
+/**
+ * `git clean` arguments used everywhere the tool wipes a working directory.
+ *
+ * `.devintern-code/` is excluded on purpose: it holds durable state (the
+ * `queue.db` SQLite database with run records, webhook queue, and worker
+ * cursors) and is not gitignored in every project. Deleting it mid-run pulls
+ * the database file — and its rollback journal directory — out from under an
+ * open connection, so the next write fails with "disk I/O error".
+ */
+export const GIT_CLEAN_ARGS = ["clean", "-fd", "-e", ".devintern-code"];
+
 export class Utils {
   /**
    * Ensure a directory exists, creating it recursively when missing.
@@ -324,6 +335,59 @@ export class Utils {
   }
 
   /**
+   * Park uncommitted work (including untracked files) in a labelled stash
+   * entry so a following `reset --hard` / `clean` cannot destroy it.
+   *
+   * Best-effort: a failure is reported but never blocks the workflow, which
+   * then falls back to the plain destructive cleanup.
+   *
+   * @param label - Task key (or similar) recorded in the stash message
+   * @param options - Optional git working directory
+   * @returns Whether a stash entry was created
+   */
+  static async stashWorkingDirectory(label: string, options?: { cwd?: string }): Promise<boolean> {
+    const cwd = options?.cwd;
+
+    if (!(await Utils.hasUncommittedChanges(cwd))) {
+      return false;
+    }
+
+    const message = `devintern-code: pre-branch backup for ${label}`;
+    const stashResult = await Utils.executeGitCommand(
+      [
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        message,
+        // Repo-wide (the cleanup that follows resets the whole tree), minus the
+        // tool's own state directory — stashing it away would delete the live
+        // SQLite database just as surely as `git clean` would.
+        "--",
+        ":/",
+        // `top` anchors the exclusion at the repo root; without it the pattern
+        // is relative to the cwd and a run started from a subdirectory would
+        // still stash away the project's state directory.
+        ":(top,exclude,glob)**/.devintern-code/**",
+      ],
+      options,
+    );
+
+    if (!stashResult.success) {
+      console.warn(`⚠️  Could not back up uncommitted changes: ${stashResult.error}`);
+      console.warn("   They will be discarded by the cleanup below.");
+      return false;
+    }
+
+    const stashSha = await Utils.executeGitCommand(["rev-parse", "stash@{0}"], options);
+    const restoreRef = stashSha.success ? stashSha.output : "stash@{0}";
+
+    console.log(`🧺 Backed up uncommitted changes to a git stash ("${message}")`);
+    console.log(`   Restore with: git stash apply ${restoreRef}`);
+    return true;
+  }
+
+  /**
    * Stage all changes and create an implementation commit.
    *
    * @param taskKey - JIRA issue key for the commit message
@@ -509,7 +573,8 @@ export class Utils {
       if (await Utils.hasUncommittedChanges(cwd)) {
         return {
           success: false,
-          message: "There are uncommitted changes. Please commit or stash them before pulling.",
+          message:
+            "There are uncommitted changes — skipping the pull. They are backed up to a git stash when the feature branch is created.",
         };
       }
 
@@ -1104,6 +1169,10 @@ export class Utils {
       // This ensures a clean state for the new feature branch
       console.log("🧹 Cleaning up working directory before creating feature branch...");
 
+      // The cleanup below is destructive, so park any pre-existing work in a
+      // stash entry first: the tree still ends up clean, but nothing is lost.
+      await Utils.stashWorkingDirectory(taskKey, gitOpts);
+
       // Reset any staged or modified files
       const resetResult = await Utils.executeGitCommand(["reset", "--hard", "HEAD"], gitOpts);
       if (!resetResult.success) {
@@ -1111,7 +1180,7 @@ export class Utils {
       }
 
       // Remove untracked files and directories
-      const cleanResult = await Utils.executeGitCommand(["clean", "-fd"], gitOpts);
+      const cleanResult = await Utils.executeGitCommand(GIT_CLEAN_ARGS, gitOpts);
       if (!cleanResult.success) {
         console.warn(`⚠️  Failed to clean untracked files: ${cleanResult.error}`);
       }
@@ -1488,7 +1557,7 @@ export class Utils {
               verbose: false,
               cwd: worktreePath,
             });
-            await Utils.executeGitCommand(["clean", "-fd"], {
+            await Utils.executeGitCommand(GIT_CLEAN_ARGS, {
               verbose: false,
               cwd: worktreePath,
             });
@@ -1521,7 +1590,7 @@ export class Utils {
               }
 
               // Clean again after checkout to remove any untracked files from the new branch state
-              await Utils.executeGitCommand(["clean", "-fd"], {
+              await Utils.executeGitCommand(GIT_CLEAN_ARGS, {
                 verbose: false,
                 cwd: worktreePath,
               });

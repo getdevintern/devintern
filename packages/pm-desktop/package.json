@@ -2,7 +2,7 @@
   "name": "@devintern/pm-desktop",
   "version": "0.2.0",
   "private": true,
-  "description": "Desktop app for @devintern/pm \u2014 single-screen AI task creation for your tracker.",
+  "description": "Desktop app for @devintern/pm \u2014 multi-ticket AI task creation for your tracker.",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {

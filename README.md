@@ -1,60 +1,81 @@
 # DevIntern
 
-**Delegate the tickets. Review the pull requests.**
+**Turn tracker tickets into pull requests with any coding agent — on your keys, self-hosted.**
 
-DevIntern wires the task tracker your team already uses to the coding agent and model you choose, on your keys, on your machines. Tickets get implemented and self-reviewed in the background; you step in when a diff is ready. Swap any piece at any time.
+[![License](https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue)](LICENSE.md)
+[![Website](https://img.shields.io/badge/Website-devintern.com-blue)](https://devintern.com)
+[![npm](https://img.shields.io/npm/v/%40getdevintern%2Fcode?label=%40getdevintern%2Fcode)](https://www.npmjs.com/package/@getdevintern/code)
+[![Stars](https://img.shields.io/github/stars/getdevintern/devintern?style=social)](https://github.com/getdevintern/devintern)
 
-- **Your tracker:** Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or plain markdown files
-- **Your coding agent:** Claude Code, Codex, Cursor, or OpenCode (swapping is one config line)
-- **Your model, your keys:** whatever your agent supports, billed on your existing provider contract
+<!-- Drop a short demo GIF here when available (ticket → agent → PR). Host at docs/demo.gif and allowlist it in publish/sync.sh.
+<p align="center">
+  <img src="docs/demo.gif" width="820" alt="DevIntern demo: ticket becomes a pull request">
+</p>
+-->
 
-Free for interactive use. No signup, no time limit. [devintern.com](https://devintern.com)
+DevIntern connects the tracker your team already uses to the coding agent and model you choose. Tickets get implemented and self-reviewed in the background; you step in when a clean diff is ready. Swap any piece at any time.
+
+- **Your tracker:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · plain markdown files
+- **Your agent:** Claude Code · Codex · Cursor · OpenCode (one config line to switch)
+- **Your keys:** BYOK — billed on your existing provider contract
+- **Interactive use is free forever** — no signup, no time limit
+
+→ [Live docs & full setup](https://devintern.com/docs/code/quick-start/)
 
 ## Quick start
 
 ```bash
-# Install Bun if not already installed
+# Requires Bun
 curl -fsSL https://bun.sh/install | bash
-
-# Install the task automation tool
 bun install -g @getdevintern/code
 
-# In your project
-devintern init          # creates .devintern-code/ config
-devintern PROJ-123      # turn a ticket into a pull request
+# Zero tracker credentials: pass a local markdown task
+devintern ./tasks/feature-spec.md --create-pr
 ```
 
-Full setup guides for every tracker and agent: [devintern.com/docs](https://devintern.com/docs/code/quick-start/)
+That is the full loop: markdown task → agent run → pull request. No Jira/Linear account required for the markdown path.
 
-## What's in this repository
+With a real tracker (after `devintern init`):
 
-| Package | What it does |
-| ------- | ------------ |
-| [`@getdevintern/code`](packages/code) | The `devintern` tool: picks up tracker tickets, runs your coding agent, opens self-reviewed PRs, and (with unattended automation) turns review comments into commits |
-| [`@getdevintern/pm`](packages/pm) | The `devpm` tool: turns rough input (prompts, logs, Figma frames) into well-specified, codebase-grounded tickets |
-| `packages/*` (shared) | Source-only workspace packages: agent harness abstraction, tracker clients, auth, license check, utilities |
+```bash
+devintern init          # interactive setup for your tracker + agent
+devintern PROJ-123 --create-pr
+```
 
-The devintern.com website and its server code live in a separate repository.
+Full tracker and agent guides: [devintern.com/docs](https://devintern.com/docs/code/quick-start/)
 
-## How it holds up unattended
+## Why teams use it
 
-- **Feasibility gate**: vague tickets get flagged back to the tracker with questions instead of becoming a confidently wrong PR
-- **Self-review loop**: the agent reviews and fixes its own diff before any human sees it
-- **Review comments become commits** (with unattended automation): reviewer feedback is addressed on the same branch, with replies
-- **Survives real life**: persistent queue, crash recovery, provider rate-limit detection with pause and resume
+| Capability | What it does |
+| --- | --- |
+| **Feasibility gate** | Vague tickets get questions back on the tracker instead of a confidently wrong PR |
+| **Self-review loop** | The agent reviews and fixes its own diff before a human sees it |
+| **Unattended automation** | Scheduled pickup; review comments become commits on the same branch |
+| **Real-world resilience** | Persistent queue, crash recovery, rate-limit pause/resume |
 
-## Repository status
+## Packages in this repository
 
-History starts at the FSL release. Development currently happens in a private monorepo that also contains the devintern.com website; this repository receives regular synced snapshots of the tool packages, and pull requests here are reviewed and ported with authorship preserved (see [CONTRIBUTING.md](CONTRIBUTING.md)). Once the in-flight internal work lands, development of the tool packages moves here and PRs merge directly.
+| Package | Purpose |
+| --- | --- |
+| [`@getdevintern/code`](packages/code) | The `devintern` CLI: ticket → agent → self-reviewed PR |
+| [`@getdevintern/pm`](packages/pm) | The `devpm` CLI: rough notes, logs, or Figma frames → well-specified tickets |
+| `packages/*` (shared) | Source-only workspace packages: agent harness, tracker clients, auth, license check, utilities |
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how PRs are handled during the transition, and [AGENTS.md](AGENTS.md) for the monorepo layout, tooling (Bun only), and per-package commands. Pre-commit hooks run format, lint, and typecheck via lefthook.
+The website and control plane live elsewhere; this repository is the tool packages only.
 
 ## License and pricing
 
-The source is available under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host; each release converts to Apache-2.0 two years after publication.
+Source is under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
-Interactive use is free forever. Unattended automation (scheduled ticket pickup and webhook-driven review handling) requires a license: a one-time Supporter License for solo use or a Team/Business subscription. See [devintern.com/pricing](https://devintern.com/pricing/).
+- **Interactive use** → free forever
+- **Unattended automation** (scheduled pickup, webhook-driven review handling) → Supporter License (one-time) or Team/Business subscription
+
+Details: [devintern.com/pricing](https://devintern.com/pricing/)
 
 The FSL grants no trademark rights: the DevIntern name and logo are trademarks of Daniil Pokrovsky (devintern.com) and may not be used to identify forks or derived products.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how PRs are handled during the private→public sync transition, and [AGENTS.md](AGENTS.md) for monorepo layout, tooling (Bun only), and per-package commands. Pre-commit hooks run format, lint, and typecheck via lefthook.
+
+Built for teams that want agents to close tickets, not just write code.

@@ -1,7 +1,7 @@
 {
   "name": "@getdevintern/pm",
   "version": "2.2.1",
-  "description": "Automate story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues using your preferred AI agent.",
+  "description": "Turn rough notes, logs, and Figma into codebase-grounded tracker tickets with any coding agent. Self-hosted, BYOK.",
   "type": "module",
   "bin": {
     "devpm": "dist/index.js"
@@ -35,17 +35,29 @@
     "test": "bun test"
   },
   "keywords": [
+    "ai",
+    "coding-agent",
+    "agent",
+    "cli",
+    "self-hosted",
+    "byok",
     "jira",
+    "linear",
+    "github",
+    "trello",
+    "asana",
+    "azure-devops",
+    "figma",
     "claude",
+    "claude-code",
     "opencode",
     "codex",
     "cursor",
-    "ai",
     "project-management",
-    "figma",
-    "automation",
-    "cli",
-    "task-management"
+    "task-management",
+    "story-writing",
+    "devtools",
+    "workflow"
   ],
   "repository": {
     "type": "git",

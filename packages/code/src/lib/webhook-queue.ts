@@ -7,8 +7,11 @@
  */
 
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { spawnSync } from "child_process";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import { dirname, join, resolve } from "path";
+
+import { findConfigDir } from "@devintern/utils";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -50,13 +53,83 @@ const DEFAULT_MAX_RETRIES = 3;
 
 /**
  * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
- * `.devintern-code/queue.db` under the project directory so queue state,
+ * `queue.db` inside the nearest `.devintern-code` directory so queue state,
  * cursors, and run records persist across reboots.
  *
- * @param projectDir - Project root (defaults to the current working directory)
+ * The config directory is searched upwards from `projectDir` (same traversal
+ * as `.env` resolution), so running from a subdirectory of the project reuses
+ * the project's database instead of creating a stray one next to the cwd.
+ *
+ * @param projectDir - Directory to search from (defaults to the current working directory)
  */
 export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
-  return process.env.WEBHOOK_QUEUE_DB || join(projectDir, ".devintern-code", "queue.db");
+  if (process.env.WEBHOOK_QUEUE_DB) {
+    return process.env.WEBHOOK_QUEUE_DB;
+  }
+
+  const configDir = findConfigDir({ configDirName: ".devintern-code", startDir: projectDir });
+  return join(configDir ?? join(projectDir, ".devintern-code"), "queue.db");
+}
+
+/** Local ignore pattern for the state database, at any depth. */
+const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
+
+/**
+ * Keep the state database out of git without touching the project's committed
+ * `.gitignore`, using the per-clone `.git/info/exclude`.
+ *
+ * Projects initialised before `.devintern-code/*` was ignored wholesale leave
+ * `queue.db` untracked-but-visible, where `git add -A` sweeps it into the
+ * implementation commit and `git clean` deletes it mid-run. Best-effort: any
+ * failure (not a repo, read-only .git) is ignored.
+ */
+function ensureDbIgnored(dbPath: string): void {
+  try {
+    const dir = dirname(dbPath);
+
+    // Already covered by a .gitignore (or a previous run of this helper).
+    const check = spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: dir });
+    if (check.status !== 1) {
+      return; // 0 = ignored, 128 = not a git repository
+    }
+
+    const gitDir = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    if (gitDir.status !== 0) {
+      return;
+    }
+
+    const excludeFile = join(resolve(dir, gitDir.stdout.trim()), "info", "exclude");
+    const existing = existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "";
+    if (existing.includes(QUEUE_DB_IGNORE_PATTERN)) {
+      return;
+    }
+
+    mkdirSync(dirname(excludeFile), { recursive: true });
+    const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+    appendFileSync(
+      excludeFile,
+      `${separator}\n# @devintern/code local state (not committed)\n${QUEUE_DB_IGNORE_PATTERN}\n`,
+    );
+  } catch {
+    // Ignoring the database is a convenience, never a requirement.
+  }
+}
+
+/**
+ * Create the state database's directory and keep the database itself out of
+ * git. Shared by every store that opens `queue.db` for writing.
+ *
+ * @param dbPath - Path of the database file about to be opened
+ */
+export function prepareQueueDbDirectory(dbPath: string): void {
+  const dir = dirname(dbPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  ensureDbIgnored(dbPath);
 }
 
 /**
@@ -83,11 +156,7 @@ export class WebhookQueue {
       return;
     }
 
-    // Ensure directory exists
-    const dir = dirname(dbPath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    prepareQueueDbDirectory(dbPath);
 
     this.migrateLegacyDb(dbPath, config.legacyDbPath);
 

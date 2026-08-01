@@ -1,28 +1,45 @@
 # @getdevintern/code
 
-AI-powered task automation for Jira and other project management tools. Automatically implements tasks using your preferred AI agent with git integration and PR creation.
+**Turn tracker tickets into pull requests with any coding agent — on your keys, self-hosted.**
 
-Supported agent harnesses: Claude Code, OpenCode, Codex, Cursor, Grok Build, Reasonix (DeepSeek), and others.
+`devintern` watches your issue tracker (or a local markdown file), runs Claude Code / Codex / Cursor / OpenCode / others, and opens a ready-to-review PR. Interactive use is free forever.
+
+- **Trackers:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · markdown files
+- **Agents:** Claude Code · Codex · Cursor · OpenCode · Grok Build · and others
+- **BYOK:** your model keys, billed on your existing provider contract
 
 ## Install
 
 ```bash
-bun add -g @getdevintern/code
+bun install -g @getdevintern/code
 # or
 npm install -g @getdevintern/code
 ```
 
+## Quick start
+
+```bash
+# Zero tracker credentials: local markdown task → PR
+devintern ./tasks/feature-spec.md --create-pr
+
+# Or configure a real tracker
+devintern init
+devintern PROJ-123 --create-pr
+```
+
 ## Documentation
 
-Full documentation lives at **[devintern.com/docs/code](https://devintern.com/docs/code/quick-start)**:
+Full docs: **[devintern.com/docs/code](https://devintern.com/docs/code/quick-start)**
 
 - [Quick start](https://devintern.com/docs/code/quick-start)
 - [Configuration](https://devintern.com/docs/code/configuration)
 - [Usage](https://devintern.com/docs/code/usage)
+- [Markdown file tasks](https://devintern.com/docs/code/markdown-tasks)
+- [Worker / unattended automation](https://devintern.com/docs/code/worker)
 - [GitHub integration](https://devintern.com/docs/code/github-integration)
-- [Automated task processing](https://devintern.com/docs/code/automated-task-processing)
-- [Story points estimation](https://devintern.com/docs/code/story-points-estimation)
+
+Source monorepo: [getdevintern/devintern](https://github.com/getdevintern/devintern)
 
 ## License
 
-See [LICENSE.md](./LICENSE.md).
+[FSL-1.1-Apache-2.0](./LICENSE.md). Interactive use free forever; unattended automation requires a license — see [pricing](https://devintern.com/pricing/).

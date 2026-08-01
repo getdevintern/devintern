@@ -256,7 +256,8 @@ export async function getRelatedWorkItems(
       }
     }
 
-    console.log(`✅ Successfully fetched ${relatedIssues.length} related work items`);
+    // The count is logged by the caller for every tracker; logging it here too
+    // printed the line twice for Jira.
     return relatedIssues;
   } catch (error) {
     console.warn(`Error fetching related work items: ${error}`);

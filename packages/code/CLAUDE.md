@@ -74,7 +74,7 @@ Tracker-specific sections are supported. The tool resolves configuration based o
 
 Legacy top-level `projects` is still honored as a Jira fallback for backward compatibility.
 
-Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state) lives in `.devintern-code/queue.db`; the retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
+Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
 
 ## Key Implementation Details
 

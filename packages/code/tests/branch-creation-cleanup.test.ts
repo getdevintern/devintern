@@ -4,7 +4,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
 
@@ -165,6 +165,50 @@ describe("Branch Creation Cleanup", () => {
 
     expect(result.success).toBe(true);
     expect(result.branchName).toBe("feature/test-456-attempt-2");
+  });
+
+  test("keeps the .devintern-code state directory", async () => {
+    // The SQLite database is open while the branch is created; deleting it
+    // breaks every later write with "disk I/O error".
+    mkdirSync(join(repoDir, ".devintern-code"), { recursive: true });
+    writeFileSync(join(repoDir, ".devintern-code", "queue.db"), "state\n", "utf8");
+
+    const result = await Utils.createFeatureBranch("TEST-STATE", undefined, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    expect(existsSync(join(repoDir, ".devintern-code", "queue.db"))).toBe(true);
+  });
+
+  test("keeps a nested .devintern-code directory when run from a subdirectory", async () => {
+    const nestedDir = join(repoDir, "packages", "app", ".devintern-code");
+    mkdirSync(nestedDir, { recursive: true });
+    writeFileSync(join(nestedDir, "queue.db"), "state\n", "utf8");
+
+    const result = await Utils.createFeatureBranch("TEST-NESTED", undefined, {
+      cwd: join(repoDir, "packages", "app"),
+    });
+
+    expect(result.success).toBe(true);
+    expect(existsSync(join(nestedDir, "queue.db"))).toBe(true);
+  });
+
+  test("backs up discarded work to a recoverable stash entry", async () => {
+    writeFileSync(join(repoDir, "README.md"), "# Modified README\n", "utf8");
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+
+    const result = await Utils.createFeatureBranch("TEST-STASH", undefined, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    expect(await Utils.hasUncommittedChanges(repoDir)).toBe(false);
+
+    // The stash entry is labelled with the task key and restores both the
+    // modified and the untracked file.
+    const stashList = execSync("git stash list", { cwd: repoDir }).toString();
+    expect(stashList).toContain("devintern-code: pre-branch backup for TEST-STASH");
+
+    execSync("git stash apply stash@{0}", { cwd: repoDir });
+    expect(readFileSync(join(repoDir, "README.md"), "utf8")).toBe("# Modified README\n");
+    expect(existsSync(join(repoDir, "untracked.txt"))).toBe(true);
   });
 
   test("suffixes attempt-2 when the branch exists only on the remote", async () => {
