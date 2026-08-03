@@ -1,5 +1,16 @@
 # @devintern/code Changelog
 
+## [2.2.1] - 2026-08-03
+
+### Changed
+
+- **Analysis runs temporarily skip harness read-only mode**: feasibility/clarity and estimation spawns always use the default unattended path for now. Several harnesses (notably Cursor ask mode) were returning empty or non-JSON stdout under native read-only/plan modes. The prefer-readonly + fallback path remains in `lib/analysis-mode.ts` behind `PREFER_READONLY_ANALYSIS` for a later re-enable
+
+### Fixed
+
+- **Markdown feasibility checks use the assessment prompt**: markdown tracker runs were feeding `task-details.md` (an implement prompt) into the clarity agent, so the response was prose instead of the required JSON assessment and the parse always failed
+- **Branch cleanup no longer destroys run records or user work**: `queue.db` now resolves through the nearest `.devintern-code` directory (same traversal as `.env`), `git clean` excludes that directory, and the database is kept out of git via `.git/info/exclude`. Uncommitted local changes are stashed with a labelled entry before feature-branch prep instead of being hard-reset away after a pull refusal
+
 ## [2.2.0] - 2026-07-31
 
 The server-automation release: a single `devintern worker` daemon that picks up ready tasks, reacts to PR reviews, and reports on itself through a local dashboard — plus OS-level sandboxing for every agent spawn.

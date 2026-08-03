@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 
 import {
+  PREFER_READONLY_ANALYSIS,
   ReadonlyAnalysisError,
   analysisRunOptions,
   runAnalysisWithFallback,
@@ -28,17 +29,18 @@ afterEach(() => {
 });
 
 describe("analysisRunOptions", () => {
-  test("uses readonly mode without permission-skip when supported", () => {
+  test("uses unattended defaults while PREFER_READONLY_ANALYSIS is off", () => {
+    expect(PREFER_READONLY_ANALYSIS).toBe(false);
     const options = analysisRunOptions(readonlyHarness, 10);
-    expect(options.mode).toBe("readonly");
-    expect(options.skipPermissions).toBe(false);
+    expect(options.mode).toBeUndefined();
+    expect(options.skipPermissions).toBe(true);
     expect(options.allowedTools).toBeUndefined();
   });
 
-  test("parses AGENT_ANALYSIS_ALLOWED_TOOLS into allowedTools", () => {
+  test("ignores AGENT_ANALYSIS_ALLOWED_TOOLS while readonly is disabled", () => {
     process.env.AGENT_ANALYSIS_ALLOWED_TOOLS = " mcp__notion , mcp__figma__get_design_context ,";
     const options = analysisRunOptions(readonlyHarness, 10);
-    expect(options.allowedTools).toEqual(["mcp__notion", "mcp__figma__get_design_context"]);
+    expect(options.allowedTools).toBeUndefined();
   });
 
   test("falls back to unattended defaults without readonly support", () => {
@@ -66,20 +68,16 @@ describe("shouldRetryInDefaultMode", () => {
 });
 
 describe("runAnalysisWithFallback", () => {
-  test("retries once in default mode when the readonly run fails retriably", async () => {
+  test("runs once in default mode while readonly preference is off", async () => {
     const attempts: AgentRunOptions[] = [];
     const result = await runAnalysisWithFallback(readonlyHarness, 10, async (options) => {
       attempts.push(options);
-      if (options.mode === "readonly") {
-        throw new ReadonlyAnalysisError("empty stdout");
-      }
       return "ok";
     });
     expect(result).toBe("ok");
-    expect(attempts).toHaveLength(2);
-    expect(attempts[0]?.mode).toBe("readonly");
-    expect(attempts[1]?.mode).toBeUndefined();
-    expect(attempts[1]?.skipPermissions).toBe(true);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.mode).toBeUndefined();
+    expect(attempts[0]?.skipPermissions).toBe(true);
   });
 
   test("does not retry non-retriable failures", async () => {
@@ -101,16 +99,6 @@ describe("runAnalysisWithFallback", () => {
         throw new Error("some failure");
       }),
     ).rejects.toThrow("some failure");
-    expect(attempts).toBe(1);
-  });
-
-  test("returns the first result when the readonly run succeeds", async () => {
-    let attempts = 0;
-    const result = await runAnalysisWithFallback(readonlyHarness, 10, async () => {
-      attempts++;
-      return { ok: true };
-    });
-    expect(result).toEqual({ ok: true });
     expect(attempts).toBe(1);
   });
 });

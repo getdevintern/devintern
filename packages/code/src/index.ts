@@ -1639,24 +1639,23 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Run clarity check first (unless skipped)
     if (!options.skipClarityCheck) {
       console.log("\n🔍 Running basic feasibility assessment...");
-      if (!isMarkdownTaskTracker(tracker)) {
-        console.log(
-          "   (Checking for fundamental requirements only - technical details will be inferred from code)",
-        );
-      }
+      console.log(
+        "   (Checking for fundamental requirements only - technical details will be inferred from code)",
+      );
 
-      const clarityInputFile = isMarkdownTaskTracker(tracker)
-        ? outputFile
-        : join(require("os").tmpdir(), `clarity-${workflowKey.toLowerCase()}-${Date.now()}.md`);
-
-      if (!isMarkdownTaskTracker(tracker)) {
-        TaskFormatter.saveClarityAssessment(
-          taskDetails,
-          clarityInputFile,
-          process.env.JIRA_BASE_URL!,
-          attachmentMap,
-        );
-      }
+      // Always build the assessment prompt — markdown trackers previously
+      // reused task-details.md (an implement prompt), so the agent returned
+      // prose instead of the required JSON assessment.
+      const clarityInputFile = join(
+        require("os").tmpdir(),
+        `clarity-${workflowKey.toLowerCase()}-${Date.now()}.md`,
+      );
+      TaskFormatter.saveClarityAssessment(
+        taskDetails,
+        clarityInputFile,
+        process.env.JIRA_BASE_URL,
+        attachmentMap,
+      );
 
       try {
         const assessment = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
@@ -1691,12 +1690,10 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           }
         }
 
-        if (!isMarkdownTaskTracker(tracker)) {
-          try {
-            require("fs").unlinkSync(clarityInputFile);
-          } catch {
-            /* ignore */
-          }
+        try {
+          require("fs").unlinkSync(clarityInputFile);
+        } catch {
+          /* ignore */
         }
       } catch (clarityError) {
         recordRunStage("feasibility", {
@@ -1706,12 +1703,10 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
         console.warn("⚠️  Feasibility check failed, continuing with implementation:", clarityError);
         console.log("   You can skip feasibility checks with --skip-clarity-check");
 
-        if (!isMarkdownTaskTracker(tracker)) {
-          try {
-            require("fs").unlinkSync(clarityInputFile);
-          } catch {
-            /* ignore */
-          }
+        try {
+          require("fs").unlinkSync(clarityInputFile);
+        } catch {
+          /* ignore */
         }
       }
     }

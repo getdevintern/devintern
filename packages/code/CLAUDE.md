@@ -80,7 +80,7 @@ Everything under the output directory is a write-only debug artifact. Durable st
 
 - **Runtime**: Bun (required for bun:sqlite in webhook queue)
 - **Git branches**: `feature/{task-key-lowercase}` naming convention
-- **Claude execution**: Spawns subprocess with `-p --dangerously-skip-permissions` for implementation; internal analysis-only spawns (clarity check, estimation) use the harness's native read-only mode when supported (e.g. Claude `--permission-mode plan`) and never combine it with permission-skip
+- **Claude execution**: Spawns subprocess with `-p --dangerously-skip-permissions` for implementation; internal analysis-only spawns (clarity check, estimation) currently use the same unattended path (`PREFER_READONLY_ANALYSIS` is off in `lib/analysis-mode.ts` — harness ask/plan modes often return unusable stdout). The read-only prefer + fallback path is kept for re-enable later
 - **JIRA integration**: Posts summaries in Atlassian Document Format
 - **Webhook isolation**: Sequential queue + branch-scoped worktrees at `/tmp/devintern-review-worktree-<branch>/`
   - One worktree per PR branch (reused across reviews of the same branch; other branches pruned to bound disk usage)

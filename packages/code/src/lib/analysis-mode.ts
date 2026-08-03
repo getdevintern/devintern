@@ -2,12 +2,13 @@
  * Read-only mode policy for internal analysis-only agent spawns
  * (clarity check, story point estimation).
  *
- * These runs only need to read the repo and emit JSON on stdout, so they use
- * the harness's native read-only enforcement when available — with a one-shot
- * fallback to the default unattended path when the constrained run fails,
- * because a read-only-mode incompatibility (e.g. an older agent CLI that
- * rejects the mode flag, or a CLI that returns empty output under it) must
- * degrade to pre-existing behavior rather than break analysis for that user.
+ * Prefer native read-only enforcement when available, with a one-shot
+ * fallback to the default unattended path when the constrained run fails.
+ *
+ * TEMP: {@link PREFER_READONLY_ANALYSIS} is false — several harnesses
+ * (notably Cursor ask mode) return unusable stdout under read-only, so
+ * analysis always uses the default unattended path for now. Flip the flag
+ * back to true once harness behavior is reliable; keep the helpers below.
  */
 
 import {
@@ -16,6 +17,13 @@ import {
   type AgentHarness,
   type AgentRunOptions,
 } from "@devintern/agent-harness";
+
+/**
+ * When true, analysis spawns prefer harness `readonly`/`plan` modes (with
+ * fallback). Currently off: read-only runs often fail with empty/non-JSON
+ * stdout (e.g. `cursor-agent --mode ask`).
+ */
+export const PREFER_READONLY_ANALYSIS = false;
 
 /**
  * Thrown by analysis runs when a constrained-mode agent produced unusable
@@ -31,23 +39,19 @@ export class ReadonlyAnalysisError extends Error {
 }
 
 /**
- * Run options for analysis-only spawns: native read-only mode when the
- * harness supports it (never combined with permission-skip), the unattended
- * default otherwise.
+ * Run options for analysis-only spawns.
  *
- * Known tradeoff: constrained modes reduce the toolset beyond file writes on
- * some harnesses — cursor (ask mode) and opencode (plan agent) lose shell
- * entirely, claude-code keeps only read-only bash, and MCP tools are
- * restricted on most (see per-harness doc comments in
- * packages/agent-harness/src/harnesses/). Acceptable here because these
- * prompts are mostly local-repo reads. claude-code re-allows WebFetch and
- * WebSearch so linked docs in task descriptions stay reachable, and
- * AGENT_ANALYSIS_ALLOWED_TOOLS (comma-separated, harness tool naming — e.g.
- * `mcp__notion,mcp__figma__get_design_context`) lets users extend the
- * allowlist to MCP servers they enabled for their harness.
+ * When {@link PREFER_READONLY_ANALYSIS} is true: native read-only mode when
+ * the harness supports it (never combined with permission-skip), unattended
+ * default otherwise. Known tradeoff: constrained modes reduce the toolset
+ * beyond file writes on some harnesses — cursor (ask mode) and opencode
+ * (plan agent) lose shell entirely, claude-code keeps only read-only bash,
+ * and MCP tools are restricted on most (see per-harness doc comments in
+ * packages/agent-harness/src/harnesses/). AGENT_ANALYSIS_ALLOWED_TOOLS
+ * (comma-separated, harness tool naming) extends the analysis allowlist.
  */
 export function analysisRunOptions(harness: AgentHarness, maxTurns: number): AgentRunOptions {
-  if (isModeSupported(harness, "readonly")) {
+  if (PREFER_READONLY_ANALYSIS && isModeSupported(harness, "readonly")) {
     const allowedTools = (process.env.AGENT_ANALYSIS_ALLOWED_TOOLS ?? "")
       .split(",")
       .map((tool) => tool.trim())
