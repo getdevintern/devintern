@@ -35,13 +35,15 @@ DevIntern connects the tracker your team already uses to the coding agent and mo
 - **Your keys:** BYOK — billed on your existing provider contract
 - **Interactive use is free forever** — no signup, no time limit
 
-<!-- Visual echo of the tracker + agent bullets above -->
+<!-- Visual echo of the tracker + agent bullets above.
+     Near-black brand marks use color/dark_mode_color so they stay visible
+     under prefers-color-scheme (GitHub light + dark). -->
 <p align="center">
   <img src="https://cdn.simpleicons.org/jira/0052CC" height="22" alt="Jira" title="Jira" />
   &nbsp;
   <img src="https://cdn.simpleicons.org/linear/5E6AD2" height="22" alt="Linear" title="Linear" />
   &nbsp;
-  <img src="https://cdn.simpleicons.org/github/181717" height="22" alt="GitHub Issues" title="GitHub Issues" />
+  <img src="https://cdn.simpleicons.org/github/181717/ffffff" height="22" alt="GitHub Issues" title="GitHub Issues" />
   &nbsp;
   <img src="https://cdn.simpleicons.org/trello/0052CC" height="22" alt="Trello" title="Trello" />
   &nbsp;
@@ -49,15 +51,18 @@ DevIntern connects the tracker your team already uses to the coding agent and mo
   &nbsp;
   <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/azure/azure-original.svg" height="22" alt="Azure DevOps" title="Azure DevOps" />
   &nbsp;
-  <img src="https://cdn.simpleicons.org/markdown/000000" height="22" alt="Markdown" title="Markdown files" />
+  <img src="https://cdn.simpleicons.org/markdown/000000/ffffff" height="22" alt="Markdown" title="Markdown files" />
   &nbsp;&nbsp;
   <img src="https://cdn.simpleicons.org/claude/D97757" height="22" alt="Claude Code" title="Claude Code" />
   &nbsp;
-  <img src="https://cdn.jsdelivr.net/npm/simple-icons@11.15.0/icons/openai.svg" height="22" alt="Codex" title="Codex" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.iconify.design/simple-icons/openai.svg?color=%23ffffff" />
+    <img src="https://api.iconify.design/simple-icons/openai.svg?color=%23000000" height="22" alt="Codex" title="Codex" />
+  </picture>
   &nbsp;
-  <img src="https://cdn.simpleicons.org/cursor/000000" height="22" alt="Cursor" title="Cursor" />
+  <img src="https://cdn.simpleicons.org/cursor/000000/ffffff" height="22" alt="Cursor" title="Cursor" />
   &nbsp;
-  <img src="https://cdn.simpleicons.org/opencode/000000" height="22" alt="OpenCode" title="OpenCode" />
+  <img src="https://cdn.simpleicons.org/opencode/000000/ffffff" height="22" alt="OpenCode" title="OpenCode" />
 </p>
 
 <p align="center">
