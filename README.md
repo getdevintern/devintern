@@ -17,12 +17,10 @@
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
 </p>
 
-<!-- Hero demo (record markdown task → agent → PR; prefer short silent MP4 on a GitHub attachment URL)
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/YOUR-ID" width="820" controls muted autoplay loop playsinline></video>
+  <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="820" controls muted autoplay loop playsinline></video>
 </p>
 <p align="center"><em>Markdown task → coding agent → pull request</em></p>
--->
 
 <!-- Fallback GIF if video is awkward on some clients
 <p align="center">
