@@ -89,9 +89,16 @@ const SOURCE = "github:reviews";
  *
  * @param repo - `owner/repo` slug
  * @param prNumber - Pull request number
+ * @param opts - Working directory and environment for the subprocess;
+ *               workspace mode runs from the repo's base worktree with
+ *               per-repo env, single-repo mode inherits both
  */
-export function runAddressReviewViaCli(repo: string, prNumber: number): Promise<boolean> {
-  return runSubcommandViaCli("address-review", repo, prNumber);
+export function runAddressReviewViaCli(
+  repo: string,
+  prNumber: number,
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): Promise<boolean> {
+  return runSubcommandViaCli("address-review", repo, prNumber, opts);
 }
 
 /**
@@ -99,17 +106,28 @@ export function runAddressReviewViaCli(repo: string, prNumber: number): Promise<
  *
  * @param repo - `owner/repo` slug
  * @param prNumber - Pull request number
+ * @param opts - Optional per-repo working directory and environment
  */
-export function runResolveConflictsViaCli(repo: string, prNumber: number): Promise<boolean> {
-  return runSubcommandViaCli("resolve-conflicts", repo, prNumber);
+export function runResolveConflictsViaCli(
+  repo: string,
+  prNumber: number,
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): Promise<boolean> {
+  return runSubcommandViaCli("resolve-conflicts", repo, prNumber, opts);
 }
 
-function runSubcommandViaCli(subcommand: string, repo: string, prNumber: number): Promise<boolean> {
+function runSubcommandViaCli(
+  subcommand: string,
+  repo: string,
+  prNumber: number,
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): Promise<boolean> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
       stdio: "inherit",
-      env: process.env,
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", (error) => {

@@ -1,14 +1,19 @@
 import { beforeEach, afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   resolveHarness,
   findInPath,
+  getHarnessCliCommand,
+  isHarnessCliAvailable,
+  isHarnessInstalled,
+  listInstalledHarnesses,
   resolveExecutablePath,
   resolveExecutablePathStrict,
   resolveExecutablePathWithRetry,
 } from "../src/resolver.js";
+import { getHarness } from "../src/registry.js";
 
 describe("resolveHarness", () => {
   const originalEnv = { ...process.env };
@@ -76,16 +81,42 @@ describe("resolveHarness", () => {
     expect(result.path).toBe("/global/agent");
   });
 
+  test("ignores AGENT_CLI_PATH when harnessName is explicit", () => {
+    process.env.AGENT_CLI_PATH = "/global/agent";
+    process.env.OPENCODE_CLI_PATH = "/custom/opencode";
+    const result = resolveHarness({ harnessName: "opencode" });
+    expect(result.path).toBe("/custom/opencode");
+  });
+
+  test("interactive harness switch uses harness-specific path over AGENT_CLI_PATH", () => {
+    process.env.AGENT_CLI_PATH = "/global/agent";
+    process.env.OPENCODE_CLI_PATH = "/custom/opencode";
+    const initial = resolveHarness({ harnessName: "claude-code" });
+    expect(initial.harness.name).toBe("claude-code");
+    expect(initial.path).not.toBe("/global/agent");
+
+    const switched = resolveHarness({ harnessName: "opencode" });
+    expect(switched.harness.name).toBe("opencode");
+    expect(switched.path).toBe("/custom/opencode");
+  });
+
   test("uses harness-specific env var", () => {
     process.env.OPENCODE_CLI_PATH = "/opencode/path";
     const result = resolveHarness({ harnessName: "opencode" });
     expect(result.path).toBe("/opencode/path");
   });
 
-  test("falls back to CLAUDE_CLI_PATH for non-claude harnesses", () => {
+  test("falls back to CLAUDE_CLI_PATH for non-claude harnesses when harness is env-driven", () => {
+    process.env.AGENT_HARNESS = "kimi";
+    process.env.CLAUDE_CLI_PATH = "/claude/fallback";
+    const result = resolveHarness();
+    expect(result.path).toBe("/claude/fallback");
+  });
+
+  test("explicit harnessName does not fall back to CLAUDE_CLI_PATH for other harnesses", () => {
     process.env.CLAUDE_CLI_PATH = "/claude/fallback";
     const result = resolveHarness({ harnessName: "kimi" });
-    expect(result.path).toBe("/claude/fallback");
+    expect(result.path).toBe("kimi");
   });
 
   test("falls back to harness defaultPath", () => {
@@ -301,5 +332,95 @@ describe("resolveExecutablePathWithRetry", () => {
         process.env.AGENT_SPAWN_ENOENT_RETRIES = original;
       }
     }
+  });
+});
+
+describe("harness install detection", () => {
+  const originalEnv = { ...process.env };
+  let warnings: string[];
+  const originalWarn = console.warn;
+
+  beforeEach(() => {
+    delete process.env.AGENT_CLI_PATH;
+    delete process.env.CLAUDE_CLI_PATH;
+    delete process.env.OPENCODE_CLI_PATH;
+    delete process.env.ANTIGRAVITY_CLI_PATH;
+    delete process.env.AGY_CLI_PATH;
+    delete process.env.GEMINI_CLI_PATH;
+    warnings = [];
+    console.warn = (msg?: unknown) => {
+      warnings.push(String(msg));
+    };
+  });
+
+  afterEach(() => {
+    console.warn = originalWarn;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  test("getHarnessCliCommand prefers harness-specific env vars", () => {
+    process.env.OPENCODE_CLI_PATH = "/custom/opencode";
+    const harness = getHarness("opencode")!;
+    expect(getHarnessCliCommand(harness)).toBe("/custom/opencode");
+  });
+
+  test("getHarnessCliCommand uses CLAUDE_CLI_PATH only for claude-code", () => {
+    process.env.CLAUDE_CLI_PATH = "/custom/claude";
+    expect(getHarnessCliCommand(getHarness("claude-code")!)).toBe("/custom/claude");
+    expect(getHarnessCliCommand(getHarness("opencode")!)).toBe("opencode");
+  });
+
+  test("getHarnessCliCommand honours AGENT_CLI_PATH for the active harness", () => {
+    process.env.AGENT_CLI_PATH = "/global/agent";
+    const harness = getHarness("cursor")!;
+    expect(getHarnessCliCommand(harness)).toBe("cursor-agent");
+    expect(getHarnessCliCommand(harness, { includeGlobalCliPath: true })).toBe("/global/agent");
+  });
+
+  test("isHarnessCliAvailable returns true for a command on PATH", () => {
+    const command = process.platform === "win32" ? "cmd" : "node";
+    expect(isHarnessCliAvailable(command)).toBe(true);
+  });
+
+  test("isHarnessCliAvailable returns false for a missing bare command", () => {
+    expect(isHarnessCliAvailable("definitely-not-a-real-command-12345")).toBe(false);
+  });
+
+  test("isHarnessInstalled uses harness-specific env paths", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolver-install-"));
+    const file = join(dir, "opencode");
+    writeFileSync(file, "");
+    chmodSync(file, 0o755);
+    process.env.OPENCODE_CLI_PATH = file;
+    try {
+      expect(isHarnessInstalled(getHarness("opencode")!)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("isHarnessCliAvailable returns false for a non-executable env override path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolver-not-exec-"));
+    const file = join(dir, "opencode");
+    writeFileSync(file, "");
+    try {
+      expect(isHarnessCliAvailable(file)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("listInstalledHarnesses only returns harnesses with reachable CLIs", () => {
+    const installed = listInstalledHarnesses();
+    for (const harness of installed) {
+      expect(isHarnessInstalled(harness)).toBe(true);
+    }
+    const missing = getHarness("definitely-not-real-12345");
+    expect(missing).toBeUndefined();
   });
 });

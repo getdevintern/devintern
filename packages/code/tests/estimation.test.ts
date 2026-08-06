@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -8,7 +8,12 @@ import { JiraTaskTrackerClient as JiraClient } from "../src/lib/trackers/jira/ji
 import type { FormattedTaskDetails } from "../src/types/jira";
 import type { ProjectSettings } from "../src/types/settings";
 
+// Fresh bun subprocesses for each case; under full-suite load they routinely
+// exceed bun's 5s default.
+setDefaultTimeout(30_000);
+
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
+const CLI_SPAWN_TIMEOUT_MS = 30_000;
 
 // Helper to run the CLI in an isolated directory
 function runCLI(args: string[]): {
@@ -25,7 +30,7 @@ function runCLI(args: string[]): {
   try {
     const result = spawnSync("bun", [CLI_PATH, ...args], {
       encoding: "utf8",
-      timeout: 5000,
+      timeout: CLI_SPAWN_TIMEOUT_MS,
       cwd: testDir,
       env: {
         ...process.env,

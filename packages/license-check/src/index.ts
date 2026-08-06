@@ -406,6 +406,35 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
 }
 
 /**
+ * Whether a license outcome qualifies for fleet/workspace mode.
+ *
+ * The multi-repo worker is a team-tier capability, so solo automation keys
+ * do not qualify. A grace-window result counts when the cached entitlement
+ * was team-automation.
+ *
+ * @param result - Outcome from {@link checkLicense}.
+ */
+export function isTeamAutomationEntitled(result: LicenseCheckResult): boolean {
+  return result.valid && result.entitlementSource === "team-automation";
+}
+
+/**
+ * Exit-on-failure wrapper around {@link isTeamAutomationEntitled}.
+ *
+ * @param result - Outcome from {@link checkLicense}.
+ */
+export function requireTeamAutomation(result: LicenseCheckResult): void {
+  if (isTeamAutomationEntitled(result)) {
+    return;
+  }
+  console.error("\n❌ Workspace (multi-repo) mode requires a team automation subscription");
+  console.error(
+    "   Your license covers single-repo automation only. Upgrade at https://devintern.com/pricing\n",
+  );
+  process.exit(1);
+}
+
+/**
  * Enforces a license check result: logs success or grace info, or exits with code 1 on failure.
  *
  * @param result - Outcome from {@link checkLicense}.

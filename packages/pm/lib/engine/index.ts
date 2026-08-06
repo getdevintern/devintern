@@ -21,6 +21,7 @@ import {
   type SubtaskDraft,
   type ProjectRef,
 } from "./types.js";
+import { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes } from "../issue-types.js";
 
 export { extractJsonPayload } from "./json.js";
 export { defaultPromptsDir, loadPrompt } from "./prompts.js";
@@ -38,7 +39,7 @@ export {
 export type { CreatedTask } from "../backends/index.js";
 
 /** Fallback issue types when a supporting backend cannot provide a list. */
-export const DEFAULT_ISSUE_TYPES = ["Task", "Story", "Bug", "Epic"];
+export { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes };
 
 export interface GenerateStoryInput {
   source: SourceInput;
@@ -263,23 +264,21 @@ export async function createEngine(
 
     async editStory(input, events) {
       const { current, editPrompt, issueType } = input;
-      const prompt = `You are helping revise a ${issueType.toLowerCase()} description.
+      const prompt = `Revise this ${issueType.toLowerCase()} based on the user's feedback. Keep the title unless they ask to change it.
 
 Current Title: ${current.summary}
 
 Current Description:
 ${current.description}
 
-User's edit request: ${editPrompt}
+Edit request: ${editPrompt}
 
-Please update the description based on the user's feedback. Keep the same title unless the user specifically asks to change it. Return ONLY valid JSON in this exact format:
+Return only valid JSON (no other text). Use markdown inside the description string:
 
-\`\`\`json
 {
   "summary": "Updated or same title",
   "description": "Updated description in markdown format"
-}
-\`\`\``;
+}`;
 
       return runAndParse(
         "story-edit",

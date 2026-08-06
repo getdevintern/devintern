@@ -450,6 +450,20 @@ if (process.argv[2] === "init") {
   (async () => {
     loadedEnvPath = loadEnvironment();
 
+    // `devintern worker connect ...` — pair this repo with the Mode 2 relay.
+    if (process.argv[3] === "connect") {
+      const { runWorkerConnect } = await import("./lib/relay-connect");
+      const exitCode = await runWorkerConnect(process.argv.slice(4), async () => {
+        try {
+          const detected = await new PRManager().detectRepository();
+          return detected.platform === "github" ? detected.repository : null;
+        } catch {
+          return null;
+        }
+      });
+      process.exit(exitCode);
+    }
+
     const args = process.argv.slice(3);
 
     if (args[0] === "init") {
@@ -516,9 +530,12 @@ if (process.argv[2] === "init") {
         verbose = true;
       } else if (args[i] === "--help" || args[i] === "-h") {
         console.log("Usage: devintern worker [init] [options]");
+        console.log("       devintern worker connect [github|status] [--repo owner/name]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
+        console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
+        console.log("events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
         console.log("Subcommands:");
         console.log("  init                Guided server-automation setup: ready-tasks query");
@@ -549,6 +566,7 @@ if (process.argv[2] === "init") {
         console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
         console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
         console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
+        console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
         process.exit(0);
       }
     }
@@ -767,6 +785,137 @@ if (process.argv[2] === "init") {
         );
       } else if (verbose) {
         console.log("   Mention sweep disabled: could not determine the GitHub repo slug.");
+      }
+    }
+
+    // Mode 2 relay: long-poll the control plane for reference envelopes when
+    // this project is connected (`devintern worker connect`) or a relay URL
+    // is set explicitly. Mode 1 polling keeps running as the fallback sweep;
+    // dedupe and live-state re-derivation bound double-triggers.
+    const { loadRelayState } = await import("./lib/relay-connect");
+    const relayState = loadRelayState();
+    if (relayState || process.env.WORKER_RELAY_URL) {
+      const relayToken = relayState?.relayToken;
+      const relayUrl =
+        process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+      if (!relayToken) {
+        console.warn(
+          "⚠️  Relay is configured but no relay token is stored — run `devintern worker connect` while signed in (`devintern login`). Mode 1 polling continues.",
+        );
+      } else if (relayUrl) {
+        const { RelayAcquirer } = await import("./lib/relay-acquirer");
+        const { runAddressReviewViaCli } = await import("./lib/review-polling-acquirer");
+        const { runTaskViaCli } = await import("./lib/task-polling-acquirer");
+        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
+        const { mentionsBot } = await import("./lib/mention-sweep-acquirer");
+        const relayWorkerState = new WorkerState(dbPath);
+
+        const hasGitHubCreds = Boolean(process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID);
+        const { GitHubReviewsClient } = await import("./lib/github-reviews");
+        const relayGh = hasGitHubCreds ? new GitHubReviewsClient({ preferAppAuth: true }) : null;
+
+        // Task envelopes re-evaluate the user's query before running
+        // (detect-then-evaluate, same as the polling acquirer).
+        const relayTracker = workerQuery
+          ? await (async () => {
+              const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
+              return new TaskTrackerManager().getClient();
+            })()
+          : null;
+
+        const relayUser = (user: { login: string; type: string }) => ({
+          login: user.login,
+          id: 0,
+          avatar_url: "",
+          type: user.type as "User" | "Bot" | "Organization",
+        });
+
+        acquirers.push(
+          new RelayAcquirer({
+            relayUrl,
+            relayToken,
+            workerState: relayWorkerState,
+            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+            isAgentPr: (repo, prNumber) =>
+              relayWorkerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
+            handlers: {
+              addressPr: async (repo, prNumber) => {
+                await runAddressReviewViaCli(repo, prNumber);
+              },
+              handlePrComment: async (repo, prNumber, commentId) => {
+                if (!relayGh) {
+                  return;
+                }
+                const [repoOwner, repoName] = repo.split("/") as [string, string];
+                // Fetch the referenced comment (envelopes never carry text),
+                // then pre-filter for the bot mention before entering the
+                // pipeline; the permission gate applies inside.
+                const { data: comment } = await relayGh.conditionalGet<{
+                  id: number;
+                  body: string | null;
+                  user: { login: string; type: string };
+                  created_at: string;
+                  html_url: string;
+                }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
+                if (!comment) {
+                  return;
+                }
+                const botName = await relayGh.getBotUsername(repoOwner, repoName);
+                if (!botName || !mentionsBot(comment.body, botName)) {
+                  return;
+                }
+                console.log(`📌 [relay] @mention on ${repo}#${prNumber}`);
+                await processIssueCommentAsync(
+                  {
+                    action: "created",
+                    issue: {
+                      number: prNumber,
+                      title: "",
+                      state: "open",
+                      user: relayUser(comment.user),
+                      pull_request: { url: "", html_url: comment.html_url },
+                    },
+                    comment: {
+                      id: comment.id,
+                      body: comment.body,
+                      user: relayUser(comment.user),
+                      html_url: comment.html_url,
+                      created_at: comment.created_at,
+                    },
+                    repository: {
+                      id: 0,
+                      name: repoName,
+                      full_name: repo,
+                      private: false,
+                      owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
+                      html_url: `https://github.com/${repo}`,
+                      default_branch: "main",
+                    },
+                    sender: relayUser(comment.user),
+                  },
+                  DEFAULT_CONFIG,
+                );
+              },
+              evaluateTask: async (taskKey) => {
+                if (!relayTracker || !workerQuery) {
+                  if (verbose) {
+                    console.log(
+                      `   [relay] task ${taskKey} changed but no --query is configured; skipping.`,
+                    );
+                  }
+                  return;
+                }
+                const { tasks } = await relayTracker.searchTasks(workerQuery);
+                if (!tasks.some((task) => task.key === taskKey)) {
+                  return;
+                }
+                console.log(`📌 [relay] task ${taskKey} is ready`);
+                await runTaskViaCli(taskKey);
+              },
+            },
+            verbose,
+          }),
+        );
       }
     }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { getDefaultIssueType } from "./lib/issue-types";
+import { getDefaultIssueType, orderIssueTypes } from "./lib/issue-types";
 
 describe("getDefaultIssueType", () => {
   test("prefers Task when present", () => {
@@ -30,5 +30,26 @@ describe("getDefaultIssueType", () => {
     expect(getDefaultIssueType(["STORY", "TASK", "BUG"])).toBe("TASK");
     expect(getDefaultIssueType(["story", "task", "bug"])).toBe("task");
     expect(getDefaultIssueType(["Epic", "Story"])).toBe("Story");
+  });
+});
+
+describe("orderIssueTypes", () => {
+  test("moves preferred default to the front without dropping types", () => {
+    expect(orderIssueTypes(["Epic", "Bug", "Task", "Story"])).toEqual([
+      "Task",
+      "Epic",
+      "Bug",
+      "Story",
+    ]);
+    expect(orderIssueTypes(["Epic", "Story", "Bug"])).toEqual(["Story", "Epic", "Bug"]);
+    expect(orderIssueTypes(["Epic", "Feature"])).toEqual(["Feature", "Epic"]);
+  });
+
+  test("leaves Epic first when it is the only option", () => {
+    expect(orderIssueTypes(["Epic"])).toEqual(["Epic"]);
+  });
+
+  test("returns empty list unchanged", () => {
+    expect(orderIssueTypes([])).toEqual([]);
   });
 });

@@ -386,6 +386,7 @@ describe("runInitWizard", () => {
 });
 
 describe("init --yes subprocess", () => {
+  // Spawns a fresh bun process; under full-suite load this exceeds bun's 5s default.
   test("writes the template files without prompting", () => {
     const result = Bun.spawnSync(
       ["bun", "run", join(import.meta.dir, "..", "src", "index.ts"), "init", "--yes"],
@@ -400,5 +401,5 @@ describe("init --yes subprocess", () => {
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain("TASK_TRACKER=jira");
     expect(env).toContain("# LINEAR_API_KEY=");
-  });
+  }, 30_000);
 });

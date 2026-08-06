@@ -60,16 +60,21 @@ export function workerTaskArgs(): string[] {
  *
  * @param taskKey - Task key to process
  * @param extraArgs - CLI flags (default from {@link workerTaskArgs})
+ * @param opts - Working directory and environment for the subprocess;
+ *               workspace mode routes each task to its repo's worktree with
+ *               per-repo env, single-repo mode inherits both
  * @returns true when the CLI exited 0
  */
 export function runTaskViaCli(
   taskKey: string,
   extraArgs: string[] = workerTaskArgs(),
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
       stdio: "inherit",
-      env: process.env,
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", (error) => {

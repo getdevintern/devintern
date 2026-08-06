@@ -7,6 +7,17 @@ export {
   parseTrackerConfigFromEnv,
   sanitizeDomain,
 } from "./config/load-tracker-config.ts";
+export type { ConfiguredTracker, TrackerId, TrackerMeta } from "./config/tracker-meta.ts";
+export {
+  TRACKER_IDS,
+  TRACKER_META,
+  getMissingRequiredEnv,
+  getProjectKeyEnvVar,
+  getTrackerDisplayName,
+  isTrackerConfigured,
+  isTrackerId,
+  listConfiguredTrackers,
+} from "./config/tracker-meta.ts";
 
 export { fetchWithRetry } from "@devintern/utils";
 

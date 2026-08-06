@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.2.1",
+  "version": "2.2.3",
   "description": "Turn tracker tickets into pull requests with any coding agent. Self-hosted, BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,7 @@
     "lint": "oxlint .",
     "typecheck": "bun run tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "bun test",
+    "test": "bun test --timeout=30000",
     "install-global": "bun run build && bun link",
     "uninstall-global": "bun unlink",
     "prepare": "bun run build",

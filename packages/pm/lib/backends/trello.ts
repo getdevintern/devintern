@@ -1,4 +1,5 @@
 import { TrelloClient } from "@devintern/task-trackers";
+import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
 
 /**
@@ -165,6 +166,6 @@ export class TrelloBackend implements TaskBackend {
    * @returns Default type names (not enforced by Trello).
    */
   async getIssueTypes(): Promise<string[]> {
-    return ["Task", "Story", "Bug", "Epic"];
+    return [...DEFAULT_ISSUE_TYPES];
   }
 }

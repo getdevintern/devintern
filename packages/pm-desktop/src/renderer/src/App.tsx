@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { ABOUT_VERSION_UNAVAILABLE, AboutDialog } from "./components/AboutDialog.tsx";
 import {
   ComposerForm,
   initialComposerValues,
@@ -7,8 +8,10 @@ import {
 import { NoTicketsEmptyState } from "./components/NoTicketsEmptyState.tsx";
 import { OutputPanel } from "./components/OutputPanel.tsx";
 import { ProjectBar } from "./components/ProjectBar.tsx";
+import { ProjectSetupWizard } from "./components/ProjectSetupWizard.tsx";
 import { SetupBanner, Welcome } from "./components/SetupEmptyState.tsx";
 import { TicketSidebar } from "./components/TicketSidebar.tsx";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,39 +29,53 @@ import {
   initialTicketWorkspacesState,
 } from "./state/ticket-workspaces.ts";
 import type { IpcError, ProjectStatus } from "../../shared/ipc-contract.ts";
+import { shouldShowCodeDiscovery } from "../../shared/code-discovery.ts";
+import {
+  DEFAULT_ISSUE_TYPES,
+  getDefaultIssueType,
+  issueTypeIfNeedsReset,
+  resolveIssueTypes,
+} from "./lib/issue-types.ts";
 
 let requestCounter = 0;
 const nextRequestId = () => `req-${++requestCounter}`;
-
-const FALLBACK_ISSUE_TYPES = ["Task", "Story", "Bug", "Epic"];
 
 function toError(error: IpcError | undefined): IpcError {
   return error ?? { code: "error", message: "Unknown error" };
 }
 
 function defaultComposerForProject(status: ProjectStatus, issueTypes: string[]): ComposerValues {
-  const types = issueTypes.length > 0 ? issueTypes : FALLBACK_ISSUE_TYPES;
+  const types = resolveIssueTypes(issueTypes);
   return {
     ...initialComposerValues,
     sourceContent: { ...initialComposerValues.sourceContent },
     projectKey: status.defaultProjectKey ?? "",
-    issueType: types[0] ?? "Task",
+    issueType: getDefaultIssueType(types),
   };
 }
 
 export function App() {
   const [status, setStatus] = useState<ProjectStatus | null>(null);
   const [loadingProject, setLoadingProject] = useState(false);
+  /** Transient error from tracker/project switch IPC (cleared on next successful load). */
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  /** null until settings IPC resolves — treat as "do not show" to avoid a launch flash. */
+  const [codeDiscoveryDismissed, setCodeDiscoveryDismissed] = useState<boolean | null>(null);
+  const [codeDiscoveryDismissError, setCodeDiscoveryDismissError] = useState<string | null>(null);
 
   const [workspaces, dispatch] = useReducer(ticketWorkspacesReducer, initialTicketWorkspacesState);
   const activeTicket = getActiveTicket(workspaces);
 
-  const [issueTypes, setIssueTypes] = useState<string[]>(FALLBACK_ISSUE_TYPES);
+  const [issueTypes, setIssueTypes] = useState<string[]>([...DEFAULT_ISSUE_TYPES]);
   const [loadingIssueTypes, setLoadingIssueTypes] = useState(false);
   const issueTypesCache = useRef(new Map<string, string[]>());
 
   /** Pending close when the ticket still has an agent/operation in flight. */
   const [closeConfirmId, setCloseConfirmId] = useState<string | null>(null);
+  /** In-app setup wizard for unconfigured / misconfigured projects. */
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
   // Stream agent output into the ticket that owns the requestId (may be background).
   useEffect(() => {
@@ -67,28 +84,99 @@ export function App() {
     });
   }, []);
 
-  const loadProject = useCallback(async (dir: string) => {
-    setLoadingProject(true);
-    try {
-      const result = await window.pm.getProjectStatus(dir);
-      if (!result.ok) return;
-      const next = result.value;
-      setStatus(next);
-      issueTypesCache.current.clear();
-      const types =
-        next.issueTypes && next.issueTypes.length > 0 ? next.issueTypes : FALLBACK_ISSUE_TYPES;
-      setIssueTypes(types);
-      if (next.defaultProjectKey) {
-        issueTypesCache.current.set(next.defaultProjectKey, types);
-      }
-      dispatch({
-        type: "project-loaded",
-        defaultComposer: defaultComposerForProject(next, types),
-      });
-    } finally {
-      setLoadingProject(false);
-    }
+  useEffect(() => {
+    return window.pm.onShowAbout(() => {
+      setAboutOpen(true);
+    });
   }, []);
+
+  useEffect(() => {
+    void window.pm
+      .getAppVersion()
+      .then((result) => {
+        setAppVersion(result.ok ? result.value : ABOUT_VERSION_UNAVAILABLE);
+      })
+      .catch(() => {
+        setAppVersion(ABOUT_VERSION_UNAVAILABLE);
+      });
+  }, []);
+
+  useEffect(() => {
+    void window.pm.isCodeDiscoveryDismissed().then((result) => {
+      if (result.ok) setCodeDiscoveryDismissed(result.value);
+    });
+  }, []);
+
+  const applyProjectStatus = useCallback((next: ProjectStatus) => {
+    setSwitchError(null);
+    setStatus(next);
+    issueTypesCache.current.clear();
+    const types = resolveIssueTypes(next.issueTypes);
+    setIssueTypes(types);
+    if (next.defaultProjectKey) {
+      issueTypesCache.current.set(next.defaultProjectKey, types);
+    }
+    dispatch({
+      type: "project-loaded",
+      defaultComposer: defaultComposerForProject(next, types),
+    });
+  }, []);
+
+  const loadProject = useCallback(
+    async (dir: string, options?: { openSetupIfUnconfigured?: boolean }) => {
+      setLoadingProject(true);
+      try {
+        const result = await window.pm.getProjectStatus(dir);
+        if (!result.ok) return;
+        const next = result.value;
+        applyProjectStatus(next);
+        if (options?.openSetupIfUnconfigured && !next.configured) {
+          setSetupOpen(true);
+        }
+      } finally {
+        setLoadingProject(false);
+      }
+    },
+    [applyProjectStatus],
+  );
+
+  const switchTracker = useCallback(
+    async (trackerId: string) => {
+      if (!status || status.activeTrackerId === trackerId) return;
+      setLoadingProject(true);
+      setSwitchError(null);
+      try {
+        const result = await window.pm.switchTracker(trackerId);
+        if (!result.ok) {
+          setSwitchError(toError(result.error).message);
+          return;
+        }
+        applyProjectStatus(result.value);
+      } finally {
+        setLoadingProject(false);
+      }
+    },
+    [applyProjectStatus, status],
+  );
+
+  const switchProjectKey = useCallback(
+    async (projectKey: string) => {
+      if (!status || status.defaultProjectKey === projectKey) return;
+      setLoadingProject(true);
+      setSwitchError(null);
+      try {
+        const result = await window.pm.switchProjectKey(projectKey);
+        if (!result.ok) {
+          setSwitchError(toError(result.error).message);
+          return;
+        }
+        applyProjectStatus(result.value);
+      } finally {
+        setLoadingProject(false);
+      }
+    },
+    [applyProjectStatus, status],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -108,11 +196,12 @@ export function App() {
     const cached = issueTypesCache.current.get(activeProjectKey);
     if (cached) {
       setIssueTypes(cached);
-      if (activeIssueType && !cached.includes(activeIssueType)) {
+      const reset = issueTypeIfNeedsReset(activeIssueType, cached);
+      if (reset !== null) {
         dispatch({
           type: "composer-patched",
           id: activeTicketId,
-          patch: { issueType: cached[0] ?? "Task" },
+          patch: { issueType: reset },
         });
       }
       return;
@@ -122,14 +211,15 @@ export function App() {
     void window.pm.listIssueTypes(activeProjectKey).then((result) => {
       if (cancelled) return;
       setLoadingIssueTypes(false);
-      const types = result.ok && result.value.length > 0 ? result.value : FALLBACK_ISSUE_TYPES;
+      const types = resolveIssueTypes(result.ok ? result.value : undefined);
       issueTypesCache.current.set(activeProjectKey, types);
       setIssueTypes(types);
-      if (activeIssueType && !types.includes(activeIssueType)) {
+      const reset = issueTypeIfNeedsReset(activeIssueType, types);
+      if (reset !== null) {
         dispatch({
           type: "composer-patched",
           id: activeTicketId,
-          patch: { issueType: types[0] ?? "Task" },
+          patch: { issueType: reset },
         });
       }
     });
@@ -141,15 +231,34 @@ export function App() {
   const chooseProject = async () => {
     const result = await window.pm.chooseProjectDir();
     if (result.ok && result.value) {
-      await loadProject(result.value);
+      await loadProject(result.value, { openSetupIfUnconfigured: true });
     }
   };
+
+  const onSetupComplete = useCallback(
+    (next: ProjectStatus) => {
+      applyProjectStatus(next);
+      setSetupOpen(false);
+    },
+    [applyProjectStatus],
+  );
 
   const openTicket = useCallback(() => {
     if (!status) return;
     const composer = defaultComposerForProject(status, issueTypes);
     dispatch({ type: "ticket-opened", id: nextTicketId(), composer });
   }, [status, issueTypes]);
+
+  const dismissCodeDiscovery = useCallback(async () => {
+    setCodeDiscoveryDismissError(null);
+    const result = await window.pm.dismissCodeDiscovery();
+    if (result.ok) {
+      setCodeDiscoveryDismissed(true);
+      return;
+    }
+    setCodeDiscoveryDismissed(false);
+    setCodeDiscoveryDismissError(toError(result.error).message);
+  }, []);
 
   const requestCloseTicket = useCallback(
     (id: string) => {
@@ -333,11 +442,43 @@ export function App() {
   const closeConfirmTicket = closeConfirmId
     ? workspaces.tickets.find((t) => t.id === closeConfirmId)
     : null;
+  const showCodeDiscovery =
+    codeDiscoveryDismissed !== null &&
+    shouldShowCodeDiscovery({
+      configured: status.configured,
+      hasCodeConfig: status.hasCodeConfig === true,
+      dismissed: codeDiscoveryDismissed,
+    });
 
   return (
     <div className="flex h-screen flex-col">
-      <ProjectBar status={status} onChangeProject={chooseProject} />
-      {!status.configured && <SetupBanner configError={status.configError} />}
+      <ProjectBar
+        status={status}
+        onChangeProject={chooseProject}
+        onSwitchTracker={switchTracker}
+        onSwitchProjectKey={switchProjectKey}
+        switching={loadingProject}
+      />
+      {!status.configured && (
+        <SetupBanner
+          onSetup={() => setSetupOpen(true)}
+          canRecoverViaTrackerSwitch={(status.configuredTrackers ?? []).some(
+            (t) => t.id !== status.activeTrackerId,
+          )}
+        />
+      )}
+      <ProjectSetupWizard
+        projectDir={status.projectDir}
+        open={setupOpen}
+        onOpenChange={setSetupOpen}
+        onComplete={onSetupComplete}
+      />
+      {switchError && (
+        <Alert variant="destructive" className="rounded-none border-x-0 border-t-0">
+          <AlertTitle>Could not switch</AlertTitle>
+          <AlertDescription>{switchError}</AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <TicketSidebar
@@ -346,10 +487,20 @@ export function App() {
           onOpenTicket={openTicket}
           onActivateTicket={(id) => dispatch({ type: "ticket-activated", id })}
           onCloseTicket={requestCloseTicket}
+          showCodeDiscovery={showCodeDiscovery}
+          onLearnMoreCode={(url) => void window.pm.openExternal(url)}
+          onDismissCodeDiscovery={dismissCodeDiscovery}
+          codeDiscoveryDismissError={codeDiscoveryDismissError}
         />
 
         {!activeTicket ? (
-          <NoTicketsEmptyState onOpenTicket={openTicket} />
+          <NoTicketsEmptyState
+            onOpenTicket={openTicket}
+            showCodeDiscovery={showCodeDiscovery}
+            onLearnMoreCode={(url) => void window.pm.openExternal(url)}
+            onDismissCodeDiscovery={dismissCodeDiscovery}
+            codeDiscoveryDismissError={codeDiscoveryDismissError}
+          />
         ) : (
           <main className="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(320px,5fr)_7fr]">
             <ComposerForm
@@ -372,6 +523,13 @@ export function App() {
                   type: "output-action",
                   id: activeTicket.id,
                   action: { type: "draft-title-changed", summary },
+                })
+              }
+              onDescriptionChange={(description) =>
+                dispatch({
+                  type: "output-action",
+                  id: activeTicket.id,
+                  action: { type: "draft-description-changed", description },
                 })
               }
               onEdit={edit}
@@ -406,6 +564,10 @@ export function App() {
                 })
               }
               onOpenUrl={(url) => void window.pm.openExternal(url)}
+              showCodeDiscovery={showCodeDiscovery}
+              onLearnMoreCode={(url) => void window.pm.openExternal(url)}
+              onDismissCodeDiscovery={dismissCodeDiscovery}
+              codeDiscoveryDismissError={codeDiscoveryDismissError}
             />
           </main>
         )}
@@ -436,6 +598,13 @@ export function App() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AboutDialog
+        open={aboutOpen}
+        onOpenChange={setAboutOpen}
+        version={appVersion}
+        onOpenWebsite={(url) => void window.pm.openExternal(url)}
+      />
     </div>
   );
 }

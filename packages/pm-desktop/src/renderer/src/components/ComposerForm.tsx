@@ -6,6 +6,7 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { orderIssueTypes } from "@/lib/issue-types";
 import type { ProjectStatus, PromptStyle, SourceType } from "../../../shared/ipc-contract.ts";
 
 export interface ComposerValues {
@@ -70,6 +71,7 @@ export function ComposerForm({
   const activeTab = SOURCE_TABS.find((t) => t.type === values.sourceType)!;
   const content = values.sourceContent[values.sourceType];
   const canGenerate = status.configured && content.trim().length > 0 && !busy;
+  const orderedIssueTypes = orderIssueTypes(issueTypes);
 
   return (
     <section className="flex min-h-0 flex-col gap-4 overflow-y-auto border-r bg-card/50 p-4">
@@ -146,7 +148,7 @@ export function ComposerForm({
               disabled={loadingIssueTypes}
               onChange={(e) => onChange({ issueType: e.target.value })}
             >
-              {issueTypes.map((type) => (
+              {orderedIssueTypes.map((type) => (
                 <option key={type} value={type}>
                   {type}
                 </option>

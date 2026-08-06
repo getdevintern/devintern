@@ -10,6 +10,7 @@ import {
   type TicketAgentStatus,
   type TicketWorkspace,
 } from "../state/ticket-workspaces.ts";
+import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 
 interface TicketSidebarProps {
   tickets: TicketWorkspace[];
@@ -17,6 +18,11 @@ interface TicketSidebarProps {
   onOpenTicket: () => void;
   onActivateTicket: (id: string) => void;
   onCloseTicket: (id: string) => void;
+  /** Soft Code discovery strip in the sidebar footer. */
+  showCodeDiscovery?: boolean;
+  onLearnMoreCode?: (url: string) => void;
+  onDismissCodeDiscovery?: () => void;
+  codeDiscoveryDismissError?: string | null;
 }
 
 function statusBadgeVariant(
@@ -115,6 +121,10 @@ export function TicketSidebar({
   onOpenTicket,
   onActivateTicket,
   onCloseTicket,
+  showCodeDiscovery = false,
+  onLearnMoreCode,
+  onDismissCodeDiscovery,
+  codeDiscoveryDismissError = null,
 }: TicketSidebarProps) {
   return (
     <aside
@@ -160,6 +170,15 @@ export function TicketSidebar({
           ))
         )}
       </div>
+
+      {showCodeDiscovery && onLearnMoreCode && onDismissCodeDiscovery && (
+        <CodeDiscoveryCard
+          variant="sidebar"
+          onLearnMore={onLearnMoreCode}
+          onDismiss={onDismissCodeDiscovery}
+          dismissError={codeDiscoveryDismissError}
+        />
+      )}
     </aside>
   );
 }

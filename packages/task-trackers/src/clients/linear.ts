@@ -100,6 +100,29 @@ export class LinearClient {
   }
 
   /**
+   * Register a webhook for Issue events across all public teams.
+   *
+   * @param url - Webhook target URL (e.g. a relay ingest URL).
+   * @param secret - Signing secret Linear uses for the `linear-signature` header.
+   * @returns The created webhook id.
+   * @throws When the API rejects the webhook (e.g. duplicate URL).
+   */
+  async createWebhook(url: string, secret: string): Promise<{ id: string }> {
+    const data = await this.request<{
+      webhookCreate: { success: boolean; webhook: { id: string } | null };
+    }>(
+      `mutation CreateWebhook($input: WebhookCreateInput!) {
+        webhookCreate(input: $input) { success webhook { id } }
+      }`,
+      { input: { url, secret, allPublicTeams: true, resourceTypes: ["Issue"] } },
+    );
+    if (!data.webhookCreate.success || !data.webhookCreate.webhook) {
+      throw new Error("Linear webhook creation did not succeed");
+    }
+    return { id: data.webhookCreate.webhook.id };
+  }
+
+  /**
    * Execute a GraphQL query or mutation against the Linear API.
    *
    * @param query - GraphQL document string.

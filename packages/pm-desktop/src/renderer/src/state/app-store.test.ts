@@ -120,6 +120,26 @@ describe("outputReducer", () => {
     expect(state.created?.key).toBe("T-1");
   });
 
+  test("edit-succeeded replaces the entire draft", () => {
+    const userTitle = "User-edited title";
+    const editedDraft = {
+      summary: "AI-returned summary",
+      description: "## AI revision\n\nUpdated acceptance criteria.",
+    };
+    const state = run([
+      { type: "generate-started", requestId: "r1" },
+      { type: "generate-succeeded", draft },
+      { type: "draft-title-changed", summary: userTitle },
+      { type: "edit-started", requestId: "r2" },
+      { type: "edit-succeeded", draft: editedDraft },
+    ]);
+    expect(state.phase).toBe("preview");
+    expect(state.activeRequestId).toBeNull();
+    expect(state.draft?.summary).toBe(editedDraft.summary);
+    expect(state.draft?.summary).not.toBe(userTitle);
+    expect(state.draft?.description).toBe(editedDraft.description);
+  });
+
   test("draft title stays editable in preview", () => {
     const state = run([
       { type: "generate-started", requestId: "r1" },
@@ -128,6 +148,33 @@ describe("outputReducer", () => {
     ]);
     expect(state.draft?.summary).toBe("Better title");
     expect(state.draft?.description).toBe(draft.description);
+  });
+
+  test("draft description stays editable in preview without touching the title", () => {
+    const state = run([
+      { type: "generate-started", requestId: "r1" },
+      { type: "generate-succeeded", draft },
+      { type: "draft-description-changed", description: "## Overview\n\nPolished body" },
+    ]);
+    expect(state.draft?.description).toBe("## Overview\n\nPolished body");
+    expect(state.draft?.summary).toBe(draft.summary);
+  });
+
+  test("draft description change is a no-op without a draft", () => {
+    const state = outputReducer(initialOutputState, {
+      type: "draft-description-changed",
+      description: "orphan",
+    });
+    expect(state.draft).toBeNull();
+  });
+
+  test("empty description edits are allowed", () => {
+    const state = run([
+      { type: "generate-started", requestId: "r1" },
+      { type: "generate-succeeded", draft },
+      { type: "draft-description-changed", description: "" },
+    ]);
+    expect(state.draft?.description).toBe("");
   });
 
   test("restart resets everything", () => {

@@ -167,6 +167,26 @@ export class TrelloClient {
     return response.json() as T;
   }
 
+  /**
+   * Register a webhook on a model (typically a board).
+   *
+   * Trello probes the callback URL with HEAD during creation; the target
+   * must answer 200 for the webhook to be accepted.
+   *
+   * @param callbackUrl - Webhook target URL (e.g. a relay ingest URL).
+   * @param idModel - Board (or other model) id to watch.
+   * @returns The created webhook id.
+   * @throws When the Trello API request or callback probe fails.
+   */
+  async createWebhook(callbackUrl: string, idModel: string): Promise<{ id: string }> {
+    const data = await this.request<{ id: string }>("/webhooks", "POST", {
+      callbackURL: callbackUrl,
+      idModel,
+      description: "DevIntern relay",
+    });
+    return { id: data.id };
+  }
+
   private normalizeCardId(cardIdOrShortLink: string): string {
     return parseTrelloCardReference(cardIdOrShortLink);
   }

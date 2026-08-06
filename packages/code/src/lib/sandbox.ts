@@ -58,7 +58,7 @@ const PROVIDER_SETUP_NOTES: Record<string, (linux: boolean) => string[]> = {
     "confines shell commands and their children; for a boundary around the whole agent process use nono or srt",
   ],
   nono: () => [
-    "one-time per agent: nono pull nolabs-ai/<agent> (packs: claude, codex, opencode, goose, pi)",
+    "one-time per agent: nono pull nolabs-ai/<agent> (packs: claude, codex, opencode, goose, pi, antigravity)",
   ],
   srt: () => [
     "network runs on a built-in allowlist of agent essentials; extend it with AGENT_SANDBOX_ALLOWED_DOMAINS",

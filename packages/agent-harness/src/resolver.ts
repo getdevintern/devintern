@@ -15,10 +15,10 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync } from "fs";
+import { accessSync, constants, existsSync } from "fs";
 import { resolve } from "path";
 import { getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
-import type { ResolvedHarness } from "./types.js";
+import type { AgentHarness, ResolvedHarness } from "./types.js";
 
 export interface HarnessResolutionOptions {
   /** Explicit harness name (e.g. "claude-code"). */
@@ -44,10 +44,15 @@ export interface HarnessResolutionOptions {
  * Aliases (e.g. `agy` / deprecated `gemini` → `antigravity`) are applied before
  * registry lookup; deprecated aliases emit a one-line console warning.
  *
- * Executable path: `options.cliPath` → `AGENT_CLI_PATH` →
- * `{PREFIX}_CLI_PATH` → harness-specific fallbacks (e.g. `AGY_CLI_PATH`,
- * deprecated `GEMINI_CLI_PATH` for Antigravity) → `CLAUDE_CLI_PATH` →
- * harness `defaultPath`.
+ * Executable path when no explicit harness name is given:
+ * `options.cliPath` → `AGENT_CLI_PATH` → `{PREFIX}_CLI_PATH` →
+ * harness-specific fallbacks (e.g. `AGY_CLI_PATH`, deprecated `GEMINI_CLI_PATH`
+ * for Antigravity) → `CLAUDE_CLI_PATH` → harness `defaultPath`.
+ *
+ * When `options.harnessName` is set (CLI `--harness` or interactive picker),
+ * `AGENT_CLI_PATH` is skipped so a previous harness's global path override
+ * cannot stick to a newly selected agent. Resolution uses harness-specific
+ * env vars / defaults via {@link getHarnessCliCommand} instead.
  *
  * @param options - Optional overrides for harness name, CLI path, and env prefix.
  * @returns The resolved harness and executable path.
@@ -57,7 +62,8 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   const env = process.env;
 
   // 1. Determine harness name
-  let harnessName = options?.harnessName;
+  const explicitHarnessName = options?.harnessName;
+  let harnessName = explicitHarnessName;
   if (!harnessName) {
     harnessName = env.AGENT_HARNESS;
   }
@@ -85,16 +91,30 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   // 2. Determine executable path
   let path = options?.cliPath;
   if (!path) {
-    const prefix = options?.envPrefix ?? harness.name.toUpperCase().replace(/-/g, "_");
-    path =
-      env.AGENT_CLI_PATH ||
-      env[`${prefix}_CLI_PATH`] ||
-      // Antigravity: also accept AGY_CLI_PATH (binary name) and legacy GEMINI_CLI_PATH
-      (harness.name === "antigravity" ? env.AGY_CLI_PATH : undefined) ||
-      (harness.name === "antigravity" && env.GEMINI_CLI_PATH
-        ? warnAndMapLegacyGeminiCliPath(env.GEMINI_CLI_PATH, options?.warnDeprecated !== false)
-        : undefined) ||
-      env.CLAUDE_CLI_PATH; // backward compatibility
+    if (explicitHarnessName) {
+      // Explicit selection (--harness / interactive picker): honour harness-specific
+      // paths only; AGENT_CLI_PATH is reserved for env/default-driven resolution.
+      if (options?.envPrefix) {
+        const prefix = options.envPrefix;
+        path = env[`${prefix}_CLI_PATH`];
+        if (!path && harness.name === "claude-code") {
+          path = env.CLAUDE_CLI_PATH;
+        }
+      } else {
+        path = getHarnessCliCommand(harness, { warnDeprecated: options?.warnDeprecated });
+      }
+    } else {
+      const prefix = options?.envPrefix ?? harness.name.toUpperCase().replace(/-/g, "_");
+      path =
+        env.AGENT_CLI_PATH ||
+        env[`${prefix}_CLI_PATH`] ||
+        // Antigravity: also accept AGY_CLI_PATH (binary name) and legacy GEMINI_CLI_PATH
+        (harness.name === "antigravity" ? env.AGY_CLI_PATH : undefined) ||
+        (harness.name === "antigravity" && env.GEMINI_CLI_PATH
+          ? warnAndMapLegacyGeminiCliPath(env.GEMINI_CLI_PATH, options?.warnDeprecated !== false)
+          : undefined) ||
+        env.CLAUDE_CLI_PATH; // backward compatibility
+    }
   }
   if (!path) {
     path = harness.defaultPath;
@@ -173,6 +193,133 @@ export function findInPath(command: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Options for {@link getHarnessCliCommand} and {@link isHarnessInstalled}. */
+export interface HarnessInstallOptions {
+  /** When true, also honour `AGENT_CLI_PATH` for this harness. */
+  includeGlobalCliPath?: boolean;
+  /**
+   * When false, suppress deprecation warnings for legacy path env vars
+   * (e.g. `GEMINI_CLI_PATH`). Defaults to true.
+   */
+  warnDeprecated?: boolean;
+}
+
+/**
+ * Resolve the CLI command or path to probe for a harness.
+ *
+ * Uses harness-specific env vars (`OPENCODE_CLI_PATH`, etc.), Antigravity
+ * fallbacks (`AGY_CLI_PATH`, legacy `GEMINI_CLI_PATH`), `CLAUDE_CLI_PATH`
+ * for claude-code, then `defaultPath`. Optionally includes `AGENT_CLI_PATH`
+ * when checking the active harness.
+ *
+ * @param harness - Registered harness to resolve a probe target for.
+ * @param options - Whether to include the global `AGENT_CLI_PATH` override.
+ * @returns Command name or path to check for availability.
+ */
+export function getHarnessCliCommand(
+  harness: AgentHarness,
+  options?: HarnessInstallOptions,
+): string {
+  const env = process.env;
+
+  if (options?.includeGlobalCliPath && env.AGENT_CLI_PATH) {
+    return env.AGENT_CLI_PATH;
+  }
+
+  const prefix = harness.name.toUpperCase().replace(/-/g, "_");
+  const harnessSpecific = env[`${prefix}_CLI_PATH`];
+  if (harnessSpecific) {
+    return harnessSpecific;
+  }
+
+  if (harness.name === "antigravity") {
+    if (env.AGY_CLI_PATH) {
+      return env.AGY_CLI_PATH;
+    }
+    if (env.GEMINI_CLI_PATH) {
+      const mapped = warnAndMapLegacyGeminiCliPath(
+        env.GEMINI_CLI_PATH,
+        options?.warnDeprecated !== false,
+      );
+      if (mapped) {
+        return mapped;
+      }
+    }
+  }
+
+  if (harness.name === "claude-code" && env.CLAUDE_CLI_PATH) {
+    return env.CLAUDE_CLI_PATH;
+  }
+
+  return harness.defaultPath;
+}
+
+/**
+ * Whether a CLI command or path points at an executable that exists or is on PATH.
+ *
+ * @param command - Executable name or path (absolute, relative, or PATH lookup).
+ * @param cwd - Working directory for relative path resolution.
+ * @returns `true` when the command resolves to an existing executable.
+ */
+export function isHarnessCliAvailable(command: string, cwd: string = process.cwd()): boolean {
+  const resolved = resolveExecutablePath(command, cwd);
+
+  const isBareCommand =
+    !command.startsWith("/") &&
+    !command.includes(":") &&
+    !command.includes("/") &&
+    !command.includes("\\");
+
+  if (isBareCommand) {
+    return resolved !== command;
+  }
+
+  try {
+    accessSync(resolved, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the given harness CLI is installed and reachable on this machine.
+ *
+ * @param harness - Registered harness to check.
+ * @param options - Whether to include the global `AGENT_CLI_PATH` override.
+ * @returns `true` when the harness CLI can be invoked.
+ */
+export function isHarnessInstalled(
+  harness: AgentHarness,
+  options?: HarnessInstallOptions,
+): boolean {
+  const command = getHarnessCliCommand(harness, options);
+  return isHarnessCliAvailable(command);
+}
+
+/** Options for {@link listInstalledHarnesses}. */
+export interface ListInstalledHarnessesOptions {
+  /** Honour `AGENT_CLI_PATH` when checking this harness (typically the active one). */
+  currentHarnessName?: string;
+}
+
+/**
+ * Return registered harnesses whose CLIs are installed on this machine.
+ *
+ * Probes each harness via `which` / `where` (or env/path overrides) so UI
+ * pickers only show agents the user can actually run.
+ *
+ * @param options - Optional active harness name for `AGENT_CLI_PATH` lookup.
+ * @returns Harnesses with a resolvable CLI on the current machine.
+ */
+export function listInstalledHarnesses(options?: ListInstalledHarnessesOptions): AgentHarness[] {
+  return listHarnesses().filter((h) =>
+    isHarnessInstalled(h, {
+      includeGlobalCliPath: h.name === options?.currentHarnessName,
+    }),
+  );
 }
 
 /**

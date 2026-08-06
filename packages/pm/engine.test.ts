@@ -251,7 +251,8 @@ describe("createEngine", () => {
     expect(seenPrompt).toContain("Old title");
     expect(seenPrompt).toContain("Old body");
     expect(seenPrompt).toContain("make it shorter");
-    expect(seenPrompt).toContain("story description");
+    expect(seenPrompt).toContain("Revise this story");
+    expect(seenPrompt).toContain("Current Description:");
   });
 
   test("decomposeStory returns subtasks array", async () => {

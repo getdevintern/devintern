@@ -199,6 +199,24 @@ export class AsanaClient {
   }
 
   /**
+   * Register a webhook on a resource (project) targeting a URL.
+   *
+   * Asana performs its `X-Hook-Secret` handshake against the target during
+   * this call; the target must echo the header for creation to succeed.
+   *
+   * @param resourceGid - Project (or other resource) GID to watch.
+   * @param targetUrl - Webhook target URL (e.g. a relay ingest URL).
+   * @returns The created webhook GID.
+   * @throws When the Asana API request or handshake fails.
+   */
+  async createWebhook(resourceGid: string, targetUrl: string): Promise<{ gid: string }> {
+    const data = await this.request<{ gid: string }>("/webhooks", "POST", {
+      data: { resource: resourceGid, target: targetUrl },
+    });
+    return { gid: data.gid };
+  }
+
+  /**
    * List projects accessible to the token.
    *
    * @returns Project GID and name records.

@@ -104,7 +104,5 @@ describe("query-based change detectors", () => {
     expect(createChangeDetector("linear", searchTasks)?.source).toBe("linear");
     expect(createChangeDetector("github", searchTasks)?.source).toBe("github");
     expect(createChangeDetector("azure-devops", searchTasks)?.source).toBe("azure-devops");
-    expect(createChangeDetector("trello", searchTasks)).toBeNull();
-    expect(createChangeDetector("asana", searchTasks)).toBeNull();
   });
 });

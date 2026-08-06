@@ -20,10 +20,20 @@ export class LockManager {
    * @param lockFileName - Lock file name; the default guards CLI task runs,
    *                       while the worker daemon uses its own lock so an
    *                       idle daemon does not block manual runs
+   * @param options - `plainDir` places the lock file directly in
+   *                  `workingDir` instead of nesting `.devintern-code/`
+   *                  (workspace locks live in `~/.devintern/`, which is a
+   *                  config dir already, not a project root)
    */
-  constructor(workingDir: string = process.cwd(), lockFileName = ".pid.lock") {
+  constructor(
+    workingDir: string = process.cwd(),
+    lockFileName = ".pid.lock",
+    options: { plainDir?: boolean } = {},
+  ) {
     // Create lock file in .devintern-code directory
-    const configDir = resolve(workingDir, ".devintern-code");
+    const configDir = options.plainDir
+      ? resolve(workingDir)
+      : resolve(workingDir, ".devintern-code");
 
     // Ensure .devintern-code directory exists
     if (!existsSync(configDir)) {

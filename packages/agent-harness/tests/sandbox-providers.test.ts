@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
@@ -31,6 +31,8 @@ describe("NonoSandboxProvider.wrapCommand", () => {
     process.env = { ...originalEnv };
   });
 
+  // wrapCommand runs a Linux Landlock preflight (`nono run … -- true`); under
+  // full-suite load the spawn routinely exceeds bun's 5s default.
   test("wraps the agent after -- with policy grants and no profile by default", () => {
     const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
     expect(wrapped.path).toBe("nono");
@@ -64,7 +66,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
         expect(wrapped.args[i + 1]).not.toBe(process.env.HOME);
       }
     }
-  });
+  }, 30_000);
 
   test("passes AGENT_SANDBOX_NONO_PROFILE as --profile", () => {
     process.env.AGENT_SANDBOX_NONO_PROFILE = "devintern";
@@ -84,7 +86,35 @@ describe("NonoSandboxProvider.wrapCommand", () => {
       .map((a, i) => (a === "--allow-domain" ? wrapped.args[i + 1] : null))
       .filter(Boolean);
     expect(domains).toEqual(["api.anthropic.com", "github.com"]);
-  });
+  }, 30_000);
+
+  test("grants cursor-agent write access to ~/.config/cursor", () => {
+    const home = process.env.HOME ?? "";
+    const cursorConfig = join(home, ".config/cursor");
+    if (!existsSync(cursorConfig)) return; // machine-dependent; skip when absent
+    const wrapped = new NonoSandboxProvider().wrapCommand(
+      "/usr/bin/cursor-agent",
+      ["-p", "hi"],
+      policy({ harnessName: "cursor" }),
+    );
+    const sep = wrapped.args.indexOf("--");
+    const allows: string[] = [];
+    for (let i = 0; i < sep; i++) {
+      if (wrapped.args[i] === "--allow") allows.push(wrapped.args[i + 1] as string);
+    }
+    expect(allows).toContain(cursorConfig);
+  }, 30_000);
+
+  test("grants /dev/ptmx so lefthook can allocate a PTY", () => {
+    if (!existsSync("/dev/ptmx")) return; // absent on some constrained hosts
+    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    const sep = wrapped.args.indexOf("--");
+    const allowFiles: string[] = [];
+    for (let i = 0; i < sep; i++) {
+      if (wrapped.args[i] === "--allow-file") allowFiles.push(wrapped.args[i + 1] as string);
+    }
+    expect(allowFiles).toContain("/dev/ptmx");
+  }, 30_000);
 });
 
 describe("nono Landlock grant refinement", () => {

@@ -3,7 +3,7 @@ import { render, Box, Text, useInput, useApp } from "ink";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { MarkdownText } from "./MarkdownText";
 import { PromptInput } from "./PromptInput";
-import { getDefaultIssueType } from "../issue-types";
+import { getDefaultIssueType, orderIssueTypes } from "../issue-types";
 import { uiSymbols } from "../runtime/terminal.js";
 
 interface Task {
@@ -21,6 +21,7 @@ interface InteractiveState {
     | "epic"
     | "style"
     | "issue-type"
+    | "harness"
     | "confirm"
     | "generating"
     | "preview"
@@ -35,6 +36,7 @@ interface InteractiveState {
   epicKey?: string;
   promptStyle: "pm" | "technical";
   issueType: string;
+  harnessName?: string;
   decompose: boolean;
   tasks: Task[];
   previewData?: {
@@ -62,6 +64,8 @@ export interface InteractiveModeHandle {
   cleanup: () => void;
   getStep: () => InteractiveState["step"];
   getPreviewData: () => { summary: string; description: string } | undefined;
+  /** Current harness name selected in the wizard (if any). */
+  getHarnessName: () => string | undefined;
   /** Updates preview data without changing the current step. */
   updatePreviewData: (summary: string, description: string) => void;
 }
@@ -72,7 +76,12 @@ export interface InteractiveModeOptions {
   issueTypes?: string[];
   fetchIssueTypes?: (projectKey: string) => Promise<string[]>;
   backendName?: string;
+  /** @deprecated Prefer `harnesses` + `currentHarnessName` for on-the-fly switching. */
   harnessDisplayName?: string;
+  /** Installed harnesses offered in the Ctrl+G picker. */
+  harnesses?: Array<{ name: string; displayName: string }>;
+  /** Active harness name at wizard start. */
+  currentHarnessName?: string;
   /**
    * Whether the selected tracker can persist an epic/parent link. When
    * `false`, the epic linking step is skipped. Defaults to `true` when omitted.
@@ -127,6 +136,9 @@ export function getPreviousStep(step: WizardStep, flags: StepNavFlags): WizardSt
       return "custom";
     case "confirm":
       return "style";
+    case "harness":
+      // Modal step: Esc is handled via stepBeforeHarness, not the linear map.
+      return null;
     case "edit-prompt":
       return "preview";
     // Preview stays put: index.ts holds a waitForCompletion/waitForEdit race;
@@ -175,6 +187,7 @@ export async function runInteractiveMode(
     let restartPromiseReject: ((error: Error) => void) | null = null;
     let currentStep: InteractiveState["step"] = "source-type";
     let visiblePreviewDataRef: { summary: string; description: string } | null = null;
+    let currentHarnessNameRef: string | undefined = options?.currentHarnessName;
 
     const cancelError = () => new Error("Interactive mode cancelled");
 
@@ -218,6 +231,22 @@ export async function runInteractiveMode(
     // can't persist an epic/parent link). Defaults to true for compatibility.
     const hasEpicStep = options?.supportsEpicLinking ?? true;
 
+    const allHarnesses = options?.harnesses || [];
+    const currentHarnessName = options?.currentHarnessName;
+    const orderedHarnesses = currentHarnessName
+      ? [
+          ...allHarnesses.filter((h) => h.name === currentHarnessName),
+          ...allHarnesses.filter((h) => h.name !== currentHarnessName),
+        ]
+      : allHarnesses;
+    const hasHarnessStep = orderedHarnesses.length > 0;
+    currentHarnessNameRef = currentHarnessName;
+
+    // Tracks the step the user was on before opening the harness modal via Ctrl+G,
+    // so ESC / Enter / number selection return there instead of always jumping
+    // to confirm or style. Reset on every transition out of "harness".
+    let stepBeforeHarness: InteractiveState["step"] | null = null;
+
     // First step after collecting custom instructions, accounting for skips.
     const stepAfterCustom = hasEpicStep ? "epic" : hasIssueTypeStep ? "issue-type" : "style";
 
@@ -240,16 +269,14 @@ export async function runInteractiveMode(
         projectKey: defaultProjectKey, // Start with default project
         promptStyle: "pm",
         issueType: initialIssueType,
+        harnessName: currentHarnessName,
         decompose: false,
         tasks: [],
       });
       const [input, setInput] = useState("");
       const [inputVersion, setInputVersion] = useState(0);
       const [issueTypes, setIssueTypes] = useState<string[]>(defaultIssueTypes);
-      const orderedIssueTypes = (() => {
-        const def = getDefaultIssueType(issueTypes);
-        return [def, ...issueTypes.filter((t) => t !== def)];
-      })();
+      const orderedIssueTypes = orderIssueTypes(issueTypes);
       const [isLoadingIssueTypes, setIsLoadingIssueTypes] = useState(false);
       const scrollViewRef = useRef<ScrollViewRef>(null);
       const sym = uiSymbols();
@@ -325,6 +352,7 @@ export async function runInteractiveMode(
         stateRef.current = state;
         currentStep = state.step;
         visiblePreviewDataRef = state.previewData ?? null;
+        currentHarnessNameRef = state.harnessName;
       });
 
       useEffect(() => {
@@ -450,6 +478,25 @@ export async function runInteractiveMode(
             }
           }
 
+          // Ctrl+G to navigate to harness selection (only if harnesses are available).
+          // Ctrl+H was the original binding, but it collides with backspace (\b / 0x08)
+          // in many terminal emulators and line disciplines, so the keypress was
+          // swallowed before reaching Ink. Ctrl+G does not collide with common
+          // terminal control characters.
+          if (key.ctrl && inputChar === "g" && hasHarnessStep) {
+            if (
+              state.step !== "harness" &&
+              state.step !== "generating" &&
+              state.step !== "regenerating" &&
+              state.step !== "done"
+            ) {
+              stepBeforeHarness = state.step;
+              setState((prev) => ({ ...prev, step: "harness" }));
+              resetInput();
+              return;
+            }
+          }
+
           // Handle scrolling in preview mode
           if (state.step === "preview") {
             if (key.upArrow) {
@@ -513,6 +560,20 @@ export async function runInteractiveMode(
                 const issueType = orderedIssueTypes[index];
                 if (issueType) {
                   setState((prev) => ({ ...prev, issueType, step: "style" }));
+                  resetInput();
+                  return;
+                }
+              }
+            }
+
+            if (state.step === "harness") {
+              const index = parseInt(inputChar) - 1;
+              if (index >= 0 && index < orderedHarnesses.length) {
+                const harness = orderedHarnesses[index];
+                if (harness) {
+                  const target = stepBeforeHarness ?? "style";
+                  stepBeforeHarness = null;
+                  setState((prev) => ({ ...prev, harnessName: harness.name, step: target }));
                   resetInput();
                   return;
                 }
@@ -690,6 +751,13 @@ export async function runInteractiveMode(
        * Does not clear previewData (including when leaving edit-prompt).
        */
       const handleEscape = () => {
+        if (state.step === "harness") {
+          const target = stepBeforeHarness ?? "style";
+          stepBeforeHarness = null;
+          resetInput(inputSeedForStep(target));
+          setState((prev) => ({ ...prev, step: target }));
+          return;
+        }
         const previous = getPreviousStep(state.step, navFlags);
         if (previous === null) {
           return;
@@ -743,6 +811,26 @@ export async function runInteractiveMode(
               const issueType = orderedIssueTypes[index];
               if (issueType) {
                 setState((prev) => ({ ...prev, issueType, step: "style" }));
+                resetInput();
+              }
+            }
+            break;
+          }
+
+          case "harness": {
+            const target = stepBeforeHarness ?? "style";
+            if (trimmedInput === "") {
+              stepBeforeHarness = null;
+              setState((prev) => ({ ...prev, step: target }));
+              resetInput();
+              break;
+            }
+            const harnessIndex = parseInt(trimmedInput) - 1;
+            if (harnessIndex >= 0 && harnessIndex < orderedHarnesses.length) {
+              const harness = orderedHarnesses[harnessIndex];
+              if (harness) {
+                stepBeforeHarness = null;
+                setState((prev) => ({ ...prev, harnessName: harness.name, step: target }));
                 resetInput();
               }
             }
@@ -940,6 +1028,22 @@ export async function runInteractiveMode(
               </Box>
             );
 
+          case "harness": {
+            return (
+              <Box flexDirection="column" paddingY={1}>
+                <Text bold>
+                  Select AI agent harness <Text dimColor>(Enter to accept current)</Text>:
+                </Text>
+                {orderedHarnesses.map((harness, index) => (
+                  <Text key={harness.name}>
+                    {index + 1}. {harness.displayName}
+                    {harness.name === state.harnessName ? " (current)" : ""}
+                  </Text>
+                ))}
+              </Box>
+            );
+          }
+
           case "confirm": {
             const sourceLabel =
               state.sourceType === "figma"
@@ -947,6 +1051,7 @@ export async function runInteractiveMode(
                 : state.sourceType === "log"
                   ? "Error Log"
                   : "Requirements";
+            const selectedHarness = allHarnesses.find((h) => h.name === state.harnessName);
             return (
               <Box flexDirection="column" paddingY={1}>
                 <Text bold color="green">
@@ -995,6 +1100,13 @@ export async function runInteractiveMode(
                     <Text bold>Prompt Style:</Text>
                     <Text color="cyan">{state.promptStyle}</Text>
                   </Box>
+
+                  {(selectedHarness || state.harnessName) && (
+                    <Box flexDirection="column" paddingTop={1}>
+                      <Text bold>Agent:</Text>
+                      <Text color="cyan">{selectedHarness?.displayName || state.harnessName}</Text>
+                    </Box>
+                  )}
                 </Box>
                 <Text bold>Continue? (Y/n)</Text>
               </Box>
@@ -1190,6 +1302,16 @@ export async function runInteractiveMode(
         return options?.backendName ? `${options.backendName}/${project}` : project;
       })();
 
+      // Get current harness display name from state. Only show the
+      // displayName when the selected harness is still in the registry; if it
+      // was removed mid-run, fall back to the startup display name
+      // (options?.harnessDisplayName || "None") and never leaks the raw
+      // harnessName string.
+      const currentHarnessDisplay = (() => {
+        const harness = allHarnesses.find((h) => h.name === state.harnessName);
+        return harness?.displayName || options?.harnessDisplayName || "None";
+      })();
+
       return (
         <Box flexDirection="column">
           <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
@@ -1203,10 +1325,13 @@ export async function runInteractiveMode(
             </Box>
             <Box flexDirection="row" gap={1}>
               <Text dimColor>Agent: </Text>
-              <Text color="cyan">{options?.harnessDisplayName || "None"}</Text>
+              <Text color="cyan">{currentHarnessDisplay}</Text>
+              {hasHarnessStep && <Text dimColor>{sym.sep}Ctrl+G: Change Agent</Text>}
             </Box>
             <Text dimColor>
-              {canNavigateBack(state.step, navFlags) ? `ESC: Back${sym.sep}` : ""}
+              {canNavigateBack(state.step, navFlags) || state.step === "harness"
+                ? `ESC: Back${sym.sep}`
+                : ""}
               {state.step === "success"
                 ? `Any key: New task${sym.sep}Ctrl+C: Exit`
                 : state.step === "preview"
@@ -1365,6 +1490,8 @@ export async function runInteractiveMode(
           epicKey: undefined,
           promptStyle: "pm",
           issueType: getDefaultIssueType(defaultIssueTypes),
+          // Preserve the harness the user most recently selected mid-wizard.
+          harnessName: currentHarnessNameRef ?? currentHarnessName,
           decompose: false,
           tasks: [],
           previewData: undefined,
@@ -1387,6 +1514,7 @@ export async function runInteractiveMode(
       restart,
       getStep: () => currentStep,
       getPreviewData: () => visiblePreviewDataRef ?? undefined,
+      getHarnessName: () => currentHarnessNameRef,
       /** Unmounts the Ink interactive form and releases terminal control. */
       cleanup: () => {
         unmount();

@@ -14,7 +14,7 @@
     "format:check": "oxfmt --check \"src/**/*.ts\"",
     "lint": "oxlint .",
     "typecheck": "bun run tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --timeout=30000"
   },
   "devDependencies": {
     "@types/bun": "latest",

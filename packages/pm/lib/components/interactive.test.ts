@@ -584,3 +584,135 @@ describe("Esc config-step chain with skipped steps", () => {
     expect(handle.getStep()).toBe("epic");
   });
 });
+
+describe("runInteractiveMode harness step (Ctrl+G)", () => {
+  const HARNESS_FIXTURE = [
+    { name: "claude-code", displayName: "Claude Code" },
+    { name: "opencode", displayName: "OpenCode" },
+    { name: "codex", displayName: "Codex" },
+  ];
+
+  let handle: Awaited<ReturnType<typeof runInteractiveMode>>;
+  let stdin: FakeStdin;
+
+  beforeEach(async () => {
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      harnesses: HARNESS_FIXTURE,
+      currentHarnessName: "claude-code",
+    });
+  });
+
+  afterEach(() => {
+    handle?.cleanup();
+  });
+
+  test("Ctrl+G navigates from source-type into the harness step", async () => {
+    expect(handle.getStep()).toBe("source-type");
+
+    // Ctrl+G is byte 0x07. FakeStdin emits it as raw data; Ink's input
+    // parser turns it into key.ctrl=true + inputChar="g".
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+    expect(handle.getStep()).toBe("harness");
+  });
+
+  test("number selection in the harness step updates harnessName and returns to the previous step", async () => {
+    expect(handle.getStep()).toBe("source-type");
+
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+    expect(handle.getStep()).toBe("harness");
+
+    // Press "2" to pick opencode (1=claude-code, 2=opencode, 3=codex).
+    stdin.write("2");
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+    expect(handle.getHarnessName()).toBe("opencode");
+  });
+
+  test("Enter on the harness step returns to the previous step without changing harness", async () => {
+    expect(handle.getStep()).toBe("source-type");
+
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+
+    // Enter on empty input keeps the current harness and pops back to the
+    // step we entered from (source-type in this case).
+    stdin.write("\r");
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("ESC on the harness step returns to the previous step without changing harness", async () => {
+    expect(handle.getStep()).toBe("source-type");
+
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+
+    // ESC is byte 0x1b.
+    stdin.write("\x1b");
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("Ctrl+G does not navigate to harness from generating/regenerating/done", async () => {
+    // Drive the wizard to "done" via the preview path: set preview, confirm.
+    handle.setPreviewData("Title", "Body");
+    await waitFor(() => handle.getStep() === "preview");
+
+    // Confirm: "y" on the preview step moves to "done".
+    stdin.write("y");
+    await waitFor(() => handle.getStep() === "done");
+    expect(handle.getStep()).toBe("done");
+
+    // Pressing Ctrl+G while in "done" should be a no-op.
+    stdin.write("\x07");
+    await sleep(50);
+    expect(handle.getStep()).toBe("done");
+  });
+
+  test("number selection with no matching input does not change the step", async () => {
+    expect(handle.getStep()).toBe("source-type");
+
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+
+    // Out-of-range number is ignored.
+    stdin.write("9");
+    await sleep(50);
+    expect(handle.getStep()).toBe("harness");
+  });
+
+  test("Ctrl+G is ignored when no harnesses are configured", async () => {
+    handle.cleanup();
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      // harnesses omitted on purpose
+    });
+    expect(handle.getStep()).toBe("source-type");
+
+    stdin.write("\x07");
+    await sleep(50);
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("re-entering the harness step after picking option 2 follows the new selection", async () => {
+    expect(handle.getHarnessName()).toBe("claude-code");
+
+    // Pick option 2 (opencode).
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+    stdin.write("2");
+    await waitFor(() => handle.getStep() === "source-type");
+    expect(handle.getHarnessName()).toBe("opencode");
+
+    // Re-enter the harness step. The '(current)' label should now mark
+    // opencode (the freshly selected harness) and not claude-code.
+    stdin.write("\x07");
+    await waitFor(() => handle.getStep() === "harness");
+    expect(handle.getHarnessName()).toBe("opencode");
+  });
+});

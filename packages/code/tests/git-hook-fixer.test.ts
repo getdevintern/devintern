@@ -3,7 +3,11 @@ import { execSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { isCommitAlreadyComplete } from "../src/lib/git-hook-fixer";
+import {
+  isCommitAlreadyComplete,
+  manualHookFixCommitArgs,
+  MANUAL_HOOK_FIX_COMMIT_MESSAGE,
+} from "../src/lib/git-hook-fixer";
 
 describe("git-hook-fixer", () => {
   let testDir: string;
@@ -44,5 +48,34 @@ describe("git-hook-fixer", () => {
   test("isCommitAlreadyComplete returns false when there are uncommitted changes", async () => {
     writeFileSync(join(repoDir, "change.txt"), "pending change\n", "utf8");
     expect(await isCommitAlreadyComplete(repoDir)).toBe(false);
+  });
+
+  test("manualHookFixCommitArgs always includes -m so git never opens an editor", () => {
+    const args = manualHookFixCommitArgs();
+    expect(args).toEqual(["commit", "--no-verify", "-m", MANUAL_HOOK_FIX_COMMIT_MESSAGE]);
+    expect(args.includes("-m")).toBe(true);
+    expect(manualHookFixCommitArgs("custom msg")).toEqual([
+      "commit",
+      "--no-verify",
+      "-m",
+      "custom msg",
+    ]);
+  });
+
+  test("manual fallback commit with -m succeeds without an editor", () => {
+    writeFileSync(join(repoDir, "fix.txt"), "hook fix\n", "utf8");
+    execSync("git add -A", { cwd: repoDir });
+    // Simulate the hung path: GIT_EDITOR=nvim would block without -m.
+    execSync(
+      `git ${manualHookFixCommitArgs()
+        .map((a) => JSON.stringify(a))
+        .join(" ")}`,
+      {
+        cwd: repoDir,
+        env: { ...process.env, GIT_EDITOR: "nvim", EDITOR: "nvim", VISUAL: "nvim" },
+      },
+    );
+    const log = execSync("git log -1 --pretty=%s", { cwd: repoDir, encoding: "utf8" }).trim();
+    expect(log).toBe(MANUAL_HOOK_FIX_COMMIT_MESSAGE);
   });
 });

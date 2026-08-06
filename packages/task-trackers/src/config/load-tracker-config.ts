@@ -1,8 +1,37 @@
 import { readFile } from "node:fs/promises";
 import { findEnvFile } from "@devintern/utils";
+import { getMissingRequiredEnv, isTrackerId } from "./tracker-meta.ts";
 import type { TrackerConfig, TrackerType } from "./types.ts";
 
 export const BUNDLED_TRELLO_API_KEY = "b2d5d1ced28b515c6eb66c40187400b0";
+
+/**
+ * Throw when `TRACKER_META.requiredEnv` entries are missing for `backendType`.
+ * Trello keeps a custom authorize-URL message; other trackers share one format.
+ */
+function assertRequiredTrackerEnv(backendType: string): void {
+  if (!isTrackerId(backendType)) return;
+
+  const missing = getMissingRequiredEnv(backendType, process.env);
+  if (missing.length === 0) return;
+
+  if (backendType === "trello") {
+    const apiKey = process.env.TRELLO_API_KEY || BUNDLED_TRELLO_API_KEY;
+    const authorizeUrl = apiKey
+      ? `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=${apiKey}`
+      : "https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=YOUR_API_KEY";
+    throw new Error(
+      `Trello backend requires TRELLO_API_TOKEN.\n` +
+        `Generate one by visiting:\n${authorizeUrl}\n` +
+        `Then set TRELLO_API_TOKEN in your .env`,
+    );
+  }
+
+  throw new Error(
+    `Missing required environment variables: ${missing.join(", ")}\n` +
+      "Please copy .env.example to .env and fill in the values.",
+  );
+}
 
 /**
  * Sanitize a Jira domain by removing protocol and trailing slashes.
@@ -120,142 +149,62 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
   let asanaConfig: TrackerConfig["asana"];
   let githubConfig: TrackerConfig["github"];
 
+  // Markdown keeps MARKDOWN_TASKS_DIR optional here (backends default the path);
+  // other trackers validate against TRACKER_META.requiredEnv.
+  if (backendType !== "markdown") {
+    assertRequiredTrackerEnv(backendType);
+  }
+
   if (backendType === "jira") {
-    const required = ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_DEFAULT_PROJECT_KEY"];
-    const missing = required.filter((key) => !process.env[key]);
-
-    if (missing.length > 0) {
-      throw new Error(
-        `Missing required environment variables: ${missing.join(", ")}\n` +
-          "Please copy .env.example to .env and fill in the values.",
-      );
-    }
-
-    const jiraBaseUrl = process.env.JIRA_BASE_URL;
-    const jiraEmail = process.env.JIRA_EMAIL;
-    const jiraApiToken = process.env.JIRA_API_TOKEN;
-    const jiraDefaultProjectKey = process.env.JIRA_DEFAULT_PROJECT_KEY;
-
-    if (!jiraBaseUrl || !jiraEmail || !jiraApiToken || !jiraDefaultProjectKey) {
-      throw new Error("Configuration was expected but missing after validation.");
-    }
-
     jiraConfig = {
-      domain: sanitizeDomain(jiraBaseUrl),
-      email: jiraEmail,
-      apiToken: jiraApiToken,
-      defaultProjectKey: jiraDefaultProjectKey,
+      domain: sanitizeDomain(process.env.JIRA_BASE_URL!),
+      email: process.env.JIRA_EMAIL!,
+      apiToken: process.env.JIRA_API_TOKEN!,
+      defaultProjectKey: process.env.JIRA_DEFAULT_PROJECT_KEY!,
       verbose,
     };
   }
 
   if (backendType === "linear") {
-    const apiKey = process.env.LINEAR_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "Linear backend selected but LINEAR_API_KEY is missing. " +
-          "Please set LINEAR_API_KEY in your environment.",
-      );
-    }
-
     linearConfig = {
-      apiKey,
+      apiKey: process.env.LINEAR_API_KEY!,
       defaultTeamKey: process.env.LINEAR_DEFAULT_TEAM_KEY,
     };
   }
 
   if (backendType === "trello") {
     const apiKey = process.env.TRELLO_API_KEY || BUNDLED_TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_API_TOKEN;
-
-    if (!apiToken) {
-      const authorizeUrl = apiKey
-        ? `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=${apiKey}`
-        : "https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=YOUR_API_KEY";
-      throw new Error(
-        `Trello backend requires TRELLO_API_TOKEN.\n` +
-          `Generate one by visiting:\n${authorizeUrl}\n` +
-          `Then set TRELLO_API_TOKEN in your .env`,
-      );
-    }
-
-    if (!apiKey) {
-      throw new Error(
-        "TRELLO_API_KEY is required. Register a Power-Up at https://trello.com/power-ups/admin to get one.",
-      );
-    }
-
     trelloConfig = {
       apiKey,
-      apiToken,
+      apiToken: process.env.TRELLO_API_TOKEN!,
       defaultBoardId: process.env.TRELLO_DEFAULT_BOARD_ID,
       defaultListName: process.env.TRELLO_DEFAULT_LIST_NAME,
     };
   }
 
   if (backendType === "azure-devops") {
-    const required = ["AZURE_DEVOPS_ORG", "AZURE_DEVOPS_PAT", "AZURE_DEVOPS_PROJECT"];
-    const missing = required.filter((key) => !process.env[key]);
-
-    if (missing.length > 0) {
-      throw new Error(
-        `Missing required environment variables: ${missing.join(", ")}\n` +
-          "Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT in your environment.",
-      );
-    }
-
-    const azureOrg = process.env.AZURE_DEVOPS_ORG;
-    const azurePat = process.env.AZURE_DEVOPS_PAT;
-    const azureProject = process.env.AZURE_DEVOPS_PROJECT;
-
-    if (!azureOrg || !azurePat || !azureProject) {
-      throw new Error("Azure DevOps configuration was expected but missing after validation.");
-    }
-
     azureDevOpsConfig = {
-      organization: azureOrg,
-      pat: azurePat,
-      defaultProject: azureProject,
+      organization: process.env.AZURE_DEVOPS_ORG!,
+      pat: process.env.AZURE_DEVOPS_PAT!,
+      defaultProject: process.env.AZURE_DEVOPS_PROJECT!,
     };
   }
 
   if (backendType === "asana") {
-    const apiToken = process.env.ASANA_API_TOKEN;
-    if (!apiToken) {
-      throw new Error(
-        "Asana backend selected but ASANA_API_TOKEN is missing. " +
-          "Please set ASANA_API_TOKEN in your environment.",
-      );
-    }
-
     asanaConfig = {
-      apiToken,
+      apiToken: process.env.ASANA_API_TOKEN!,
       defaultProjectGid: process.env.ASANA_DEFAULT_PROJECT_GID,
     };
   }
 
   if (backendType === "github") {
-    const required = ["GITHUB_TOKEN", "GITHUB_REPO"];
-    const missing = required.filter((key) => !process.env[key]);
-
-    if (missing.length > 0) {
-      throw new Error(
-        `Missing required environment variables: ${missing.join(", ")}\n` +
-          "Please set GITHUB_TOKEN and GITHUB_REPO (owner/repo) in your environment.",
-      );
-    }
-
-    const githubToken = process.env.GITHUB_TOKEN;
-    const githubRepoValue = process.env.GITHUB_REPO;
-
-    if (!githubToken || !githubRepoValue) {
-      throw new Error("GitHub configuration was expected but missing after validation.");
-    }
-
-    const { owner, repo, repository } = parseGitHubRepo(githubRepoValue, process.env.GITHUB_OWNER);
+    const { owner, repo, repository } = parseGitHubRepo(
+      process.env.GITHUB_REPO!,
+      process.env.GITHUB_OWNER,
+    );
 
     githubConfig = {
-      token: githubToken,
+      token: process.env.GITHUB_TOKEN!,
       owner,
       repo,
       repository,

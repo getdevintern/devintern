@@ -83,8 +83,11 @@ const SRT_OPEN_NETWORK_DOMAINS = [
 const HARNESS_STATE_PATHS: Record<string, string[]> = {
   "claude-code": [".claude", ".claude.json", ".claude.json.lock", ".claude.lock"],
   codex: [".codex"],
+  // agy keeps state under ~/.gemini (legacy Gemini CLI layout)
+  antigravity: [".gemini"],
   gemini: [".gemini"],
-  cursor: [".cursor"],
+  // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
+  cursor: [".cursor", ".config/cursor"],
   opencode: [".config/opencode", ".local/share/opencode"],
 };
 

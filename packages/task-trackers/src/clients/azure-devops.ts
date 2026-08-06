@@ -124,6 +124,45 @@ export class AzureDevOpsClient {
   }
 
   /**
+   * Register Service Hook web-hook subscriptions for work item events.
+   *
+   * Creates one subscription each for `workitem.created` and
+   * `workitem.updated`, scoped to the configured project and pointing at the
+   * target URL. Service Hooks carry no signature; the target URL itself must
+   * be unguessable.
+   *
+   * @param targetUrl - Webhook target URL (e.g. a relay ingest URL).
+   * @param project - Optional project name override.
+   * @returns Ids of the created subscriptions.
+   * @throws When the Azure DevOps API request fails.
+   */
+  async createWorkItemWebhooks(targetUrl: string, project?: string): Promise<{ ids: string[] }> {
+    const targetProject = project || this.defaultProject;
+    const { id: projectId } = await this.request<{ id: string }>(
+      `${this.baseUrl}/_apis/projects/${encodeURIComponent(targetProject)}?api-version=7.0`,
+    );
+
+    const ids: string[] = [];
+    for (const eventType of ["workitem.created", "workitem.updated"]) {
+      const subscription = await this.request<{ id: string }>(
+        `${this.baseUrl}/_apis/hooks/subscriptions?api-version=7.0`,
+        "POST",
+        {
+          publisherId: "tfs",
+          eventType,
+          resourceVersion: "1.0",
+          consumerId: "webHooks",
+          consumerActionId: "httpRequest",
+          publisherInputs: { projectId },
+          consumerInputs: { url: targetUrl },
+        },
+      );
+      ids.push(subscription.id);
+    }
+    return { ids };
+  }
+
+  /**
    * Create a work item with title and HTML description.
    *
    * @param title - Work item title.

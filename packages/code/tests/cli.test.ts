@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+// Fresh bun subprocesses for each case; under full-suite load they routinely
+// exceed bun's 5s default.
+setDefaultTimeout(30_000);
+
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
+const CLI_SPAWN_TIMEOUT_MS = 30_000;
 
 // Helper to run the CLI in an isolated directory to avoid lock conflicts
 function runCLI(args: string[]): {
@@ -22,7 +27,7 @@ function runCLI(args: string[]): {
   try {
     const result = spawnSync("bun", [CLI_PATH, ...args], {
       encoding: "utf8",
-      timeout: 5000,
+      timeout: CLI_SPAWN_TIMEOUT_MS,
       cwd: testDir, // Run in isolated directory
       env: {
         ...process.env,
@@ -188,7 +193,7 @@ describe("CLI Argument Handling", () => {
     try {
       const result = spawnSync("bun", [CLI_PATH, "4uWKPOTv"], {
         encoding: "utf8",
-        timeout: 5000,
+        timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
         env: {
           ...process.env,
@@ -216,7 +221,7 @@ describe("CLI Argument Handling", () => {
     try {
       const result = spawnSync("bun", [CLI_PATH, "--query", 'list:"To Do" is:open'], {
         encoding: "utf8",
-        timeout: 5000,
+        timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
         env: {
           ...process.env,
@@ -274,7 +279,7 @@ describe("CLI Init Command", () => {
       // Run init command in the test directory
       const result = spawnSync("bun", [CLI_PATH, "init"], {
         encoding: "utf8",
-        timeout: 5000,
+        timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
       });
 

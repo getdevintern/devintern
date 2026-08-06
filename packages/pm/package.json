@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/pm",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Turn rough notes, logs, and Figma into codebase-grounded tracker tickets with any coding agent. Self-hosted, BYOK.",
   "type": "module",
   "bin": {
@@ -9,8 +9,11 @@
   "exports": {
     ".": "./dist/index.js",
     "./engine": "./lib/engine/index.ts",
+    "./issue-types": "./lib/issue-types.ts",
     "./package.json": "./package.json",
-    "./config": "./lib/config.ts"
+    "./config": "./lib/config.ts",
+    "./init": "./lib/init-wizard.ts",
+    "./init-shared": "./lib/init-shared.ts"
   },
   "engines": {
     "node": ">=20"

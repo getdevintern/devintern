@@ -75,6 +75,13 @@ const confirmed = await askConfirm("Continue?");
 
 Use appropriate exit codes for success (0) and errors (non-zero).
 
+## Agent harness switching
+
+- CLI: `--harness <name>` overrides `AGENT_HARNESS` for one run (validated once in `main()` via `validateHarnessName`).
+- Interactive: `Ctrl+G` opens a modal picker of **installed** harnesses (`listInstalledHarnesses`); ESC returns to the prior step.
+- Do not expose `--agent-path`; CLI path resolution stays on PATH / `AGENT_CLI_PATH` / `<HARNESS>_CLI_PATH`.
+- When `harnessName` is explicit, `resolveHarness` skips `AGENT_CLI_PATH` so a previous agent path does not stick.
+
 ## Build Output
 
 The `bun run build` command targets **Node.js** (`--target=node`) so the resulting `dist/index.js` runs under plain Node.js without Bun installed. External dependencies (`ink`, `react`, `ink-scroll-view`) are left as externals and resolved at runtime.

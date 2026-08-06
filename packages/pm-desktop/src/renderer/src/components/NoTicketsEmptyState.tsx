@@ -1,18 +1,31 @@
 import { Layers, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 
 interface NoTicketsEmptyStateProps {
   onOpenTicket: () => void;
+  /** When true, show the soft Code discovery tip below the primary CTA. */
+  showCodeDiscovery?: boolean;
+  onLearnMoreCode?: (url: string) => void;
+  onDismissCodeDiscovery?: () => void;
+  /** Shown on the tip when dismiss persistence fails. */
+  codeDiscoveryDismissError?: string | null;
 }
 
 /**
  * Shown when a project is loaded but no ticket workspaces are open.
  * Explains multi-ticket work and how to start.
  */
-export function NoTicketsEmptyState({ onOpenTicket }: NoTicketsEmptyStateProps) {
+export function NoTicketsEmptyState({
+  onOpenTicket,
+  showCodeDiscovery = false,
+  onLearnMoreCode,
+  onDismissCodeDiscovery,
+  codeDiscoveryDismissError = null,
+}: NoTicketsEmptyStateProps) {
   return (
     <section
-      className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center"
+      className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 overflow-y-auto p-8 text-center"
       data-testid="no-tickets-empty"
     >
       <div className="flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
@@ -30,6 +43,13 @@ export function NoTicketsEmptyState({ onOpenTicket }: NoTicketsEmptyStateProps) 
         <Plus data-icon="inline-start" />
         Open a ticket
       </Button>
+      {showCodeDiscovery && onLearnMoreCode && onDismissCodeDiscovery && (
+        <CodeDiscoveryCard
+          onLearnMore={onLearnMoreCode}
+          onDismiss={onDismissCodeDiscovery}
+          dismissError={codeDiscoveryDismissError}
+        />
+      )}
     </section>
   );
 }

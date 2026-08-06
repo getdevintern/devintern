@@ -21,6 +21,9 @@
  * - `--allow` on the harness's own config dir (e.g. `~/.claude` +
  *   `~/.claude.json`): agents write session state there and hard-fail
  *   without it.
+ * - `--allow-file /dev/ptmx` so tools that allocate a PTY (lefthook,
+ *   script(1), interactive CLIs) can open the master; without it git
+ *   hooks fail with path_not_granted on /dev/ptmx.
  * - `--allow-unix-socket $SSH_AUTH_SOCK` so `git push` over ssh works.
  * - Domain allowlists map to repeated `--allow-domain` (nono's proxy filter);
  *   network is otherwise open by default.
@@ -50,8 +53,11 @@ import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand }
 const HARNESS_STATE_PATHS: Record<string, string[]> = {
   "claude-code": [".claude", ".claude.json"],
   codex: [".codex"],
+  // agy keeps state under ~/.gemini (legacy Gemini CLI layout)
+  antigravity: [".gemini"],
   gemini: [".gemini"],
-  cursor: [".cursor"],
+  // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
+  cursor: [".cursor", ".config/cursor"],
   opencode: [".config/opencode", ".local/share/opencode"],
 };
 
@@ -59,7 +65,8 @@ const HARNESS_STATE_PATHS: Record<string, string[]> = {
  * Harness name → nono registry pack profile name (used when installed).
  * Official packs live at registry.nono.sh under nolabs-ai/<agent>
  * (Sigstore-verified on pull): claude (installs profile claude-code),
- * codex, opencode, goose, pi. No packs exist yet for gemini or cursor.
+ * codex, opencode, goose, pi, antigravity. No packs yet for cursor or
+ * the other CLI harnesses.
  */
 const HARNESS_NONO_PROFILES: Record<string, string> = {
   "claude-code": "claude-code",
@@ -67,6 +74,7 @@ const HARNESS_NONO_PROFILES: Record<string, string> = {
   opencode: "opencode",
   goose: "goose",
   pi: "pi",
+  antigravity: "antigravity",
 };
 
 /**
@@ -327,6 +335,12 @@ export class NonoSandboxProvider implements SandboxProvider {
     // Extra readable roots from the policy (parity with srt's allowRead).
     for (const p of policy.readablePaths ?? []) {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
+    }
+
+    // PTY master: lefthook (and similar) open /dev/ptmx per hook command.
+    // Write-only is not enough — openpty needs O_RDWR (--allow-file).
+    if (existsSync("/dev/ptmx")) {
+      grants.push({ flag: "--allow-file", path: "/dev/ptmx" });
     }
 
     const suffix: string[] = [];

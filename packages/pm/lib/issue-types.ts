@@ -1,3 +1,6 @@
+/** Fallback issue types when a supporting backend cannot provide a list. */
+export const DEFAULT_ISSUE_TYPES = ["Task", "Story", "Bug", "Epic"];
+
 /**
  * Choose the most appropriate default issue type from a list of available types.
  *
@@ -30,4 +33,16 @@ export function getDefaultIssueType(types: string[]): string {
   }
 
   return types[0]!;
+}
+
+/**
+ * Order issue types for display so the preferred default appears first.
+ * Preserves relative order of the remaining types.
+ */
+export function orderIssueTypes(types: string[]): string[] {
+  if (types.length === 0) {
+    return types;
+  }
+  const preferred = getDefaultIssueType(types);
+  return [preferred, ...types.filter((t) => t !== preferred)];
 }

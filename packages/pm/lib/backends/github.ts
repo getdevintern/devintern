@@ -1,4 +1,5 @@
 import { GitHubClient } from "@devintern/task-trackers";
+import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
 
 /**
@@ -133,6 +134,6 @@ export class GitHubBackend implements TaskBackend {
    * @returns Default GitHub-oriented type names.
    */
   async getIssueTypes(): Promise<string[]> {
-    return ["Task", "Story", "Bug", "Epic"];
+    return [...DEFAULT_ISSUE_TYPES];
   }
 }

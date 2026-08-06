@@ -41,10 +41,16 @@ export { buildPromptArgs } from "./prompt-args.js";
 export {
   resolveHarness,
   findInPath,
+  getHarnessCliCommand,
+  isHarnessCliAvailable,
+  isHarnessInstalled,
+  listInstalledHarnesses,
   resolveExecutablePath,
   resolveExecutablePathStrict,
   resolveExecutablePathWithRetry,
+  type HarnessInstallOptions,
   type HarnessResolutionOptions,
+  type ListInstalledHarnessesOptions,
   type ResolveWithRetryOptions,
 } from "./resolver.js";
 

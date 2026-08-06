@@ -1,5 +1,20 @@
 # @devintern/code Changelog
 
+## [2.2.3] - 2026-08-06
+
+### Fixed
+
+- **Cursor under nono/srt can write session chats**: sandboxed `cursor-agent` runs now get write access to `~/.config/cursor` (in addition to `~/.cursor`), so chat `mkdir` no longer fails with `EACCES`
+- **lefthook commits work under nono**: the nono provider grants `--allow-file /dev/ptmx` so git hooks that allocate a PTY are not blocked
+- **Antigravity nono pack is selected when installed**: `AGENT_HARNESS=antigravity` now loads the `antigravity` pack profile (and grants `~/.gemini` state writes); doctor/docs list `antigravity` alongside the other packs
+- **Hook-fix fallback commit no longer hangs on an editor**: when the agent fixes pre-commit issues but leaves the tree dirty, DevIntern's manual `git commit --no-verify` now always passes `-m` (and stages with `git add -A`). Previously omitting `-m` opened `GIT_EDITOR` and blocked unattended runs indefinitely
+
+## [2.2.2] - 2026-08-06
+
+### Fixed
+
+- **Linux desktop terminals no longer trip the automation license gate**: systemd user sessions inherit `INVOCATION_ID` / `JOURNAL_STREAM` / `SYSTEMD_EXEC_PID` into every terminal (Ghostty, Cursor, etc.), so interactive runs were falsely treated as unattended. Detection now requires `CI`, a direct systemd `ExecStart` (`SYSTEMD_EXEC_PID` matching this process), or a real `.service` cgroup — not desktop `.scope` units
+
 ## [2.2.1] - 2026-08-03
 
 ### Changed

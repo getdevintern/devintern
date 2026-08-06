@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
 import { readFile, writeFile, pathExists, mkdir } from "../runtime/fs.js";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
 
@@ -211,6 +212,6 @@ ${description}
    * @returns Static list of type names.
    */
   async getIssueTypes(): Promise<string[]> {
-    return ["Task", "Story", "Bug", "Epic"];
+    return [...DEFAULT_ISSUE_TYPES];
   }
 }

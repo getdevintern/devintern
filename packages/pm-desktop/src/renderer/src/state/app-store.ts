@@ -63,6 +63,7 @@ export type OutputAction =
   | { type: "edit-started"; requestId: string }
   | { type: "edit-succeeded"; draft: StoryDraft }
   | { type: "draft-title-changed"; summary: string }
+  | { type: "draft-description-changed"; description: string }
   | { type: "create-started" }
   | { type: "create-succeeded"; created: CreateTaskResponse }
   | { type: "decompose-started"; requestId: string }
@@ -109,6 +110,10 @@ export function outputReducer(state: OutputState, action: OutputAction): OutputS
       return { ...state, phase: "preview", activeRequestId: null, draft: action.draft };
     case "draft-title-changed":
       return state.draft ? { ...state, draft: { ...state.draft, summary: action.summary } } : state;
+    case "draft-description-changed":
+      return state.draft
+        ? { ...state, draft: { ...state.draft, description: action.description } }
+        : state;
     case "create-started":
       return { ...state, phase: "creating", error: null };
     case "create-succeeded":

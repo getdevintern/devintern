@@ -2,52 +2,23 @@
  * Electron main process entry.
  */
 
-import { join } from "node:path";
-import { BrowserWindow, app, shell } from "electron";
+import { BrowserWindow, app } from "electron";
+import { appOpenedProps, shutdownAnalytics, track } from "./analytics.ts";
 import { registerIpcHandlers } from "./ipc.ts";
+import { installAppMenu } from "./menu.ts";
 import { augmentPath } from "./path-fix.ts";
+import { createWindow } from "./window.ts";
 
 augmentPath();
-
-const isDev = !!process.env.ELECTRON_RENDERER_URL;
-
-function createWindow(): void {
-  const window = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 900,
-    minHeight: 600,
-    title: "DevIntern PM",
-    show: false,
-    webPreferences: {
-      preload: join(import.meta.dirname, "../preload/index.mjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-
-  window.once("ready-to-show", () => window.show());
-
-  // External links open in the system browser, never inside the app window.
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) {
-      void shell.openExternal(url);
-    }
-    return { action: "deny" };
-  });
-
-  if (isDev) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL!);
-  } else {
-    void window.loadFile(join(import.meta.dirname, "../renderer/index.html"));
-  }
-}
 
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) {
   app.quit();
 } else {
+  // Claim the application menu before Electron's default `will-finish-launching`
+  // handler installs `role: "appMenu"` (native About → "Electron" in dev).
+  installAppMenu({ createWindow });
+
   app.on("second-instance", () => {
     const [window] = BrowserWindow.getAllWindows();
     if (window) {
@@ -57,12 +28,19 @@ if (!hasLock) {
   });
 
   void app.whenReady().then(() => {
+    // Re-apply identity now that `app.getVersion()` is fully resolved.
+    installAppMenu({ createWindow });
     registerIpcHandlers();
     createWindow();
+    void track("app_opened", appOpenedProps(app.getVersion()));
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  });
+
+  app.on("before-quit", () => {
+    void shutdownAnalytics();
   });
 
   app.on("window-all-closed", () => {

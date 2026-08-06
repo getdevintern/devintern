@@ -1,24 +1,20 @@
-Analyze the following requirement or feature description and generate technical requirements for a Jira story:
+Analyze the following requirement or feature description and generate technical requirements for a Jira story.
 
 {{promptContent}}
 {{epicContext}}
 {{extraInstructions}}
 
-IMPORTANT:
-- Include technical considerations and implementation approach
-- Identify potential technical challenges
-- Suggest architecture patterns and best practices
-- Reference existing codebase patterns when relevant
+Guidance:
+- Include technical considerations when they change the work
+- Call out potential technical challenges
+- Suggest architecture patterns when relevant
+- Reference existing codebase patterns when you can
 - Balance user value with technical feasibility
+- Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
 
-Please analyze the requirement and provide it in the following JSON format with MARKDOWN formatting:
+Return only valid JSON (no other text). Use markdown inside the description string:
 
 {
   "summary": "Brief, clear title for the story",
-  "description": "## Overview\n\n[High-level description of the feature/requirement]\n\n## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Technical Considerations\n\n- Architecture patterns to use\n- Integration points\n- Data model changes\n- API design considerations\n- Performance implications\n\n## Implementation Approach\n\n1. Research existing patterns in codebase\n2. Design the solution\n3. Implement core functionality\n4. Add tests and documentation\n\n## Acceptance Criteria\n\n- [ ] Functional requirement 1\n- [ ] Functional requirement 2\n- [ ] Technical requirement (performance, security, etc.)\n- [ ] Tests are written and passing\n\n## Edge Cases & Considerations\n\n- Potential error scenarios\n- Backwards compatibility\n- Migration needs"
+  "description": "## Overview\n\n[High-level description of the feature/requirement]\n\n## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Technical Considerations\n\n- Architecture, integration, data model, or API notes that matter here\n\n## Acceptance Criteria\n\n- [ ] Functional requirement 1\n- [ ] Functional requirement 2\n- [ ] Technical requirement specific to this work\n\n## Edge Cases & Considerations\n\n- Error scenarios, compatibility, or migration needs that matter here"
 }
-
-IMPORTANT:
-- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`, ``` code blocks)
-- This ensures proper rich formatting in Jira
-- Return ONLY valid JSON, no additional text

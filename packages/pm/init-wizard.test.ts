@@ -6,9 +6,14 @@ import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
 import {
   PM_TRACKER_DOCS,
   PM_TRACKER_SETUP,
+  PmInitError,
+  inspectPmInitContext,
   isInteractive,
+  listPmTrackers,
+  probePmConnection,
   renderPmEnvFile,
   runPmInitWizard,
+  writePmProjectConfig,
 } from "./lib/init-wizard";
 
 let tempDir: string;
@@ -74,6 +79,87 @@ describe("renderPmEnvFile", () => {
     expect(env).toContain("# LINEAR_DEFAULT_TEAM_KEY=ENG");
     expect(env).toContain("# Setup guide: https://devintern.com/docs/pm/linear-integration");
     expect(env).toContain("AGENT_HARNESS=claude-code");
+  });
+});
+
+describe("writePmProjectConfig / probePmConnection (programmatic init)", () => {
+  test("writes markdown config and gitignore without probing", async () => {
+    let probed = false;
+    const result = await probePmConnection("markdown", {}, () => {
+      probed = true;
+      return Promise.resolve();
+    });
+    expect(result).toEqual({ ok: true });
+    expect(probed).toBe(false);
+
+    const { envPath } = await writePmProjectConfig({
+      cwd: tempDir,
+      trackerId: "markdown",
+      values: {},
+    });
+    expect(envPath).toBe(join(tempDir, ".devintern-pm", ".env"));
+    expect(readEnv()).toContain("TASK_TRACKER=markdown");
+    expect(readEnv()).toContain("MARKDOWN_TASKS_DIR=.devintern-pm/tasks");
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-pm/.env");
+  });
+
+  test("refuses overwrite unless overwrite: true", async () => {
+    await writePmProjectConfig({
+      cwd: tempDir,
+      trackerId: "linear",
+      values: { LINEAR_API_KEY: "lin_api_1" },
+    });
+    const before = readEnv();
+
+    try {
+      await writePmProjectConfig({
+        cwd: tempDir,
+        trackerId: "markdown",
+        values: {},
+      });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PmInitError);
+      expect((error as PmInitError).code).toBe("already_exists");
+    }
+    expect(readEnv()).toBe(before);
+
+    await writePmProjectConfig({
+      cwd: tempDir,
+      trackerId: "markdown",
+      values: {},
+      overwrite: true,
+    });
+    expect(readEnv()).toContain("TASK_TRACKER=markdown");
+  });
+
+  test("inspectPmInitContext finds reusable code credentials", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_x\nGITHUB_REPO=acme/app\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.configExists).toBe(false);
+    expect(ctx.reusableFromCode?.trackerId).toBe("github");
+    expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_x");
+  });
+
+  test("probePmConnection surfaces probe failures", async () => {
+    const result = await probePmConnection("linear", { LINEAR_API_KEY: "bad" }, () =>
+      Promise.reject(new Error("401 Unauthorized")),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("401");
+  });
+
+  test("listPmTrackers covers setup table and marks markdown credential-free", () => {
+    const trackers = listPmTrackers();
+    expect(trackers.map((t) => t.id).sort()).toEqual(Object.keys(PM_TRACKER_SETUP).sort());
+    expect(trackers.find((t) => t.id === "markdown")?.needsCredentials).toBe(false);
+    expect(trackers.find((t) => t.id === "jira")?.docsUrl).toStartWith("https://devintern.com/");
   });
 });
 

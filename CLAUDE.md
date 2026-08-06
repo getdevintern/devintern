@@ -59,8 +59,9 @@ bun run --filter @getdevintern/pm build
 
 - Electron app built with electron-vite; React + shadcn/ui renderer
 - Dev: `bun run dev`; build: `bun run build` (output in `out/`, not committed)
-- Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`
+- Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`; issue-type defaults via `@getdevintern/pm/issue-types`; in-app project setup via `@getdevintern/pm/init` (main) and `@getdevintern/pm/init-shared` (renderer-safe metadata)
 - Multi-ticket workspaces: sidebar of open tickets with independent composer/output state; agent streams route by `requestId` (see `renderer/src/state/ticket-workspaces.ts`)
+- Anonymous product analytics (PostHog): set `POSTHOG_API_KEY` (and optional `POSTHOG_HOST`) at **build** time via `packages/pm-desktop/.env` (see `.env.example`), shell, or CI so electron-vite can bake them into the main bundle; missing key → analytics no-ops. Users can opt out in Settings.
 
 ### Source-only shared packages
 

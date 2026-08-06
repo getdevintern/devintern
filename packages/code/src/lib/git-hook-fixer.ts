@@ -15,6 +15,19 @@ import { getSandbox } from "./sandbox";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";
 
+/** Default message when the agent fixed hooks but left the commit unfinished. */
+export const MANUAL_HOOK_FIX_COMMIT_MESSAGE = "fix: resolve pre-commit hook failures";
+
+/**
+ * Args for a non-interactive fallback commit after a hook-fix agent run.
+ * Always includes `-m` so git never opens an editor (which hangs unattended).
+ */
+export function manualHookFixCommitArgs(
+  message: string = MANUAL_HOOK_FIX_COMMIT_MESSAGE,
+): string[] {
+  return ["commit", "--no-verify", "-m", message];
+}
+
 /**
  * Check whether the working tree is clean after a hook-fix attempt.
  *
@@ -133,7 +146,7 @@ The git ${hookType} operation has failed, likely due to pre-${hookType} hooks ch
 
 5. ${
         hookType === "commit"
-          ? "**Retry the commit** to verify it succeeds."
+          ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
           : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
       }
 
@@ -234,8 +247,9 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                 );
                 console.log(`   Changes: ${statusResult.output}`);
 
-                // Attempt to stage and commit manually
-                const stageResult = await Utils.executeGitCommand(["add", "."], {
+                // Attempt to stage and commit manually. Use -A (whole tree) and
+                // an explicit -m so unattended runs never open GIT_EDITOR.
+                const stageResult = await Utils.executeGitCommand(["add", "-A"], {
                   cwd,
                 });
                 if (!stageResult.success) {
@@ -245,7 +259,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                   return;
                 }
 
-                const commitResult = await Utils.executeGitCommand(["commit", "--no-verify"], {
+                const commitResult = await Utils.executeGitCommand(manualHookFixCommitArgs(), {
                   cwd,
                 });
                 if (commitResult.success) {
@@ -283,8 +297,8 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                   cwd,
                 });
                 if (statusCheck.success && statusCheck.output.trim() !== "") {
-                  // Stage all changes
-                  const stageResult = await Utils.executeGitCommand(["add", "."], { cwd });
+                  // Stage all changes (-A: whole tree, not cwd-limited)
+                  const stageResult = await Utils.executeGitCommand(["add", "-A"], { cwd });
                   if (!stageResult.success) {
                     console.log("❌ Failed to stage changes:");
                     console.log(`   ${stageResult.error}`);

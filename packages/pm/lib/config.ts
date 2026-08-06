@@ -18,6 +18,15 @@ export interface Config extends TrackerConfig {
   agent: ResolvedHarness;
 }
 
+export interface LoadConfigOptions {
+  /** Explicit harness name override (e.g. from `--harness`). */
+  harnessName?: string;
+  /** Explicit CLI path override. */
+  cliPath?: string;
+  /** Directory to resolve config from (defaults to cwd). */
+  baseDir?: string;
+}
+
 /**
  * Migrate a legacy `.claude-pm` config directory to `.devintern-pm` in the cwd.
  *
@@ -51,13 +60,19 @@ export async function migrateLegacyConfigDir(baseDir: string = process.cwd()): P
  *
  * Reads `.devintern-pm/.env` first, then validates backend-specific required vars.
  *
- * @param baseDir - Directory to resolve config from (defaults to cwd).
+ * @param optionsOrBaseDir - Optional harness overrides, or a bare base-directory
+ *   string (legacy callers such as pm-desktop).
  * @returns Fully resolved {@link Config} for the selected task tracker and agent harness.
  * @throws When required environment variables for the chosen backend are missing or invalid.
  */
-export async function loadConfig(baseDir?: string): Promise<Config> {
-  const trackerConfig = await loadTrackerConfig(".devintern-pm", baseDir);
-  const agent = resolveHarness();
+export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string): Promise<Config> {
+  const options =
+    typeof optionsOrBaseDir === "string" ? { baseDir: optionsOrBaseDir } : optionsOrBaseDir;
+  const trackerConfig = await loadTrackerConfig(".devintern-pm", options?.baseDir);
+  const agent = resolveHarness({
+    harnessName: options?.harnessName,
+    cliPath: options?.cliPath,
+  });
   // Locate the CLI on PATH and fail fast with an actionable error if missing,
   // instead of surfacing a cryptic spawn error mid-run.
   agent.path = resolveExecutablePathStrict(agent.path, agent.harness.displayName);

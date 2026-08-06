@@ -1,38 +1,24 @@
-Decompose the following bug fix story into smaller, actionable tasks with detailed descriptions:
+Decompose the following bug-fix story into smaller, actionable tasks.
 
 Story: {{storySummary}}
 
 Description:
 {{storyDescription}}
 
-IMPORTANT:
-- Focus on investigation, fix, testing, and validation tasks
-- Suggest checking existing error handling patterns
-- Consider both immediate fix and preventive measures
+Guidance:
+- Cover investigation, fix, and validation as needed
+- Suggest checking existing error-handling patterns
+- Consider both an immediate fix and preventive follow-ups when useful
+- One responsibility per task; roughly a day or two when possible
+- Group tiny work; split oversized work
 
-Requirements for each task:
-- Focused on a single responsibility
-- Completable within 1-2 days
-- Not too granular (group similar small tasks together)
-- Not too large (break down complex work)
-- MUST include a detailed description formatted in MARKDOWN with:
-  * Use ## for section headers (e.g., "## What needs to be done", "## Acceptance Criteria")
-  * Use - for bullet points
-  * Use **text** for important terms or emphasis
-  * Use `code` for technical terms, function names, or code references
-
-Return your response ONLY as valid JSON in this exact format (no markdown, no code blocks, no additional text):
+Return only valid JSON (no other text). Use markdown inside each description string:
 
 {
   "subtasks": [
     {
       "summary": "Brief, actionable task title",
-      "description": "## What needs to be done\\n\\nDetailed explanation...\\n\\n## Acceptance Criteria\\n\\n- Criterion 1\\n- Criterion 2"
+      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance Criteria\n\n- Criterion 1\n- Criterion 2"
     }
   ]
 }
-
-IMPORTANT:
-- Each task MUST have a comprehensive description
-- Format descriptions using MARKDOWN (headers, bullets, bold, code)
-- This ensures proper formatting in Jira

@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { CheckCircle2, ExternalLink, Loader2, RotateCcw, Send } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -7,12 +6,19 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { isBusy, type OutputState } from "../state/app-store.ts";
+import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
+
+const MarkdownDescriptionEditor = lazy(async () => {
+  const mod = await import("./MarkdownDescriptionEditor.tsx");
+  return { default: mod.MarkdownDescriptionEditor };
+});
 
 interface OutputPanelProps {
   output: OutputState;
   issueType: string;
   decompose: boolean;
   onTitleChange: (summary: string) => void;
+  onDescriptionChange: (description: string) => void;
   onEdit: (editPrompt: string) => void;
   onCreate: () => void;
   onToggleSubtask: (index: number) => void;
@@ -21,6 +27,11 @@ interface OutputPanelProps {
   onRestart: () => void;
   onDismissError: () => void;
   onOpenUrl: (url: string) => void;
+  /** Soft Code discovery tip shown after a successful create. */
+  showCodeDiscovery?: boolean;
+  onLearnMoreCode?: (url: string) => void;
+  onDismissCodeDiscovery?: () => void;
+  codeDiscoveryDismissError?: string | null;
 }
 
 /** Auto-scrolling monospace log of live agent output. */
@@ -54,6 +65,7 @@ export function OutputPanel({
   issueType,
   decompose,
   onTitleChange,
+  onDescriptionChange,
   onEdit,
   onCreate,
   onToggleSubtask,
@@ -62,6 +74,10 @@ export function OutputPanel({
   onRestart,
   onDismissError,
   onOpenUrl,
+  showCodeDiscovery = false,
+  onLearnMoreCode,
+  onDismissCodeDiscovery,
+  codeDiscoveryDismissError = null,
 }: OutputPanelProps) {
   const [editPrompt, setEditPrompt] = useState("");
   const busy = isBusy(output.phase);
@@ -83,7 +99,7 @@ export function OutputPanel({
   }
 
   return (
-    <section className="flex min-h-0 flex-col gap-3 overflow-y-auto p-4">
+    <section className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
       {output.phase === "generating" && <WorkingIndicator label="Generating story…" />}
       {output.phase === "editing" && <WorkingIndicator label="Applying your edit…" />}
       {output.phase === "decomposing" && <WorkingIndicator label="Decomposing into subtasks…" />}
@@ -125,15 +141,28 @@ export function OutputPanel({
           output.phase === "creating") && (
           <div className="flex min-h-0 flex-1 flex-col gap-3">
             <Input
-              className="h-9 text-base font-semibold"
+              className="h-9 shrink-0 text-base font-semibold"
               value={output.draft.summary}
               onChange={(e) => onTitleChange(e.target.value)}
               disabled={busy}
             />
-            <div className="prose-preview min-h-0 flex-1 overflow-y-auto rounded-md border bg-card p-4 text-sm">
-              <Markdown>{output.draft.description}</Markdown>
+            <div className="draft-description-shell min-h-0 flex-1 overflow-hidden rounded-md border bg-card text-sm">
+              <Suspense
+                fallback={
+                  <div className="flex h-full min-h-40 items-center justify-center gap-2 p-4 text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />
+                    Loading editor…
+                  </div>
+                }
+              >
+                <MarkdownDescriptionEditor
+                  markdown={output.draft.description}
+                  onChange={onDescriptionChange}
+                  readOnly={busy}
+                />
+              </Suspense>
             </div>
-            <div className="flex gap-2">
+            <div className="flex shrink-0 gap-2">
               <Input
                 placeholder="Request changes… (e.g. add acceptance criteria for mobile)"
                 value={editPrompt}
@@ -190,52 +219,62 @@ export function OutputPanel({
       )}
 
       {output.phase === "done" && output.created && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <CheckCircle2 className="size-4 text-secondary" />
-              Task created: {output.created.key}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2 text-sm">
-            <Button
-              variant="link"
-              className="h-auto justify-start p-0 text-left break-all whitespace-normal"
-              onClick={() => onOpenUrl(output.created!.url)}
-            >
-              <ExternalLink data-icon="inline-start" />
-              {output.created.url}
-            </Button>
-            {output.created.epicLinkError && (
-              <p className="text-xs text-destructive">
-                Epic link failed: {output.created.epicLinkError} (task was still created)
-              </p>
-            )}
-            {output.subtaskOutcomes && (
-              <ul className="flex flex-col gap-1 text-xs">
-                {output.subtaskOutcomes.map((outcome, i) => (
-                  <li key={i}>
-                    {outcome.error ? (
-                      <span className="text-destructive">
-                        ✗ {outcome.subtask.summary}: {outcome.error}
-                      </span>
-                    ) : (
-                      <span>
-                        ✓ {outcome.key}: {outcome.subtask.summary}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div>
-              <Button variant="outline" size="sm" onClick={onRestart}>
-                <RotateCcw data-icon="inline-start" />
-                New task
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CheckCircle2 className="size-4 text-secondary" />
+                Task created: {output.created.key}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2 text-sm">
+              <Button
+                variant="link"
+                className="h-auto justify-start p-0 text-left break-all whitespace-normal"
+                onClick={() => onOpenUrl(output.created!.url)}
+              >
+                <ExternalLink data-icon="inline-start" />
+                {output.created.url}
               </Button>
-            </div>
-          </CardContent>
-        </Card>
+              {output.created.epicLinkError && (
+                <p className="text-xs text-destructive">
+                  Epic link failed: {output.created.epicLinkError} (task was still created)
+                </p>
+              )}
+              {output.subtaskOutcomes && (
+                <ul className="flex flex-col gap-1 text-xs">
+                  {output.subtaskOutcomes.map((outcome, i) => (
+                    <li key={i}>
+                      {outcome.error ? (
+                        <span className="text-destructive">
+                          ✗ {outcome.subtask.summary}: {outcome.error}
+                        </span>
+                      ) : (
+                        <span>
+                          ✓ {outcome.key}: {outcome.subtask.summary}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div>
+                <Button variant="outline" size="sm" onClick={onRestart}>
+                  <RotateCcw data-icon="inline-start" />
+                  New task
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+          {showCodeDiscovery && onLearnMoreCode && onDismissCodeDiscovery && (
+            <CodeDiscoveryCard
+              variant="post-create"
+              onLearnMore={onLearnMoreCode}
+              onDismiss={onDismissCodeDiscovery}
+              dismissError={codeDiscoveryDismissError}
+            />
+          )}
+        </>
       )}
     </section>
   );

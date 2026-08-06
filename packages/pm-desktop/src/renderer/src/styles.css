@@ -145,7 +145,7 @@
   }
 }
 
-/* Markdown story preview */
+/* Markdown story preview / description editor content */
 .prose-preview {
   line-height: 1.7;
 }
@@ -207,4 +207,66 @@
 }
 .prose-preview > :first-child {
   margin-top: 0;
+}
+
+/* In-place description editor (MDXEditor) — fill remaining panel height;
+   content scrolls inside via mdxeditor-full-height. */
+.draft-description-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.draft-mdx-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  font-family: inherit;
+  color: var(--foreground);
+  --basePageBg: var(--card);
+  --baseBg: var(--muted);
+  --baseBgSubtle: var(--muted);
+  --baseBgHover: var(--accent);
+  --baseBgActive: var(--accent);
+  --baseLine: var(--border);
+  --baseBorder: var(--border);
+  --baseBorderHover: var(--border);
+  --baseText: var(--muted-foreground);
+  --baseTextContrast: var(--foreground);
+  --accentSolid: var(--primary);
+  --accentSolidHover: var(--primary-strong);
+  --accentText: var(--primary);
+  --accentBg: color-mix(in oklab, var(--primary) 12%, transparent);
+  --accentBgHover: color-mix(in oklab, var(--primary) 18%, transparent);
+  --accentBgActive: color-mix(in oklab, var(--primary) 24%, transparent);
+  --accentBorder: color-mix(in oklab, var(--primary) 35%, var(--border));
+  --accentBorderHover: var(--primary);
+  background: var(--card);
+}
+
+.draft-mdx-editor .mdxeditor-toolbar {
+  flex-shrink: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  padding: 0.25rem 0.35rem;
+}
+
+.draft-mdx-editor .draft-mdx-content {
+  padding: 1rem;
+}
+
+.product-pm {
+  color: var(--product-pm);
+  font-family: inherit;
+}
+.product-code {
+  color: var(--product-code);
+  font-family: inherit;
+}
+.product-sep {
+  color: var(--product-sep);
+  font-family: inherit;
 }

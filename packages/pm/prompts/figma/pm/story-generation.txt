@@ -1,21 +1,19 @@
-Analyze the following Figma design and generate PM-style requirements for a Jira story, don't be very technical, you are business/product person:
+Analyze the following Figma design and generate PM-style requirements for a Jira story. Write as a product person: user value over implementation detail.
 
 {{figmaUrl}}
 {{epicContext}}
 {{extraInstructions}}
 
-IMPORTANT:
-- Implementation should use the existing design system. DO NOT include specific design notes or styling details from Figma.
-- Suggest reusing or adapting existing code rather than building everything from scratch.
+Guidance:
+- Prefer the existing design system over Figma-specific styling or design tokens
+- Prefer reuse of existing patterns when they fit
+- Keep technical implementation details light
+- Include the Figma URL once under Design Reference
+- Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
 
-Please analyze the Figma design and provide the requirements in the following JSON format with MARKDOWN formatting:
+Return only valid JSON (no other text). Use markdown inside the description string:
 
 {
   "summary": "Brief, clear title for the story",
-  "description": "## User Story\\n\\nAs a [user type]\\nI want [goal]\\nSo that [benefit]\\n\\n## Design Reference\\n\\n{{figmaUrl}}\\n\\n## Acceptance Criteria\\n\\n- Criterion 1\\n- Criterion 2\\n- Criterion 3\\n\\n**Note:** Implementation must use existing design system components and patterns, not Figma-specific styling."
+  "description": "## User Story\n\nAs a [user type]\nI want [goal]\nSo that [benefit]\n\n## Design Reference\n\n[Figma URL]\n\n## Acceptance Criteria\n\n- Criterion 1\n- Criterion 2\n- Criterion 3"
 }
-
-IMPORTANT:
-- Format the description using MARKDOWN (## headers, - bullets, **bold**, `code`)
-- This ensures proper rich formatting in Jira
-- Return ONLY valid JSON, no additional text
