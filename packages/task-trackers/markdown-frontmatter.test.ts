@@ -5,6 +5,7 @@ import { join } from "path";
 import {
   extractMarkdownTitle,
   parseMarkdownFrontmatter,
+  parseMarkdownLabelList,
   sanitizeMarkdownTaskKey,
   updateMarkdownFrontmatterField,
 } from "./src/markdown/frontmatter.ts";
@@ -63,6 +64,23 @@ status: To Do
 
   test("returns null when frontmatter is absent", () => {
     expect(updateMarkdownFrontmatterField("# Title", "status", "Done")).toBeNull();
+  });
+});
+
+describe("parseMarkdownLabelList", () => {
+  test("prefers labels over tags and splits CSV", () => {
+    expect(parseMarkdownLabelList({ labels: "backend, auth", tags: "ignored" })).toEqual([
+      "backend",
+      "auth",
+    ]);
+  });
+
+  test("falls back to tags", () => {
+    expect(parseMarkdownLabelList({ tags: "a, b" })).toEqual(["a", "b"]);
+  });
+
+  test("returns empty for missing fields", () => {
+    expect(parseMarkdownLabelList({})).toEqual([]);
   });
 });
 

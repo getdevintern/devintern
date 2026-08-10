@@ -8,6 +8,7 @@ function renderEmptyState(props: Partial<Parameters<typeof NoTicketsEmptyState>[
   return renderToStaticMarkup(
     createElement(NoTicketsEmptyState, {
       onOpenTicket: props.onOpenTicket ?? (() => {}),
+      canOpenTicket: props.canOpenTicket,
       showCodeDiscovery: props.showCodeDiscovery,
       onLearnMoreCode: props.onLearnMoreCode ?? (() => {}),
       onDismissCodeDiscovery: props.onDismissCodeDiscovery ?? (() => {}),
@@ -17,6 +18,13 @@ function renderEmptyState(props: Partial<Parameters<typeof NoTicketsEmptyState>[
 }
 
 describe("NoTicketsEmptyState code discovery wiring", () => {
+  test("disables open CTA when canOpenTicket is false", () => {
+    const html = renderEmptyState({ canOpenTicket: false });
+    expect(html).toContain('data-testid="open-first-ticket"');
+    expect(html).toContain("disabled");
+    expect(html).toContain("Finish project setup before opening a ticket");
+  });
+
   test("hides the discovery card by default", () => {
     const html = renderEmptyState();
     expect(html).toContain('data-testid="no-tickets-empty"');

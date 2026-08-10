@@ -9,7 +9,13 @@ afterEach(() => {
 
 type CapturedRequest = { url: string; method: string; body?: unknown };
 
-function mockFetch(handler: (req: CapturedRequest) => { status?: number; json?: unknown }) {
+function mockFetch(
+  handler: (req: CapturedRequest) => {
+    status?: number;
+    json?: unknown;
+    next_page?: { offset?: string } | null;
+  },
+) {
   const calls: CapturedRequest[] = [];
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     const req: CapturedRequest = {
@@ -19,9 +25,12 @@ function mockFetch(handler: (req: CapturedRequest) => { status?: number; json?: 
     };
     calls.push(req);
     const result = handler(req);
-    return new Response(JSON.stringify({ data: result.json ?? {} }), {
-      status: result.status ?? 200,
-    });
+    return new Response(
+      JSON.stringify({ data: result.json ?? {}, next_page: result.next_page ?? undefined }),
+      {
+        status: result.status ?? 200,
+      },
+    );
   }) as typeof fetch;
   return calls;
 }
@@ -172,5 +181,67 @@ describe("AsanaClient sections and fields", () => {
     await makeClient().updateCustomField("task-1", "field-7", 5);
 
     expect(calls[0].body).toEqual({ data: { custom_fields: { "field-7": 5 } } });
+  });
+});
+
+describe("AsanaClient tags", () => {
+  test("resolveWorkspaceGid uses project workspace when provided", async () => {
+    const calls = mockFetch(() => ({ json: { workspace: { gid: "ws-9" } } }));
+
+    const workspaceGid = await makeClient().resolveWorkspaceGid("proj-1");
+
+    expect(calls[0].url).toContain("/projects/proj-1");
+    expect(calls[0].url).toContain("opt_fields=workspace.gid");
+    expect(workspaceGid).toBe("ws-9");
+  });
+
+  test("resolveWorkspaceGid falls back to first workspace", async () => {
+    mockFetch(() => ({ json: [{ gid: "ws-1" }, { gid: "ws-2" }] }));
+
+    expect(await makeClient().resolveWorkspaceGid()).toBe("ws-1");
+  });
+
+  test("getTags paginates until exhausted", async () => {
+    let page = 0;
+    const calls = mockFetch(() => {
+      page += 1;
+      if (page === 1) {
+        return {
+          json: Array.from({ length: 100 }, (_, i) => ({ gid: `t${i}`, name: `n${i}` })),
+          next_page: { offset: "cursor-2" },
+        };
+      }
+      return {
+        json: [{ gid: "t100", name: "n100" }],
+        next_page: null,
+      };
+    });
+
+    const result = await makeClient().getTags("ws-1");
+
+    expect(calls.length).toBe(2);
+    expect(calls[1].url).toContain("offset=cursor-2");
+    expect(result.tags.length).toBe(101);
+    expect(result.truncated).toBe(false);
+  });
+
+  test("getTags reports truncated at soft cap", async () => {
+    mockFetch(() => ({
+      json: Array.from({ length: 100 }, (_, i) => ({ gid: `t${i}`, name: `n${i}` })),
+      next_page: { offset: "more" },
+    }));
+
+    const result = await makeClient().getTags("ws-1", 100);
+    expect(result.tags.length).toBe(100);
+    expect(result.truncated).toBe(true);
+  });
+
+  test("addTagToTask posts tag gid", async () => {
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await makeClient().addTagToTask("task-1", "tag-9");
+
+    expect(calls[0].url).toContain("/tasks/task-1/addTag");
+    expect(calls[0].body).toEqual({ data: { tag: "tag-9" } });
   });
 });

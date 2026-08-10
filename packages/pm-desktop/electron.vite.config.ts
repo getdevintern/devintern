@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { defineConfig, externalizeDepsPlugin, loadEnv } from "electron-vite";
+import { defineConfig, loadEnv } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -12,19 +12,24 @@ export default defineConfig(({ mode }) => {
   const posthogApiKey = process.env.POSTHOG_API_KEY ?? fileEnv.POSTHOG_API_KEY ?? "";
   const posthogHost =
     process.env.POSTHOG_HOST ?? fileEnv.POSTHOG_HOST ?? "https://us.i.posthog.com";
+  const githubOauthClientId =
+    process.env.GITHUB_OAUTH_CLIENT_ID ?? fileEnv.GITHUB_OAUTH_CLIENT_ID ?? "";
 
   return {
     main: {
-      // Bake PostHog credentials into release builds (set via .env, shell, or CI).
-      // Absent key → analytics no-ops at runtime. Prefer env over hardcoding.
+      // Bake PostHog credentials and the GitHub OAuth App Client ID into release
+      // builds (set via .env, shell, or CI). Absent PostHog key → analytics no-ops.
+      // The GitHub Client ID is public (device flow needs no secret); absent ID →
+      // the "Sign in with GitHub" button is hidden and PAT remains available.
       define: {
         "process.env.POSTHOG_API_KEY": JSON.stringify(posthogApiKey),
         "process.env.POSTHOG_HOST": JSON.stringify(posthogHost),
+        "process.env.GITHUB_OAUTH_CLIENT_ID": JSON.stringify(githubOauthClientId),
       },
       // Bundle workspace TS packages (they ship raw .ts sources); keep real
-      // node_modules external.
-      plugins: [
-        externalizeDepsPlugin({
+      // node_modules external. electron-vite 5 externalizes deps by default.
+      build: {
+        externalizeDeps: {
           exclude: [
             "@getdevintern/pm",
             "@devintern/agent-harness",
@@ -32,12 +37,11 @@ export default defineConfig(({ mode }) => {
             "@devintern/text-formatter",
             "@devintern/utils",
           ],
-        }),
-      ],
+        },
+      },
     },
-    preload: {
-      plugins: [externalizeDepsPlugin()],
-    },
+    // Explicit empty config keeps the default `src/preload` entry (v5 warns if omitted).
+    preload: {},
     renderer: {
       plugins: [react(), tailwindcss()],
       resolve: {

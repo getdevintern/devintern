@@ -6,11 +6,15 @@
  * - Update work item: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/update
  * - Get projects: https://learn.microsoft.com/en-us/rest/api/azure/devops/core/projects/list
  * - Get work item types: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-item-types/list
+ * - List project tags: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/tags/list
  * - Description field format (HTML default, Markdown opt-in):
  *   https://devblogs.microsoft.com/devops/markdown-support-arrives-for-work-items/
  */
 
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { markdownToHtmlDescription } from "@devintern/text-formatter";
+import { mimeTypeFromFilename } from "./mime.ts";
 
 export interface AzureDevOpsWorkItem {
   id: number;
@@ -18,6 +22,12 @@ export interface AzureDevOpsWorkItem {
 }
 
 export interface AzureDevOpsProject {
+  id: string;
+  name: string;
+}
+
+/** Work item tag from the project Tags catalog. */
+export interface AzureDevOpsTag {
   id: string;
   name: string;
 }
@@ -505,6 +515,56 @@ export class AzureDevOpsClient {
   }
 
   /**
+   * List work item tags defined in a project.
+   *
+   * @param project - Optional project name override.
+   * @param maxLabels - Soft catalog cap (default 500).
+   * @returns Tag id/name pairs plus truncation when the project has more tags
+   *   than the soft cap (API returns the full list; we slice locally).
+   * @throws When the Azure DevOps API request fails.
+   */
+  async getTags(
+    project?: string,
+    maxLabels: number = 500,
+  ): Promise<{ tags: AzureDevOpsTag[]; truncated: boolean }> {
+    const targetProject = project || this.defaultProject;
+    const result = await this.request<{ value?: Array<{ id?: string; name?: string }> }>(
+      `${this.baseUrl}/${encodeURIComponent(targetProject)}/_apis/wit/tags?api-version=7.1`,
+    );
+
+    const tags: AzureDevOpsTag[] = [];
+    for (const tag of result.value || []) {
+      const name = tag.name?.trim();
+      if (!name) continue;
+      tags.push({ id: tag.id || name, name });
+    }
+
+    return {
+      tags: tags.slice(0, maxLabels),
+      truncated: tags.length > maxLabels,
+    };
+  }
+
+  /**
+   * Replace a work item's `System.Tags` field with the given tag names.
+   *
+   * Azure DevOps stores tags as a semicolon-separated string. Callers should
+   * pass names from {@link getTags}; unknown names are rejected by the engine
+   * before this method runs so tags are not auto-created from the picker.
+   *
+   * @param id - Work item numeric ID.
+   * @param tagNames - Tag names to set.
+   * @throws When the Azure DevOps API request fails.
+   */
+  async setWorkItemTags(id: number, tagNames: string[]): Promise<void> {
+    const value = tagNames
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .join("; ");
+    await this.updateWorkItemField(id, "System.Tags", value);
+  }
+
+  /**
    * Download an attachment URL (from work item relations) with PAT auth.
    *
    * @param url - Attachment content URL.
@@ -519,6 +579,69 @@ export class AzureDevOpsClient {
       throw new Error(`Azure DevOps attachment download failed (${response.status})`);
     }
     return response.arrayBuffer();
+  }
+
+  /**
+   * Upload a local file and attach it to a work item.
+   *
+   * @param workItemId - Numeric work item ID (or string form of it).
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME / project overrides.
+   * @throws When upload or relation patch fails.
+   */
+  async uploadAttachment(
+    workItemId: number | string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string; project?: string },
+  ): Promise<void> {
+    const filename = options?.filename || basename(filePath);
+    const mimeType = options?.mimeType || mimeTypeFromFilename(filename);
+    const project = options?.project || this.defaultProject;
+    const bytes = readFileSync(filePath);
+
+    const uploadUrl =
+      `${this.baseUrl}/${encodeURIComponent(project)}/_apis/wit/attachments` +
+      `?fileName=${encodeURIComponent(filename)}&api-version=7.0`;
+
+    const uploadResponse = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${this.auth}`,
+        "Content-Type": "application/octet-stream",
+        Accept: "application/json",
+      },
+      body: bytes,
+    });
+
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      throw new Error(
+        `Azure DevOps attachment upload failed (${uploadResponse.status}): ${errorText}`,
+      );
+    }
+
+    const uploaded = (await uploadResponse.json()) as { url: string };
+    const id = typeof workItemId === "string" ? Number(workItemId) : workItemId;
+    if (!Number.isFinite(id)) {
+      throw new Error(`Invalid Azure DevOps work item id: ${workItemId}`);
+    }
+
+    await this.request(
+      `${this.baseUrl}/_apis/wit/workitems/${id}?api-version=7.0`,
+      "PATCH",
+      [
+        {
+          op: "add",
+          path: "/relations/-",
+          value: {
+            rel: "AttachedFile",
+            url: uploaded.url,
+            attributes: { comment: mimeType },
+          },
+        },
+      ],
+      "application/json-patch+json",
+    );
   }
 
   /**

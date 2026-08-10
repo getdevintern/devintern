@@ -10,6 +10,7 @@
     ".": "./dist/index.js",
     "./engine": "./lib/engine/index.ts",
     "./issue-types": "./lib/issue-types.ts",
+    "./attachments": "./lib/attachments.ts",
     "./package.json": "./package.json",
     "./config": "./lib/config.ts",
     "./init": "./lib/init-wizard.ts",
@@ -27,9 +28,9 @@
     ".env.example"
   ],
   "scripts": {
-    "build": "bun build index.ts --target=node --outdir=dist --format=esm --external=ink --external=react --external=ink-scroll-view --minify && bun run tsc --noEmit",
-    "format": "oxfmt \"index.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
-    "format:check": "oxfmt --check \"index.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
+    "build": "bun run build.ts && bun run tsc --noEmit",
+    "format": "oxfmt \"index.ts\" \"build.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
+    "format:check": "oxfmt --check \"index.ts\" \"build.ts\" \"lib/**/*.ts\" \"lib/**/*.tsx\" \"*.test.ts\"",
     "lint": "oxlint .",
     "install-global": "bun run build && bun link",
     "uninstall-global": "bun unlink",

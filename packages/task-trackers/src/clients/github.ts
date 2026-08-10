@@ -231,13 +231,50 @@ export class GitHubClient {
   }
 
   /**
-   * List labels defined on the configured repository.
+   * List labels defined on the configured repository (paginated until exhausted or cap).
    *
-   * @returns Up to 100 label records.
+   * Soft-capped at {@link maxLabels} (default 500). When `truncated` is true,
+   * more labels may exist — validation of a selected set should page without
+   * the cap rather than rejecting missing names as unknown.
+   *
+   * @param maxLabels - Soft upper bound on labels returned (default 500).
+   * @returns Label records plus whether the soft cap truncated the catalog.
    * @throws When the GitHub API request fails.
    */
-  async getLabels(): Promise<GitHubLabel[]> {
-    return this.request<GitHubLabel[]>(`/repos/${this.owner}/${this.repo}/labels?per_page=100`);
+  async getLabels(maxLabels: number = 500): Promise<{ labels: GitHubLabel[]; truncated: boolean }> {
+    const labels: GitHubLabel[] = [];
+    // Keep per_page fixed: GitHub's `page` offset is relative to per_page, so
+    // shrinking the last request would re-fetch earlier items.
+    const pageSize = 100;
+    let page = 1;
+    let truncated = false;
+
+    while (labels.length < maxLabels) {
+      const batch = await this.request<GitHubLabel[]>(
+        `/repos/${this.owner}/${this.repo}/labels?per_page=${pageSize}&page=${page}`,
+      );
+      labels.push(...batch);
+      if (batch.length < pageSize) {
+        break;
+      }
+      page += 1;
+      if (labels.length >= maxLabels) {
+        // Full page hit the soft cap — probe one more page before claiming
+        // truncation (exact multiples of pageSize would otherwise false-positive).
+        const sentinel = await this.request<GitHubLabel[]>(
+          `/repos/${this.owner}/${this.repo}/labels?per_page=${pageSize}&page=${page}`,
+        );
+        truncated = sentinel.length > 0;
+        break;
+      }
+    }
+
+    // A short final page can overshoot the soft cap before we break; slicing
+    // must still report truncated so callers exhaust before treating misses as unknown.
+    return {
+      labels: labels.slice(0, maxLabels),
+      truncated: truncated || labels.length > maxLabels,
+    };
   }
 
   /**

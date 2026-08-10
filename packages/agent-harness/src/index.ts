@@ -37,6 +37,16 @@ export { registerHarness, getHarness, listHarnesses, HARNESS_ALIASES } from "./r
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
 
+// Attachment helpers (path injection + native image args)
+export {
+  appendAttachmentPathsToPrompt,
+  attachmentKindForPath,
+  isImagePath,
+  preparePromptWithAttachments,
+  type AttachmentKind,
+  type PromptAttachment,
+} from "./attachments.js";
+
 // Resolver
 export {
   resolveHarness,

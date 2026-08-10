@@ -7,6 +7,7 @@
  */
 
 import { type ChildProcess } from "child_process";
+import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
@@ -65,11 +66,17 @@ export async function runAgentNode(
 
   return new Promise((resolve, reject) => {
     const inputMethod = options.inputMethod ?? "arg";
+    const { prompt: effectivePrompt, imageArgs } = preparePromptWithAttachments(
+      harness,
+      prompt,
+      options,
+    );
     const args = [...harness.buildArgs(options)];
 
     if (inputMethod === "arg") {
-      args.push(...buildPromptArgs(harness, prompt));
+      args.push(...buildPromptArgs(harness, effectivePrompt));
     }
+    args.push(...imageArgs);
 
     const timeoutMinutes =
       options.timeoutMinutes ?? parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
@@ -80,7 +87,7 @@ export async function runAgentNode(
 
     logAgent(
       `Spawning ${harness.displayName}: ${resolvedPath} ${args
-        .map((arg) => (arg === prompt ? `<prompt:${prompt.length} chars>` : arg))
+        .map((arg) => (arg === effectivePrompt ? `<prompt:${effectivePrompt.length} chars>` : arg))
         .join(" ")} (input: ${inputMethod})`,
       options,
     );
@@ -178,7 +185,7 @@ export async function runAgentNode(
     });
 
     if (proc.stdin && inputMethod === "stdin") {
-      proc.stdin.write(prompt);
+      proc.stdin.write(effectivePrompt);
       proc.stdin.end();
     }
   });

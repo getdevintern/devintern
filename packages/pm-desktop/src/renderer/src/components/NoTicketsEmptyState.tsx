@@ -4,6 +4,8 @@ import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 
 interface NoTicketsEmptyStateProps {
   onOpenTicket: () => void;
+  /** When false, the Open CTA is disabled (e.g. awaiting PM setup). */
+  canOpenTicket?: boolean;
   /** When true, show the soft Code discovery tip below the primary CTA. */
   showCodeDiscovery?: boolean;
   onLearnMoreCode?: (url: string) => void;
@@ -18,6 +20,7 @@ interface NoTicketsEmptyStateProps {
  */
 export function NoTicketsEmptyState({
   onOpenTicket,
+  canOpenTicket = true,
   showCodeDiscovery = false,
   onLearnMoreCode,
   onDismissCodeDiscovery,
@@ -39,7 +42,13 @@ export function NoTicketsEmptyState({
           ticket.
         </p>
       </div>
-      <Button size="lg" onClick={onOpenTicket} data-testid="open-first-ticket">
+      <Button
+        size="lg"
+        onClick={onOpenTicket}
+        disabled={!canOpenTicket}
+        title={canOpenTicket ? undefined : "Finish project setup before opening a ticket"}
+        data-testid="open-first-ticket"
+      >
         <Plus data-icon="inline-start" />
         Open a ticket
       </Button>

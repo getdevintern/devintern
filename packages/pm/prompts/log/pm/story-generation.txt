@@ -3,6 +3,7 @@ Analyze the following error log or bug report and generate PM-style requirements
 {{logContent}}
 {{epicContext}}
 {{extraInstructions}}
+{{attachmentsSection}}
 
 Guidance:
 - Focus on user impact and business value of the fix
@@ -11,6 +12,7 @@ Guidance:
 - Suggest investigating existing code and patterns for the fix
 - In Error Details, include only a short relevant excerpt — not the full log
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
+- When files are attached (screenshots, logs), treat them as evidence of the failure
 
 Return only valid JSON (no other text). Use markdown inside the description string:
 

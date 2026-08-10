@@ -8,6 +8,7 @@
  * non-interactive modes).
  */
 
+import { resolve } from "node:path";
 import { getHarness, listHarnesses } from "@devintern/agent-harness";
 import type { SourceInput } from "./engine/index.js";
 
@@ -20,6 +21,8 @@ export interface CLIArgs {
   confirm: boolean;
   model?: string;
   issueType: string;
+  /** Local files for agent context and post-create upload. */
+  attachments?: Array<{ path: string }>;
 }
 
 export type ParsedArgs = CLIArgs | null | "init";
@@ -69,6 +72,9 @@ Options:
   --type, -t <type>    Issue type (default: "Task")
                         Common types: Task, Story, Bug, Epic
   --custom, -c <text>  Additional custom instructions for the requirements
+  --attach <path>      Attach a local file for agent context (and upload on create when
+                        the tracker supports it). Repeatable. Supported: images, text/docs,
+                        pdf (not .docx/.xlsx). Max 10 files.
   --style, -s <type>   Prompt style: "pm" (default) or "technical"
                         - pm: Focuses on user stories and acceptance criteria
                         - technical: Includes Technical Considerations section
@@ -76,7 +82,9 @@ Options:
   --harness <name>     AI agent harness to use (e.g., "claude-code", "opencode", "codex")
   --decompose          Decompose the story into subtasks (default: off)
   --confirm            Interactively confirm each subtask before creating
+  --no-update          Skip the npm update check for this run
   --verbose, -v        Enable verbose API logging for debugging
+  --version, -V        Print the CLI version
   --help, -h           Show this help message
 
 Environment variables (set in .env):
@@ -124,6 +132,7 @@ Examples:
   devpm --prompt "$(cat requirements.txt)" --epic PROJ-300
   devpm --prompt "Implement OAuth login" --style technical --decompose
   devpm --prompt "..." --harness codex
+  devpm --prompt "Refine checkout" --attach ./notes.md --attach ./shot.png
     `);
     process.exit(0);
   }
@@ -136,6 +145,7 @@ Examples:
   let confirm = false;
   let model: string | undefined;
   let issueType = "Task"; // Default to Task
+  const attachments: Array<{ path: string }> = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -204,6 +214,13 @@ Examples:
       }
       customInstructions = args[i + 1]!; // Non-null assertion safe due to check above
       i++; // Skip next arg
+    } else if (arg === "--attach") {
+      if (i + 1 >= args.length) {
+        console.error("Error: --attach requires a file path");
+        process.exit(1);
+      }
+      attachments.push({ path: resolve(args[i + 1]!) });
+      i++;
     } else if (arg === "--style" || arg === "-s") {
       if (i + 1 >= args.length) {
         console.error("Error: --style requires a value");
@@ -239,6 +256,9 @@ Examples:
     } else if (arg === "--verbose" || arg === "-v") {
       // Handled before parseArgs() is called; skip here
       continue;
+    } else if (arg === "--no-update" || arg === "--version" || arg === "-V") {
+      // Handled before parseArgs() / inside maybeOfferCliUpdate; skip here
+      continue;
     } else if (arg === "--yes" || arg === "--no-interactive") {
       // Init-only flags; ignored outside init (init returns early above).
       continue;
@@ -263,6 +283,7 @@ Examples:
     model,
     issueType,
     extraInstructions: customInstructions,
+    attachments: attachments.length > 0 ? attachments : undefined,
   };
 }
 

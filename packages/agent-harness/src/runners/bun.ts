@@ -9,6 +9,7 @@
  * default) or written to the process stdin when `inputMethod === "stdin"`.
  */
 
+import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
@@ -38,11 +39,17 @@ export async function runAgentBun(
   assertModeSupported(harness, options.mode);
 
   const inputMethod = options.inputMethod ?? "arg";
+  const { prompt: effectivePrompt, imageArgs } = preparePromptWithAttachments(
+    harness,
+    prompt,
+    options,
+  );
   const args = harness.buildArgs(options);
 
   if (inputMethod === "arg") {
-    args.push(...buildPromptArgs(harness, prompt));
+    args.push(...buildPromptArgs(harness, effectivePrompt));
   }
+  args.push(...imageArgs);
 
   if (!options.silent) {
     console.log(`\n🤖 Running ${harness.displayName}...\n`);
@@ -61,7 +68,7 @@ export async function runAgentBun(
   });
 
   if (inputMethod === "stdin" && proc.stdin) {
-    proc.stdin.write(prompt);
+    proc.stdin.write(effectivePrompt);
     proc.stdin.end();
   }
 

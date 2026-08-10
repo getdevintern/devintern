@@ -87,6 +87,8 @@ describe("AboutDialog", () => {
     expect(html).toContain("Version 1.0.0");
     expect(html).toContain('data-testid="about-dialog-website"');
     expect(html).toContain("Visit website");
+    expect(html).toContain('data-testid="about-dialog-check-updates"');
+    expect(html).toContain("Check for updates");
     expect(html).toContain('data-testid="about-dialog-close"');
   });
 

@@ -97,6 +97,91 @@ describe("LinearClient.searchIssues", () => {
   });
 });
 
+describe("LinearClient labels", () => {
+  test("getLabels paginates with after cursor until exhausted", async () => {
+    const calls = mockGraphQL((call) => {
+      if (call.variables?.after) {
+        return {
+          team: {
+            labels: {
+              nodes: [{ id: "lab-2", name: "backend" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        };
+      }
+      return {
+        team: {
+          labels: {
+            nodes: [{ id: "lab-1", name: "bug" }],
+            pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+          },
+        },
+      };
+    });
+
+    const client = new LinearClient({ apiKey: "key" });
+    const result = await client.getLabels("team-1");
+
+    expect(result).toEqual({
+      labels: [
+        { id: "lab-1", name: "bug" },
+        { id: "lab-2", name: "backend" },
+      ],
+      truncated: false,
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.variables).toMatchObject({ teamId: "team-1", first: 100, after: null });
+    expect(calls[1]?.variables).toMatchObject({ teamId: "team-1", after: "cursor-1" });
+  });
+
+  test("getLabels sets truncated when soft cap stops paging", async () => {
+    mockGraphQL(() => ({
+      team: {
+        labels: {
+          nodes: Array.from({ length: 100 }, (_, i) => ({ id: `lab-${i}`, name: `n-${i}` })),
+          pageInfo: { hasNextPage: true, endCursor: "cursor-more" },
+        },
+      },
+    }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    const result = await client.getLabels("team-1", 100);
+    expect(result.labels).toHaveLength(100);
+    expect(result.truncated).toBe(true);
+  });
+
+  test("getLabels sets truncated when a page overshoots the soft cap", async () => {
+    mockGraphQL(() => ({
+      team: {
+        labels: {
+          // More nodes than `first` (50) — still must report truncated after slice.
+          nodes: Array.from({ length: 80 }, (_, i) => ({ id: `lab-${i}`, name: `n-${i}` })),
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    const result = await client.getLabels("team-1", 50);
+    expect(result.labels).toHaveLength(50);
+    expect(result.truncated).toBe(true);
+    expect(result.labels[49]?.id).toBe("lab-49");
+  });
+
+  test("setIssueLabels sends labelIds via IssueUpdate", async () => {
+    const calls = mockGraphQL(() => ({ issueUpdate: { success: true } }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    await client.setIssueLabels("uuid-1", ["lab-1", "lab-2"]);
+
+    expect(calls[0]?.variables).toEqual({
+      id: "uuid-1",
+      input: { labelIds: ["lab-1", "lab-2"] },
+    });
+  });
+});
+
 describe("LinearClient comments and state", () => {
   test("createComment sends CommentCreate mutation and returns id", async () => {
     const calls = mockGraphQL((call) => {

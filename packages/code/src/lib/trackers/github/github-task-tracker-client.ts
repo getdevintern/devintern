@@ -116,8 +116,14 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
       return;
     }
 
-    const repoLabels = await this.githubClient.getLabels();
-    const target = repoLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
+    // Status transitions need an authoritative catalog — the picker soft-cap
+    // (default 500) can omit a configured status label that exists further on.
+    let { labels: repoLabels, truncated } = await this.githubClient.getLabels();
+    let target = repoLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
+    if (!target && truncated) {
+      ({ labels: repoLabels } = await this.githubClient.getLabels(Number.POSITIVE_INFINITY));
+      target = repoLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
+    }
 
     if (!target) {
       const available = repoLabels.map((l) => l.name).join(", ");

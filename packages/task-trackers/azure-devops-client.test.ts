@@ -114,6 +114,37 @@ describe("AzureDevOpsClient work item detail and fields", () => {
   });
 });
 
+describe("AzureDevOpsClient tags", () => {
+  test("getTags lists project tags and soft-caps", async () => {
+    const calls = mockFetch(() => ({
+      value: [
+        { id: "guid-1", name: "bug" },
+        { id: "guid-2", name: "backend" },
+        { id: "guid-3", name: "  " },
+      ],
+    }));
+
+    const result = await makeClient().getTags("OtherProject", 1);
+
+    expect(calls[0].url).toContain("/OtherProject/_apis/wit/tags");
+    expect(calls[0].url).toContain("api-version=7.1");
+    expect(result).toEqual({
+      tags: [{ id: "guid-1", name: "bug" }],
+      truncated: true,
+    });
+  });
+
+  test("setWorkItemTags writes System.Tags", async () => {
+    const calls = mockFetch(() => ({}));
+
+    await makeClient().setWorkItemTags(42, ["bug", "backend"]);
+
+    expect(calls[0].body).toEqual([
+      { op: "add", path: "/fields/System.Tags", value: "bug; backend" },
+    ]);
+  });
+});
+
 describe("AzureDevOpsClient comments", () => {
   test("getComments sorts oldest first", async () => {
     mockFetch(() => ({

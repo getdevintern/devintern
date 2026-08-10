@@ -55,6 +55,18 @@ export interface AgentRunOptions {
   verbose?: boolean;
   /** How to feed the prompt to the agent. */
   inputMethod?: "arg" | "stdin";
+  /**
+   * Local file paths to surface in the prompt as an "Attached files" section
+   * (docs, transcripts, images, etc.). Agents are expected to open them via
+   * their normal file tools.
+   */
+  attachmentPaths?: readonly string[];
+  /**
+   * Image subset for harnesses with native multimodal CLI flags (e.g. Codex
+   * `-i`). Paths here should also appear in {@link attachmentPaths} (or will
+   * be injected into the prompt automatically).
+   */
+  imagePaths?: readonly string[];
   /** Called with each stdout chunk as the agent runs (for live output streaming). */
   onStdout?: (chunk: string) => void;
   /** Called with each stderr chunk as the agent runs (for live status updates). */
@@ -111,6 +123,21 @@ export interface AgentHarness {
    * Use this when the CLI expects the prompt as a flag value.
    */
   readonly promptFlag?: string;
+  /**
+   * How image attachments from {@link AgentRunOptions.imagePaths} are delivered.
+   *
+   * - `"path"` (default) — list paths in the prompt only.
+   * - `"native"` — also emit CLI flags via {@link buildImageArgs} after the prompt.
+   */
+  readonly imageInput?: "native" | "path";
+  /**
+   * Build trailing CLI args for native image attachment (e.g. Codex `-i`).
+   * Only used when {@link imageInput} is `"native"`.
+   *
+   * @param paths - Absolute image file paths.
+   * @returns Args appended after the prompt by the runner.
+   */
+  buildImageArgs?(paths: readonly string[]): string[];
 }
 
 export interface ResolvedHarness {

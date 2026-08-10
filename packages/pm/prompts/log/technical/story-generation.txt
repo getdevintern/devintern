@@ -3,6 +3,7 @@ Analyze the following error log or bug report and generate technical requirement
 {{logContent}}
 {{epicContext}}
 {{extraInstructions}}
+{{attachmentsSection}}
 
 Guidance:
 - Provide a technical read on likely root cause
@@ -11,6 +12,7 @@ Guidance:
 - Note architectural implications when relevant
 - In Error Details, include only a short relevant excerpt — not the full log
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
+- When files are attached, open them and use them as additional context
 
 Return only valid JSON (no other text). Use markdown inside the description string:
 

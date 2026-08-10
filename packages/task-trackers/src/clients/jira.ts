@@ -13,11 +13,12 @@
  */
 
 import { extractTextFromADF } from "@devintern/text-formatter";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, readFileSync } from "fs";
 import path from "path";
 import { fetchWithRetry } from "@devintern/utils";
 import { sanitizeDomain } from "../config/load-tracker-config.ts";
 import { textToADF } from "./jira-adf.ts";
+import { mimeTypeFromFilename } from "./mime.ts";
 
 export interface JiraStory {
   key: string;
@@ -401,6 +402,46 @@ export class JiraClient {
         console.warn(`Failed to fetch attachments for ${issueKey}: ${error}`);
       }
       return [];
+    }
+  }
+
+  /**
+   * Upload a local file as an attachment on a Jira issue.
+   *
+   * @param issueKey - Issue key (e.g. `PROJ-123`).
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   * @throws When the upload request fails.
+   */
+  async uploadAttachment(
+    issueKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    const filename = options?.filename || path.basename(filePath);
+    const mimeType = options?.mimeType || mimeTypeFromFilename(filename);
+    const bytes = new Uint8Array(readFileSync(filePath));
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: mimeType }), filename);
+
+    const response = await fetchWithRetry(
+      `${this.apiBaseUrl}/issue/${encodeURIComponent(issueKey)}/attachments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: this.getAuthHeader(),
+          "X-Atlassian-Token": "no-check",
+          Accept: "application/json",
+        },
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to upload attachment to ${issueKey}: ${response.status} ${errorText}`,
+      );
     }
   }
 
@@ -1385,5 +1426,62 @@ export class JiraClient {
 
     this.issueTypesCacheByProject.set(targetProjectKey, issueTypes);
     return issueTypes;
+  }
+
+  /**
+   * List existing global Jira labels (paginated until exhausted or cap reached).
+   *
+   * Soft-capped at {@link maxLabels} (default 500) so pickers stay bounded.
+   * When `truncated` is true, more labels may exist beyond the returned set —
+   * create-time validation should page without a cap (or look up selected
+   * names) instead of treating missing ids as unknown.
+   *
+   * @param maxLabels - Soft upper bound on labels returned (default 500).
+   * @returns Label names plus whether the soft cap truncated the catalog.
+   * @throws When the Jira API request fails.
+   */
+  async getLabels(maxLabels: number = 500): Promise<{ labels: string[]; truncated: boolean }> {
+    const labels: string[] = [];
+    let startAt = 0;
+    const pageSize = 100;
+    let truncated = false;
+
+    while (labels.length < maxLabels) {
+      const maxResults = Math.min(pageSize, maxLabels - labels.length);
+      const result = await this.jiraApiCall(
+        "GET",
+        `/rest/api/3/label?startAt=${startAt}&maxResults=${maxResults}`,
+      );
+      const values: string[] = Array.isArray(result.values) ? result.values : [];
+      labels.push(...values);
+      if (result.isLast || values.length === 0) {
+        break;
+      }
+      startAt += values.length;
+      if (labels.length >= maxLabels) {
+        truncated = true;
+        break;
+      }
+    }
+
+    // Guard against APIs returning more than maxResults (or any overshoot):
+    // slicing must still report truncated so callers exhaust before Unknown.
+    return {
+      labels: labels.slice(0, maxLabels),
+      truncated: truncated || labels.length > maxLabels,
+    };
+  }
+
+  /**
+   * Replace labels on an issue with the given set of existing label names.
+   *
+   * @param issueKey - Target issue key.
+   * @param labels - Label names to set (empty clears all labels).
+   * @throws When the Jira API request fails.
+   */
+  async setLabels(issueKey: string, labels: string[]): Promise<void> {
+    await this.jiraApiCall("PUT", `/rest/api/3/issue/${issueKey}`, {
+      fields: { labels },
+    });
   }
 }

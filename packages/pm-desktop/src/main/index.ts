@@ -4,6 +4,7 @@
 
 import { BrowserWindow, app } from "electron";
 import { appOpenedProps, shutdownAnalytics, track } from "./analytics.ts";
+import { initAutoUpdate, startAutoUpdateChecks, stopAutoUpdateChecks } from "./auto-update.ts";
 import { registerIpcHandlers } from "./ipc.ts";
 import { installAppMenu } from "./menu.ts";
 import { augmentPath } from "./path-fix.ts";
@@ -27,10 +28,27 @@ if (!hasLock) {
     }
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     // Re-apply identity now that `app.getVersion()` is fully resolved.
     installAppMenu({ createWindow });
     registerIpcHandlers();
+
+    if (app.isPackaged) {
+      // Dynamic import: unpackaged/dev never loads electron-updater.
+      const { autoUpdater } = await import("electron-updater");
+      initAutoUpdate({
+        isPackaged: true,
+        currentVersion: app.getVersion(),
+        createUpdater: () => autoUpdater as unknown as import("./auto-update.ts").UpdaterLike,
+      });
+      startAutoUpdateChecks();
+    } else {
+      initAutoUpdate({
+        isPackaged: false,
+        currentVersion: app.getVersion(),
+      });
+    }
+
     createWindow();
     void track("app_opened", appOpenedProps(app.getVersion()));
 
@@ -40,6 +58,7 @@ if (!hasLock) {
   });
 
   app.on("before-quit", () => {
+    stopAutoUpdateChecks();
     void shutdownAnalytics();
   });
 

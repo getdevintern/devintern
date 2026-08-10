@@ -17,6 +17,8 @@ interface OutputPanelProps {
   output: OutputState;
   issueType: string;
   decompose: boolean;
+  /** Extra busy (e.g. harness/tracker/project switch) beyond the ticket phase. */
+  busy?: boolean;
   onTitleChange: (summary: string) => void;
   onDescriptionChange: (description: string) => void;
   onEdit: (editPrompt: string) => void;
@@ -64,6 +66,7 @@ export function OutputPanel({
   output,
   issueType,
   decompose,
+  busy: externallyBusy = false,
   onTitleChange,
   onDescriptionChange,
   onEdit,
@@ -80,7 +83,7 @@ export function OutputPanel({
   codeDiscoveryDismissError = null,
 }: OutputPanelProps) {
   const [editPrompt, setEditPrompt] = useState("");
-  const busy = isBusy(output.phase);
+  const busy = externallyBusy || isBusy(output.phase);
 
   const submitEdit = () => {
     if (!editPrompt.trim() || busy) return;
@@ -194,6 +197,7 @@ export function OutputPanel({
                   className="mt-0.5 accent-primary"
                   checked={output.selectedSubtasks.has(index)}
                   onChange={() => onToggleSubtask(index)}
+                  disabled={busy}
                 />
                 <span>
                   <span className="font-medium">{subtask.summary}</span>
@@ -206,11 +210,14 @@ export function OutputPanel({
               </label>
             ))}
             <div className="mt-1 flex gap-2">
-              <Button onClick={onCreateSubtasks} disabled={output.selectedSubtasks.size === 0}>
+              <Button
+                onClick={onCreateSubtasks}
+                disabled={busy || output.selectedSubtasks.size === 0}
+              >
                 Create {output.selectedSubtasks.size} subtask
                 {output.selectedSubtasks.size === 1 ? "" : "s"}
               </Button>
-              <Button variant="ghost" onClick={onSkipSubtasks}>
+              <Button variant="ghost" onClick={onSkipSubtasks} disabled={busy}>
                 Skip
               </Button>
             </div>
@@ -239,6 +246,23 @@ export function OutputPanel({
               {output.created.epicLinkError && (
                 <p className="text-xs text-destructive">
                   Epic link failed: {output.created.epicLinkError} (task was still created)
+                </p>
+              )}
+              {output.created.labelsApplyError && (
+                <p className="text-xs text-destructive">
+                  Labels failed: {output.created.labelsApplyError} (task was still created)
+                </p>
+              )}
+              {output.created.attachmentsUploaded > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Uploaded {output.created.attachmentsUploaded} attachment
+                  {output.created.attachmentsUploaded === 1 ? "" : "s"}
+                </p>
+              )}
+              {output.created.attachmentErrors && output.created.attachmentErrors.length > 0 && (
+                <p className="text-xs text-destructive">
+                  Attachment upload failed: {output.created.attachmentErrors.join("; ")} (task was
+                  still created)
                 </p>
               )}
               {output.subtaskOutcomes && (

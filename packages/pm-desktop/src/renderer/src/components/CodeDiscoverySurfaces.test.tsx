@@ -63,12 +63,13 @@ describe("TicketSidebar code discovery", () => {
     projectKey: "DEV",
   });
 
-  function renderSidebar(show: boolean): string {
+  function renderSidebar(show: boolean, canOpenTicket = true): string {
     return renderToStaticMarkup(
       createElement(TicketSidebar, {
         tickets: [ticket],
         activeTicketId: ticket.id,
         onOpenTicket: noop,
+        canOpenTicket,
         onActivateTicket: noop,
         onCloseTicket: noop,
         showCodeDiscovery: show,
@@ -77,6 +78,13 @@ describe("TicketSidebar code discovery", () => {
       }),
     );
   }
+
+  test("disables New when canOpenTicket is false", () => {
+    const html = renderSidebar(false, false);
+    expect(html).toContain('data-testid="open-ticket"');
+    expect(html).toContain("disabled");
+    expect(html).toContain("Finish project setup before opening a ticket");
+  });
 
   test("shows sidebar discovery strip when eligible", () => {
     const html = renderSidebar(true);
@@ -94,7 +102,13 @@ describe("OutputPanel post-create code discovery", () => {
   const doneOutput: OutputState = {
     ...initialOutputState,
     phase: "done",
-    created: { key: "DEV-1", url: "https://example.com/DEV-1", epicLinked: false },
+    created: {
+      key: "DEV-1",
+      url: "https://example.com/DEV-1",
+      epicLinked: false,
+      labelsApplied: false,
+      attachmentsUploaded: 0,
+    },
   };
 
   function renderOutput(show: boolean): string {
@@ -119,6 +133,34 @@ describe("OutputPanel post-create code discovery", () => {
       }),
     );
   }
+
+  test("shows labels apply failure without hiding the created task", () => {
+    const html = renderToStaticMarkup(
+      createElement(OutputPanel, {
+        output: {
+          ...doneOutput,
+          created: {
+            ...doneOutput.created!,
+            labelsApplyError: "permission denied",
+          },
+        },
+        issueType: "Task",
+        decompose: false,
+        onTitleChange: noop,
+        onDescriptionChange: noop,
+        onEdit: noop,
+        onCreate: noop,
+        onToggleSubtask: noop,
+        onCreateSubtasks: noop,
+        onSkipSubtasks: noop,
+        onRestart: noop,
+        onDismissError: noop,
+        onOpenUrl: noop,
+      }),
+    );
+    expect(html).toContain("Task created: DEV-1");
+    expect(html).toContain("Labels failed: permission denied");
+  });
 
   test("shows post-create tip after successful create when eligible", () => {
     const html = renderOutput(true);

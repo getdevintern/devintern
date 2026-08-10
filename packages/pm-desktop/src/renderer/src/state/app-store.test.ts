@@ -32,7 +32,16 @@ describe("outputReducer", () => {
       { type: "agent-chunk", requestId: "r1", chunk: "old log" },
       { type: "generate-succeeded", draft },
       { type: "create-started" },
-      { type: "create-succeeded", created: { key: "T-1", url: "u", epicLinked: false } },
+      {
+        type: "create-succeeded",
+        created: {
+          key: "T-1",
+          url: "u",
+          epicLinked: false,
+          labelsApplied: false,
+          attachmentsUploaded: 0,
+        },
+      },
     ]);
     const state = outputReducer(dirty, { type: "generate-started", requestId: "r2" });
     expect(state.agentLog).toBe("");
@@ -69,7 +78,16 @@ describe("outputReducer", () => {
       { type: "generate-started", requestId: "r1" },
       { type: "generate-succeeded", draft },
       { type: "create-started" },
-      { type: "create-succeeded", created: { key: "T-1", url: "u", epicLinked: false } },
+      {
+        type: "create-succeeded",
+        created: {
+          key: "T-1",
+          url: "u",
+          epicLinked: false,
+          labelsApplied: false,
+          attachmentsUploaded: 0,
+        },
+      },
       { type: "decompose-started", requestId: "r2" },
       { type: "request-failed", error },
       { type: "error-dismissed" },
@@ -93,7 +111,16 @@ describe("outputReducer", () => {
       { type: "generate-started", requestId: "r1" },
       { type: "generate-succeeded", draft },
       { type: "create-started" },
-      { type: "create-succeeded", created: { key: "T-1", url: "u", epicLinked: false } },
+      {
+        type: "create-succeeded",
+        created: {
+          key: "T-1",
+          url: "u",
+          epicLinked: false,
+          labelsApplied: false,
+          attachmentsUploaded: 0,
+        },
+      },
       { type: "decompose-started", requestId: "r2" },
       { type: "decompose-succeeded", subtasks },
     ]);

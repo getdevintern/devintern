@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { join } from "node:path";
-import { readFile, pathExists, rm } from "./lib/runtime/fs.js";
+import { readFile, writeFile, pathExists, rm } from "./lib/runtime/fs.js";
 import { getModuleDir } from "./lib/runtime/path.js";
 import { MarkdownBackend } from "./lib/backends/markdown";
 import { LinearBackend } from "./lib/backends/linear";
@@ -8,6 +8,7 @@ import { TrelloBackend } from "./lib/backends/trello";
 import { AzureDevOpsBackend } from "./lib/backends/azure-devops";
 import { AsanaBackend } from "./lib/backends/asana";
 import { GitHubBackend } from "./lib/backends/github";
+import { JiraBackend } from "./lib/backends/jira";
 
 const TEST_DIR = join(getModuleDir(import.meta.url), "tmp-test-tasks");
 
@@ -33,6 +34,15 @@ describe("MarkdownBackend", () => {
 
   test("should not support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(false);
+  });
+
+  test("should support labels via frontmatter", () => {
+    expect(backend.supportsLabels).toBe(true);
+    expect(backend.supportsFreeformLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
   });
 
   describe("createTask", () => {
@@ -178,6 +188,58 @@ describe("MarkdownBackend", () => {
       expect(types).toEqual(["Task", "Story", "Bug", "Epic"]);
     });
   });
+
+  describe("getLabels / applyLabels", () => {
+    test("collects unique labels from labels and tags frontmatter", async () => {
+      await writeFile(
+        join(TEST_DIR, "a.md"),
+        `---
+key: a
+labels: backend, auth
+---
+
+# A
+`,
+      );
+      await writeFile(
+        join(TEST_DIR, "b.md"),
+        `---
+key: b
+tags: auth, frontend
+---
+
+# B
+`,
+      );
+
+      const result = await backend.getLabels();
+      expect(result.truncated).toBe(false);
+      expect(result.labels.map((l) => l.name)).toEqual(["auth", "backend", "frontend"]);
+      expect(result.labels.every((l) => l.id === l.name)).toBe(true);
+    });
+
+    test("writes labels CSV into frontmatter on apply", async () => {
+      const task = await backend.createTask("Feature", "Desc", "Story");
+      await backend.applyLabels?.(task.key, ["backend", "auth"]);
+
+      const content = await readFile(task.url);
+      expect(content).toContain("labels: backend, auth");
+    });
+
+    test("updates existing labels field", async () => {
+      const task = await backend.createTask("Feature", "Desc", "Story");
+      await backend.applyLabels?.(task.key, ["old"]);
+      await backend.applyLabels?.(task.key, ["new-a", "new-b"]);
+
+      const content = await readFile(task.url);
+      expect(content).toContain("labels: new-a, new-b");
+      expect(content).not.toContain("labels: old");
+    });
+
+    test("throws when task is missing", async () => {
+      expect(backend.applyLabels?.("missing", ["x"])).rejects.toThrow("Task not found");
+    });
+  });
 });
 
 describe("LinearBackend", () => {
@@ -211,6 +273,14 @@ describe("LinearBackend", () => {
 
   test("should support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(true);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
   });
 
   describe("createTask", () => {
@@ -408,6 +478,84 @@ describe("LinearBackend", () => {
       expect(types).toEqual(["Task", "Story", "Bug", "Epic", "Feature", "Improvement"]);
     });
   });
+
+  describe("getLabels", () => {
+    test("should resolve team and return label refs", async () => {
+      let callCount = 0;
+      (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+        callCount++;
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        if (body.query.includes("teams")) {
+          return new Response(
+            JSON.stringify({
+              data: { teams: { nodes: [{ id: "team-1", key: "ENG", name: "Engineering" }] } },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              team: {
+                labels: {
+                  nodes: [
+                    { id: "lab-1", name: "bug" },
+                    { id: "lab-2", name: "backend" },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const result = await backend.getLabels("ENG");
+      expect(result).toEqual({
+        labels: [
+          { id: "lab-1", name: "bug" },
+          { id: "lab-2", name: "backend" },
+        ],
+        truncated: false,
+      });
+      expect(callCount).toBe(2);
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("should resolve issue id and set label ids", async () => {
+      const calls: Array<{ query: string; variables?: Record<string, unknown> }> = [];
+      (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables?: Record<string, unknown>;
+        };
+        calls.push(body);
+        if (body.query.includes("issues")) {
+          return new Response(
+            JSON.stringify({
+              data: { issues: { nodes: [{ id: "issue-uuid", identifier: "ENG-42" }] } },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("ENG-42", ["lab-1", "lab-2"]);
+      const update = calls.find(
+        (c) => c.query.includes("issueUpdate") || c.query.includes("Update"),
+      );
+      expect(update?.variables).toMatchObject({
+        id: "issue-uuid",
+        input: { labelIds: ["lab-1", "lab-2"] },
+      });
+    });
+  });
 });
 
 describe("TrelloBackend", () => {
@@ -441,6 +589,14 @@ describe("TrelloBackend", () => {
 
   test("should not support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(false);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
   });
 
   describe("createTask", () => {
@@ -617,6 +773,54 @@ describe("TrelloBackend", () => {
       expect(types).toEqual(["Task", "Story", "Bug", "Epic"]);
     });
   });
+
+  describe("getLabels", () => {
+    test("should return board labels with color fallback for empty names", async () => {
+      const calls: string[] = [];
+      (globalThis as any).fetch = async (url: string) => {
+        calls.push(url);
+        return new Response(
+          JSON.stringify([
+            { id: "lab-1", name: "bug", color: "red" },
+            { id: "lab-2", name: "  ", color: "green" },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const result = await backend.getLabels("board-1");
+      expect(result).toEqual({
+        labels: [
+          { id: "lab-1", name: "bug" },
+          { id: "lab-2", name: "green" },
+        ],
+        truncated: false,
+      });
+      expect(calls[0]).toContain("/boards/board-1/labels");
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("should put label ids on the card", async () => {
+      const calls: Array<{ url: string; method?: string; body?: string }> = [];
+      (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+        calls.push({
+          url,
+          method: init?.method,
+          body: init?.body as string | undefined,
+        });
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("ABC123", ["lab-1", "lab-2"]);
+      expect(calls[0]?.url).toContain("/cards/ABC123");
+      expect(calls[0]?.method).toBe("PUT");
+      expect(calls[0]?.body).toContain("idLabels=lab-1%2Clab-2");
+    });
+  });
 });
 
 describe("AzureDevOpsBackend", () => {
@@ -654,6 +858,14 @@ describe("AzureDevOpsBackend", () => {
 
   test("should support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(true);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
   });
 
   describe("createTask", () => {
@@ -776,6 +988,54 @@ describe("AzureDevOpsBackend", () => {
       expect(types).toEqual(["User Story", "Task", "Bug"]);
     });
   });
+
+  describe("getLabels", () => {
+    test("returns name-keyed tags from the project Tags API", async () => {
+      let requestedUrl = "";
+      (globalThis as any).fetch = async (url: string) => {
+        requestedUrl = url;
+        return new Response(
+          JSON.stringify({
+            value: [
+              { id: "guid-1", name: "bug" },
+              { id: "guid-2", name: "backend" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const result = await backend.getLabels("OtherProject");
+      expect(requestedUrl).toContain("/OtherProject/_apis/wit/tags");
+      expect(result).toEqual({
+        labels: [
+          { id: "bug", name: "bug" },
+          { id: "backend", name: "backend" },
+        ],
+        truncated: false,
+      });
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("sets System.Tags as a semicolon-separated string", async () => {
+      let patchBody: unknown;
+      (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          patchBody = JSON.parse(init.body as string);
+        }
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("42", ["bug", "backend"]);
+      expect(patchBody).toEqual([
+        { op: "add", path: "/fields/System.Tags", value: "bug; backend" },
+      ]);
+    });
+  });
 });
 
 describe("AsanaBackend", () => {
@@ -809,6 +1069,14 @@ describe("AsanaBackend", () => {
 
   test("should support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(true);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
   });
 
   describe("createTask", () => {
@@ -932,6 +1200,57 @@ describe("AsanaBackend", () => {
       expect(types).toEqual(["Task", "Milestone"]);
     });
   });
+
+  describe("getLabels", () => {
+    test("resolves workspace from project and returns tag gids", async () => {
+      const calls: string[] = [];
+      (globalThis as any).fetch = async (url: string) => {
+        calls.push(url);
+        if (url.includes("/projects/proj-1")) {
+          return new Response(JSON.stringify({ data: { workspace: { gid: "ws-1" } } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            data: [
+              { gid: "tag-1", name: "bug" },
+              { gid: "tag-2", name: "backend" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const result = await backend.getLabels("proj-1");
+      expect(calls[0]).toContain("/projects/proj-1");
+      expect(calls[1]).toContain("/workspaces/ws-1/tags");
+      expect(result).toEqual({
+        labels: [
+          { id: "tag-1", name: "bug" },
+          { id: "tag-2", name: "backend" },
+        ],
+        truncated: false,
+      });
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("adds each tag to the task", async () => {
+      const bodies: unknown[] = [];
+      (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+        if (init?.body) bodies.push(JSON.parse(init.body as string));
+        return new Response(JSON.stringify({ data: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("task-1", ["tag-1", "tag-2"]);
+      expect(bodies).toEqual([{ data: { tag: "tag-1" } }, { data: { tag: "tag-2" } }]);
+    });
+  });
 });
 
 describe("GitHubBackend", () => {
@@ -965,6 +1284,14 @@ describe("GitHubBackend", () => {
 
   test("should not support epic linking", () => {
     expect(backend.supportsEpicLinking).toBe(false);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should not support attachments", () => {
+    expect(backend.supportsAttachments).toBe(false);
   });
 
   describe("createTask", () => {
@@ -1106,6 +1433,125 @@ describe("GitHubBackend", () => {
     test("should return default issue types", async () => {
       const types = await backend.getIssueTypes();
       expect(types).toEqual(["Task", "Story", "Bug", "Epic"]);
+    });
+  });
+
+  describe("getLabels", () => {
+    test("should return repo labels keyed by name", async () => {
+      mockFetch([
+        { name: "bug", description: "Something broken" },
+        { name: "enhancement", description: null },
+      ]);
+
+      const result = await backend.getLabels();
+      expect(result).toEqual({
+        labels: [
+          { id: "bug", name: "bug" },
+          { id: "enhancement", name: "enhancement" },
+        ],
+        truncated: false,
+      });
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("should post label names to the issue", async () => {
+      const calls: Array<{ url: string; method?: string; body?: string }> = [];
+      (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method, body: init?.body as string | undefined });
+        return new Response("[]", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("42", ["bug", "backend"]);
+      expect(calls[0]?.url).toContain("/issues/42/labels");
+      expect(calls[0]?.method).toBe("POST");
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ labels: ["bug", "backend"] });
+    });
+  });
+});
+
+describe("JiraBackend", () => {
+  let backend: JiraBackend;
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    backend = new JiraBackend({
+      domain: "acme.atlassian.net",
+      email: "user@example.com",
+      apiToken: "token",
+      defaultProjectKey: "ACME",
+    });
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("should have correct name", () => {
+    expect(backend.name).toBe("Jira");
+  });
+
+  test("should support issue types", () => {
+    expect(backend.supportsIssueTypes).toBe(true);
+  });
+
+  test("should support epic linking", () => {
+    expect(backend.supportsEpicLinking).toBe(true);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should support attachments", () => {
+    expect(backend.supportsAttachments).toBe(true);
+  });
+
+  describe("getLabels", () => {
+    test("should return global labels keyed by name", async () => {
+      (globalThis as any).fetch = async () =>
+        new Response(
+          JSON.stringify({
+            values: ["bug", "backend"],
+            isLast: true,
+            startAt: 0,
+            maxResults: 100,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+
+      const result = await backend.getLabels();
+      expect(result).toEqual({
+        labels: [
+          { id: "bug", name: "bug" },
+          { id: "backend", name: "backend" },
+        ],
+        truncated: false,
+      });
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("should put label names on the issue", async () => {
+      const calls: Array<{ url: string; method?: string; body?: string }> = [];
+      (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method, body: init?.body as string | undefined });
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("ACME-9", ["bug", "backend"]);
+      expect(calls[0]?.url).toContain("/rest/api/3/issue/ACME-9");
+      expect(calls[0]?.method).toBe("PUT");
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        fields: { labels: ["bug", "backend"] },
+      });
     });
   });
 });

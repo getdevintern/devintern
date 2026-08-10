@@ -1,0 +1,90 @@
+# Packaging config for @devintern/pm-desktop.
+# Signing / notarization run only when the documented env vars are set; see README.md.
+
+appId: com.getdevintern.pm-desktop
+productName: DevIntern PM
+executableName: DevIntern-PM
+copyright: Copyright © DevIntern
+forceCodeSigning: false
+npmRebuild: false
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!scripts/*"
+  - "!release/*"
+  - "!electron.vite.config.ts"
+  - "!electron-builder.yml"
+  - "!tsconfig.json"
+  - "!{.env,.env.*,.npmrc}"
+  - "!{README.md,RELEASE.md,CHANGELOG.md}"
+  # Host-only packaging helpers (entitlements / notarize run on the builder, not in the asar)
+  - "!build/*.cjs"
+  - "!build/*.ts"
+  - "!build/*.plist"
+  - "!build/*.test.ts"
+
+asar: true
+
+afterSign: build/notarize.cjs
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  # Identity is resolved from CSC_* / keychain when present.
+  # Leave unset so unsigned local/CI builds skip signing instead of failing.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization is gated in build/notarize.cjs (no-ops without Apple credentials).
+  notarize: false
+
+dmg:
+  artifactName: DevIntern-PM-${version}-mac-${arch}.${ext}
+
+linux:
+  category: Development
+  syncDesktopName: true
+  maintainer: DevIntern <hello@getdevintern.com>
+  synopsis: Multi-ticket AI task creation for your tracker
+  description: Desktop app for DevIntern PM — create and refine tracker tickets with AI agents.
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  # AppImage + .deb are enough for a usable unsigned Linux release path.
+  # Optional .rpm needs `rpmbuild` on the builder (install `rpm` on Debian/Ubuntu CI).
+
+appImage:
+  artifactName: DevIntern-PM-${version}-linux-${arch}.${ext}
+
+deb:
+  artifactName: DevIntern-PM-${version}-linux-${arch}.${ext}
+
+# GitHub Releases feed for electron-updater (latest-mac.yml / latest-linux.yml).
+# `--publish never` still generates metadata; CI attaches the yml + blockmap files to the release.
+# Explicit owner/repo — must match package.json#repository. Auto-update only discovers
+# *published* (non-draft) releases on this public repo (not a private monorepo draft).
+publish:
+  provider: github
+  owner: getdevintern
+  repo: devintern
+  releaseType: release
+
+# Do not auto-publish from electron-builder; scripts/CI use --publish never and attach artifacts separately.

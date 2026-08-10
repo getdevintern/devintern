@@ -1,5 +1,5 @@
 import { LinearClient } from "@devintern/task-trackers";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * Linear backend adapter.
@@ -10,6 +10,9 @@ export class LinearBackend implements TaskBackend {
   readonly name = "Linear";
   readonly supportsIssueTypes = false;
   readonly supportsEpicLinking = true;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  readonly supportsAttachments = true;
   private client: LinearClient;
   private defaultTeamKey?: string;
 
@@ -140,5 +143,52 @@ export class LinearBackend implements TaskBackend {
    */
   async getIssueTypes(): Promise<string[]> {
     return ["Task", "Story", "Bug", "Epic", "Feature", "Improvement"];
+  }
+
+  /**
+   * List labels available to the resolved Linear team.
+   *
+   * @param projectKey - Optional team key override.
+   * @returns Label id/name pairs, plus whether the soft cap truncated.
+   * @throws When team resolution or the GraphQL request fails.
+   */
+  async getLabels(projectKey?: string, options?: { maxLabels?: number }): Promise<LabelListResult> {
+    const teamId = await this.resolveTeamId(projectKey);
+    const result = await this.client.getLabels(teamId, options?.maxLabels);
+    return {
+      labels: result.labels.map((label) => ({ id: label.id, name: label.name })),
+      truncated: result.truncated,
+    };
+  }
+
+  /**
+   * Replace labels on a created Linear issue.
+   *
+   * @param taskKey - Issue identifier (e.g. `ENG-42`).
+   * @param labelIds - Linear label UUIDs.
+   * @throws When the issue is not found or the update fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    const issueId = await this.client.getIssueIdByIdentifier(taskKey);
+    if (!issueId) {
+      throw new Error(`Issue not found: ${taskKey}`);
+    }
+    await this.client.setIssueLabels(issueId, labelIds);
+  }
+
+  /**
+   * Upload a local file onto a Linear issue.
+   *
+   * @param taskKey - Issue identifier (e.g. `ENG-42`).
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    await this.client.uploadAttachment(taskKey, filePath, options);
   }
 }

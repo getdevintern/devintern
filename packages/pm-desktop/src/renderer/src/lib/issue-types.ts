@@ -17,6 +17,23 @@ export function resolveIssueTypes(types: string[] | undefined | null): string[] 
 }
 
 /**
+ * Replace the issue-types cache from a ProjectStatus (Update / project-key
+ * switch / chrome refresh). Keeps open tickets — callers must not dispatch
+ * `project-loaded`.
+ */
+export function cacheIssueTypesFromStatus(
+  status: { issueTypes?: string[]; defaultProjectKey?: string },
+  cache: Map<string, string[]>,
+): string[] {
+  cache.clear();
+  const types = resolveIssueTypes(status.issueTypes);
+  if (status.defaultProjectKey) {
+    cache.set(status.defaultProjectKey, types);
+  }
+  return types;
+}
+
+/**
  * When the current selection is missing from the available list (or unset),
  * return the CLI default for that list; otherwise `null` (keep selection).
  */

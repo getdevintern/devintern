@@ -42,6 +42,14 @@ describe("settings", () => {
     });
   });
 
+  test("round-trips recentProjectDirs", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-settings-"));
+    setUserDataDirForTests(tempDir);
+
+    await updateSettings({ recentProjectDirs: ["/tmp/a", "/tmp/b"] });
+    expect(await readSettings()).toEqual({ recentProjectDirs: ["/tmp/a", "/tmp/b"] });
+  });
+
   test("concurrent updateSettings patches both survive", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-settings-"));
     setUserDataDirForTests(tempDir);
@@ -54,6 +62,23 @@ describe("settings", () => {
     expect(await readSettings()).toEqual({
       lastProjectDir: "/tmp/project",
       codeDiscoveryDismissed: true,
+    });
+  });
+
+  test("updateSettings updater sees prior writes in the serialize chain", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-settings-"));
+    setUserDataDirForTests(tempDir);
+
+    await updateSettings({ recentProjectDirs: ["/tmp/a"] });
+    await updateSettings((current) => ({
+      ...current,
+      recentProjectDirs: ["/tmp/b", ...(current.recentProjectDirs ?? [])],
+      lastProjectDir: "/tmp/b",
+    }));
+
+    expect(await readSettings()).toEqual({
+      recentProjectDirs: ["/tmp/b", "/tmp/a"],
+      lastProjectDir: "/tmp/b",
     });
   });
 

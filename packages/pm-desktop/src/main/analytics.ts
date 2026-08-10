@@ -18,7 +18,11 @@ export type AnalyticsEvent =
   | "story_edited"
   | "story_decomposed"
   | "task_created"
-  | "analytics_opt_out";
+  | "analytics_opt_out"
+  | "update_available"
+  | "update_downloaded"
+  | "update_applied"
+  | "update_failed";
 
 const ALLOWED_PROP_KEYS = new Set([
   "app_version",
@@ -29,6 +33,12 @@ const ALLOWED_PROP_KEYS = new Set([
   "source_type",
   "ok",
   "epic_linked",
+  "labels_applied",
+  "attachment_count",
+  "has_images",
+  "attachments_uploaded",
+  "attachment_errors",
+  "update_version",
 ]);
 
 export type AnalyticsPropValue = string | boolean | number;

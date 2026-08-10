@@ -8,7 +8,18 @@
 
 import { runAgent as defaultRunAgent } from "../agent.js";
 import { dumpAgentOutput } from "../agent-debug.js";
-import { createBackend, type CreatedTask, type TaskBackend } from "../backends/index.js";
+import {
+  attachmentsGuidanceBlurb,
+  cleanupAttachmentStaging,
+  stageAttachments,
+  type AttachmentRef,
+} from "../attachments.js";
+import {
+  createBackend,
+  type CreatedTask,
+  type LabelListResult,
+  type TaskBackend,
+} from "../backends/index.js";
 import type { Config } from "../config.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
@@ -36,7 +47,7 @@ export {
   type SubtaskDraft,
   type ProjectRef,
 } from "./types.js";
-export type { CreatedTask } from "../backends/index.js";
+export type { CreatedTask, LabelListResult, LabelRef } from "../backends/index.js";
 
 /** Fallback issue types when a supporting backend cannot provide a list. */
 export { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes };
@@ -46,6 +57,8 @@ export interface GenerateStoryInput {
   promptStyle: PromptStyle;
   epicKey?: string;
   extraInstructions?: string;
+  /** Local files for agent context (staged into a temp dir for the run). */
+  attachments?: AttachmentRef[];
 }
 
 export interface EditStoryInput {
@@ -64,6 +77,22 @@ export interface CreateTaskOptions {
   issueType: string;
   projectKey?: string;
   epicKey?: string;
+  /** Existing label ids from {@link LabelRef.id} to apply after create. */
+  labels?: string[];
+  /** Local files to upload after create when the tracker supports attachments. */
+  attachments?: AttachmentRef[];
+}
+
+/**
+ * In-process trusted-caller extension of {@link CreateTaskOptions}.
+ * Not exported — desktop IPC / CLI must never set `labelsPrevalidated`.
+ */
+interface TrustedCreateTaskOptions extends CreateTaskOptions {
+  /**
+   * When true, skip the allowlist refetch — caller already constrained ids
+   * (e.g. engine tests). Untrusted callers cannot set this via the public type.
+   */
+  labelsPrevalidated?: boolean;
 }
 
 export interface CreateTaskResult {
@@ -72,12 +101,25 @@ export interface CreateTaskResult {
   epicLinked: boolean;
   /** Present when epic linking was attempted but failed (task still created). */
   epicLinkError?: string;
+  /** True when labels were requested and applied successfully. */
+  labelsApplied: boolean;
+  /** Present when label apply was attempted but failed (task still created). */
+  labelsApplyError?: string;
+  /** Number of attachments uploaded successfully after create. */
+  attachmentsUploaded: number;
+  /** Per-file upload failures (task still created). */
+  attachmentErrors?: string[];
 }
 
 export interface PmEngine {
   readonly backendName: string;
   readonly supportsIssueTypes: boolean;
   readonly supportsEpicLinking: boolean;
+  readonly supportsLabels: boolean;
+  /** True when inventing label names outside the catalog is allowed (markdown). */
+  readonly supportsFreeformLabels: boolean;
+  /** True when local files can be uploaded onto created tickets. */
+  readonly supportsAttachments: boolean;
   /** Default project/team/board key from tracker config, if any. */
   readonly defaultProjectKey: string | undefined;
 
@@ -90,6 +132,13 @@ export interface PmEngine {
    * propagate so callers can decide how to degrade.
    */
   listIssueTypes(projectKey?: string): Promise<string[]>;
+  /**
+   * List existing labels for a project/repo/board/team. Returns an empty
+   * catalog when the backend does not support labels. Backend fetch errors
+   * propagate so callers can decide how to degrade. Soft-capped catalogs set
+   * `truncated` so pickers can surface an incomplete-list affordance.
+   */
+  listLabels(projectKey?: string): Promise<LabelListResult>;
 
   generateStory(input: GenerateStoryInput, events?: EngineCallEvents): Promise<StoryDraft>;
   editStory(input: EditStoryInput, events?: EngineCallEvents): Promise<StoryDraft>;
@@ -162,6 +211,21 @@ export async function createEngine(
     config.asana?.defaultProjectGid ||
     config.github?.repository;
 
+  /** Session cache of listLabels results — avoids re-paginating on createTask. */
+  const labelsByProject = new Map<string, LabelListResult>();
+
+  async function loadLabels(
+    projectKey: string | undefined,
+    options?: { maxLabels?: number },
+  ): Promise<LabelListResult> {
+    if (!backend.getLabels) {
+      return { labels: [], truncated: false };
+    }
+    const result = await backend.getLabels(projectKey, options);
+    labelsByProject.set(projectKey ?? "", result);
+    return result;
+  }
+
   async function runAndParse<T>(
     label: string,
     prompt: string,
@@ -169,6 +233,7 @@ export async function createEngine(
     failureMessage: string,
     invalidMessage: string,
     events?: EngineCallEvents,
+    agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
     const onAgentChunk = events?.onAgentChunk;
     const result = await runAgent(config.agent.harness, config.agent.path, prompt, {
@@ -176,6 +241,8 @@ export async function createEngine(
       skipPermissions: true,
       model,
       silent: true,
+      attachmentPaths: agentFiles?.attachmentPaths,
+      imagePaths: agentFiles?.imagePaths,
       onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
       onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
     });
@@ -207,6 +274,9 @@ export async function createEngine(
     backendName: backend.name,
     supportsIssueTypes: backend.supportsIssueTypes,
     supportsEpicLinking: backend.supportsEpicLinking,
+    supportsLabels: backend.supportsLabels,
+    supportsFreeformLabels: backend.supportsFreeformLabels,
+    supportsAttachments: backend.supportsAttachments,
     defaultProjectKey,
 
     async listProjects() {
@@ -227,14 +297,23 @@ export async function createEngine(
       return backend.getIssueTypes(projectKey);
     },
 
+    async listLabels(projectKey?: string) {
+      if (!backend.supportsLabels || !backend.getLabels) {
+        return { labels: [], truncated: false };
+      }
+      return loadLabels(projectKey);
+    },
+
     async generateStory(input, events) {
-      const { source, promptStyle, epicKey, extraInstructions } = input;
+      const { source, promptStyle, epicKey, extraInstructions, attachments } = input;
+      const hasAttachments = Boolean(attachments?.length);
 
       const replacements: Record<string, string> = {
         epicContext: epicKey ? `\nThis story will be part of epic: ${epicKey}` : "",
         extraInstructions: extraInstructions
           ? `\nAdditional instructions: ${extraInstructions}`
           : "",
+        attachmentsSection: attachmentsGuidanceBlurb(hasAttachments),
       };
       if (source.type === "figma") {
         replacements.figmaUrl = source.content;
@@ -252,14 +331,32 @@ export async function createEngine(
         replacements,
       );
 
-      return runAndParse(
-        "story-generation",
-        prompt,
-        isStoryPayload,
-        "Failed to generate story from source",
-        "Missing required fields: summary and description",
-        events,
-      );
+      let stagingDir: string | undefined;
+      try {
+        let agentFiles: { attachmentPaths: string[]; imagePaths: string[] } | undefined;
+        if (hasAttachments && attachments) {
+          const staged = await stageAttachments(attachments);
+          stagingDir = staged.dir;
+          agentFiles = {
+            attachmentPaths: staged.files.map((file) => file.path),
+            imagePaths: staged.files
+              .filter((file) => file.kind === "image")
+              .map((file) => file.path),
+          };
+        }
+
+        return await runAndParse(
+          "story-generation",
+          prompt,
+          isStoryPayload,
+          "Failed to generate story from source",
+          "Missing required fields: summary and description",
+          events,
+          agentFiles,
+        );
+      } finally {
+        await cleanupAttachmentStaging(stagingDir);
+      }
     },
 
     async editStory(input, events) {
@@ -313,7 +410,8 @@ Return only valid JSON (no other text). Use markdown inside the description stri
       return payload.subtasks;
     },
 
-    async createTask(draft, taskOptions) {
+    async createTask(draft, options) {
+      const taskOptions = options as TrustedCreateTaskOptions;
       const task = await backend.createTask(
         draft.summary,
         draft.description,
@@ -335,7 +433,83 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         }
       }
 
-      return { task, epicLinked, epicLinkError };
+      // Apply labels after create so a labeling failure does not block the
+      // ticket itself (same partial-success model as epic linking).
+      // Validate against existing labels first so name-keyed trackers (Jira /
+      // GitHub) cannot invent labels that the picker never offered. Prefer the
+      // session listLabels cache (or labelsPrevalidated) over a full refetch.
+      // Freeform backends (markdown) skip the allowlist — any name is writable.
+      let labelsApplied = false;
+      let labelsApplyError: string | undefined;
+      const labels = taskOptions.labels?.filter((id) => id.trim().length > 0) ?? [];
+      if (labels.length > 0 && backend.supportsLabels && backend.applyLabels) {
+        try {
+          // Name-keyed trackers (GitHub/Jira) auto-create unknown labels — never
+          // apply without a catalog API to allowlist against (unless freeform).
+          if (!backend.supportsFreeformLabels && !backend.getLabels) {
+            throw new Error(
+              "Cannot apply labels: tracker supports labels but does not expose a label catalog",
+            );
+          }
+          if (!taskOptions.labelsPrevalidated && !backend.supportsFreeformLabels) {
+            const cacheKey = taskOptions.projectKey ?? "";
+            let catalog = labelsByProject.get(cacheKey);
+            if (!catalog) {
+              catalog = await loadLabels(taskOptions.projectKey);
+            }
+            let known = new Set(catalog.labels.map((label) => label.id));
+            let unknown = labels.filter((id) => !known.has(id));
+            // Soft-capped catalogs can miss real labels — exhaust before rejecting.
+            if (unknown.length > 0 && catalog.truncated) {
+              catalog = await loadLabels(taskOptions.projectKey, {
+                maxLabels: Number.POSITIVE_INFINITY,
+              });
+              known = new Set(catalog.labels.map((label) => label.id));
+              unknown = labels.filter((id) => !known.has(id));
+            }
+            if (unknown.length > 0) {
+              throw new Error(`Unknown label(s): ${unknown.join(", ")}`);
+            }
+          }
+          await backend.applyLabels(task.key, labels);
+          labelsApplied = true;
+        } catch (error) {
+          labelsApplyError = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      // Upload attachments after create (best-effort; same partial-success model).
+      let attachmentsUploaded = 0;
+      let attachmentErrors: string[] | undefined;
+      const attachList = taskOptions.attachments ?? [];
+      if (attachList.length > 0 && backend.supportsAttachments && backend.uploadAttachment) {
+        const errors: string[] = [];
+        for (const attachment of attachList) {
+          const name = attachment.name || attachment.path;
+          try {
+            await backend.uploadAttachment(task.key, attachment.path, {
+              filename: attachment.name,
+            });
+            attachmentsUploaded += 1;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            errors.push(`${name}: ${message}`);
+          }
+        }
+        if (errors.length > 0) {
+          attachmentErrors = errors;
+        }
+      }
+
+      return {
+        task,
+        epicLinked,
+        epicLinkError,
+        labelsApplied,
+        labelsApplyError,
+        attachmentsUploaded,
+        attachmentErrors,
+      };
     },
 
     async createSubtask(parentKey, subtask, projectKey) {

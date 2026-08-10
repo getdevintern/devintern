@@ -114,3 +114,95 @@ describe("GitHubClient.removeLabel", () => {
     await expect(makeClient().removeLabel(7, "gone")).resolves.toBeUndefined();
   });
 });
+
+describe("GitHubClient.getLabels", () => {
+  test("paginates until a short page", async () => {
+    const calls = mockFetch((req) => {
+      const page = new URL(req.url).searchParams.get("page");
+      if (page === "1") {
+        return {
+          json: Array.from({ length: 100 }, (_, i) => ({
+            name: `label-${i}`,
+            description: null,
+          })),
+        };
+      }
+      return { json: [{ name: "label-100", description: "last" }] };
+    });
+
+    const result = await makeClient().getLabels();
+
+    expect(result.labels).toHaveLength(101);
+    expect(result.truncated).toBe(false);
+    expect(result.labels[0]?.name).toBe("label-0");
+    expect(result.labels[100]?.name).toBe("label-100");
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[0]!.url).searchParams.get("page")).toBe("1");
+    expect(new URL(calls[1]!.url).searchParams.get("page")).toBe("2");
+  });
+
+  test("sets truncated when soft cap stops paging", async () => {
+    const calls = mockFetch((req) => {
+      const page = new URL(req.url).searchParams.get("page");
+      return {
+        json: Array.from({ length: 100 }, (_, i) => ({
+          name: `label-${(Number(page) - 1) * 100 + i}`,
+          description: null,
+        })),
+      };
+    });
+
+    const result = await makeClient().getLabels(150);
+    expect(result.labels).toHaveLength(150);
+    expect(result.truncated).toBe(true);
+    // Full page at/past the cap probes one sentinel page before truncating.
+    expect(calls).toHaveLength(3);
+  });
+
+  test("sets truncated when a short final page overshoots the soft cap", async () => {
+    mockFetch((req) => {
+      const page = new URL(req.url).searchParams.get("page");
+      if (page === "1") {
+        return {
+          json: Array.from({ length: 100 }, (_, i) => ({
+            name: `label-${i}`,
+            description: null,
+          })),
+        };
+      }
+      // Fewer than per_page, but still enough to push past maxLabels=150.
+      return {
+        json: Array.from({ length: 80 }, (_, i) => ({
+          name: `label-${100 + i}`,
+          description: null,
+        })),
+      };
+    });
+
+    const result = await makeClient().getLabels(150);
+    expect(result.labels).toHaveLength(150);
+    expect(result.truncated).toBe(true);
+    expect(result.labels[149]?.name).toBe("label-149");
+  });
+
+  test("does not set truncated when exact soft cap is the full catalog", async () => {
+    const calls = mockFetch((req) => {
+      const page = Number(new URL(req.url).searchParams.get("page"));
+      if (page <= 2) {
+        return {
+          json: Array.from({ length: 100 }, (_, i) => ({
+            name: `label-${(page - 1) * 100 + i}`,
+            description: null,
+          })),
+        };
+      }
+      return { json: [] };
+    });
+
+    const result = await makeClient().getLabels(200);
+    expect(result.labels).toHaveLength(200);
+    expect(result.truncated).toBe(false);
+    expect(calls).toHaveLength(3);
+    expect(new URL(calls[2]!.url).searchParams.get("page")).toBe("3");
+  });
+});

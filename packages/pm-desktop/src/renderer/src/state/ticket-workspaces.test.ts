@@ -15,7 +15,13 @@ import {
 import { isBusy } from "./app-store.ts";
 
 const draft = { summary: "Auth redesign", description: "Body" };
-const created = { key: "DEV-31", url: "https://example.com/DEV-31", epicLinked: false };
+const created = {
+  key: "DEV-31",
+  url: "https://example.com/DEV-31",
+  epicLinked: false,
+  labelsApplied: false,
+  attachmentsUploaded: 0,
+};
 
 function baseComposer(overrides: Partial<ComposerValues> = {}): ComposerValues {
   return {
@@ -43,6 +49,16 @@ function openTwo(): TicketWorkspacesState {
 
 beforeEach(() => {
   resetTicketIdCounter();
+});
+
+describe("createTicketWorkspace", () => {
+  test("copies labels array so tickets do not share selection state", () => {
+    const composer = baseComposer({ labels: ["bug"] });
+    const ticket = createTicketWorkspace("t-1", composer);
+    ticket.composer.labels.push("backend");
+    expect(composer.labels).toEqual(["bug"]);
+    expect(ticket.composer.labels).toEqual(["bug", "backend"]);
+  });
 });
 
 describe("ticketWorkspacesReducer", () => {
@@ -291,6 +307,13 @@ describe("ticketWorkspacesReducer", () => {
     expect(resumed.output.draft).toEqual(draft);
   });
 
+  test("project-reset clears all ticket workspaces", () => {
+    let state = openTwo();
+    state = ticketWorkspacesReducer(state, { type: "project-reset" });
+    expect(state.tickets).toHaveLength(0);
+    expect(state.activeTicketId).toBeNull();
+  });
+
   test("project-loaded resets prior workspaces for a new session", () => {
     let state = openTwo();
     state = ticketWorkspacesReducer(state, {
@@ -300,6 +323,23 @@ describe("ticketWorkspacesReducer", () => {
     expect(state.tickets).toHaveLength(1);
     expect(state.tickets[0]!.composer.projectKey).toBe("NEW");
     expect(state.tickets[0]!.output.phase).toBe("idle");
+  });
+
+  test("default-project-changed syncs projectKey across open tickets", () => {
+    let state = openTwo();
+    const ids = state.tickets.map((t) => t.id);
+    state = ticketWorkspacesReducer(state, {
+      type: "composer-patched",
+      id: ids[0]!,
+      patch: { projectKey: "OLD", extraInstructions: "keep me" },
+    });
+    state = ticketWorkspacesReducer(state, {
+      type: "default-project-changed",
+      projectKey: "NEW",
+    });
+    expect(state.tickets).toHaveLength(2);
+    expect(state.tickets.map((t) => t.composer.projectKey)).toEqual(["NEW", "NEW"]);
+    expect(state.tickets[0]!.composer.extraInstructions).toBe("keep me");
   });
 });
 

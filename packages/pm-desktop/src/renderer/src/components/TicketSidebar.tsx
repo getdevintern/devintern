@@ -16,6 +16,8 @@ interface TicketSidebarProps {
   tickets: TicketWorkspace[];
   activeTicketId: string | null;
   onOpenTicket: () => void;
+  /** When false, New is disabled (e.g. git folder still awaiting PM setup). */
+  canOpenTicket?: boolean;
   onActivateTicket: (id: string) => void;
   onCloseTicket: (id: string) => void;
   /** Soft Code discovery strip in the sidebar footer. */
@@ -119,6 +121,7 @@ export function TicketSidebar({
   tickets,
   activeTicketId,
   onOpenTicket,
+  canOpenTicket = true,
   onActivateTicket,
   onCloseTicket,
   showCodeDiscovery = false,
@@ -144,7 +147,12 @@ export function TicketSidebar({
           size="sm"
           variant="outline"
           onClick={onOpenTicket}
-          title="Open a new ticket workspace"
+          disabled={!canOpenTicket}
+          title={
+            canOpenTicket
+              ? "Open a new ticket workspace"
+              : "Finish project setup before opening a ticket"
+          }
           data-testid="open-ticket"
         >
           <Plus data-icon="inline-start" />

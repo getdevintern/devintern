@@ -34,6 +34,10 @@ export const initialTicketWorkspacesState: TicketWorkspacesState = {
 
 export type TicketWorkspacesAction =
   | { type: "project-loaded"; defaultComposer: ComposerValues }
+  /** Clear all ticket workspaces (non-git or unconfigured project). */
+  | { type: "project-reset" }
+  /** Persist a new default project key across open tickets without wiping them. */
+  | { type: "default-project-changed"; projectKey: string }
   | { type: "ticket-opened"; id: string; composer: ComposerValues }
   | { type: "ticket-activated"; id: string }
   | { type: "ticket-closed"; id: string }
@@ -61,7 +65,11 @@ export function createTicketWorkspace(
 ): TicketWorkspace {
   return {
     id,
-    composer: { ...composer, sourceContent: { ...composer.sourceContent } },
+    composer: {
+      ...composer,
+      sourceContent: { ...composer.sourceContent },
+      labels: [...composer.labels],
+    },
     output: initialOutputState,
   };
 }
@@ -176,6 +184,17 @@ export function ticketWorkspacesReducer(
       const id = nextTicketId();
       const ticket = createTicketWorkspace(id, action.defaultComposer);
       return { tickets: [ticket], activeTicketId: id };
+    }
+    case "project-reset":
+      return initialTicketWorkspacesState;
+    case "default-project-changed": {
+      return {
+        ...state,
+        tickets: state.tickets.map((ticket) => ({
+          ...ticket,
+          composer: { ...ticket.composer, projectKey: action.projectKey },
+        })),
+      };
     }
     case "ticket-opened": {
       const ticket = createTicketWorkspace(action.id, action.composer);

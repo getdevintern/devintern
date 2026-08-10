@@ -1,12 +1,21 @@
 /**
- * Read / update `.devintern-pm/.env` for tracker and project switching.
+ * Read / update `.devintern-pm/.env` for tracker, project, and harness switching.
  *
  * Persistence keeps the desktop app and `devpm` CLI on the same active
- * tracker + project key.
+ * tracker, project key, and `AGENT_HARNESS`.
  */
 
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { findEnvFile, upsertEnvVars } from "@devintern/utils";
+import { join } from "node:path";
+import {
+  getHarness,
+  isHarnessInstalled,
+  listHarnesses,
+  resolveExecutablePathStrict,
+  resolveHarness,
+} from "@devintern/agent-harness";
+import { findConfigDir, upsertEnvVars } from "@devintern/utils";
 import {
   getProjectKeyEnvVar,
   isTrackerConfigured,
@@ -19,8 +28,16 @@ import {
 
 const CONFIG_DIR = ".devintern-pm";
 
+/**
+ * Path to `.devintern-pm/.env` under the project (or an ancestor within the git tree).
+ *
+ * Does not fall through to a plain project `.env` — that file is not PM config.
+ */
 export function resolvePmEnvPath(projectDir: string): string | null {
-  return findEnvFile({ configDirName: CONFIG_DIR, startDir: projectDir });
+  const configDir = findConfigDir({ configDirName: CONFIG_DIR, startDir: projectDir });
+  if (!configDir) return null;
+  const envPath = join(configDir, ".env");
+  return existsSync(envPath) ? envPath : null;
 }
 
 export async function readProjectEnv(projectDir: string): Promise<{
@@ -112,4 +129,55 @@ export async function persistActiveProject(
 
   await upsertProjectEnvVars(projectDir, { [projectKeyEnv]: trimmed });
   return { trackerId: activeId, projectKeyEnv, projectKey: trimmed };
+}
+
+/**
+ * Persist `AGENT_HARNESS` for an installed, resolvable harness.
+ *
+ * Validates registry membership, CLI install, and path resolution before
+ * writing so a failed switch leaves the previous harness active. Clears a
+ * sticky `AGENT_CLI_PATH` so a prior agent path cannot attach to the newly
+ * selected harness (same rule as CLI explicit `harnessName` selection).
+ *
+ * @throws When the harness is unknown, not installed, or its CLI path cannot
+ *   be resolved.
+ */
+export async function persistActiveHarness(
+  projectDir: string,
+  harnessName: string,
+): Promise<string> {
+  const trimmed = harnessName.trim();
+  if (!trimmed) {
+    throw new Error("Harness name must not be empty.");
+  }
+
+  const harness = getHarness(trimmed);
+  if (!harness) {
+    const available = listHarnesses()
+      .map((h) => `"${h.name}"`)
+      .join(", ");
+    throw new Error(`Unknown agent harness: "${trimmed}". Available harnesses: ${available}.`);
+  }
+
+  if (!isHarnessInstalled(harness)) {
+    throw new Error(
+      `${harness.displayName} CLI is not installed or not on your PATH. ` +
+        `Install it, or set ${harness.name.toUpperCase().replace(/-/g, "_")}_CLI_PATH.`,
+    );
+  }
+
+  // Fail before writing .env — mirrors loadConfig's strict path check.
+  const resolved = resolveHarness({ harnessName: harness.name });
+  resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
+
+  const { env } = await readProjectEnv(projectDir);
+  const vars: Record<string, string> = { AGENT_HARNESS: harness.name };
+  // Empty value is falsy in resolveHarness; removes sticky global override.
+  if (env.AGENT_CLI_PATH) {
+    vars.AGENT_CLI_PATH = "";
+  }
+  await upsertProjectEnvVars(projectDir, vars);
+  delete process.env.AGENT_CLI_PATH;
+
+  return harness.name;
 }

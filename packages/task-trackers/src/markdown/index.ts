@@ -1,6 +1,7 @@
 export {
   extractMarkdownTitle,
   parseMarkdownFrontmatter,
+  parseMarkdownLabelList,
   sanitizeMarkdownTaskKey,
   updateMarkdownFrontmatterField,
   type MarkdownFrontmatter,

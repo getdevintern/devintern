@@ -37,6 +37,20 @@ export function parseMarkdownFrontmatter(content: string): ParsedMarkdownFrontma
 }
 
 /**
+ * Parse a comma-separated labels/tags frontmatter value into trimmed names.
+ *
+ * Prefers `labels`, then falls back to `tags` (common in hand-written notes).
+ */
+export function parseMarkdownLabelList(frontmatter: MarkdownFrontmatter): string[] {
+  const raw = frontmatter.labels ?? frontmatter.tags ?? "";
+  if (!raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
  * Update a single frontmatter field, or append it when missing.
  * Does nothing when the file has no frontmatter block.
  */

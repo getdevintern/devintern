@@ -1,6 +1,6 @@
 import { GitHubClient } from "@devintern/task-trackers";
 import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * GitHub Issues backend adapter.
@@ -13,6 +13,10 @@ export class GitHubBackend implements TaskBackend {
   // GitHub Issues has no native epic hierarchy; linkToEpic only adds a
   // "Part of #N" text reference, so epic linking is treated as unsupported.
   readonly supportsEpicLinking = false;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  /** GitHub Issues has no first-class file attachment API. */
+  readonly supportsAttachments = false;
   private client: GitHubClient;
 
   /**
@@ -135,5 +139,41 @@ export class GitHubBackend implements TaskBackend {
    */
   async getIssueTypes(): Promise<string[]> {
     return [...DEFAULT_ISSUE_TYPES];
+  }
+
+  /**
+   * List labels defined on the configured repository.
+   *
+   * @returns Label refs keyed by name (GitHub uses names as ids), plus truncation.
+   * @throws When the GitHub API request fails.
+   */
+  async getLabels(
+    _projectKey?: string,
+    options?: { maxLabels?: number },
+  ): Promise<LabelListResult> {
+    const result = await this.client.getLabels(options?.maxLabels);
+    return {
+      labels: result.labels.map((label) => ({ id: label.name, name: label.name })),
+      truncated: result.truncated,
+    };
+  }
+
+  /**
+   * Add labels to an issue without removing existing ones.
+   *
+   * Callers (engine) must pass names from {@link getLabels}; unknown names are
+   * rejected before this method runs so GitHub cannot auto-create labels.
+   *
+   * @param taskKey - Issue number as string.
+   * @param labelIds - Existing label names to add.
+   * @throws When `taskKey` is not a valid issue number or the API request fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    const issueNumber = parseInt(taskKey, 10);
+    if (isNaN(issueNumber)) {
+      throw new Error(`Invalid issue number: ${taskKey}`);
+    }
+    await this.client.addLabels(issueNumber, labelIds);
   }
 }

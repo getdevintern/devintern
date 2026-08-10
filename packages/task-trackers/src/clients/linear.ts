@@ -10,6 +10,10 @@
  * - Issues query: https://studio.linear.app/graphql (search: IssueFilter)
  */
 
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
+import { mimeTypeFromFilename } from "./mime.ts";
+
 export interface LinearTeam {
   id: string;
   key: string;
@@ -29,6 +33,8 @@ export interface LinearWorkflowState {
 }
 
 export interface LinearLabel {
+  /** Present when listed from the labels API; omitted on issue-detail embeds. */
+  id?: string;
   name: string;
 }
 
@@ -480,6 +486,107 @@ export class LinearClient {
   }
 
   /**
+   * Upload a local file and attach it to a Linear issue.
+   *
+   * Uses `fileUpload` → PUT bytes → `attachmentCreate`. Accepts either an
+   * issue UUID or a human identifier (e.g. `ENG-42`).
+   *
+   * @param issueKeyOrId - Issue UUID or identifier.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   * @throws When upload or attachment creation fails.
+   */
+  async uploadAttachment(
+    issueKeyOrId: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    const filename = options?.filename || basename(filePath);
+    const mimeType = options?.mimeType || mimeTypeFromFilename(filename);
+    const bytes = readFileSync(filePath);
+
+    let issueId = await this.getIssueIdByIdentifier(issueKeyOrId);
+    if (!issueId) {
+      if (/^[0-9a-f-]{36}$/i.test(issueKeyOrId)) {
+        issueId = issueKeyOrId;
+      } else {
+        throw new Error(`Linear issue not found: ${issueKeyOrId}`);
+      }
+    }
+
+    const uploadData = await this.request<{
+      fileUpload: {
+        success: boolean;
+        uploadFile?: {
+          uploadUrl: string;
+          assetUrl: string;
+          headers: Array<{ key: string; value: string }>;
+        };
+      };
+    }>(
+      `
+      mutation FileUpload($contentType: String!, $filename: String!, $size: Int!) {
+        fileUpload(contentType: $contentType, filename: $filename, size: $size) {
+          success
+          uploadFile {
+            uploadUrl
+            assetUrl
+            headers {
+              key
+              value
+            }
+          }
+        }
+      }
+      `,
+      { contentType: mimeType, filename, size: bytes.byteLength },
+    );
+
+    if (!uploadData.fileUpload.success || !uploadData.fileUpload.uploadFile) {
+      throw new Error("Linear fileUpload mutation failed");
+    }
+
+    const { uploadUrl, assetUrl, headers } = uploadData.fileUpload.uploadFile;
+    const putHeaders: Record<string, string> = { "Content-Type": mimeType };
+    for (const header of headers) {
+      putHeaders[header.key] = header.value;
+    }
+
+    const putResponse = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: putHeaders,
+      body: bytes,
+    });
+    if (!putResponse.ok) {
+      const errorText = await putResponse.text();
+      throw new Error(`Linear file PUT failed (${putResponse.status}): ${errorText}`);
+    }
+
+    const attachData = await this.request<{
+      attachmentCreate: { success: boolean };
+    }>(
+      `
+      mutation AttachmentCreate($input: AttachmentCreateInput!) {
+        attachmentCreate(input: $input) {
+          success
+        }
+      }
+      `,
+      {
+        input: {
+          issueId,
+          title: filename,
+          url: assetUrl,
+        },
+      },
+    );
+
+    if (!attachData.attachmentCreate.success) {
+      throw new Error("Linear attachmentCreate mutation failed");
+    }
+  }
+
+  /**
    * Update an existing comment's markdown body.
    *
    * @param commentId - Comment UUID.
@@ -537,6 +644,86 @@ export class LinearClient {
     const states = data.team.states.nodes;
     this.workflowStatesCache.set(teamId, states);
     return states;
+  }
+
+  /**
+   * List issue labels available to a team (includes workspace labels).
+   *
+   * Pages through the label connection until exhausted or {@link maxLabels}.
+   * Soft-capped at 500 by default; `truncated` is true when more pages remain.
+   *
+   * @param teamId - Linear team UUID.
+   * @param maxLabels - Soft upper bound on labels returned (default 500).
+   * @returns Label id/name pairs plus whether the soft cap truncated.
+   * @throws When the GraphQL request fails.
+   */
+  async getLabels(
+    teamId: string,
+    maxLabels: number = 500,
+  ): Promise<{ labels: Array<{ id: string; name: string }>; truncated: boolean }> {
+    type LabelNode = { id: string; name: string };
+    type LabelsPage = {
+      team: {
+        labels: {
+          nodes: LabelNode[];
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        };
+      } | null;
+    };
+
+    const labels: LabelNode[] = [];
+    const pageSize = 100;
+    let after: string | null = null;
+    let truncated = false;
+
+    while (labels.length < maxLabels) {
+      const first = Math.min(pageSize, maxLabels - labels.length);
+      const data: LabelsPage = await this.request<LabelsPage>(
+        `
+        query TeamLabels($teamId: String!, $first: Int!, $after: String) {
+          team(id: $teamId) {
+            labels(first: $first, after: $after) {
+              nodes { id name }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+        `,
+        { teamId, first, after },
+      );
+
+      const connection = data.team?.labels;
+      if (!connection) {
+        break;
+      }
+      labels.push(...connection.nodes);
+      if (!connection.pageInfo.hasNextPage || !connection.pageInfo.endCursor) {
+        break;
+      }
+      after = connection.pageInfo.endCursor;
+      if (labels.length >= maxLabels) {
+        truncated = true;
+        break;
+      }
+    }
+
+    // Guard against APIs returning more nodes than `first` (or any overshoot):
+    // slicing must still report truncated so callers exhaust before Unknown.
+    return {
+      labels: labels.slice(0, maxLabels),
+      truncated: truncated || labels.length > maxLabels,
+    };
+  }
+
+  /**
+   * Replace an issue's labels with the given label ids.
+   *
+   * @param issueId - Issue UUID.
+   * @param labelIds - Linear label UUIDs.
+   * @throws When the update is unsuccessful or GraphQL fails.
+   */
+  async setIssueLabels(issueId: string, labelIds: string[]): Promise<void> {
+    await this.updateIssue(issueId, { labelIds });
   }
 
   /**

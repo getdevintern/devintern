@@ -16,6 +16,10 @@
  *   - Create attachment: POST /1/cards/{id}/attachments
  */
 
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
+import { mimeTypeFromFilename } from "./mime.ts";
+
 export interface TrelloBoard {
   id: string;
   name: string;
@@ -242,6 +246,31 @@ export class TrelloClient {
   }
 
   /**
+   * List labels defined on a board.
+   *
+   * @param boardId - Trello board ID.
+   * @returns Board labels (name may be empty for color-only labels).
+   * @throws When the Trello API request fails.
+   */
+  async getBoardLabels(boardId: string): Promise<TrelloLabel[]> {
+    return this.request<TrelloLabel[]>(`/boards/${boardId}/labels`);
+  }
+
+  /**
+   * Replace a card's labels with the given label ids.
+   *
+   * @param cardIdOrShortLink - Card ID or short link.
+   * @param labelIds - Board label IDs to apply (empty clears labels).
+   * @throws When the Trello API request fails.
+   */
+  async setCardLabels(cardIdOrShortLink: string, labelIds: string[]): Promise<void> {
+    const cardId = this.normalizeCardId(cardIdOrShortLink);
+    await this.request(`/cards/${cardId}`, "PUT", {
+      idLabels: labelIds.join(","),
+    });
+  }
+
+  /**
    * Add a checklist item to a card, creating a "Subtasks" checklist if needed.
    *
    * @param parentCardId - Parent card ID.
@@ -295,6 +324,38 @@ export class TrelloClient {
       url,
       name: name || "Linked issue",
     });
+  }
+
+  /**
+   * Upload a local file as a card attachment (multipart).
+   *
+   * @param cardIdOrShortLink - Card ID or short link token.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   * @throws When the Trello API request fails.
+   */
+  async uploadAttachment(
+    cardIdOrShortLink: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    const cardId = this.normalizeCardId(cardIdOrShortLink);
+    const filename = options?.filename || basename(filePath);
+    const mimeType = options?.mimeType || mimeTypeFromFilename(filename);
+    const bytes = new Uint8Array(readFileSync(filePath));
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: mimeType }), filename);
+    form.append("name", filename);
+
+    const response = await fetch(this.buildUrl(`/cards/${cardId}/attachments`), {
+      method: "POST",
+      body: form,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Trello attachment upload failed (${response.status}): ${errorText}`);
+    }
   }
 
   /**

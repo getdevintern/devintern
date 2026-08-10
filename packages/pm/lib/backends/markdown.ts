@@ -1,7 +1,13 @@
-import { join, resolve } from "node:path";
+import { copyFile, readdir } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import {
+  parseMarkdownFrontmatter,
+  parseMarkdownLabelList,
+  updateMarkdownFrontmatterField,
+} from "@devintern/task-trackers";
 import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
 import { readFile, writeFile, pathExists, mkdir } from "../runtime/fs.js";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 export interface MarkdownBackendConfig {
   directory: string;
@@ -16,6 +22,9 @@ export class MarkdownBackend implements TaskBackend {
   // Local markdown files have no real epic hierarchy; linkToEpic only records
   // a frontmatter note, so epic linking is treated as unsupported.
   readonly supportsEpicLinking = false;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = true;
+  readonly supportsAttachments = true;
   private dir: string;
 
   /**
@@ -213,5 +222,127 @@ ${description}
    */
   async getIssueTypes(): Promise<string[]> {
     return [...DEFAULT_ISSUE_TYPES];
+  }
+
+  /**
+   * Collect existing labels from task frontmatter in the tasks directory.
+   *
+   * Suggestions only — {@link supportsFreeformLabels} is true, so the engine
+   * and picker also accept names that are not yet present on any file.
+   *
+   * Scans `labels:` (preferred) and `tags:` CSV fields across `.md` files.
+   * Name-keyed (`id === name`). Soft-capped like remote trackers.
+   *
+   * @param _projectKey - Ignored.
+   * @param options.maxLabels - Soft catalog cap (default 500).
+   * @returns Deduped label refs sorted by name, plus truncation.
+   */
+  async getLabels(
+    _projectKey?: string,
+    options?: { maxLabels?: number },
+  ): Promise<LabelListResult> {
+    const maxLabels = options?.maxLabels ?? 500;
+    const seen = new Map<string, string>();
+
+    if (!(await pathExists(this.dir))) {
+      return { labels: [], truncated: false };
+    }
+
+    let entries: string[];
+    try {
+      entries = await readdir(this.dir);
+    } catch {
+      return { labels: [], truncated: false };
+    }
+
+    for (const entry of entries) {
+      if (!entry.endsWith(".md")) continue;
+      let content: string;
+      try {
+        content = await readFile(join(this.dir, entry));
+      } catch {
+        continue;
+      }
+      const { frontmatter } = parseMarkdownFrontmatter(content);
+      for (const name of parseMarkdownLabelList(frontmatter)) {
+        const key = name.toLowerCase();
+        if (!seen.has(key)) {
+          seen.set(key, name);
+        }
+      }
+    }
+
+    const all = [...seen.values()].sort((a, b) => a.localeCompare(b));
+    return {
+      labels: all.slice(0, maxLabels).map((name) => ({ id: name, name })),
+      truncated: all.length > maxLabels,
+    };
+  }
+
+  /**
+   * Write labels into a task file's frontmatter as a CSV `labels:` field.
+   *
+   * @param taskKey - Task filename stem.
+   * @param labelIds - Label names from {@link getLabels}.
+   * @throws When the task file does not exist or has no frontmatter block.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+
+    const filePath = this.filePath(taskKey);
+    if (!(await pathExists(filePath))) {
+      throw new Error(`Task not found: ${taskKey}`);
+    }
+
+    const content = await readFile(filePath);
+    const value = labelIds
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .join(", ");
+    const updated = updateMarkdownFrontmatterField(content, "labels", value);
+    if (!updated) {
+      throw new Error(`Task has no frontmatter to store labels: ${taskKey}`);
+    }
+    await writeFile(filePath, updated);
+  }
+
+  /**
+   * Copy a local file into `attachments/` next to the task and link it in the body.
+   *
+   * @param taskKey - Task filename stem.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename override.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    const mdPath = this.filePath(taskKey);
+    if (!(await pathExists(mdPath))) {
+      throw new Error(`Task not found: ${taskKey}`);
+    }
+
+    const attachmentsDir = join(this.dir, "attachments", taskKey);
+    await mkdir(attachmentsDir);
+
+    const filename = (options?.filename || basename(filePath)).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const destPath = join(attachmentsDir, filename);
+    await copyFile(filePath, destPath);
+
+    const relativeLink = `attachments/${taskKey}/${filename}`;
+    const isImage = /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(filename);
+    const linkLine = isImage
+      ? `- ![${filename}](${relativeLink})`
+      : `- [${filename}](${relativeLink})`;
+
+    let content = await readFile(mdPath);
+    const heading = "\n## Attachments\n\n";
+    if (!content.includes(heading) && !content.includes("\n## Attachments\n")) {
+      content = content.trimEnd() + heading + linkLine + "\n";
+    } else {
+      content = content.trimEnd() + "\n" + linkLine + "\n";
+    }
+    await writeFile(mdPath, content);
   }
 }

@@ -14,7 +14,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | `@devintern/auth`           | Shared Supabase auth utilities (CLI login/session)                                                                      | no, source-only |
 | `@devintern/license-check`  | Shared license checking                                                                                                 | no, source-only |
 | `@devintern/text-formatter` | Shared text formatting                                                                                                  | no, source-only |
-| `@devintern/utils`          | Shared utilities (`fetchWithRetry`, etc.)                                                                               | no, source-only |
+| `@devintern/utils`          | Shared utilities (`fetchWithRetry`, CLI auto-update check, etc.)                                                            | no, source-only |
 | `@devintern/task-trackers`  | Shared task tracker config and API clients (Jira, Linear, Trello, etc.)                                                 | no, source-only |
 
 **Tooling:** Bun exclusively: runtime, package manager, bundler, and test runner. Do not use `node`, `npm`, `pnpm`, `jest`, or `vitest`.
@@ -58,7 +58,10 @@ bun run --filter @getdevintern/pm build
 ### `@devintern/pm-desktop`
 
 - Electron app built with electron-vite; React + shadcn/ui renderer
+- Runtime pin: Electron `^43.3.0` (latest stable at DEV-47) with `electron-vite` `^5.0.0`. Requires macOS 12+ (Electron dropped 11 in v38). Electron 42+ downloads its binary lazily on first `electron`/`electron-vite` run (no npm `postinstall`); root `trustedDependencies` still lists `electron` for Bun lifecycle trust.
 - Dev: `bun run dev`; build: `bun run build` (output in `out/`, not committed)
+- Package installers: `bun run package` / `package:linux|mac` (electron-builder → `release/`). Signing/notarization gated on env secrets; see `packages/pm-desktop/README.md` and `RELEASE.md`
+- Auto-update via `electron-updater` against GitHub Releases (packaged builds only; no-op in dev)
 - Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`; issue-type defaults via `@getdevintern/pm/issue-types`; in-app project setup via `@getdevintern/pm/init` (main) and `@getdevintern/pm/init-shared` (renderer-safe metadata)
 - Multi-ticket workspaces: sidebar of open tickets with independent composer/output state; agent streams route by `requestId` (see `renderer/src/state/ticket-workspaces.ts`)
 - Anonymous product analytics (PostHog): set `POSTHOG_API_KEY` (and optional `POSTHOG_HOST`) at **build** time via `packages/pm-desktop/.env` (see `.env.example`), shell, or CI so electron-vite can bake them into the main bundle; missing key → analytics no-ops. Users can opt out in Settings.

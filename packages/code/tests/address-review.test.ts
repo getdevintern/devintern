@@ -264,6 +264,10 @@ describe("Address Review - Worktree Integration", () => {
           ...process.env,
           // Mock credentials - will fail auth but that's expected
           GITHUB_TOKEN: "test-token",
+          // Keep token-first path; inherited App creds can change failure modes.
+          GITHUB_APP_ID: "",
+          GITHUB_APP_PRIVATE_KEY_PATH: "",
+          GITHUB_APP_PRIVATE_KEY_BASE64: "",
         },
       },
     );
@@ -277,8 +281,10 @@ describe("Address Review - Worktree Integration", () => {
     expect(output).toContain("Parsing PR URL");
     expect(output).toContain("Fetching PR details");
 
-    // It should fail at GitHub API, which proves it got past argument parsing
-    expect(output).toMatch(/Bad credentials|GitHub API error/);
+    // Fail at the GitHub API step (auth or transient network) — proves we got past arg parsing.
+    expect(output).toMatch(
+      /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ECONNREFUSED|fetch failed/i,
+    );
 
     // Command should exit with non-zero status due to API failure
     expect(result.status).not.toBe(0);

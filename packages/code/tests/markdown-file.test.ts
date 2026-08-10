@@ -25,6 +25,7 @@ function runCLI(
     env: {
       ...process.env,
       DEVINTERN_SKIP_LICENSE_CHECK: "1",
+      DEVINTERN_NO_UPDATE: "1",
       ...env,
     },
   });

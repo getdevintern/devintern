@@ -8,6 +8,7 @@
 import { askConfirm } from "./lib/runtime/stdin.js";
 import { getArgs } from "./lib/runtime/args.js";
 import { configureTerminalEncoding } from "./lib/runtime/terminal.js";
+import { getModuleDir } from "./lib/runtime/path.js";
 import { loadConfig, migrateLegacyConfigDir } from "./lib/config";
 import {
   createEngine,
@@ -31,6 +32,24 @@ import {
   resolveExecutablePathStrict,
   resolveHarness,
 } from "@devintern/agent-harness";
+import { maybeOfferCliUpdate } from "@devintern/utils";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// Version is injected at build time via --define; falls back to package.json for `bun run`.
+declare const __VERSION__: string;
+
+function readPackageVersion(): string {
+  try {
+    const pkgPath = join(getModuleDir(import.meta.url), "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : readPackageVersion();
 
 /** Extract the last non-empty line from an agent stderr chunk for status display. */
 function lastStderrLine(chunk: string): string | undefined {
@@ -81,6 +100,11 @@ async function main() {
     process.env.DEVINTERN_VERBOSE = "1";
   }
 
+  if (args.includes("--version") || args.includes("-V")) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
   // Extract harness flag up front so the harness can be validated once for
   // both interactive and non-interactive modes.
   const harnessFlags = extractHarnessFlags(args);
@@ -88,8 +112,21 @@ async function main() {
   // Migrate legacy .claude-pm directory to .devintern-pm if needed
   await migrateLegacyConfigDir();
 
-  // Parse arguments - null means interactive mode, 'init' means run initialization
+  // Parse arguments - null means interactive mode, 'init' means run initialization.
+  // Help exits inside parseArgs before any update check.
   const parsedArgs = parseArgs(args);
+
+  // Check npm for a newer global `@getdevintern/pm` before real work.
+  // Non-interactive sessions skip install by default.
+  await maybeOfferCliUpdate({
+    packageName: "@getdevintern/pm",
+    binName: "devpm",
+    currentVersion: VERSION,
+    isInteractive: isInteractive(process.argv, process.stdin),
+    confirm: askConfirm,
+    noUpdateEnv: "DEVPM_NO_UPDATE",
+    autoUpdateEnv: "DEVPM_AUTO_UPDATE",
+  });
 
   // Handle init command: guided wizard in interactive terminals, template
   // scaffold with `--yes` / `--no-interactive` / piped stdin.
@@ -293,6 +330,7 @@ async function main() {
     model = cliArgs.model;
     issueType = cliArgs.issueType;
     projectKey = undefined; // CLI mode uses default project
+    const attachments = cliArgs.attachments;
 
     // Config already loaded and verified early
     const config = configForInteractive!;
@@ -307,6 +345,7 @@ async function main() {
       model,
       issueType,
       projectKey,
+      attachments,
       interactiveHandle: null,
       config,
       engine,
@@ -332,6 +371,7 @@ interface CreateFlowParams {
   model?: string;
   issueType: string;
   projectKey?: string;
+  attachments?: Array<{ path: string; name?: string }>;
   interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null;
   config: Awaited<ReturnType<typeof loadConfig>>;
   engine: PmEngine;
@@ -353,6 +393,7 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     model,
     issueType,
     projectKey,
+    attachments,
     interactiveHandle,
     config,
     engine,
@@ -389,6 +430,9 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       if (extraInstructions) {
         console.log(`Custom instructions: ${extraInstructions}`);
       }
+      if (attachments?.length) {
+        console.log(`Attachments: ${attachments.map((a) => a.path).join(", ")}`);
+      }
     }
 
     // In interactive mode, show generating state
@@ -402,7 +446,7 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     let storyData: StoryDraft;
     try {
       storyData = await engine.generateStory(
-        { source, promptStyle, epicKey, extraInstructions },
+        { source, promptStyle, epicKey, extraInstructions, attachments },
         {
           onAgentChunk: interactiveUi
             ? (chunk, stream) => {
@@ -518,7 +562,12 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     // Create the task via backend (links to epic when supported by the tracker;
     // trackers without epic support skip linking silently so we never create a
     // misleading attachment/text reference).
-    const createResult = await engine.createTask(storyData, { issueType, projectKey, epicKey });
+    const createResult = await engine.createTask(storyData, {
+      issueType,
+      projectKey,
+      epicKey,
+      attachments,
+    });
     const createdTask = createResult.task;
 
     if (!interactiveHandle) {
@@ -535,6 +584,17 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       console.error(`⚠️  Warning: Failed to link to epic: ${createResult.epicLinkError}`);
       if (!interactiveHandle) {
         console.log("Continuing with task decomposition...");
+      }
+    }
+    if (createResult.labelsApplyError) {
+      console.error(`⚠️  Warning: Failed to apply labels: ${createResult.labelsApplyError}`);
+    }
+    if (createResult.attachmentsUploaded > 0 && !interactiveHandle) {
+      console.log(`📎 Uploaded ${createResult.attachmentsUploaded} attachment(s)`);
+    }
+    if (createResult.attachmentErrors?.length) {
+      for (const err of createResult.attachmentErrors) {
+        console.error(`⚠️  Warning: Failed to upload attachment: ${err}`);
       }
     }
     if (!interactiveHandle) {

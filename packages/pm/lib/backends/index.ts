@@ -9,7 +9,7 @@ import { MarkdownBackend } from "./markdown";
 import { TrelloBackend } from "./trello";
 import type { TaskBackend } from "./types";
 
-export type { TaskBackend, CreatedTask, ProjectInfo } from "./types";
+export type { TaskBackend, CreatedTask, ProjectInfo, LabelRef, LabelListResult } from "./types";
 
 /**
  * Create a {@link TaskBackend} implementation for the configured task tracker.
@@ -21,6 +21,7 @@ export type { TaskBackend, CreatedTask, ProjectInfo } from "./types";
  * @throws When the backend type is unknown or required backend config is missing.
  */
 export async function createBackend(config: Config, baseDir?: string): Promise<TaskBackend> {
+  let backend: TaskBackend;
   switch (config.backend.type) {
     case "jira": {
       if (!config.jira) {
@@ -29,7 +30,8 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, and JIRA_DEFAULT_PROJECT_KEY.",
         );
       }
-      return new JiraBackend(config.jira);
+      backend = new JiraBackend(config.jira);
+      break;
     }
     case "linear": {
       if (!config.linear) {
@@ -38,7 +40,8 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set LINEAR_API_KEY.",
         );
       }
-      return new LinearBackend(config.linear);
+      backend = new LinearBackend(config.linear);
+      break;
     }
     case "trello": {
       if (!config.trello) {
@@ -47,7 +50,8 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set TRELLO_API_KEY and TRELLO_API_TOKEN.",
         );
       }
-      return new TrelloBackend(config.trello);
+      backend = new TrelloBackend(config.trello);
+      break;
     }
     case "azure-devops": {
       if (!config.azureDevOps) {
@@ -56,7 +60,8 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT.",
         );
       }
-      return new AzureDevOpsBackend(config.azureDevOps);
+      backend = new AzureDevOpsBackend(config.azureDevOps);
+      break;
     }
     case "asana": {
       if (!config.asana) {
@@ -65,7 +70,8 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set ASANA_API_TOKEN.",
         );
       }
-      return new AsanaBackend(config.asana);
+      backend = new AsanaBackend(config.asana);
+      break;
     }
     case "github": {
       if (!config.github) {
@@ -74,15 +80,17 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
             "Please set GITHUB_TOKEN and GITHUB_REPO (owner/repo).",
         );
       }
-      return new GitHubBackend(config.github);
+      backend = new GitHubBackend(config.github);
+      break;
     }
     case "markdown": {
-      return new MarkdownBackend({
+      backend = new MarkdownBackend({
         directory: resolve(
           baseDir ?? process.cwd(),
           config.backend.directory || ".devintern-pm/tasks",
         ),
       });
+      break;
     }
     default:
       throw new Error(
@@ -90,4 +98,16 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
           `Supported: jira, linear, trello, azure-devops, asana, github, markdown`,
       );
   }
+
+  if (backend.supportsLabels && !backend.getLabels) {
+    throw new Error(`${backend.name} reports supportsLabels but does not implement getLabels`);
+  }
+
+  if (backend.supportsAttachments && !backend.uploadAttachment) {
+    throw new Error(
+      `${backend.name} reports supportsAttachments but does not implement uploadAttachment`,
+    );
+  }
+
+  return backend;
 }

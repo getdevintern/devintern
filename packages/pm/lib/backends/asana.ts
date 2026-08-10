@@ -1,5 +1,5 @@
 import { AsanaClient } from "@devintern/task-trackers";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * Asana backend adapter.
@@ -10,6 +10,9 @@ export class AsanaBackend implements TaskBackend {
   readonly name = "Asana";
   readonly supportsIssueTypes = false;
   readonly supportsEpicLinking = true;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  readonly supportsAttachments = true;
   private client: AsanaClient;
   private defaultProjectGid?: string;
 
@@ -123,5 +126,55 @@ export class AsanaBackend implements TaskBackend {
    */
   async getIssueTypes(): Promise<string[]> {
     return ["Task", "Milestone"];
+  }
+
+  /**
+   * List existing workspace tags for the Labels picker.
+   *
+   * Resolves the workspace from the project override / default project, or
+   * falls back to the first workspace on the token.
+   *
+   * @param projectKey - Optional project GID override.
+   * @param options.maxLabels - Soft catalog cap (default 500).
+   * @returns Tag refs keyed by Asana tag GID.
+   * @throws When workspace resolution or the Tags API fails.
+   */
+  async getLabels(projectKey?: string, options?: { maxLabels?: number }): Promise<LabelListResult> {
+    const projectGid = await this.resolveProjectGid(projectKey);
+    const workspaceGid = await this.client.resolveWorkspaceGid(projectGid);
+    const result = await this.client.getTags(workspaceGid, options?.maxLabels);
+    return {
+      labels: result.tags.map((tag) => ({ id: tag.gid, name: tag.name })),
+      truncated: result.truncated,
+    };
+  }
+
+  /**
+   * Add existing tags to a created Asana task (additive).
+   *
+   * @param taskKey - Task GID.
+   * @param labelIds - Tag GIDs from {@link getLabels}.
+   * @throws When any addTag request fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    for (const tagGid of labelIds) {
+      await this.client.addTagToTask(taskKey, tagGid);
+    }
+  }
+
+  /**
+   * Upload a local file onto an Asana task.
+   *
+   * @param taskKey - Task GID.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    await this.client.uploadAttachment(taskKey, filePath, options);
   }
 }

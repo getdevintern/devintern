@@ -6,6 +6,7 @@ export type {
   AsanaProject,
   AsanaSection,
   AsanaStory,
+  AsanaTag,
   AsanaTask,
   AsanaTaskDetail,
   AsanaTaskFilters,
@@ -15,6 +16,7 @@ export { AzureDevOpsClient } from "./azure-devops.ts";
 export type {
   AzureDevOpsComment,
   AzureDevOpsProject,
+  AzureDevOpsTag,
   AzureDevOpsWorkItem,
   AzureDevOpsWorkItemDetail,
   AzureDevOpsWorkItemType,
@@ -57,3 +59,5 @@ export type {
   JiraStory,
   JiraTask,
 } from "./jira.ts";
+
+export { mimeTypeFromFilename } from "./mime.ts";

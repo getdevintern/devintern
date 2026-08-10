@@ -1,5 +1,5 @@
 import { AzureDevOpsClient } from "@devintern/task-trackers";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * Azure DevOps backend adapter.
@@ -10,6 +10,9 @@ export class AzureDevOpsBackend implements TaskBackend {
   readonly name = "Azure DevOps";
   readonly supportsIssueTypes = true;
   readonly supportsEpicLinking = true;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  readonly supportsAttachments = true;
   private client: AzureDevOpsClient;
   private defaultProject: string;
 
@@ -119,5 +122,58 @@ export class AzureDevOpsBackend implements TaskBackend {
   async getIssueTypes(projectKey?: string): Promise<string[]> {
     const types = await this.client.getWorkItemTypes(projectKey);
     return types.map((t) => t.name);
+  }
+
+  /**
+   * List existing project tags for the Labels picker.
+   *
+   * Tag refs are name-keyed (`id === name`) because `System.Tags` is a
+   * semicolon-separated name string.
+   *
+   * @param projectKey - Optional project name override.
+   * @param options.maxLabels - Soft catalog cap (default 500).
+   * @returns Name-keyed label refs plus truncation.
+   * @throws When the Tags API request fails.
+   */
+  async getLabels(projectKey?: string, options?: { maxLabels?: number }): Promise<LabelListResult> {
+    const result = await this.client.getTags(projectKey || this.defaultProject, options?.maxLabels);
+    return {
+      labels: result.tags.map((tag) => ({ id: tag.name, name: tag.name })),
+      truncated: result.truncated,
+    };
+  }
+
+  /**
+   * Replace tags on a created work item via `System.Tags`.
+   *
+   * @param taskKey - Work item ID as string.
+   * @param labelIds - Tag names from {@link getLabels}.
+   * @throws When `taskKey` is not a valid ID or the update fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    const id = await this.client.getWorkItemIdByKey(taskKey);
+    if (!id) {
+      throw new Error(`Work item not found: ${taskKey}`);
+    }
+    await this.client.setWorkItemTags(id, labelIds);
+  }
+
+  /**
+   * Upload a local file onto an Azure DevOps work item.
+   *
+   * @param taskKey - Work item ID as string.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    await this.client.uploadAttachment(taskKey, filePath, {
+      ...options,
+      project: this.defaultProject,
+    });
   }
 }

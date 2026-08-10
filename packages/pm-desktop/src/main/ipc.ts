@@ -2,7 +2,12 @@
  * IPC handlers: thin adapters between the renderer and the pm engine.
  */
 
-import { BrowserWindow, app, dialog, ipcMain, shell } from "electron";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from "electron";
+import { MAX_ATTACHMENTS, attachmentExtensionError } from "@getdevintern/pm/attachments";
 import { EngineError, type EngineCallEvents } from "@getdevintern/pm/engine";
 import {
   PmInitError,
@@ -13,6 +18,7 @@ import {
 } from "@getdevintern/pm/init";
 import {
   IPC_CHANNELS,
+  type ConnectGitHubRepoRequest,
   type CreateTaskRequest,
   type DecomposeStoryRequest,
   type EditStoryRequest,
@@ -23,14 +29,59 @@ import {
   type SubtaskOutcome,
 } from "../shared/ipc-contract.ts";
 import { getAnalyticsEnabled, setAnalyticsEnabled, track } from "./analytics.ts";
+import { toEngineCreateTaskOptions } from "./create-task-options.ts";
 import {
+  checkForUpdates,
+  dismissUpdateError,
+  downloadUpdate,
+  getUpdateStatus,
+  installUpdate,
+  snoozeUpdate,
+  subscribeUpdateStatus,
+} from "./auto-update.ts";
+import { listGitHubRepos, validateGitHubToken } from "./github-api.ts";
+import {
+  clearGitHubToken,
+  getGitHubAuthStatus,
+  getGitHubToken,
+  setGitHubToken,
+} from "./github-auth.ts";
+import { isGitHubOAuthAvailable, runDeviceFlow } from "./github-oauth.ts";
+import { connectManagedGitHubRepo } from "./managed-clone.ts";
+import { listProjectBindings } from "./project-bindings.ts";
+import { removeConnectedProject } from "./remove-connected-project.ts";
+import {
+  beginAgentRequest,
+  detectGitRepository,
+  endAgentRequest,
   getSession,
   loadProject,
   requireSession,
+  switchHarness,
   switchProjectKey,
   switchTracker,
+  updateProjectFromRemote,
 } from "./session.ts";
+import { listRecentProjectDirs, recordRecentProjectDir } from "./recent-projects.ts";
 import { readSettings, updateSettings } from "./settings.ts";
+
+/** Reveal only known project dirs (bindings, recents, current session) — not arbitrary paths. */
+async function isAllowedRevealPath(resolved: string): Promise<boolean> {
+  const session = getSession();
+  if (session && resolve(session.projectDir) === resolved) return true;
+
+  const settings = await readSettings();
+  if (settings.lastProjectDir && resolve(settings.lastProjectDir) === resolved) return true;
+  for (const dir of settings.recentProjectDirs ?? []) {
+    if (resolve(dir) === resolved) return true;
+  }
+
+  const bindings = await listProjectBindings();
+  return bindings.some((b) => resolve(b.localPath) === resolved);
+}
+
+/** AbortController for the in-flight OAuth device flow, if any. */
+let oauthAbort: AbortController | null = null;
 
 function toIpcError(error: unknown): { code: string; message: string; detail?: string } {
   if (error instanceof PmInitError) {
@@ -40,7 +91,11 @@ function toIpcError(error: unknown): { code: string; message: string; detail?: s
     return { code: error.code, message: error.message, detail: error.detail };
   }
   if (error instanceof Error) {
-    return { code: "error", message: error.message };
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : "error";
+    return { code, message: error.message };
   }
   return { code: "error", message: String(error) };
 }
@@ -70,11 +125,25 @@ function chunkEvents(event: Electron.IpcMainInvokeEvent, requestId: string): Eng
   };
 }
 
+/** Run an agent IPC call while marking its request id as in flight. */
+async function withAgentRequest<T>(requestId: string, run: () => Promise<T>): Promise<T> {
+  beginAgentRequest(requestId);
+  try {
+    return await run();
+  } finally {
+    endAgentRequest(requestId);
+  }
+}
+
 export function registerIpcHandlers(): void {
   handle(IPC_CHANNELS.chooseProjectDir, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
+    // Electron 43+ opens Downloads when defaultPath is omitted; seed from
+    // lastProjectDir (updated on successful open in getProjectStatus / initializeProject).
+    const settings = await readSettings();
     const result = await dialog.showOpenDialog(window!, {
-      title: "Choose a project directory",
+      title: "Open existing project folder",
+      defaultPath: settings.lastProjectDir ?? undefined,
       properties: ["openDirectory", "createDirectory"],
     });
     if (result.canceled || result.filePaths.length === 0) {
@@ -83,14 +152,203 @@ export function registerIpcHandlers(): void {
     return result.filePaths[0] ?? null;
   });
 
+  handle(IPC_CHANNELS.chooseAttachmentFiles, async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(window!, {
+      title: "Attach files",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        {
+          name: "Supported attachments",
+          extensions: [
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "gif",
+            "txt",
+            "md",
+            "markdown",
+            "csv",
+            "tsv",
+            "json",
+            "yaml",
+            "yml",
+            "xml",
+            "html",
+            "log",
+            "pdf",
+            "ipynb",
+          ],
+        },
+        { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] },
+        {
+          name: "Documents",
+          extensions: ["txt", "md", "markdown", "csv", "json", "yaml", "yml", "pdf"],
+        },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return [];
+    }
+    const refs = [];
+    for (const filePath of result.filePaths.slice(0, MAX_ATTACHMENTS)) {
+      const name = basename(filePath);
+      const extError = attachmentExtensionError(name);
+      if (extError) {
+        throw new Error(`${name}: ${extError}`);
+      }
+      refs.push({ path: filePath, name });
+    }
+    return refs;
+  });
+
+  handle(IPC_CHANNELS.saveClipboardImage, async () => {
+    const image = clipboard.readImage();
+    if (image.isEmpty()) {
+      return null;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "devpm-clipboard-"));
+    const name = `screenshot-${Date.now()}.png`;
+    const filePath = join(dir, name);
+    writeFileSync(filePath, image.toPNG());
+    return { path: filePath, name };
+  });
+
   handle(IPC_CHANNELS.getLastProjectDir, async () => {
     const settings = await readSettings();
     return settings.lastProjectDir ?? null;
   });
 
+  handle(IPC_CHANNELS.getRecentProjectDirs, async () => {
+    return listRecentProjectDirs();
+  });
+
+  handle(IPC_CHANNELS.connectGitHubRepo, async (_event, input: ConnectGitHubRepoRequest) => {
+    if (!input || typeof input !== "object") {
+      throw Object.assign(new Error("Enter a GitHub repository as owner/repo."), {
+        code: "invalid_input",
+      });
+    }
+    if (typeof input.repoInput !== "string" || input.repoInput.trim().length === 0) {
+      throw Object.assign(new Error("Enter a GitHub repository as owner/repo."), {
+        code: "invalid_input",
+      });
+    }
+    const branch =
+      typeof input.branch === "string" && input.branch.trim().length > 0
+        ? input.branch.trim()
+        : undefined;
+    const binding = await connectManagedGitHubRepo({
+      repoInput: input.repoInput.trim(),
+      branch,
+    });
+    const status = await loadProject(binding.localPath);
+    await updateSettings({ lastProjectDir: status.projectDir });
+    await recordRecentProjectDir(status.projectDir);
+    void track("project_opened", { configured: status.configured });
+    return status;
+  });
+
+  handle(IPC_CHANNELS.getGitHubAuthStatus, async () => {
+    return getGitHubAuthStatus();
+  });
+
+  handle(IPC_CHANNELS.setGitHubToken, async (_event, token: string) => {
+    if (typeof token !== "string" || token.trim().length === 0) {
+      throw Object.assign(new Error("Paste a GitHub personal access token."), {
+        code: "auth_required",
+      });
+    }
+    const trimmed = token.trim();
+    const validated = await validateGitHubToken(trimmed);
+    if (!validated.ok) {
+      throw Object.assign(new Error(validated.message), { code: "auth_required" });
+    }
+    await setGitHubToken(trimmed);
+    const status = await getGitHubAuthStatus();
+    return { ...status, login: validated.login };
+  });
+
+  handle(IPC_CHANNELS.clearGitHubToken, async () => {
+    await clearGitHubToken();
+    return null;
+  });
+
+  handle(IPC_CHANNELS.isGitHubOAuthAvailable, async () => {
+    return isGitHubOAuthAvailable();
+  });
+
+  handle(IPC_CHANNELS.startGitHubOAuth, async () => {
+    if (oauthAbort) {
+      throw Object.assign(new Error("A sign-in is already in progress."), {
+        code: "in_progress",
+      });
+    }
+    oauthAbort = new AbortController();
+    try {
+      await runDeviceFlow({
+        signal: oauthAbort.signal,
+        onPrompt: (prompt) => {
+          for (const window of BrowserWindow.getAllWindows()) {
+            if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+              window.webContents.send(IPC_CHANNELS.githubOAuthPrompt, prompt);
+            }
+          }
+        },
+      });
+    } finally {
+      oauthAbort = null;
+    }
+    return getGitHubAuthStatus();
+  });
+
+  handle(IPC_CHANNELS.cancelGitHubOAuth, async () => {
+    oauthAbort?.abort();
+    return null;
+  });
+
+  handle(IPC_CHANNELS.listGitHubRepos, async () => {
+    const token = await getGitHubToken();
+    return listGitHubRepos(token);
+  });
+
+  handle(IPC_CHANNELS.revealProjectInFolder, async (_event, dir: unknown) => {
+    if (typeof dir !== "string" || dir.trim().length === 0) {
+      throw Object.assign(new Error("Invalid project folder."), { code: "invalid_input" });
+    }
+    const resolved = resolve(dir);
+    if (!(await isAllowedRevealPath(resolved))) {
+      throw new Error("Can only reveal a known project folder.");
+    }
+    shell.showItemInFolder(resolved);
+    return null;
+  });
+
+  handle(IPC_CHANNELS.removeConnectedProject, async (_event, options: unknown) => {
+    if (!options || typeof options !== "object") {
+      throw Object.assign(new Error("Invalid remove project request."), {
+        code: "invalid_input",
+      });
+    }
+    const { localPath, deleteFiles } = options as {
+      localPath?: unknown;
+      deleteFiles?: unknown;
+    };
+    if (typeof localPath !== "string" || typeof deleteFiles !== "boolean") {
+      throw Object.assign(new Error("Invalid remove project request."), {
+        code: "invalid_input",
+      });
+    }
+    await removeConnectedProject({ localPath, deleteFiles });
+    return null;
+  });
+
   handle(IPC_CHANNELS.getProjectStatus, async (_event, dir: string) => {
     const status = await loadProject(dir);
-    await updateSettings({ lastProjectDir: dir });
+    await updateSettings({ lastProjectDir: status.projectDir });
+    // Only PM-ready folders (git + .devintern-pm) join the recent menu.
+    await recordRecentProjectDir(status.projectDir);
 
     void track("project_opened", { configured: status.configured });
     if (status.configured) {
@@ -119,6 +377,12 @@ export function registerIpcHandlers(): void {
   );
 
   handle(IPC_CHANNELS.initializeProject, async (_event, input: InitializeProjectRequest) => {
+    // Match loadProject's git gate so we never persist credentials for unsuitable folders.
+    if (!detectGitRepository(input.projectDir)) {
+      throw new Error(
+        "This folder is not a git repository. Choose a git-connected project before setting up PM.",
+      );
+    }
     await writePmProjectConfig({
       cwd: input.projectDir,
       trackerId: input.trackerId,
@@ -126,7 +390,9 @@ export function registerIpcHandlers(): void {
       overwrite: input.overwrite === true,
     });
     const status = await loadProject(input.projectDir);
-    await updateSettings({ lastProjectDir: input.projectDir });
+    await updateSettings({ lastProjectDir: status.projectDir });
+    // Setup writes `.devintern-pm`, so the project is now eligible for recents.
+    await recordRecentProjectDir(status.projectDir);
     if (!status.configured) {
       throw new Error(
         status.configError ?? "Configuration was written but the project could not be loaded.",
@@ -139,93 +405,138 @@ export function registerIpcHandlers(): void {
     return requireSession().engine.listIssueTypes(projectKey);
   });
 
+  handle(IPC_CHANNELS.listLabels, async (_event, projectKey?: string) => {
+    return requireSession().engine.listLabels(projectKey);
+  });
+
   handle(
     IPC_CHANNELS.generateStory,
     async (event, requestId: string, input: GenerateStoryRequest) => {
-      try {
-        const draft = await requireSession().engine.generateStory(
-          input,
-          chunkEvents(event, requestId),
-        );
-        void track("story_generated", { source_type: input.source.type, ok: true });
-        return draft;
-      } catch (error) {
-        void track("story_generated", { source_type: input.source.type, ok: false });
-        throw error;
-      }
+      return withAgentRequest(requestId, async () => {
+        try {
+          const draft = await requireSession().engine.generateStory(
+            input,
+            chunkEvents(event, requestId),
+          );
+          void track("story_generated", {
+            source_type: input.source.type,
+            ok: true,
+            attachment_count: input.attachments?.length ?? 0,
+            has_images: Boolean(
+              input.attachments?.some((a) => /\.(png|jpe?g|webp|gif)$/i.test(a.name)),
+            ),
+          });
+          return draft;
+        } catch (error) {
+          void track("story_generated", {
+            source_type: input.source.type,
+            ok: false,
+            attachment_count: input.attachments?.length ?? 0,
+          });
+          throw error;
+        }
+      });
     },
   );
 
   handle(IPC_CHANNELS.editStory, async (event, requestId: string, input: EditStoryRequest) => {
-    try {
-      const draft = await requireSession().engine.editStory(input, chunkEvents(event, requestId));
-      void track("story_edited", { ok: true });
-      return draft;
-    } catch (error) {
-      void track("story_edited", { ok: false });
-      throw error;
-    }
+    return withAgentRequest(requestId, async () => {
+      try {
+        const draft = await requireSession().engine.editStory(input, chunkEvents(event, requestId));
+        void track("story_edited", { ok: true });
+        return draft;
+      } catch (error) {
+        void track("story_edited", { ok: false });
+        throw error;
+      }
+    });
   });
 
   handle(
     IPC_CHANNELS.decomposeStory,
     async (event, requestId: string, input: DecomposeStoryRequest) => {
-      try {
-        const subtasks = await requireSession().engine.decomposeStory(
-          input,
-          chunkEvents(event, requestId),
-        );
-        void track("story_decomposed", { ok: true });
-        return subtasks;
-      } catch (error) {
-        void track("story_decomposed", { ok: false });
-        throw error;
-      }
+      return withAgentRequest(requestId, async () => {
+        try {
+          const subtasks = await requireSession().engine.decomposeStory(
+            input,
+            chunkEvents(event, requestId),
+          );
+          void track("story_decomposed", { ok: true });
+          return subtasks;
+        } catch (error) {
+          void track("story_decomposed", { ok: false });
+          throw error;
+        }
+      });
     },
   );
 
   handle(IPC_CHANNELS.createTask, async (_event, input: CreateTaskRequest) => {
-    try {
-      const result = await requireSession().engine.createTask(input.draft, {
-        issueType: input.issueType,
-        projectKey: input.projectKey,
-        epicKey: input.epicKey,
-      });
-      void track("task_created", {
-        ok: true,
-        epic_linked: result.epicLinked,
-      });
-      return {
-        key: result.task.key,
-        url: result.task.url,
-        epicLinked: result.epicLinked,
-        epicLinkError: result.epicLinkError,
-      };
-    } catch (error) {
-      void track("task_created", { ok: false });
-      throw error;
-    }
+    // Non-streaming, but still holds the session engine — guard like generate/edit.
+    return withAgentRequest(`create-task:${randomUUID()}`, async () => {
+      try {
+        // Never forward labelsPrevalidated — Jira/GitHub apply can auto-create
+        // names; main always re-validates against getLabels.
+        const result = await requireSession().engine.createTask(
+          input.draft,
+          toEngineCreateTaskOptions(input),
+        );
+        void track("task_created", {
+          ok: true,
+          epic_linked: result.epicLinked,
+          labels_applied: result.labelsApplied,
+          attachments_uploaded: result.attachmentsUploaded,
+          attachment_errors: result.attachmentErrors?.length ?? 0,
+        });
+        return {
+          key: result.task.key,
+          url: result.task.url,
+          epicLinked: result.epicLinked,
+          epicLinkError: result.epicLinkError,
+          labelsApplied: result.labelsApplied,
+          labelsApplyError: result.labelsApplyError,
+          attachmentsUploaded: result.attachmentsUploaded,
+          attachmentErrors: result.attachmentErrors,
+        };
+      } catch (error) {
+        void track("task_created", { ok: false });
+        throw error;
+      }
+    });
   });
 
   handle(
     IPC_CHANNELS.createSubtasks,
     async (_event, parentKey: string, subtasks: SubtaskDraft[], projectKey?: string) => {
-      const session = requireSession();
-      const outcomes: SubtaskOutcome[] = [];
-      for (const subtask of subtasks) {
-        try {
-          const created = await session.engine.createSubtask(parentKey, subtask, projectKey);
-          outcomes.push({ subtask, key: created.key, url: created.url });
-        } catch (error) {
-          outcomes.push({
-            subtask,
-            error: error instanceof Error ? error.message : String(error),
-          });
+      // Non-streaming, but still holds the session engine — guard like generate/edit.
+      return withAgentRequest(`create-subtasks:${randomUUID()}`, async () => {
+        const session = requireSession();
+        const outcomes: SubtaskOutcome[] = [];
+        for (const subtask of subtasks) {
+          try {
+            const created = await session.engine.createSubtask(parentKey, subtask, projectKey);
+            outcomes.push({ subtask, key: created.key, url: created.url });
+          } catch (error) {
+            outcomes.push({
+              subtask,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
-      }
-      return outcomes;
+        return outcomes;
+      });
     },
   );
+
+  handle(IPC_CHANNELS.beginAgentRequest, async (_event, requestId: string) => {
+    beginAgentRequest(requestId);
+    return null;
+  });
+
+  handle(IPC_CHANNELS.endAgentRequest, async (_event, requestId: string) => {
+    endAgentRequest(requestId);
+    return null;
+  });
 
   handle(IPC_CHANNELS.openExternal, async (_event, url: string) => {
     if (!/^https?:\/\//.test(url) && !url.startsWith("file://")) {
@@ -268,5 +579,34 @@ export function registerIpcHandlers(): void {
 
   handle(IPC_CHANNELS.switchProjectKey, async (_event, projectKey: string) => {
     return switchProjectKey(projectKey);
+  });
+
+  handle(IPC_CHANNELS.switchHarness, async (_event, harnessName: string) => {
+    return switchHarness(harnessName);
+  });
+
+  handle(IPC_CHANNELS.updateProjectFromRemote, async () => {
+    return updateProjectFromRemote();
+  });
+
+  handle(IPC_CHANNELS.getUpdateStatus, async () => getUpdateStatus());
+
+  handle(IPC_CHANNELS.checkForUpdates, async () => checkForUpdates({ silent: false }));
+
+  handle(IPC_CHANNELS.downloadUpdate, async () => downloadUpdate());
+
+  handle(IPC_CHANNELS.installUpdate, async () => installUpdate());
+
+  handle(IPC_CHANNELS.snoozeUpdate, async () => snoozeUpdate());
+
+  handle(IPC_CHANNELS.dismissUpdateError, async () => dismissUpdateError());
+
+  // Push status changes to all renderer windows (progress, available, errors).
+  subscribeUpdateStatus((status) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(IPC_CHANNELS.updateStatus, status);
+      }
+    }
   });
 }

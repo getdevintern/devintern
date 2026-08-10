@@ -16,6 +16,40 @@ function mockFetch(json: unknown): string[] {
   return urls;
 }
 
+describe("TrelloClient labels", () => {
+  test("getBoardLabels hits the board labels endpoint", async () => {
+    const urls = mockFetch([
+      { id: "lab-1", name: "bug", color: "red" },
+      { id: "lab-2", name: "", color: "green" },
+    ]);
+
+    const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+    const labels = await client.getBoardLabels("board-1");
+
+    expect(new URL(urls[0]).pathname).toBe("/1/boards/board-1/labels");
+    expect(labels).toEqual([
+      { id: "lab-1", name: "bug", color: "red" },
+      { id: "lab-2", name: "", color: "green" },
+    ]);
+  });
+
+  test("setCardLabels puts idLabels on the card", async () => {
+    const urls: string[] = [];
+    const bodies: string[] = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      urls.push(String(url));
+      bodies.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+
+    const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+    await client.setCardLabels("ABC123", ["lab-1", "lab-2"]);
+
+    expect(new URL(urls[0]).pathname).toBe("/1/cards/ABC123");
+    expect(bodies[0]).toContain("idLabels=lab-1%2Clab-2");
+  });
+});
+
 describe("TrelloClient.searchCards", () => {
   test("searches cards with the query and limits", async () => {
     const urls = mockFetch({

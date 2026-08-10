@@ -1,5 +1,5 @@
 import { JiraClient } from "@devintern/task-trackers";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * Jira backend adapter.
@@ -10,6 +10,9 @@ export class JiraBackend implements TaskBackend {
   readonly name = "Jira";
   readonly supportsIssueTypes = true;
   readonly supportsEpicLinking = true;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  readonly supportsAttachments = true;
   private client: JiraClient;
 
   /**
@@ -103,5 +106,52 @@ export class JiraBackend implements TaskBackend {
   async getIssueTypes(projectKey?: string): Promise<string[]> {
     const types = await this.client.getIssueTypes(projectKey);
     return types.map((t) => t.name);
+  }
+
+  /**
+   * List existing global Jira labels.
+   *
+   * @returns Label refs keyed by name, plus whether the soft cap truncated.
+   * @throws When the Jira API request fails.
+   */
+  async getLabels(
+    _projectKey?: string,
+    options?: { maxLabels?: number },
+  ): Promise<LabelListResult> {
+    const result = await this.client.getLabels(options?.maxLabels);
+    return {
+      labels: result.labels.map((name) => ({ id: name, name })),
+      truncated: result.truncated,
+    };
+  }
+
+  /**
+   * Set labels on a created Jira issue.
+   *
+   * Callers (engine) must pass names from {@link getLabels}; unknown names are
+   * rejected before this method runs so Jira cannot auto-create labels.
+   *
+   * @param taskKey - Issue key (e.g. `PROJ-123`).
+   * @param labelIds - Existing label names to apply.
+   * @throws When the Jira API request fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    await this.client.setLabels(taskKey, labelIds);
+  }
+
+  /**
+   * Upload a local file onto a Jira issue.
+   *
+   * @param taskKey - Issue key (e.g. `PROJ-123`).
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    await this.client.uploadAttachment(taskKey, filePath, options);
   }
 }

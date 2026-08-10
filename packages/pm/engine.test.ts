@@ -115,14 +115,25 @@ function stubBackend(overrides: Partial<TaskBackend> = {}): TaskBackend {
     name: "Stub",
     supportsIssueTypes: true,
     supportsEpicLinking: true,
+    supportsLabels: true,
+    supportsFreeformLabels: false,
+    supportsAttachments: false,
     createTask: async (): Promise<CreatedTask> => ({ key: "PROJ-1", url: "http://t/PROJ-1" }),
     createSubtask: async (_parent: string, summary: string): Promise<CreatedTask> => ({
       key: `SUB-${summary}`,
       url: `http://t/${summary}`,
     }),
     linkToEpic: async () => {},
+    applyLabels: async () => {},
     getProjects: async (): Promise<ProjectInfo[]> => [{ key: "PROJ", name: "Project" }],
     getIssueTypes: async () => ["Story", "Bug"],
+    getLabels: async () => ({
+      labels: [
+        { id: "bug", name: "bug" },
+        { id: "backend", name: "backend" },
+      ],
+      truncated: false,
+    }),
     ...overrides,
   };
 }
@@ -147,6 +158,9 @@ describe("createEngine", () => {
     expect(engine.backendName).toBe("Stub");
     expect(engine.supportsIssueTypes).toBe(true);
     expect(engine.supportsEpicLinking).toBe(true);
+    expect(engine.supportsAttachments).toBe(false);
+    expect(engine.supportsLabels).toBe(true);
+    expect(engine.supportsFreeformLabels).toBe(false);
     expect(engine.defaultProjectKey).toBe("PROJ");
   });
 
@@ -322,6 +336,59 @@ describe("createEngine", () => {
     expect(result.epicLinkError).toBe("no epic access");
   });
 
+  test("createTask uploads attachments when supported", async () => {
+    const uploaded: string[] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          supportsAttachments: true,
+          uploadAttachment: async (_key, filePath) => {
+            uploaded.push(filePath);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      {
+        issueType: "Task",
+        attachments: [
+          { path: "/tmp/a.md", name: "a.md" },
+          { path: "/tmp/b.png", name: "b.png" },
+        ],
+      },
+    );
+    expect(result.attachmentsUploaded).toBe(2);
+    expect(result.attachmentErrors).toBeUndefined();
+    expect(uploaded).toEqual(["/tmp/a.md", "/tmp/b.png"]);
+  });
+
+  test("createTask reports attachment upload failure without throwing", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          supportsAttachments: true,
+          uploadAttachment: async () => {
+            throw new Error("quota");
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", attachments: [{ path: "/tmp/a.md", name: "a.md" }] },
+    );
+    expect(result.task.key).toBe("PROJ-1");
+    expect(result.attachmentsUploaded).toBe(0);
+    expect(result.attachmentErrors).toEqual(["a.md: quota"]);
+  });
+
   test("createTask skips epic linking when backend does not support it", async () => {
     const engine = await createEngine(
       stubConfig(),
@@ -335,6 +402,291 @@ describe("createEngine", () => {
     );
     expect(result.epicLinked).toBe(false);
     expect(result.epicLinkError).toBeUndefined();
+  });
+
+  test("createTask applies labels and reports success", async () => {
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug", "backend"] },
+    );
+    expect(result.labelsApplied).toBe(true);
+    expect(result.labelsApplyError).toBeUndefined();
+    expect(applied).toEqual([["bug", "backend"]]);
+  });
+
+  test("createTask reports label apply failure without throwing", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          applyLabels: async () => {
+            throw new Error("labels locked");
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug"] },
+    );
+    expect(result.task.key).toBe("PROJ-1");
+    expect(result.labelsApplied).toBe(false);
+    expect(result.labelsApplyError).toBe("labels locked");
+  });
+
+  test("createTask rejects unknown labels before apply", async () => {
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug", "invented"] },
+    );
+    expect(result.task.key).toBe("PROJ-1");
+    expect(result.labelsApplied).toBe(false);
+    expect(result.labelsApplyError).toBe("Unknown label(s): invented");
+    expect(applied).toEqual([]);
+  });
+
+  test("createTask allows unknown labels when supportsFreeformLabels", async () => {
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          supportsFreeformLabels: true,
+          getLabels: async () => ({ labels: [], truncated: false }),
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["brand-new", "also-new"] },
+    );
+    expect(result.labelsApplied).toBe(true);
+    expect(result.labelsApplyError).toBeUndefined();
+    expect(applied).toEqual([["brand-new", "also-new"]]);
+  });
+
+  test("createTask reuses listLabels cache instead of refetching", async () => {
+    let getLabelsCalls = 0;
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          getLabels: async () => {
+            getLabelsCalls += 1;
+            return {
+              labels: [
+                { id: "bug", name: "bug" },
+                { id: "backend", name: "backend" },
+              ],
+              truncated: false,
+            };
+          },
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    await engine.listLabels();
+    expect(getLabelsCalls).toBe(1);
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug"] },
+    );
+    expect(result.labelsApplied).toBe(true);
+    expect(getLabelsCalls).toBe(1);
+    expect(applied).toEqual([["bug"]]);
+  });
+
+  test("createTask skips allowlist fetch when labelsPrevalidated", async () => {
+    let getLabelsCalls = 0;
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          getLabels: async () => {
+            getLabelsCalls += 1;
+            return { labels: [], truncated: false };
+          },
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      // TrustedCreateTaskOptions is unexported — assert for in-process tests only.
+      { issueType: "Task", labels: ["from-picker"], labelsPrevalidated: true } as {
+        issueType: string;
+        labels: string[];
+        labelsPrevalidated: boolean;
+      },
+    );
+    expect(result.labelsApplied).toBe(true);
+    expect(getLabelsCalls).toBe(0);
+    expect(applied).toEqual([["from-picker"]]);
+  });
+
+  test("createTask exhausts truncated catalogs before rejecting unknowns", async () => {
+    let getLabelsCalls = 0;
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          getLabels: async (_projectKey, options) => {
+            getLabelsCalls += 1;
+            if (options?.maxLabels === Number.POSITIVE_INFINITY) {
+              return {
+                labels: [
+                  { id: "bug", name: "bug" },
+                  { id: "deep", name: "deep" },
+                ],
+                truncated: false,
+              };
+            }
+            return {
+              labels: [{ id: "bug", name: "bug" }],
+              truncated: true,
+            };
+          },
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["deep"] },
+    );
+    expect(result.labelsApplied).toBe(true);
+    expect(getLabelsCalls).toBe(2);
+    expect(applied).toEqual([["deep"]]);
+  });
+
+  test("createTask skips labels when backend does not support them", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      { backend: stubBackend({ supportsLabels: false, applyLabels: undefined }) },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug"] },
+    );
+    expect(result.labelsApplied).toBe(false);
+    expect(result.labelsApplyError).toBeUndefined();
+  });
+
+  test("createTask refuses labels when catalog API is missing", async () => {
+    const applied: string[][] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          getLabels: undefined,
+          applyLabels: async (_key, labels) => {
+            applied.push(labels);
+          },
+        }),
+      },
+    );
+
+    const result = await engine.createTask(
+      { summary: "S", description: "D" },
+      { issueType: "Task", labels: ["bug"] },
+    );
+    expect(result.task.key).toBe("PROJ-1");
+    expect(result.labelsApplied).toBe(false);
+    expect(result.labelsApplyError).toContain("does not expose a label catalog");
+    expect(applied).toEqual([]);
+  });
+
+  test("listLabels returns empty catalog when unsupported", async () => {
+    const unsupported = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      { backend: stubBackend({ supportsLabels: false, getLabels: undefined }) },
+    );
+    expect(await unsupported.listLabels()).toEqual({ labels: [], truncated: false });
+
+    const supported = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      { backend: stubBackend() },
+    );
+    expect(await supported.listLabels()).toEqual({
+      labels: [
+        { id: "bug", name: "bug" },
+        { id: "backend", name: "backend" },
+      ],
+      truncated: false,
+    });
+  });
+
+  test("listLabels propagates truncated from the backend catalog", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend({
+          getLabels: async () => ({
+            labels: [{ id: "bug", name: "bug" }],
+            truncated: true,
+          }),
+        }),
+      },
+    );
+    expect(await engine.listLabels()).toEqual({
+      labels: [{ id: "bug", name: "bug" }],
+      truncated: true,
+    });
   });
 
   test("createSubtask falls back to summary when description is empty", async () => {

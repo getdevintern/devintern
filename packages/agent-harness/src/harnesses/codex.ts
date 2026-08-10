@@ -27,6 +27,25 @@ export class CodexHarness implements AgentHarness {
   readonly displayName = "Codex";
   readonly defaultPath = "codex";
   readonly supportedModes = ["plan", "readonly"] as const;
+  /** Codex `exec` accepts images via `-i` after the prompt. */
+  readonly imageInput = "native" as const;
+
+  /**
+   * Build trailing `-i` flags for native image attachment.
+   *
+   * Must be appended **after** the prompt in `codex exec` mode.
+   *
+   * @param paths - Absolute image file paths.
+   */
+  buildImageArgs(paths: readonly string[]): string[] {
+    const args: string[] = [];
+    for (const path of paths) {
+      if (path.trim()) {
+        args.push("-i", path);
+      }
+    }
+    return args;
+  }
 
   /**
    * Build `codex exec` flags for non-interactive execution.

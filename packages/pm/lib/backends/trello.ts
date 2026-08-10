@@ -1,6 +1,6 @@
 import { TrelloClient } from "@devintern/task-trackers";
 import { DEFAULT_ISSUE_TYPES } from "../issue-types.js";
-import type { CreatedTask, ProjectInfo, TaskBackend } from "./types";
+import type { CreatedTask, LabelListResult, ProjectInfo, TaskBackend } from "./types";
 
 /**
  * Trello backend adapter.
@@ -13,6 +13,9 @@ export class TrelloBackend implements TaskBackend {
   // Trello has no native epic/parent hierarchy; linkToEpic only adds an
   // attachment, so epic linking is treated as unsupported.
   readonly supportsEpicLinking = false;
+  readonly supportsLabels = true;
+  readonly supportsFreeformLabels = false;
+  readonly supportsAttachments = true;
   private client: TrelloClient;
   private defaultBoardId?: string;
   private defaultListName?: string;
@@ -167,5 +170,71 @@ export class TrelloBackend implements TaskBackend {
    */
   async getIssueTypes(): Promise<string[]> {
     return [...DEFAULT_ISSUE_TYPES];
+  }
+
+  /**
+   * Resolve the board id used for label listing (override, default, or first board).
+   *
+   * @param projectKey - Optional board ID override.
+   * @returns Board ID.
+   * @throws When no boards are available.
+   */
+  private async resolveBoardId(projectKey?: string): Promise<string> {
+    if (projectKey) return projectKey;
+    if (this.defaultBoardId) return this.defaultBoardId;
+    const boards = await this.client.getBoards();
+    if (boards.length === 0) {
+      throw new Error("No Trello boards found. Please create a board first.");
+    }
+    return boards[0]!.id;
+  }
+
+  /**
+   * List labels defined on the resolved Trello board.
+   *
+   * Color-only labels (empty name) are shown using their color as the display name.
+   * Board label catalogs are small — never soft-capped (`truncated` is always false).
+   *
+   * @param projectKey - Optional board ID override.
+   * @returns Board label refs.
+   * @throws When board resolution or the API request fails.
+   */
+  async getLabels(projectKey?: string): Promise<LabelListResult> {
+    const boardId = await this.resolveBoardId(projectKey);
+    const labels = await this.client.getBoardLabels(boardId);
+    return {
+      labels: labels.map((label) => ({
+        id: label.id,
+        name: label.name.trim() || label.color || label.id,
+      })),
+      truncated: false,
+    };
+  }
+
+  /**
+   * Replace labels on a created Trello card.
+   *
+   * @param taskKey - Card short link or ID.
+   * @param labelIds - Board label IDs.
+   * @throws When the Trello API request fails.
+   */
+  async applyLabels(taskKey: string, labelIds: string[]): Promise<void> {
+    if (labelIds.length === 0) return;
+    await this.client.setCardLabels(taskKey, labelIds);
+  }
+
+  /**
+   * Upload a local file onto a Trello card.
+   *
+   * @param taskKey - Card short link or ID.
+   * @param filePath - Absolute path to the local file.
+   * @param options - Optional filename / MIME overrides.
+   */
+  async uploadAttachment(
+    taskKey: string,
+    filePath: string,
+    options?: { filename?: string; mimeType?: string },
+  ): Promise<void> {
+    await this.client.uploadAttachment(taskKey, filePath, options);
   }
 }

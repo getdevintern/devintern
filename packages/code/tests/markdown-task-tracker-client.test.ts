@@ -88,6 +88,7 @@ Refactor the auth middleware.
       expect(taskRaw(task).hasFrontmatter).toBe(true);
       expect(taskRaw(task).hasStatusField).toBe(false);
       expect(taskRaw(task).frontmatter.author).toBe("me");
+      expect(task.labels).toEqual(["backend", "perf"]);
 
       await client.transitionStatus(task.key, "In Progress");
       expect(readFileSync(mdFile, "utf8")).toBe(content);

@@ -3,6 +3,7 @@ Analyze the following requirement or feature description and generate technical 
 {{promptContent}}
 {{epicContext}}
 {{extraInstructions}}
+{{attachmentsSection}}
 
 Guidance:
 - Include technical considerations when they change the work
@@ -11,6 +12,7 @@ Guidance:
 - Reference existing codebase patterns when you can
 - Balance user value with technical feasibility
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
+- When files are attached, open them and use them as additional context
 
 Return only valid JSON (no other text). Use markdown inside the description string:
 

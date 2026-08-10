@@ -92,11 +92,14 @@ describe("GitHubTaskTrackerClient.transitionStatus", () => {
     const removed: string[] = [];
     const adapter = makeAdapter(
       {
-        getLabels: async () => [
-          { name: "To Do", description: null },
-          { name: "In Progress", description: null },
-          { name: "bug", description: null },
-        ],
+        getLabels: async () => ({
+          labels: [
+            { name: "To Do", description: null },
+            { name: "In Progress", description: null },
+            { name: "bug", description: null },
+          ],
+          truncated: false,
+        }),
         getIssue: async () => makeIssue({ labels: [{ name: "To Do" }, { name: "bug" }] }),
         addLabels: async (_n: number, labels: string[]) => {
           added.push(labels);
@@ -116,10 +119,13 @@ describe("GitHubTaskTrackerClient.transitionStatus", () => {
 
   test("lists repo labels when target label is missing", async () => {
     const adapter = makeAdapter({
-      getLabels: async () => [
-        { name: "bug", description: null },
-        { name: "enhancement", description: null },
-      ],
+      getLabels: async () => ({
+        labels: [
+          { name: "bug", description: null },
+          { name: "enhancement", description: null },
+        ],
+        truncated: false,
+      }),
     });
 
     await expect(adapter.transitionStatus("123", "In Progress")).rejects.toThrow(
@@ -127,10 +133,49 @@ describe("GitHubTaskTrackerClient.transitionStatus", () => {
     );
   });
 
+  test("exhausts truncated catalog when status label is beyond the soft cap", async () => {
+    const caps: Array<number | undefined> = [];
+    const added: string[][] = [];
+    const adapter = makeAdapter(
+      {
+        getLabels: async (maxLabels?: number) => {
+          caps.push(maxLabels);
+          if (maxLabels === Number.POSITIVE_INFINITY) {
+            return {
+              labels: [
+                { name: "bug", description: null },
+                { name: "In Progress", description: null },
+              ],
+              truncated: false,
+            };
+          }
+          return {
+            labels: [{ name: "bug", description: null }],
+            truncated: true,
+          };
+        },
+        getIssue: async () => makeIssue({ labels: [{ name: "bug" }] }),
+        addLabels: async (_n: number, labels: string[]) => {
+          added.push(labels);
+        },
+        removeLabel: async () => {},
+      },
+      { statusLabels: ["To Do", "In Progress"] },
+    );
+
+    await adapter.transitionStatus("123", "In Progress");
+
+    expect(caps).toEqual([undefined, Number.POSITIVE_INFINITY]);
+    expect(added).toEqual([["In Progress"]]);
+  });
+
   test("reopens a closed issue when moving to an open status", async () => {
     const updates: unknown[] = [];
     const adapter = makeAdapter({
-      getLabels: async () => [{ name: "To Do", description: null }],
+      getLabels: async () => ({
+        labels: [{ name: "To Do", description: null }],
+        truncated: false,
+      }),
       getIssue: async () => makeIssue({ state: "closed", labels: [] }),
       addLabels: async () => {},
       updateIssue: async (_n: number, patch: unknown) => {

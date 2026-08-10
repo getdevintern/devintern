@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!--
+      Hardened runtime entitlement for Electron (JIT / V8).
+      Intentionally omit allow-unsigned-executable-memory (discouraged on Electron 12+)
+      and disable-library-validation (broad attack surface). Re-add only if notarization
+      or runtime fails without them, and document why.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+  </dict>
+</plist>

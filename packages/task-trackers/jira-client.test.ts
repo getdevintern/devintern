@@ -400,3 +400,116 @@ describe("JiraClient verbose logging", () => {
     }
   });
 });
+
+describe("JiraClient labels", () => {
+  test("getLabels paginates until isLast", async () => {
+    const client = new JiraClient({
+      domain: "acme.atlassian.net",
+      email: "user@example.com",
+      apiToken: "token",
+      defaultProjectKey: "ACME",
+    });
+
+    const urls: string[] = [];
+    client.jiraApiCall = async (_method: string, url: string) => {
+      urls.push(url);
+      if (url.includes("startAt=0")) {
+        return { values: ["bug", "backend"], isLast: false, startAt: 0, maxResults: 100 };
+      }
+      return { values: ["frontend"], isLast: true, startAt: 2, maxResults: 100 };
+    };
+
+    const result = await client.getLabels();
+    expect(result).toEqual({
+      labels: ["bug", "backend", "frontend"],
+      truncated: false,
+    });
+    expect(urls).toEqual([
+      "/rest/api/3/label?startAt=0&maxResults=100",
+      "/rest/api/3/label?startAt=2&maxResults=100",
+    ]);
+  });
+
+  test("getLabels sets truncated when soft cap stops paging", async () => {
+    const client = new JiraClient({
+      domain: "acme.atlassian.net",
+      email: "user@example.com",
+      apiToken: "token",
+      defaultProjectKey: "ACME",
+    });
+
+    const maxResults: number[] = [];
+    let page = 0;
+    client.jiraApiCall = async (_method: string, url: string) => {
+      page += 1;
+      const requested = Number(new URL(url, "https://example.com").searchParams.get("maxResults"));
+      maxResults.push(requested);
+      return {
+        values: Array.from({ length: requested }, (_, i) => `label-${(page - 1) * 100 + i}`),
+        isLast: false,
+        startAt: (page - 1) * 100,
+        maxResults: requested,
+      };
+    };
+
+    const result = await client.getLabels(150);
+    expect(result.labels).toHaveLength(150);
+    expect(result.truncated).toBe(true);
+    expect(page).toBe(2);
+    expect(maxResults).toEqual([100, 50]);
+  });
+
+  test("getLabels sets truncated when a short final page overshoots the soft cap", async () => {
+    const client = new JiraClient({
+      domain: "acme.atlassian.net",
+      email: "user@example.com",
+      apiToken: "token",
+      defaultProjectKey: "ACME",
+    });
+
+    client.jiraApiCall = async (_method: string, url: string) => {
+      if (url.includes("startAt=0")) {
+        return {
+          values: Array.from({ length: 100 }, (_, i) => `label-${i}`),
+          isLast: false,
+          startAt: 0,
+          maxResults: 100,
+        };
+      }
+      // API returns more than remaining room / a short page past the cap.
+      return {
+        values: Array.from({ length: 80 }, (_, i) => `label-${100 + i}`),
+        isLast: true,
+        startAt: 100,
+        maxResults: 50,
+      };
+    };
+
+    const result = await client.getLabels(150);
+    expect(result.labels).toHaveLength(150);
+    expect(result.truncated).toBe(true);
+    expect(result.labels[149]).toBe("label-149");
+  });
+
+  test("setLabels puts label names on the issue", async () => {
+    const client = new JiraClient({
+      domain: "acme.atlassian.net",
+      email: "user@example.com",
+      apiToken: "token",
+      defaultProjectKey: "ACME",
+    });
+
+    let captured: { method: string; url: string; body: unknown } | undefined;
+    client.jiraApiCall = async (method: string, url: string, body?: unknown) => {
+      captured = { method, url, body };
+      return {};
+    };
+
+    await client.setLabels("ACME-9", ["bug", "backend"]);
+    expect(captured).toEqual({
+      method: "PUT",
+      url: "/rest/api/3/issue/ACME-9",
+      body: { fields: { labels: ["bug", "backend"] } },
+    });
+  });
+});

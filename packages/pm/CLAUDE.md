@@ -79,6 +79,7 @@ Use appropriate exit codes for success (0) and errors (non-zero).
 
 - CLI: `--harness <name>` overrides `AGENT_HARNESS` for one run (validated once in `main()` via `validateHarnessName`).
 - Interactive: `Ctrl+G` opens a modal picker of **installed** harnesses (`listInstalledHarnesses`); ESC returns to the prior step.
+- Desktop (`pm-desktop`): the header harness pill switches among installed harnesses and persists `AGENT_HARNESS` in `.devintern-pm/.env` (same resolution as CLI). Clears sticky `AGENT_CLI_PATH` on switch so a prior agent path cannot attach to the new harness.
 - Do not expose `--agent-path`; CLI path resolution stays on PATH / `AGENT_CLI_PATH` / `<HARNESS>_CLI_PATH`.
 - When `harnessName` is explicit, `resolveHarness` skips `AGENT_CLI_PATH` so a previous agent path does not stick.
 

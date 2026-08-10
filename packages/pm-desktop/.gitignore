@@ -1,6 +1,17 @@
 node_modules
 out
 release
+*.log
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+
+# Local signing material — never commit
+*.p12
+*.pfx
+*.p8
+*.cer
+*.mobileprovision
+build/certs/

@@ -38,6 +38,7 @@ function runCLI(args: string[]): {
         JIRA_EMAIL: "test@example.com",
         JIRA_API_TOKEN: "test-token",
         DEVINTERN_SKIP_LICENSE_CHECK: "1",
+        DEVINTERN_NO_UPDATE: "1",
       },
     });
 

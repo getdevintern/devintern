@@ -35,6 +35,7 @@ function runCLI(args: string[]): {
         JIRA_EMAIL: "test@example.com",
         JIRA_API_TOKEN: "test-token",
         DEVINTERN_SKIP_LICENSE_CHECK: "1",
+        DEVINTERN_NO_UPDATE: "1",
       },
     });
 
@@ -201,6 +202,7 @@ describe("CLI Argument Handling", () => {
           TRELLO_API_KEY: "test-api-key",
           TRELLO_API_TOKEN: "test-api-token",
           DEVINTERN_SKIP_LICENSE_CHECK: "1",
+          DEVINTERN_NO_UPDATE: "1",
         },
       });
       const output = (result.stdout || "") + (result.stderr || "");
@@ -229,6 +231,7 @@ describe("CLI Argument Handling", () => {
           TRELLO_API_KEY: "test-api-key",
           TRELLO_API_TOKEN: "test-api-token",
           DEVINTERN_SKIP_LICENSE_CHECK: "1",
+          DEVINTERN_NO_UPDATE: "1",
         },
       });
       const output = (result.stdout || "") + (result.stderr || "");
@@ -281,6 +284,10 @@ describe("CLI Init Command", () => {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
+        env: {
+          ...process.env,
+          DEVINTERN_NO_UPDATE: "1",
+        },
       });
 
       expect(result.status).toBe(0);

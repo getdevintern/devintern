@@ -42,7 +42,7 @@ import {
 } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
 import { isMarkdownFilePath, parseTrelloCardReference } from "@devintern/task-trackers";
-import { findEnvFile, resolveConfigDir } from "@devintern/utils";
+import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { TaskFormatter, type RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
@@ -83,6 +83,21 @@ import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types
 // Version is injected at build time via --define flag, or read from package.json in dev
 declare const __VERSION__: string;
 const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
+
+/**
+ * Check npm for a newer global `@getdevintern/code` and offer/apply an update.
+ * Non-interactive sessions skip install by default (see `@devintern/utils`).
+ */
+async function checkForCliUpdate(): Promise<void> {
+  await maybeOfferCliUpdate({
+    packageName: "@getdevintern/code",
+    binName: "devintern",
+    currentVersion: VERSION,
+    isInteractive: isInteractive(process.argv, process.stdin) && !isAutomatedEnvironment(),
+    noUpdateEnv: "DEVINTERN_NO_UPDATE",
+    autoUpdateEnv: "DEVINTERN_AUTO_UPDATE",
+  });
+}
 
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
 const __filename_resolved = fileURLToPath(import.meta.url);
@@ -432,6 +447,10 @@ function loadSupabaseConfig() {
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
+
+// Check npm for a newer global install before any real work. Local/monorepo
+// runs and --help/--version/--no-update are no-ops inside maybeOfferCliUpdate.
+await checkForCliUpdate();
 
 // Check if running subcommands before parsing
 // This needs to happen early to avoid Commander treating them as task keys
@@ -1288,7 +1307,8 @@ program
   .option(
     "--sandbox <provider>",
     "Run the agent inside a sandbox: none | auto | native | nono | srt | docker | smolvm (overrides AGENT_SANDBOX; run 'devintern sandbox' to see what is available)",
-  );
+  )
+  .addOption(new Option("--no-update", "Skip the npm update check for this run"));
 
 program.addHelpText(
   "after",

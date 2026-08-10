@@ -73,11 +73,18 @@ describe("track", () => {
       source_type: "figma",
       ok: true,
       prompt: "should not appear",
+      attachment_count: 2,
+      has_images: true,
     });
 
     expect(captures).toHaveLength(1);
     expect(captures[0]?.event).toBe("story_generated");
-    expect(captures[0]?.properties).toEqual({ source_type: "figma", ok: true });
+    expect(captures[0]?.properties).toEqual({
+      source_type: "figma",
+      ok: true,
+      attachment_count: 2,
+      has_images: true,
+    });
   });
 
   test("no-ops when user opted out", async () => {
