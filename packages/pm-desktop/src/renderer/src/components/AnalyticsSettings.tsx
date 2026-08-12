@@ -1,6 +1,6 @@
 import { FolderOpen, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { UpdateStatus } from "../../../shared/auto-update.ts";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ProjectBindingInfo } from "../../../shared/project-binding.ts";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,32 +14,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-
-function updateCheckSummary(status: UpdateStatus | null, checking: boolean): string {
-  if (checking) return "Checking for updates…";
-  if (!status) return "Update status unavailable.";
-  if (status.phase === "disabled") {
-    return "Update checks run only in packaged installs (not in development builds).";
-  }
-  if (status.phase === "checking") return "Checking for updates…";
-  if (status.phase === "downloading") {
-    const pct = status.download?.percent;
-    return pct === undefined ? "Downloading update…" : `Downloading update… ${Math.floor(pct)}%`;
-  }
-  if (status.phase === "downloaded" && status.availableVersion) {
-    return `Version ${status.availableVersion} is downloaded. Use the banner to restart and install.`;
-  }
-  if (status.phase === "available" && status.availableVersion) {
-    return `Version ${status.availableVersion} is available. Use the banner to download and install.`;
-  }
-  if (status.phase === "not-available") {
-    return `You're up to date (version ${status.currentVersion}).`;
-  }
-  if (status.phase === "error" && status.errorMessage) {
-    return status.errorMessage;
-  }
-  return `Current version ${status.currentVersion}.`;
-}
+import { qk } from "../queries/keys.ts";
+import { useAnalyticsEnabled } from "../queries/useAnalyticsEnabled.ts";
+import { useGitHubAuthStatus } from "../queries/useGitHubAuthStatus.ts";
 
 interface AnalyticsSettingsProps {
   /** Current project path (for disk settings). */
@@ -61,58 +38,41 @@ export function AnalyticsSettings({
   agentRunning = false,
   updatingFromRemote = false,
 }: AnalyticsSettingsProps = {}) {
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [githubConnected, setGithubConnected] = useState(false);
-  const [githubAuthMethod, setGithubAuthMethod] = useState<"oauth" | "pat" | undefined>(undefined);
-  const [githubLogin, setGithubLogin] = useState<string | undefined>(undefined);
-  const [githubTokenEncrypted, setGithubTokenEncrypted] = useState<boolean | null>(null);
   const [clearingToken, setClearingToken] = useState(false);
   const [confirmClearToken, setConfirmClearToken] = useState(false);
   const [githubTokenError, setGithubTokenError] = useState<string | null>(null);
 
+  const analyticsQuery = useAnalyticsEnabled(open);
+  const githubAuthQuery = useGitHubAuthStatus(open);
+  const githubConnected = githubAuthQuery.data?.connected ?? false;
+  const githubAuthMethod = githubAuthQuery.data?.method;
+  const githubLogin = githubAuthQuery.data?.login;
+  const githubTokenEncrypted = githubAuthQuery.data
+    ? githubAuthQuery.data.connected
+      ? (githubAuthQuery.data.tokenEncrypted ?? false)
+      : null
+    : null;
+
   const removeBlocked = agentRunning || updatingFromRemote;
 
+  // Seed the analytics toggle from the shared cache when the dialog opens.
   useEffect(() => {
     if (!open) return;
     setError(null);
     setGithubTokenError(null);
     setConfirmClearToken(false);
-    void window.pm.getAnalyticsEnabled().then((result) => {
-      if (result.ok) {
-        setEnabled(result.value);
-      } else {
-        setError(result.error.message);
-      }
-    });
-    void window.pm.getUpdateStatus().then((result) => {
-      if (result.ok) setUpdateStatus(result.value);
-    });
-    void window.pm.getGitHubAuthStatus().then((result) => {
-      if (result.ok) {
-        setGithubConnected(result.value.connected);
-        setGithubAuthMethod(result.value.method);
-        setGithubLogin(result.value.login);
-        setGithubTokenEncrypted(
-          result.value.connected ? (result.value.tokenEncrypted ?? false) : null,
-        );
-      }
-    });
-  }, [open]);
-
-  useEffect(() => {
-    return window.pm.onUpdateStatus((status) => {
-      setUpdateStatus(status);
-    });
-  }, []);
+    if (analyticsQuery.data !== undefined) {
+      setEnabled(analyticsQuery.data);
+    }
+  }, [open, analyticsQuery.data]);
 
   const onCheckedChange = (next: boolean) => {
     setLoading(true);
@@ -124,24 +84,13 @@ export function AnalyticsSettings({
       if (!result.ok) {
         setEnabled(previous);
         setError(result.error.message);
+        return;
       }
+      // Keep the shared analytics cache in sync.
+      queryClient.setQueryData(qk.analyticsEnabled, next);
     });
   };
 
-  const onCheckForUpdates = () => {
-    setCheckingUpdate(true);
-    setUpdateError(null);
-    void window.pm.checkForUpdates().then((result) => {
-      setCheckingUpdate(false);
-      if (result.ok) {
-        setUpdateStatus(result.value);
-      } else {
-        setUpdateError(result.error.message);
-      }
-    });
-  };
-
-  const updatesDisabled = updateStatus?.phase === "disabled";
   const diskPath = projectBinding?.localPath ?? projectDir;
   const isManaged = projectBinding?.managed === true;
 
@@ -189,11 +138,9 @@ export function AnalyticsSettings({
         setGithubTokenError(result.error.message);
         return;
       }
-      setGithubConnected(false);
-      setGithubAuthMethod(undefined);
-      setGithubLogin(undefined);
-      setGithubTokenEncrypted(null);
       setConfirmClearToken(false);
+      // Refresh the shared auth-status cache (now disconnected).
+      void queryClient.invalidateQueries({ queryKey: qk.githubAuthStatus });
     });
   };
 
@@ -363,35 +310,6 @@ export function AnalyticsSettings({
             </div>
           </>
         ) : null}
-
-        <Separator />
-
-        <div className="space-y-3 py-1" data-testid="settings-updates">
-          <div className="space-y-1">
-            <Label className="text-sm text-foreground">Updates</Label>
-            <p
-              className="text-xs leading-relaxed text-muted-foreground"
-              data-testid="settings-update-summary"
-            >
-              {updateCheckSummary(updateStatus, checkingUpdate)}
-            </p>
-            {updateError && (
-              <p className="text-xs text-destructive" data-testid="settings-update-error">
-                {updateError}
-              </p>
-            )}
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={checkingUpdate || updatesDisabled}
-            data-testid="settings-check-updates"
-            onClick={onCheckForUpdates}
-          >
-            {checkingUpdate ? "Checking…" : "Check for updates"}
-          </Button>
-        </div>
       </DialogContent>
     </Dialog>
   );

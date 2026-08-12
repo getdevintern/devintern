@@ -5,12 +5,8 @@
  */
 
 import { existsSync } from "fs";
-import {
-  type AgentHarness,
-  spawnAgent,
-  reapTree,
-  resolveExecutablePathWithRetry,
-} from "@devintern/agent-harness";
+import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
+import type { AgentHarness } from "@devintern/agent-harness";
 import { getSandbox } from "./sandbox";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";

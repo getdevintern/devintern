@@ -7,7 +7,8 @@
  * native `estimate` field.
  */
 
-import { LinearClient, type LinearComment, type LinearIssueDetail } from "@devintern/task-trackers";
+import { LinearClient } from "@devintern/task-trackers";
+import type { LinearComment, LinearIssueDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -27,8 +28,10 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  type ClarityAssessmentLike,
-  type EstimationResultLike,
+} from "../shared/markdown-comment-formatter";
+import type {
+  ClarityAssessmentLike,
+  EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";

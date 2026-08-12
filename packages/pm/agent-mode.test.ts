@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { getHarness, type AgentHarness } from "@devintern/agent-harness";
+import { getHarness } from "@devintern/agent-harness";
+import type { AgentHarness } from "@devintern/agent-harness";
 
 import { withReadonlyMode } from "./lib/agent";
 

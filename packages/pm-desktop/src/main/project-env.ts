@@ -22,9 +22,9 @@ import {
   isTrackerId,
   listConfiguredTrackers,
   parseEnvContent,
-  type ConfiguredTracker,
-  type TrackerId,
 } from "@devintern/task-trackers";
+import type { ConfiguredTracker, TrackerId } from "@devintern/task-trackers";
+import { applyPmTrackerDefaults, missingRequiredPmFields } from "@getdevintern/pm/init-shared";
 
 const CONFIG_DIR = ".devintern-pm";
 
@@ -180,4 +180,41 @@ export async function persistActiveHarness(
   delete process.env.AGENT_CLI_PATH;
 
   return harness.name;
+}
+
+/**
+ * Merge a tracker's credentials into the existing `.devintern-pm/.env` and
+ * make it the active tracker — without overwriting unrelated settings or
+ * other trackers' credentials.
+ *
+ * Unlike {@link persistActiveTracker} (which only flips `TASK_TRACKER` for an
+ * already-configured tracker), this writes the credential env vars too, so a
+ * user can connect a new tracker (or reconfigure an existing one) from the
+ * desktop app after init. Optional fields left blank are not written, so
+ * existing values for those keys are preserved.
+ *
+ * @throws When the tracker id is unknown, required fields are missing, or the
+ *   env file does not exist.
+ */
+export async function persistTrackerCredentials(
+  projectDir: string,
+  trackerId: string,
+  values: Record<string, string>,
+): Promise<{ envPath: string; trackerId: TrackerId }> {
+  if (!isTrackerId(trackerId)) {
+    throw new Error(`Unknown task tracker: ${trackerId}`);
+  }
+  const merged = applyPmTrackerDefaults(trackerId, values);
+  const missing = missingRequiredPmFields(trackerId, merged);
+  if (missing.length > 0) {
+    throw new Error(`Missing required fields: ${missing.join(", ")}`);
+  }
+  const vars: Record<string, string> = { TASK_TRACKER: trackerId };
+  for (const [key, value] of Object.entries(merged)) {
+    if (value.trim()) {
+      vars[key] = value;
+    }
+  }
+  const envPath = await upsertProjectEnvVars(projectDir, vars);
+  return { envPath, trackerId };
 }

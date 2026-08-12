@@ -4,13 +4,13 @@
 
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { basename } from "node:path";
-import {
-  IPC_CHANNELS,
-  type AgentChunkEvent,
-  type AttachmentRef,
-  type GitHubOAuthPrompt,
-  type PmDesktopApi,
-  type UpdateStatus,
+import { IPC_CHANNELS } from "../shared/ipc-contract.ts";
+import type {
+  AgentChunkEvent,
+  AttachmentRef,
+  GitHubOAuthPrompt,
+  PmDesktopApi,
+  UpdateStatus,
 } from "../shared/ipc-contract.ts";
 import { createShowAboutLatch } from "./show-about-latch.ts";
 
@@ -65,6 +65,7 @@ const api: PmDesktopApi = {
   probeTrackerConnection: (trackerId, values) =>
     ipcRenderer.invoke(IPC_CHANNELS.probeTrackerConnection, trackerId, values),
   initializeProject: (input) => ipcRenderer.invoke(IPC_CHANNELS.initializeProject, input),
+  updateProjectTracker: (input) => ipcRenderer.invoke(IPC_CHANNELS.updateProjectTracker, input),
   generateStory: (requestId, input) =>
     ipcRenderer.invoke(IPC_CHANNELS.generateStory, requestId, input),
   editStory: (requestId, input) => ipcRenderer.invoke(IPC_CHANNELS.editStory, requestId, input),

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -10,6 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { ABOUT_PRODUCT_NAME, ABOUT_WEBSITE_URL } from "../../../shared/about.ts";
 import type { UpdateStatus } from "../../../shared/auto-update.ts";
+import { qk } from "../queries/keys.ts";
+import { useUpdateStatus } from "../queries/useUpdateStatus.ts";
 
 export interface AboutDialogProps {
   open: boolean;
@@ -57,13 +60,28 @@ export function formatAboutUpdateResult(status: UpdateStatus): string {
 export function AboutDialog({ open, onOpenChange, version, onOpenWebsite }: AboutDialogProps) {
   const [checking, setChecking] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const { data: status } = useUpdateStatus();
+
+  // Seed the update message from the live status when About opens (only when
+  // there is no manual-check message yet, so we don't clobber "You're up to
+  // date."). Re-runs when the shared status changes while open.
+  useEffect(() => {
+    if (!open) return;
+    setUpdateMessage((prev) => prev ?? (status ? formatAboutUpdateResult(status) : null));
+  }, [open, status]);
+
+  const updatesDisabled = status?.phase === "disabled";
 
   const onCheckForUpdates = () => {
+    if (updatesDisabled) return;
     setChecking(true);
     setUpdateMessage(null);
     void window.pm.checkForUpdates().then((result) => {
       setChecking(false);
       if (result.ok) {
+        // Keep the shared update-status cache in sync for other readers.
+        queryClient.setQueryData(qk.updateStatus, result.value);
         setUpdateMessage(formatAboutUpdateResult(result.value));
       } else {
         setUpdateMessage(result.error.message);
@@ -113,7 +131,10 @@ export function AboutDialog({ open, onOpenChange, version, onOpenWebsite }: Abou
               type="button"
               variant="outline"
               data-testid="about-dialog-check-updates"
-              disabled={checking}
+              disabled={checking || updatesDisabled}
+              title={
+                updatesDisabled ? "Update checks are unavailable in development builds" : undefined
+              }
               onClick={onCheckForUpdates}
             >
               {checking ? "Checking…" : "Check for updates"}

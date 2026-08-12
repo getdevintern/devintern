@@ -1,6 +1,7 @@
 import { Activity, CircleCheck, CircleOff, GitPullRequest, Inbox } from "lucide-react";
 
-import { usePoll, type WorkerResponse } from "@/lib/api";
+import { usePoll } from "@/lib/api";
+import type { WorkerResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function Item({

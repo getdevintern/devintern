@@ -11,8 +11,8 @@ import {
   extractTextFromADF,
   formatIssueDetails,
   getRelatedWorkItems,
-  type JiraIssue,
 } from "@devintern/task-trackers";
+import type { JiraIssue } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,

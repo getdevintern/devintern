@@ -9,12 +9,8 @@
  * estimation is comment-only.
  */
 
-import {
-  AsanaClient,
-  parseAsanaTaskFilters,
-  type AsanaStory,
-  type AsanaTaskDetail,
-} from "@devintern/task-trackers";
+import { AsanaClient, parseAsanaTaskFilters } from "@devintern/task-trackers";
+import type { AsanaStory, AsanaTaskDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -34,8 +30,10 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  type ClarityAssessmentLike,
-  type EstimationResultLike,
+} from "../shared/markdown-comment-formatter";
+import type {
+  ClarityAssessmentLike,
+  EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";

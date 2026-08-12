@@ -54,7 +54,7 @@ export function shouldPromptForUpdate(input: {
   snoozedVersion?: string;
   snoozedUntil?: number;
   now: number;
-  /** When true (Settings / About "Check for updates"), ignore snooze. */
+  /** When true (About "Check for updates"), ignore snooze. */
   force?: boolean;
 }): boolean {
   if (input.force) return true;

@@ -16,18 +16,11 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import {
-  type AuthenticatedUser,
-  type SupabaseAuthConfig,
-  getAuthenticatedUser,
-} from "@devintern/auth";
+import { getAuthenticatedUser } from "@devintern/auth";
+import type { AuthenticatedUser, SupabaseAuthConfig } from "@devintern/auth";
 import { fetchWithRetry } from "@devintern/utils";
-import {
-  type EntitlementSource,
-  getAllowedBenefits,
-  isAutomationSource,
-  validatePolarLicenseKey,
-} from "./polar.ts";
+import { getAllowedBenefits, isAutomationSource, validatePolarLicenseKey } from "./polar.ts";
+import type { EntitlementSource } from "./polar.ts";
 
 export {
   type EntitlementSource,

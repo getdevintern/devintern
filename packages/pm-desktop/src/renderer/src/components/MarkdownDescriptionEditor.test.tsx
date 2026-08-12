@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import type { Ref } from "react";
 import type { MDXEditorMethods } from "@mdxeditor/editor";
 
@@ -46,14 +47,19 @@ mock.module("@mdxeditor/editor", () => {
       insertMarkdown: () => {},
     }));
 
+    // Capture mount-time props in refs so the effect stays mount-only and does
+    // not depend on prop identities that change every parent render.
+    const markdownAtMountRef = React.useRef(props.markdown);
+    const onChangeAtMountRef = React.useRef(props.onChange);
     useEffect(() => {
       // Simulate MDXEditor mount: markdown$ publish, then Lexical export trim /
       // bullet restyle, both with initialMarkdownNormalize=true.
-      const first = props.markdown;
-      const second = mountSecondNormalize ?? normalizeLikeMdxEditor(props.markdown);
+      const first = markdownAtMountRef.current;
+      const second = mountSecondNormalize ?? normalizeLikeMdxEditor(first);
+      const onChange = onChangeAtMountRef.current;
       const fire = () => {
-        props.onChange?.(first, true);
-        props.onChange?.(second, true);
+        onChange?.(first, true);
+        onChange?.(second, true);
       };
       if (asyncMountNormalization) {
         queueMicrotask(fire);

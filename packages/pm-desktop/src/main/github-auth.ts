@@ -12,7 +12,6 @@
 
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { refreshOAuthToken } from "./github-oauth.ts";
 
 /** Test-only override so unit tests avoid Electron. */
 let userDataDirForTests: string | undefined;
@@ -289,7 +288,8 @@ export async function getGitHubToken(): Promise<string | null> {
     try {
       const refreshed = refreshForTests
         ? await refreshForTests(payload.refreshToken)
-        : await refreshOAuthToken(payload.refreshToken);
+        : // Dynamic import breaks the static cycle with github-oauth (which stores tokens here).
+          await (await import("./github-oauth.ts")).refreshOAuthToken(payload.refreshToken);
       const next: OAuthPayload = {
         accessToken: refreshed.accessToken,
         refreshToken: refreshed.refreshToken ?? payload.refreshToken,

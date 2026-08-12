@@ -2,16 +2,19 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import type { ReactNode } from "react";
 import { act, createElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import type { UpdateStatus } from "../../../shared/auto-update.ts";
 import type { IpcResult, PmDesktopApi } from "../../../shared/ipc-contract.ts";
+import type { QueryClient } from "@tanstack/react-query";
+import { qk } from "../queries/keys.ts";
+import { createTestQueryClient, withQueryClient } from "../test-helpers/query-client.tsx";
 import { formatAboutUpdateResult } from "./AboutDialog.tsx";
 
 mock.module("@/components/ui/dialog", () => {
   const React = require("react");
-  const passthrough =
-    (Tag: "div" | "h2") =>
-    ({
+  const passthrough = (Tag: "div" | "h2") => {
+    function DialogPassthrough({
       children,
       asChild: _asChild,
       ...props
@@ -19,8 +22,12 @@ mock.module("@/components/ui/dialog", () => {
       children?: ReactNode;
       asChild?: boolean;
       [key: string]: unknown;
-    }) =>
-      React.createElement(Tag, props, children);
+    }) {
+      return React.createElement(Tag, props, children);
+    }
+    DialogPassthrough.displayName = `DialogPassthrough(${Tag})`;
+    return DialogPassthrough;
+  };
 
   return {
     Dialog: ({ open, children }: { open: boolean; children?: ReactNode }) =>
@@ -77,6 +84,13 @@ function ok<T>(value: T): IpcResult<T> {
   return { ok: true, value };
 }
 
+/** Drain the microtask queue enough to settle TanStack Query fetch + render. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 describe("shouldShowUpdateDialog", () => {
   const base: UpdateStatus = { phase: "idle", currentVersion: "0.2.0" };
 
@@ -116,6 +130,17 @@ describe("shouldShowUpdateDialog", () => {
   test("always shows downloading and errors with a message", () => {
     expect(shouldShowUpdateDialog({ ...base, phase: "downloading" })).toBe(true);
     expect(shouldShowUpdateDialog({ ...base, phase: "error", errorMessage: "offline" })).toBe(true);
+  });
+
+  test("hides background download progress while snoozed", () => {
+    expect(
+      shouldShowUpdateDialog({
+        ...base,
+        phase: "downloading",
+        snoozed: true,
+        download: { percent: 42, transferred: 4, total: 10 },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -160,7 +185,8 @@ describe("UpdateNotifier against fake window.pm", () => {
   let domWindow: Window;
   let container: HTMLDivElement;
   let root: Root;
-  let statusListener: ((status: UpdateStatus) => void) | undefined;
+  let queryClient: QueryClient;
+  let getUpdateStatus: ReturnType<typeof mock>;
   let downloadUpdate: ReturnType<typeof mock>;
   let snoozeUpdate: ReturnType<typeof mock>;
   let installUpdate: ReturnType<typeof mock>;
@@ -187,15 +213,11 @@ describe("UpdateNotifier against fake window.pm", () => {
     installUpdate = mock(async () => ok({ ...available, phase: "downloaded" as const }));
     dismissUpdateError = mock(async () => ok(available));
     checkForUpdates = mock(async () => ok(available));
+    getUpdateStatus = mock(async () => ok(available));
 
     const pm = {
-      getUpdateStatus: mock(async () => ok(available)),
-      onUpdateStatus: mock((callback: (status: UpdateStatus) => void) => {
-        statusListener = callback;
-        return () => {
-          statusListener = undefined;
-        };
-      }),
+      getUpdateStatus,
+      onUpdateStatus: mock(() => () => {}),
       downloadUpdate,
       snoozeUpdate,
       installUpdate,
@@ -210,23 +232,32 @@ describe("UpdateNotifier against fake window.pm", () => {
       container as unknown as Parameters<typeof document.body.appendChild>[0],
     );
     root = createRoot(container);
+    queryClient = createTestQueryClient();
   });
 
   afterEach(() => {
     act(() => root.unmount());
+    queryClient.clear();
+    queryClient.unmount();
     container.remove();
     // @ts-expect-error test teardown
     delete globalThis.document;
     // @ts-expect-error test teardown
     delete globalThis.window;
-    statusListener = undefined;
     domWindow.close();
   });
 
   test("renders banner and drives install / later via preload API", async () => {
+    queryClient.setQueryData(qk.updateStatus, available);
+
     await act(async () => {
-      root.render(createElement(UpdateNotifier, { hasBusyWork: false }));
-      await Promise.resolve();
+      root.render(
+        withQueryClient(createElement(UpdateNotifier, { hasBusyWork: false }), queryClient),
+      );
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
     });
 
     expect(domWindow.document.querySelector('[data-testid="update-notifier"]')).not.toBeNull();
@@ -240,9 +271,23 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(install).not.toBeNull();
     await act(async () => {
       install!.click();
-      await Promise.resolve();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
     });
     expect(downloadUpdate).toHaveBeenCalledTimes(1);
+
+    // downloadUpdate resolved with `downloading`, which the component wrote
+    // back into the cache via setQueryData — re-seed `available` so the Later
+    // button is interactive again (downloading disables the action buttons).
+    await act(async () => {
+      queryClient.setQueryData(qk.updateStatus, available);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
 
     const later = domWindow.document.querySelector(
       '[data-testid="update-notifier-later"]',
@@ -250,25 +295,32 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(later).not.toBeNull();
     await act(async () => {
       later!.click();
-      await Promise.resolve();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
     });
     expect(snoozeUpdate).toHaveBeenCalledTimes(1);
   });
 
   test("retry on error calls downloadUpdate when a version is available", async () => {
-    await act(async () => {
-      root.render(createElement(UpdateNotifier, { hasBusyWork: false }));
-      await Promise.resolve();
-    });
+    const errorStatus: UpdateStatus = {
+      phase: "error",
+      currentVersion: "0.2.0",
+      availableVersion: "0.3.0",
+      errorMessage: "network down",
+    };
+    getUpdateStatus.mockImplementation(async () => ok(errorStatus));
+    queryClient.setQueryData(qk.updateStatus, errorStatus);
 
     await act(async () => {
-      statusListener?.({
-        phase: "error",
-        currentVersion: "0.2.0",
-        availableVersion: "0.3.0",
-        errorMessage: "network down",
-      });
-      await Promise.resolve();
+      root.render(
+        withQueryClient(createElement(UpdateNotifier, { hasBusyWork: false }), queryClient),
+      );
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
     });
 
     expect(
@@ -281,7 +333,10 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(retry).not.toBeNull();
     await act(async () => {
       retry!.click();
-      await Promise.resolve();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
     });
     expect(downloadUpdate).toHaveBeenCalledTimes(1);
     expect(checkForUpdates).not.toHaveBeenCalled();

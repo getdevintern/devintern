@@ -1,23 +1,34 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ComposerForm, initialComposerValues } from "./ComposerForm.tsx";
 import type { ProjectStatus } from "../../../shared/ipc-contract.ts";
+import { resetProjectStore, useProjectStore } from "../state/project-store.ts";
+import {
+  resetTicketWorkspacesStore,
+  useTicketWorkspacesStore,
+} from "../state/ticket-workspaces-store.ts";
+import { createTicketWorkspace } from "../state/ticket-workspaces.ts";
 
 const noop = () => {};
 
 function render(status: ProjectStatus, options?: { labelsError?: string | null }): string {
+  // Seed the active ticket with the composer values the form previously received as props.
+  const ticket = createTicketWorkspace("composer-1", {
+    ...initialComposerValues,
+    sourceContent: { ...initialComposerValues.sourceContent, prompt: "Ship labels" },
+    labels: ["bug"],
+  });
+  useTicketWorkspacesStore.setState({ tickets: [ticket], activeTicketId: ticket.id });
+  useProjectStore.setState({
+    status,
+    loadingProject: false,
+    updatingFromRemote: false,
+    chromeError: null,
+  });
   return renderToStaticMarkup(
     createElement(ComposerForm, {
-      status,
-      values: {
-        ...initialComposerValues,
-        sourceContent: { ...initialComposerValues.sourceContent, prompt: "Ship labels" },
-        labels: ["bug"],
-      },
-      onChange: noop,
       onGenerate: noop,
-      busy: false,
       issueTypes: ["Task", "Bug"],
       loadingIssueTypes: false,
       labels: [
@@ -30,6 +41,15 @@ function render(status: ProjectStatus, options?: { labelsError?: string | null }
     }),
   );
 }
+
+beforeEach(() => {
+  resetProjectStore();
+  resetTicketWorkspacesStore();
+});
+afterEach(() => {
+  resetProjectStore();
+  resetTicketWorkspacesStore();
+});
 
 describe("ComposerForm labels field", () => {
   test("shows Labels when the active tracker supports them", () => {

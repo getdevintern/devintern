@@ -12,25 +12,21 @@ import {
   attachmentsGuidanceBlurb,
   cleanupAttachmentStaging,
   stageAttachments,
-  type AttachmentRef,
 } from "../attachments.js";
-import {
-  createBackend,
-  type CreatedTask,
-  type LabelListResult,
-  type TaskBackend,
-} from "../backends/index.js";
+import type { AttachmentRef } from "../attachments.js";
+import { createBackend } from "../backends/index.js";
+import type { CreatedTask, LabelListResult, TaskBackend } from "../backends/index.js";
 import type { Config } from "../config.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
-import {
-  EngineError,
-  type EngineCallEvents,
-  type PromptStyle,
-  type SourceInput,
-  type StoryDraft,
-  type SubtaskDraft,
-  type ProjectRef,
+import { EngineError } from "./types.js";
+import type {
+  EngineCallEvents,
+  PromptStyle,
+  SourceInput,
+  StoryDraft,
+  SubtaskDraft,
+  ProjectRef,
 } from "./types.js";
 import { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes } from "../issue-types.js";
 

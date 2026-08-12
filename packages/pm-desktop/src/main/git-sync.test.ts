@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { type GitExec, resolveCurrentBranch, syncProjectFromRemote } from "./git-sync.ts";
+import { resolveCurrentBranch, syncProjectFromRemote } from "./git-sync.ts";
+import type { GitExec } from "./git-sync.ts";
 
 type Handler = (args: readonly string[]) => { code: number; stdout?: string; stderr?: string };
 

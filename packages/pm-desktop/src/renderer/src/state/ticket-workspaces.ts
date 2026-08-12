@@ -6,15 +6,10 @@
  * ticket A keeps updating A after the user switches to ticket B.
  */
 
-import { type ComposerValues, initialComposerValues } from "../components/ComposerForm.tsx";
-import {
-  initialOutputState,
-  isBusy,
-  outputReducer,
-  type OutputAction,
-  type OutputState,
-  type Phase,
-} from "./app-store.ts";
+import { initialComposerValues } from "./composer-values.ts";
+import type { ComposerValues } from "./composer-values.ts";
+import { initialOutputState, isBusy, outputReducer } from "./app-store.ts";
+import type { OutputAction, OutputState, Phase } from "./app-store.ts";
 
 export interface TicketWorkspace {
   id: string;

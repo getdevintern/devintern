@@ -22,7 +22,7 @@ import {
   requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense } from "@devintern/license-check";
+import { checkLicense, requireLicense, requireTeamAutomation } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -36,15 +36,14 @@ import {
   resolveExecutablePathWithRetry,
   spawnAgent,
   reapTree,
-  type AgentHarness,
-  type AgentRunOptions,
-  type ResolvedHarness,
 } from "@devintern/agent-harness";
+import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
 import { isMarkdownFilePath, parseTrelloCardReference } from "@devintern/task-trackers";
 import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
-import { TaskFormatter, type RetryPromptContext } from "./lib/task-formatter";
+import { TaskFormatter } from "./lib/task-formatter";
+import type { RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
@@ -52,10 +51,8 @@ import { isInteractive, runInitWizard } from "./lib/init-wizard";
 import { TaskTrackerManager } from "./lib/task-tracker-manager";
 import type { TaskTrackerClient } from "./lib/task-tracker-client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
-import {
-  isMarkdownTaskTracker,
-  type MarkdownTaskRaw,
-} from "./lib/trackers/markdown/markdown-task-tracker-client";
+import { isMarkdownTaskTracker } from "./lib/trackers/markdown/markdown-task-tracker-client";
+import type { MarkdownTaskRaw } from "./lib/trackers/markdown/markdown-task-tracker-client";
 import {
   TRACKER_CAPABILITIES,
   supportedTrackers,
@@ -520,10 +517,21 @@ if (process.argv[2] === "init") {
     let verbose = false;
     let ui = false;
     let uiPort: number | undefined;
+    let workspacePath: string | undefined;
+    let workspaceFlag = false;
+    let noWorkspace = false;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--listen") {
         listen = true;
+      } else if (args[i] === "--workspace") {
+        workspaceFlag = true;
+        if (args[i + 1] && !args[i + 1].startsWith("-")) {
+          workspacePath = args[i + 1];
+          i++;
+        }
+      } else if (args[i] === "--no-workspace") {
+        noWorkspace = true;
       } else if (args[i] === "--port" && args[i + 1]) {
         port = parseInt(args[i + 1], 10);
         i++;
@@ -564,6 +572,10 @@ if (process.argv[2] === "init") {
         console.log("Options:");
         console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
         console.log("                      (same query language as batch --query runs)");
+        console.log("  --workspace [path]  Fleet mode: serve every repo in the workspace");
+        console.log("                      (~/.devintern/workspace.toml, or the given path).");
+        console.log("                      Auto-enabled when a workspace exists; team tier.");
+        console.log("  --no-workspace      Ignore an existing workspace; single-repo mode");
         console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
         console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
         console.log(
@@ -599,6 +611,34 @@ if (process.argv[2] === "init") {
       requireAutomation: true,
     });
     requireLicense(licenseResult);
+
+    // Workspace (fleet) mode: one daemon serves every repo in the workspace.
+    // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
+    // unless --no-workspace. Team-tier capability.
+    {
+      const { hasWorkspace } = await import("./lib/workspace/paths");
+      const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
+      if (workspaceMode && !listen) {
+        requireTeamAutomation(licenseResult);
+        const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
+        await runWorkspaceWorker({
+          workspacePath,
+          query: workerQuery,
+          intervalSeconds,
+          verbose,
+          ui,
+          uiPort,
+        });
+        return;
+      }
+      if (workspaceMode && listen) {
+        console.error(
+          "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
+            "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
+        );
+        process.exit(1);
+      }
+    }
 
     const { startWorker } = await import("./worker");
     const { WorkerState } = await import("./lib/worker-state");
@@ -946,6 +986,31 @@ if (process.argv[2] === "init") {
     }
 
     await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
+  })();
+} else if (process.argv[2] === "workspace") {
+  // Workspace management: scaffold or grow the multi-repo fleet config.
+  // No license gate here - enforcement lives on the worker's workspace mode.
+  (async () => {
+    const sub = process.argv[3];
+    if (sub === "init") {
+      const { runWorkspaceInit } = await import("./lib/workspace/init");
+      process.exit(runWorkspaceInit());
+    }
+    if (sub === "import") {
+      const { runWorkspaceImport } = await import("./lib/workspace/init");
+      process.exit(await runWorkspaceImport(process.cwd()));
+    }
+    console.log("Usage: devintern workspace <command>");
+    console.log("");
+    console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
+    console.log("The fleet worker serves every repo listed there; see `devintern worker --help`.");
+    console.log("");
+    console.log("Commands:");
+    console.log("  init      Create the workspace config and shared .env");
+    console.log("  import    Add the current repo to the workspace (run inside the repo);");
+    console.log("            merges its .devintern-code/.env into the workspace .env and");
+    console.log("            keeps conflicting values repo-local in [repos.env]");
+    process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
   })();
 } else if (process.argv[2] === "dashboard") {
   // Local observability dashboard, standalone: reads the worker's SQLite
@@ -1377,6 +1442,7 @@ const isSubcommand = [
   "init",
   "worker",
   "dashboard",
+  "workspace",
   "serve",
   "address-review",
   "resolve-conflicts",
@@ -3721,7 +3787,7 @@ async function runAgentHarness(
                 // Register the PR so worker review-polling watches it automatically.
                 if (prResult.url) {
                   recordAgentPrFromUrl(prResult.url, branchForPr, taskKey);
-                  recordRunPr({ ...(parseGitHubPrUrl(prResult.url) ?? {}), url: prResult.url });
+                  recordRunPr({ ...parseGitHubPrUrl(prResult.url), url: prResult.url });
                 }
 
                 if (taskKey && tracker && !skipComments) {

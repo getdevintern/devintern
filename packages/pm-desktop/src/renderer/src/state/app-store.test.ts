@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-  initialOutputState,
-  isBusy,
-  outputReducer,
-  type OutputAction,
-  type OutputState,
-} from "./app-store.ts";
+import { initialOutputState, isBusy, outputReducer } from "./app-store.ts";
+import type { OutputAction, OutputState } from "./app-store.ts";
 
 const draft = { summary: "Title", description: "Body" };
 const error = { code: "agent-failed", message: "boom" };

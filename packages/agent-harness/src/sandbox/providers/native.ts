@@ -10,8 +10,8 @@
  *   it confines Bash commands and their children, not the agent's own file
  *   Write/Edit tools (those go through the permission system we disable).
  * - codex: `--sandbox workspace-write` (already emitted by the codex
- *   harness) plus `-c sandbox_workspace_write.writable_roots=[...]` config
- *   overrides for the extra writable paths.
+ *   harness) plus network/local-binding and
+ *   `sandbox_workspace_write.writable_roots=[...]` config overrides.
  *
  * Antigravity (the Gemini CLI successor) is deliberately not wired: its
  * `--sandbox` confines shell commands only (agent file tools bypass it),
@@ -30,6 +30,7 @@
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { applyCodexNetworkArgs } from "../../harnesses/codex.js";
 import { unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -132,10 +133,14 @@ export class NativeSandboxProvider implements SandboxProvider {
     if (!outArgs.includes("--sandbox")) {
       outArgs.unshift("--sandbox", "workspace-write");
     }
+    const configuredArgs = applyCodexNetworkArgs(outArgs, policy.network);
     const extraRoots = policy.writablePaths.filter((p) => p !== policy.workingDir);
     if (extraRoots.length > 0) {
-      outArgs.push("-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(extraRoots)}`);
+      configuredArgs.push(
+        "-c",
+        `sandbox_workspace_write.writable_roots=${JSON.stringify(extraRoots)}`,
+      );
     }
-    return { path, args: outArgs };
+    return { path, args: configuredArgs };
   }
 }

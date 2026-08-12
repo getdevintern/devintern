@@ -25,6 +25,11 @@ export interface WorkerOptions {
   /** Mode 1 polling interval in seconds (default 60). */
   intervalSeconds?: number;
   verbose?: boolean;
+  /** Single-instance lock override (workspace mode locks the workspace home
+   *  instead of the current directory). */
+  lock?: LockManager;
+  /** What this worker serves, for the startup banner (defaults to cwd). */
+  label?: string;
 }
 
 /**
@@ -52,7 +57,7 @@ export async function startWorker(
   acquirers: Acquirer[] = [],
 ): Promise<void> {
   console.log("👷 Starting devintern worker");
-  console.log(`   Project: ${process.cwd()}`);
+  console.log(`   Project: ${options.label ?? process.cwd()}`);
   console.log(`   Webhook listener (Mode 3): ${options.listen ? "enabled" : "disabled"}`);
   console.log(
     `   Polling sources (Mode 1): ${
@@ -63,7 +68,7 @@ export async function startWorker(
   // Single-instance guard, separate from the CLI task lock so an idle daemon
   // does not block manual `devintern TASK-123` runs. The executor still takes
   // the task lock per run (one in-flight task per repo).
-  const lock = new LockManager(process.cwd(), ".worker.lock");
+  const lock = options.lock ?? new LockManager(process.cwd(), ".worker.lock");
   const lockResult = lock.acquire();
   if (!lockResult.success) {
     console.error(`❌ ${lockResult.message.replace("devintern", "devintern worker")}`);

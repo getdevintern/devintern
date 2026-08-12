@@ -4,7 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/change-detector";
-import { TaskPollingAcquirer, type ReadyTask } from "../src/lib/task-polling-acquirer";
+import { TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
+import type { ReadyTask } from "../src/lib/task-polling-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 

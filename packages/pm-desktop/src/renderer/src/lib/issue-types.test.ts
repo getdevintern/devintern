@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_ISSUE_TYPES,
-  cacheIssueTypesFromStatus,
   getDefaultIssueType,
   issueTypeIfNeedsReset,
   orderIssueTypes,
@@ -17,29 +16,6 @@ describe("resolveIssueTypes", () => {
     expect(resolveIssueTypes(undefined)).toEqual(DEFAULT_ISSUE_TYPES);
     expect(resolveIssueTypes(null)).toEqual(DEFAULT_ISSUE_TYPES);
     expect(resolveIssueTypes([])).toEqual(DEFAULT_ISSUE_TYPES);
-  });
-});
-
-describe("cacheIssueTypesFromStatus", () => {
-  test("refreshes cache when status.issueTypes change after Update", () => {
-    const cache = new Map<string, string[]>();
-    cache.set("ACME", ["Epic", "Task"]);
-
-    const types = cacheIssueTypesFromStatus(
-      { issueTypes: ["Bug", "Story", "Task"], defaultProjectKey: "ACME" },
-      cache,
-    );
-
-    expect(types).toEqual(["Bug", "Story", "Task"]);
-    expect(cache.get("ACME")).toEqual(["Bug", "Story", "Task"]);
-    expect(cache.size).toBe(1);
-  });
-
-  test("clears stale keys when project key is absent", () => {
-    const cache = new Map<string, string[]>([["OLD", ["Epic"]]]);
-    const types = cacheIssueTypesFromStatus({ issueTypes: ["Task"] }, cache);
-    expect(types).toEqual(["Task"]);
-    expect(cache.size).toBe(0);
   });
 });
 

@@ -5,7 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
-import { isBusy, type OutputState } from "../state/app-store.ts";
+import { isBusy } from "../state/app-store.ts";
+import { useActiveTicket, useComposerBusy } from "../state/selectors.ts";
+import { useTicketWorkspacesStore } from "../state/ticket-workspaces-store.ts";
 import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 
 const MarkdownDescriptionEditor = lazy(async () => {
@@ -14,20 +16,9 @@ const MarkdownDescriptionEditor = lazy(async () => {
 });
 
 interface OutputPanelProps {
-  output: OutputState;
-  issueType: string;
-  decompose: boolean;
-  /** Extra busy (e.g. harness/tracker/project switch) beyond the ticket phase. */
-  busy?: boolean;
-  onTitleChange: (summary: string) => void;
-  onDescriptionChange: (description: string) => void;
   onEdit: (editPrompt: string) => void;
   onCreate: () => void;
-  onToggleSubtask: (index: number) => void;
   onCreateSubtasks: () => void;
-  onSkipSubtasks: () => void;
-  onRestart: () => void;
-  onDismissError: () => void;
   onOpenUrl: (url: string) => void;
   /** Soft Code discovery tip shown after a successful create. */
   showCodeDiscovery?: boolean;
@@ -63,19 +54,9 @@ function WorkingIndicator({ label }: { label: string }) {
 }
 
 export function OutputPanel({
-  output,
-  issueType,
-  decompose,
-  busy: externallyBusy = false,
-  onTitleChange,
-  onDescriptionChange,
   onEdit,
   onCreate,
-  onToggleSubtask,
   onCreateSubtasks,
-  onSkipSubtasks,
-  onRestart,
-  onDismissError,
   onOpenUrl,
   showCodeDiscovery = false,
   onLearnMoreCode,
@@ -83,7 +64,24 @@ export function OutputPanel({
   codeDiscoveryDismissError = null,
 }: OutputPanelProps) {
   const [editPrompt, setEditPrompt] = useState("");
+  const activeTicket = useActiveTicket();
+  const externallyBusy = useComposerBusy();
+  const applyOutputAction = useTicketWorkspacesStore((s) => s.applyOutputAction);
+  // OutputPanel only mounts when a ticket is active, but guard defensively.
+  if (!activeTicket) return null;
+  const output = activeTicket.output;
+  const issueType = activeTicket.composer.issueType;
+  const decompose = activeTicket.composer.decompose;
   const busy = externallyBusy || isBusy(output.phase);
+  const onTitleChange = (summary: string) =>
+    applyOutputAction(activeTicket.id, { type: "draft-title-changed", summary });
+  const onDescriptionChange = (description: string) =>
+    applyOutputAction(activeTicket.id, { type: "draft-description-changed", description });
+  const onToggleSubtask = (index: number) =>
+    applyOutputAction(activeTicket.id, { type: "subtask-toggled", index });
+  const onSkipSubtasks = () => applyOutputAction(activeTicket.id, { type: "subtasks-skipped" });
+  const onRestart = () => applyOutputAction(activeTicket.id, { type: "restarted" });
+  const onDismissError = () => applyOutputAction(activeTicket.id, { type: "error-dismissed" });
 
   const submitEdit = () => {
     if (!editPrompt.trim() || busy) return;
@@ -191,7 +189,10 @@ export function OutputPanel({
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {output.subtasks.map((subtask, index) => (
-              <label key={index} className="flex items-start gap-2 rounded-md border p-2 text-sm">
+              <label
+                key={`${subtask.summary}\0${subtask.description ?? ""}`}
+                className="flex items-start gap-2 rounded-md border p-2 text-sm"
+              >
                 <input
                   type="checkbox"
                   className="mt-0.5 accent-primary"
@@ -267,8 +268,8 @@ export function OutputPanel({
               )}
               {output.subtaskOutcomes && (
                 <ul className="flex flex-col gap-1 text-xs">
-                  {output.subtaskOutcomes.map((outcome, i) => (
-                    <li key={i}>
+                  {output.subtaskOutcomes.map((outcome) => (
+                    <li key={outcome.key ?? `${outcome.subtask.summary}\0${outcome.error ?? ""}`}>
                       {outcome.error ? (
                         <span className="text-destructive">
                           ✗ {outcome.subtask.summary}: {outcome.error}

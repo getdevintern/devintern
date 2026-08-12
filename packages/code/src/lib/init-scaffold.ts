@@ -6,7 +6,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { BUNDLED_TRELLO_API_KEY, type EnvPromptStep, stepLink } from "@devintern/task-trackers";
+import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
+import type { EnvPromptStep } from "@devintern/task-trackers";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 
 export type { EnvPromptStep };

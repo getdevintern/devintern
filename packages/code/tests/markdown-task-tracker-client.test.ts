@@ -2,10 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import {
-  MarkdownTaskTrackerClient,
-  type MarkdownTaskRaw,
-} from "../src/lib/trackers/markdown/markdown-task-tracker-client";
+import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
+import type { MarkdownTaskRaw } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 
 function taskRaw(task: { raw: unknown }): MarkdownTaskRaw {
   return task.raw as MarkdownTaskRaw;

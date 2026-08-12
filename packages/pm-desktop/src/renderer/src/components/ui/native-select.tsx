@@ -1,9 +1,8 @@
-import * as React from "react";
-
+import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 /** Styled native <select> — desktop-native dropdown behavior, zero popover code. */
-function NativeSelect({ className, ...props }: React.ComponentProps<"select">) {
+function NativeSelect({ className, ...props }: ComponentProps<"select">) {
   return (
     <select
       data-slot="native-select"

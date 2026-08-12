@@ -70,10 +70,13 @@ export function LabelsField({
     );
   }, [available, selected, trimmedQuery]);
 
-  const pendingCreate =
-    allowCreate && trimmedQuery.length > 0 && !queryExists
-      ? ({ id: trimmedQuery, name: trimmedQuery } satisfies LabelRef)
-      : null;
+  const pendingCreate = useMemo(
+    () =>
+      allowCreate && trimmedQuery.length > 0 && !queryExists
+        ? ({ id: trimmedQuery, name: trimmedQuery } satisfies LabelRef)
+        : null,
+    [allowCreate, trimmedQuery, queryExists],
+  );
 
   const items = useMemo(() => {
     const byId = new Map<string, LabelRef>();

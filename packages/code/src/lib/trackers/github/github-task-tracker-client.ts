@@ -11,7 +11,8 @@
  * Estimation has no native field, so estimation runs in comment-only mode.
  */
 
-import { GitHubClient, type GitHubIssue, type GitHubIssueComment } from "@devintern/task-trackers";
+import { GitHubClient } from "@devintern/task-trackers";
+import type { GitHubIssue, GitHubIssueComment } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -31,8 +32,10 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  type ClarityAssessmentLike,
-  type EstimationResultLike,
+} from "../shared/markdown-comment-formatter";
+import type {
+  ClarityAssessmentLike,
+  EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";

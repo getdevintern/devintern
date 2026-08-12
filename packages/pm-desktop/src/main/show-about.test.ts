@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { IPC_CHANNELS } from "../shared/ipc-contract.ts";
-import { notifyShowAbout, sendShowAbout, type ShowAboutWindow } from "./show-about.ts";
+import { notifyShowAbout, sendShowAbout } from "./show-about.ts";
+import type { ShowAboutWindow } from "./show-about.ts";
 
 function createMockWindow(options: {
   destroyed?: boolean;

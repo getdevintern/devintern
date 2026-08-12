@@ -8,12 +8,8 @@
  */
 
 import { getGitHubToken } from "./github-auth.ts";
-import {
-  defaultGitExec,
-  type GitExec,
-  type GitExecOptions,
-  type GitExecResult,
-} from "./git-sync.ts";
+import { defaultGitExec } from "./git-sync.ts";
+import type { GitExec, GitExecOptions, GitExecResult } from "./git-sync.ts";
 
 const NETWORK_COMMANDS = new Set(["clone", "fetch", "pull", "ls-remote", "push"]);
 

@@ -1,9 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CODE_PRODUCT_URL } from "../../../shared/code-discovery.ts";
-import { initialOutputState, type OutputState } from "../state/app-store.ts";
-import { createTicketWorkspace, type TicketWorkspace } from "../state/ticket-workspaces.ts";
+import { initialOutputState } from "../state/app-store.ts";
+import type { OutputState } from "../state/app-store.ts";
+import { createTicketWorkspace } from "../state/ticket-workspaces.ts";
+import type { TicketWorkspace } from "../state/ticket-workspaces.ts";
+import {
+  resetTicketWorkspacesStore,
+  useTicketWorkspacesStore,
+} from "../state/ticket-workspaces-store.ts";
+import { resetProjectStore, useProjectStore } from "../state/project-store.ts";
 import { initialComposerValues } from "./ComposerForm.tsx";
 import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 import { OutputPanel } from "./OutputPanel.tsx";
@@ -63,14 +70,17 @@ describe("TicketSidebar code discovery", () => {
     projectKey: "DEV",
   });
 
+  beforeEach(() => {
+    resetTicketWorkspacesStore();
+    useTicketWorkspacesStore.setState({ tickets: [ticket], activeTicketId: ticket.id });
+  });
+  afterEach(() => resetTicketWorkspacesStore());
+
   function renderSidebar(show: boolean, canOpenTicket = true): string {
     return renderToStaticMarkup(
       createElement(TicketSidebar, {
-        tickets: [ticket],
-        activeTicketId: ticket.id,
         onOpenTicket: noop,
         canOpenTicket,
-        onActivateTicket: noop,
         onCloseTicket: noop,
         showCodeDiscovery: show,
         onLearnMoreCode: show ? noop : undefined,
@@ -111,21 +121,34 @@ describe("OutputPanel post-create code discovery", () => {
     },
   };
 
-  function renderOutput(show: boolean): string {
+  function seedTicket(output: OutputState): TicketWorkspace {
+    const t = createTicketWorkspace("out-1", {
+      ...initialComposerValues,
+      sourceContent: { ...initialComposerValues.sourceContent },
+      issueType: "Task",
+      decompose: false,
+    });
+    return { ...t, output };
+  }
+
+  beforeEach(() => {
+    resetProjectStore();
+    resetTicketWorkspacesStore();
+    useProjectStore.setState({ loadingProject: false, updatingFromRemote: false });
+  });
+  afterEach(() => {
+    resetProjectStore();
+    resetTicketWorkspacesStore();
+  });
+
+  function renderOutput(show: boolean, output: OutputState = doneOutput): string {
+    const ticket = seedTicket(output);
+    useTicketWorkspacesStore.setState({ tickets: [ticket], activeTicketId: ticket.id });
     return renderToStaticMarkup(
       createElement(OutputPanel, {
-        output: doneOutput,
-        issueType: "Task",
-        decompose: false,
-        onTitleChange: noop,
-        onDescriptionChange: noop,
         onEdit: noop,
         onCreate: noop,
-        onToggleSubtask: noop,
         onCreateSubtasks: noop,
-        onSkipSubtasks: noop,
-        onRestart: noop,
-        onDismissError: noop,
         onOpenUrl: noop,
         showCodeDiscovery: show,
         onLearnMoreCode: show ? noop : undefined,
@@ -135,29 +158,11 @@ describe("OutputPanel post-create code discovery", () => {
   }
 
   test("shows labels apply failure without hiding the created task", () => {
-    const html = renderToStaticMarkup(
-      createElement(OutputPanel, {
-        output: {
-          ...doneOutput,
-          created: {
-            ...doneOutput.created!,
-            labelsApplyError: "permission denied",
-          },
-        },
-        issueType: "Task",
-        decompose: false,
-        onTitleChange: noop,
-        onDescriptionChange: noop,
-        onEdit: noop,
-        onCreate: noop,
-        onToggleSubtask: noop,
-        onCreateSubtasks: noop,
-        onSkipSubtasks: noop,
-        onRestart: noop,
-        onDismissError: noop,
-        onOpenUrl: noop,
-      }),
-    );
+    const failingOutput: OutputState = {
+      ...doneOutput,
+      created: { ...doneOutput.created!, labelsApplyError: "permission denied" },
+    };
+    const html = renderOutput(false, failingOutput);
     expect(html).toContain("Task created: DEV-1");
     expect(html).toContain("Labels failed: permission denied");
   });

@@ -12,8 +12,8 @@ import {
   UPDATE_PERIODIC_CHECK_MS,
   UPDATE_SNOOZE_MS,
   shouldPromptForUpdate,
-  type UpdateStatus,
 } from "../shared/auto-update.ts";
+import type { UpdateStatus } from "../shared/auto-update.ts";
 import { track } from "./analytics.ts";
 import { readSettings, updateSettings } from "./settings.ts";
 
@@ -60,6 +60,35 @@ export interface AutoUpdateOptions {
   now?: () => number;
 }
 
+/**
+ * Resolve `autoUpdater` from an `electron-updater` module namespace.
+ *
+ * electron-updater is CommonJS and exposes `autoUpdater` via a getter. ESM
+ * interop (and `const { autoUpdater } = await import(...)`) often yields
+ * `undefined`, which then fails at `instance.autoDownload = …` with
+ * "Cannot set properties of undefined". Prefer reading from the default
+ * export namespace — see electron-builder#7976.
+ */
+export function resolveElectronAutoUpdater(mod: unknown): UpdaterLike {
+  if (mod == null || typeof mod !== "object") {
+    throw new Error("electron-updater module did not load.");
+  }
+  const record = mod as Record<string, unknown>;
+  const candidates = [record.autoUpdater];
+  const def = record.default;
+  if (def != null && typeof def === "object") {
+    candidates.push((def as Record<string, unknown>).autoUpdater);
+  }
+  for (const candidate of candidates) {
+    if (candidate != null && typeof candidate === "object") {
+      return candidate as UpdaterLike;
+    }
+  }
+  throw new Error(
+    "electron-updater autoUpdater is unavailable (ESM/CJS interop). See electron-builder#7976.",
+  );
+}
+
 let status: UpdateStatus = {
   phase: "idle",
   currentVersion: "0.0.0",
@@ -76,6 +105,16 @@ let downloadInFlight: Promise<UpdateStatus> | null = null;
 let forcePromptForInFlightCheck = false;
 /** Bumped at the start of each check so stale `update-available` IIFEs are ignored. */
 let checkGeneration = 0;
+/**
+ * Phase (and available version) captured BEFORE a check flips status to "checking".
+ * The `update-available` handler reads these (guarded by `checkGeneration`) to suppress
+ * a transient "available" flicker when a periodic re-check fires for a version we are
+ * already downloading or have already staged — without this, the handler sees
+ * status.phase === "checking" and regresses to "available" until the post-await
+ * re-assertion restores the real phase.
+ */
+let preCheckPhase: UpdateStatus["phase"] = "idle";
+let preCheckAvailableVersion: string | undefined;
 let initialTimer: ReturnType<typeof setTimeout> | undefined;
 let periodicTimer: ReturnType<typeof setInterval> | undefined;
 let opts: AutoUpdateOptions | null = null;
@@ -112,8 +151,28 @@ async function readSnoozed(availableVersion: string, force: boolean): Promise<bo
   });
 }
 
+/**
+ * Keep `autoInstallOnAppQuit` in sync with the snooze state of the currently
+ * available version. When the user snoozed, a downloaded update must NOT be
+ * applied on the next normal quit — otherwise "Later" is purely cosmetic.
+ * Re-evaluated on every snooze read and when snooze expires (next check).
+ */
+function applyAutoInstallOnAppQuit(snoozed: boolean): void {
+  if (!updater) return;
+  updater.autoInstallOnAppQuit = !snoozed;
+}
+
 function wireUpdater(instance: UpdaterLike): void {
-  instance.autoDownload = false;
+  // Auto-download so a found update is fetched in the background without
+  // requiring the user to click anything. The notifier banner still gates
+  // when to surface progress / restart prompts (and respects snooze).
+  // autoInstallOnAppQuit applies a downloaded update on the next normal quit
+  // — the safest "hands-off" install path because the user chose to leave.
+  // It is gated on snooze: when the user clicked "Later" for the available
+  // version, we must NOT silently install on quit — that would make the
+  // snooze cosmetic. Re-evaluated on every snooze read (checkForUpdates,
+  // update-available, snoozeUpdate) and when snooze expires (next check).
+  instance.autoDownload = true;
   instance.autoInstallOnAppQuit = true;
   instance.logger = null;
 
@@ -131,6 +190,31 @@ function wireUpdater(instance: UpdaterLike): void {
       // Ignore stale handlers from a previous check (e.g. silent IIFE finishing
       // after a newer manual check already forced snoozed: false).
       if (generation !== checkGeneration) {
+        return;
+      }
+      // Don't regress from a downloaded or downloading state: a periodic
+      // re-check of the same feed fires `update-available` again, but we
+      // already have the payload staged (or are actively fetching it) and
+      // only need a restart — surfacing "available" again would lose that
+      // progress and re-prompt the user to download what they already have.
+      // Use the pre-check phase (captured before status was flipped to
+      // "checking") so the guard still fires during a periodic re-check;
+      // fall back to the live phase for events fired outside a check.
+      const wasDownloadingOrDownloaded =
+        (preCheckPhase === "downloaded" || preCheckPhase === "downloading") &&
+        preCheckAvailableVersion === info.version;
+      const isDownloadingOrDownloaded =
+        (status.phase === "downloaded" || status.phase === "downloading") &&
+        status.availableVersion === info.version;
+      // Even when skipping a phase regression to "available", still keep
+      // autoInstallOnAppQuit and status.snoozed in sync — otherwise a
+      // periodic re-check while downloading/downloaded never clears an
+      // expired snooze (and the ready banner stays hidden).
+      applyAutoInstallOnAppQuit(snoozed);
+      if (wasDownloadingOrDownloaded || isDownloadingOrDownloaded) {
+        if (status.snoozed !== snoozed) {
+          setStatus({ phase: status.phase, snoozed });
+        }
         return;
       }
       setStatus({
@@ -178,6 +262,10 @@ function wireUpdater(instance: UpdaterLike): void {
   );
 
   instance.on("update-downloaded", (info: UpdaterUpdateInfo) => {
+    // Ready-to-install clears snooze so the restart banner reappears, and
+    // re-enables install-on-quit so a downloaded update still applies on the
+    // next normal quit if the user ignores the banner (docs: applied on quit).
+    applyAutoInstallOnAppQuit(false);
     setStatus({
       phase: "downloaded",
       availableVersion: info.version,
@@ -234,8 +322,12 @@ export function initAutoUpdate(options: AutoUpdateOptions): UpdateStatus {
   }
 
   try {
-    updater = options.createUpdater();
-    wireUpdater(updater);
+    const instance = options.createUpdater();
+    if (instance == null || typeof instance !== "object") {
+      throw new Error("Updater factory returned no instance.");
+    }
+    updater = instance;
+    wireUpdater(instance);
   } catch (error) {
     setStatus({
       phase: "error",
@@ -303,13 +395,66 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<U
   checkGeneration += 1;
   forcePromptForInFlightCheck = !silent;
 
+  const suppressAutoDownload = status.phase === "downloaded" || status.phase === "downloading";
   checkInFlight = (async () => {
+    // Capture before we clobber phase → "checking": if the feed still points
+    // at a version we already have staged (downloaded) or are actively
+    // fetching (downloading), we must not regress to "available" (a periodic
+    // re-check would otherwise re-prompt the user and lose in-flight progress).
+    // Declared outside try so silent catch can restore a wiped downloading UI.
+    const previouslyDownloaded =
+      status.phase === "downloaded" ? status.availableVersion : undefined;
+    const previouslyDownloading =
+      status.phase === "downloading" ? status.availableVersion : undefined;
+    const previousDownloadProgress = status.download;
     try {
+      // Suppress electron-updater's internal auto-download during this check
+      // when a download is already in flight or already staged — otherwise
+      // `checkForUpdates()` fires `update-available` and starts a DUPLICATE
+      // download for the same version. Restored in the finally below.
+      if (suppressAutoDownload) {
+        updater!.autoDownload = false;
+      }
+      preCheckPhase = status.phase;
+      preCheckAvailableVersion = status.availableVersion;
       setStatus({ phase: "checking", errorMessage: undefined });
       const result = await updater!.checkForUpdates();
 
       if (result?.updateInfo?.version) {
         const snoozed = await readSnoozed(result.updateInfo.version, !silent);
+        applyAutoInstallOnAppQuit(snoozed);
+        if (previouslyDownloaded && previouslyDownloaded === result.updateInfo.version) {
+          // Re-assert the downloaded state (the update-available event fired
+          // during the check may have flipped us to "available"). Always
+          // re-evaluate snooze so an expired window clears here too.
+          setStatus({
+            phase: "downloaded",
+            availableVersion: result.updateInfo.version,
+            releaseNotes: normalizeReleaseNotes(result.updateInfo.releaseNotes),
+            download: { percent: 100, transferred: 0, total: 0 },
+            errorMessage: undefined,
+            snoozed,
+          });
+          return;
+        }
+        if (previouslyDownloading && previouslyDownloading === result.updateInfo.version) {
+          // Re-assert the in-flight download state — the update-available
+          // event during the check flipped us to "available", but the
+          // auto-download is already running and we must preserve its progress.
+          setStatus({
+            phase: "downloading",
+            availableVersion: result.updateInfo.version,
+            releaseNotes: normalizeReleaseNotes(result.updateInfo.releaseNotes),
+            download: previousDownloadProgress ?? {
+              percent: 0,
+              transferred: 0,
+              total: 0,
+            },
+            errorMessage: undefined,
+            snoozed,
+          });
+          return;
+        }
         // Events may have already set phase; re-assert with snooze semantics.
         if (status.phase === "checking" || status.phase === "available") {
           setStatus({
@@ -330,8 +475,24 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<U
           : "Could not check for updates. Try again when you are online.";
 
       if (silent) {
-        // Keep a known update offer; otherwise return to idle without alarming the user.
-        if (status.phase === "available" || status.phase === "downloaded") {
+        // Keep a known update offer or in-flight download; otherwise return
+        // to idle without alarming the user. Preserve downloading too —
+        // checking-for-update cleared progress, but electron-updater may
+        // still be fetching, and a network blip on the check must not wipe UI.
+        if (
+          status.phase === "available" ||
+          status.phase === "downloaded" ||
+          status.phase === "downloading"
+        ) {
+          return;
+        }
+        if (previouslyDownloading) {
+          setStatus({
+            phase: "downloading",
+            availableVersion: previouslyDownloading,
+            download: previousDownloadProgress,
+            errorMessage: undefined,
+          });
           return;
         }
         setStatus({ phase: "idle", errorMessage: undefined });
@@ -344,6 +505,10 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<U
         download: undefined,
       });
       void track("update_failed", { app_version: opts?.currentVersion, ok: false });
+    } finally {
+      if (suppressAutoDownload) {
+        updater!.autoDownload = true;
+      }
     }
   })();
 
@@ -439,6 +604,7 @@ export async function snoozeUpdate(): Promise<UpdateStatus> {
     updateSnoozedVersion: version,
     updateSnoozedUntil: until,
   });
+  applyAutoInstallOnAppQuit(true);
   setStatus({ snoozed: true, phase: status.phase });
   return status;
 }
@@ -464,6 +630,8 @@ export function resetAutoUpdateForTests(): void {
   downloadInFlight = null;
   forcePromptForInFlightCheck = false;
   checkGeneration = 0;
+  preCheckPhase = "idle";
+  preCheckAvailableVersion = undefined;
   opts = null;
   lastTrackedAvailable = undefined;
 }

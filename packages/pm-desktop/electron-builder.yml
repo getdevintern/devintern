@@ -12,6 +12,10 @@ directories:
   output: release
   buildResources: build
 
+# App / installer icon. electron-builder reads build/icon.png (1024×1024) and
+# generates .icns / Linux icons from the committed square source image.
+icon: build/icon.png
+
 files:
   - "!**/.vscode/*"
   - "!src/*"
@@ -34,6 +38,12 @@ afterSign: build/notarize.cjs
 
 mac:
   category: public.app-category.developer-tools
+  # Keep ZIP names GitHub-safe. The default uses productName ("DevIntern PM")
+  # for the archive while latest-mac.yml uses a hyphenated safeArtifactName.
+  # Generic release uploaders normalize the archive's space to a dot, leaving
+  # the updater URL broken. The target-specific dmg.artifactName below wins
+  # for DMGs; this platform pattern controls ZIPs.
+  artifactName: DevIntern-PM-${version}-mac-${arch}.${ext}
   target:
     - target: dmg
       arch:
@@ -54,6 +64,21 @@ mac:
 
 dmg:
   artifactName: DevIntern-PM-${version}-mac-${arch}.${ext}
+  # Solid color only — do NOT use the default background.tiff template.
+  # That asset is copied into the volume as `.background.tiff` and often shows
+  # as a loose file in Finder when DMG window scripting fails (unsigned CI).
+  # backgroundColor and background are mutually exclusive in dmg-builder.
+  backgroundColor: "#f5f5f5"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
 
 linux:
   category: Development

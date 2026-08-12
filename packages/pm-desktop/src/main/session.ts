@@ -12,9 +12,12 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { listInstalledHarnesses } from "@devintern/agent-harness";
 import { findConfigDir } from "@devintern/utils";
-import { getTrackerDisplayName, type ConfiguredTracker } from "@devintern/task-trackers";
-import { createEngine, DEFAULT_ISSUE_TYPES, type PmEngine } from "@getdevintern/pm/engine";
-import { loadConfig, migrateLegacyConfigDir, type Config } from "@getdevintern/pm/config";
+import { getTrackerDisplayName } from "@devintern/task-trackers";
+import type { ConfiguredTracker } from "@devintern/task-trackers";
+import { createEngine, DEFAULT_ISSUE_TYPES } from "@getdevintern/pm/engine";
+import type { PmEngine } from "@getdevintern/pm/engine";
+import { loadConfig, migrateLegacyConfigDir } from "@getdevintern/pm/config";
+import type { Config } from "@getdevintern/pm/config";
 import type { AvailableHarness, ProjectStatus } from "../shared/ipc-contract.ts";
 import { toProjectBindingInfo } from "../shared/project-binding.ts";
 import type { ProjectGitSyncStatus } from "../shared/project-git-sync.ts";
@@ -22,7 +25,8 @@ import { authenticatedGitExec } from "./git-auth.ts";
 import { detectGitHubRemoteSlug } from "./detect-github-remote.ts";
 import { noteSuccessfulFetch } from "./managed-clone.ts";
 import { ensureUnmanagedBinding, findBindingByLocalPath } from "./project-bindings.ts";
-import { syncProjectFromRemote, type GitExec } from "./git-sync.ts";
+import { syncProjectFromRemote } from "./git-sync.ts";
+import type { GitExec } from "./git-sync.ts";
 import {
   listConfiguredTrackersForProject,
   persistActiveHarness,

@@ -12,7 +12,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { usePoll, type RunOrigin, type RunStatus, type RunsResponse } from "@/lib/api";
+import { usePoll } from "@/lib/api";
+import type { RunOrigin, RunStatus, RunsResponse } from "@/lib/api";
 import { formatDuration, formatTime } from "@/lib/utils";
 
 const PAGE_SIZE = 25;

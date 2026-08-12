@@ -5,12 +5,10 @@
 import { join } from "node:path";
 import { rename } from "node:fs/promises";
 import { pathExists } from "./runtime/fs.js";
-import {
-  resolveHarness,
-  resolveExecutablePathStrict,
-  type ResolvedHarness,
-} from "@devintern/agent-harness";
-import { loadTrackerConfig, type TrackerConfig, type TrackerType } from "@devintern/task-trackers";
+import { resolveHarness, resolveExecutablePathStrict } from "@devintern/agent-harness";
+import type { ResolvedHarness } from "@devintern/agent-harness";
+import { loadTrackerConfig } from "@devintern/task-trackers";
+import type { TrackerConfig, TrackerType } from "@devintern/task-trackers";
 
 export type { TrackerType };
 

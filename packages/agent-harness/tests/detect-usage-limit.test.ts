@@ -77,6 +77,24 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", "Error: 429 Too Many Requests").limited).toBe(true);
   });
 
+  test("detects an HTTP 429 diagnostic on stdout", () => {
+    expect(detectUsageLimit("HTTP 429: Too Many Requests", "").limited).toBe(true);
+  });
+
+  test("ignores HTTP-like text in source code and does not borrow its retry hint", () => {
+    const source = [
+      'const isQuickTunnelRateLimited = stderrOutput.includes("429 Too Many Requests");',
+      '"Cloudflare Quick Tunnel creation was rate limited. Try again in a few minutes, or use a named tunnel if you need more reliable access."',
+    ].join("\n");
+    const result = detectUsageLimit(source, "");
+    expect(result.limited).toBe(false);
+    expect(result.resetsAt).toBeUndefined();
+  });
+
+  test("ignores a test count containing 429", () => {
+    expect(detectUsageLimit("Ran 429 tests across 47 files.", "").limited).toBe(false);
+  });
+
   test("detects rate limit error phrasing", () => {
     expect(detectUsageLimit("rate limit exceeded", "").limited).toBe(true);
   });

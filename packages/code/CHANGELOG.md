@@ -1,5 +1,21 @@
 # @devintern/code Changelog
 
+## [2.3.1] - 2026-08-12
+
+### Fixed
+
+- **Codex CLI approval flag**: unattended Codex runs now use the current `approval_policy` config override instead of the removed `--ask-for-approval` flag, so tasks no longer exit before execution
+
+## [2.3.0] - 2026-08-10
+
+The workspaces release: one `devintern worker` daemon now drives a fleet of repos — fleet-wide review polling, mention sweep, relay routing, and guided `workspace init`/`import` setup.
+
+### Added
+
+- **Workspace mode — one daemon drives the fleet**: `devintern worker` grows a workspace mode that auto-detects `~/.devintern/workspace.toml` (`--workspace [path]` explicit, `--no-workspace` opts out; `--listen` stays single-repo and refuses to combine). Gated by the team-automation license after the existing automation license check. One fleet `TaskPollingAcquirer` runs detect-then-evaluate with the workspace query, then routes → clone/fetch → per-task worktree → repo run lock → `runTaskViaCli(taskKey, args, { cwd, env })` → worktree cleanup. Ambiguous/unrouted tasks are recorded via `RoutingSkipStore` and counted as handled so the dedupe keeps them out until the task changes (never guesses). The workspace `.env` + `TASK_TRACKER` + `WEBHOOK_QUEUE_DB` apply to the parent process, so the tracker client, dashboard (`--ui`), and run records all follow the fleet DB with no pipeline changes. Serial by default; per-repo locks make parallel-across-repos safe to add later (config key reserved, not built)
+- **Fleet reviews, mention sweep, and relay routing**: a fleet-wide `ReviewPollingAcquirer` watches PRs across repos, a `MentionSweepAcquirer` per GitHub repo surfaces bot mentions on any PR, and a `RelayAcquirer` re-runs the fleet query when `WORKER_RELAY_URL` + `LICENSE_KEY` are set in the workspace `.env`. `createFleetAddressPr` clones/fetches and runs `address-review` as a subprocess with per-repo env. Mention-triggered fleet runs are permission-gated in the handler (write/maintain/admin required, fails closed) since `devintern address-review` performs no gating of its own; single-repo mode keeps its existing in-pipeline gate
+- **`devintern workspace init` and `devintern workspace import`**: `init` scaffolds `~/.devintern/workspace.toml` (commented template) + shared `.env`, refusing to overwrite. `import` (run inside a repo) turns the origin remote into a `[[repos]]` entry (unique filesystem-safe name; `default_branch` from `origin/HEAD` when it differs from the workspace default), merges the repo's `.devintern-code/.env` keys into the shared `.env` with conflicting values demoted to that repo's inline `[repos.env]` (nothing silently overwritten), and seeds a starter routing rule from `JIRA_DEFAULT_PROJECT`/`LINEAR_DEFAULT_TEAM_KEY` when unclaimed. Idempotent re-imports append new entries as text so hand-written comments survive, and the result is round-tripped through `loadWorkspaceConfig` before being written. No license gate on config management — enforcement stays on the worker's workspace mode
+
 ## [2.2.3] - 2026-08-06
 
 ### Fixed

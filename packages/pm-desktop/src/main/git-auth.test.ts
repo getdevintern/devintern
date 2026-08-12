@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { appendGitConfigEnv, isGitHubHttpsRemote, withGitHubTokenAuth } from "./git-auth.ts";
-import { withSyncBudget, type GitExec, type GitExecOptions } from "./git-sync.ts";
+import { withSyncBudget } from "./git-sync.ts";
+import type { GitExec, GitExecOptions } from "./git-sync.ts";
 
 describe("isGitHubHttpsRemote", () => {
   test("accepts github.com HTTPS", () => {

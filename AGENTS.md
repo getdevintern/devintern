@@ -58,10 +58,11 @@ bun run --filter @getdevintern/pm build
 ### `@devintern/pm-desktop`
 
 - Electron app built with electron-vite; React + shadcn/ui renderer
-- Runtime pin: Electron `^43.3.0` (latest stable at DEV-47) with `electron-vite` `^5.0.0`. Requires macOS 12+ (Electron dropped 11 in v38). Electron 42+ downloads its binary lazily on first `electron`/`electron-vite` run (no npm `postinstall`); root `trustedDependencies` still lists `electron` for Bun lifecycle trust.
+- Runtime pin: Electron `43.3.0` (exact — electron-builder rejects ranges) with `electron-vite` `^5.0.0`. Requires macOS 12+ (Electron dropped 11 in v38). Electron 42+ downloads its binary lazily on first `electron`/`electron-vite` run (no npm `postinstall`); root `trustedDependencies` still lists `electron` for Bun lifecycle trust.
 - Dev: `bun run dev`; build: `bun run build` (output in `out/`, not committed)
-- Package installers: `bun run package` / `package:linux|mac` (electron-builder → `release/`). Signing/notarization gated on env secrets; see `packages/pm-desktop/README.md` and `RELEASE.md`
-- Auto-update via `electron-updater` against GitHub Releases (packaged builds only; no-op in dev)
+- Package installers: `bun run package` / `package:linux|mac` (electron-builder → `release/`). Signing/notarization optional (unsigned macOS OK for early adopters); see `packages/pm-desktop/README.md` and `RELEASE.md`
+- Early-adopter binaries: **published** GitHub Releases on this repo (`pm-desktop-v*`) with installers + `latest-mac.yml` / `latest-linux.yml` (source sync via the monorepo allowlist is separate from the binary feed)
+- Auto-update via `electron-updater` against those published Releases (packaged builds only; no-op in dev). macOS may be unsigned until Developer ID + notarization — Gatekeeper steps in README/RELEASE
 - Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`; issue-type defaults via `@getdevintern/pm/issue-types`; in-app project setup via `@getdevintern/pm/init` (main) and `@getdevintern/pm/init-shared` (renderer-safe metadata)
 - Multi-ticket workspaces: sidebar of open tickets with independent composer/output state; agent streams route by `requestId` (see `renderer/src/state/ticket-workspaces.ts`)
 - Anonymous product analytics (PostHog): set `POSTHOG_API_KEY` (and optional `POSTHOG_HOST`) at **build** time via `packages/pm-desktop/.env` (see `.env.example`), shell, or CI so electron-vite can bake them into the main bundle; missing key → analytics no-ops. Users can opt out in Settings.
@@ -78,6 +79,7 @@ bun run --filter @getdevintern/pm build
 
 - Formatter: `oxfmt` (not Prettier)
 - Linter: `oxlint` (not ESLint)
+- Root `.oxlintrc.json` is the shared baseline; nested config discovery applies it to every package's `oxlint .`. Plugins: `typescript`, `unicorn`, `oxc`, `react`, `jsdoc`, `import`, `promise`. `categories.correctness` stays at `warn`; all configured `react/*` rules (including hooks) and enabled import hygiene rules (`import/no-cycle`, `no-duplicates`, `first`, etc.) are `error`. Export-layout rules (`import/group-exports`, `import/exports-last`) stay `off` — they ban the monorepo's inline `export function`/`export type` style. CommonJS is allowed only in `*.{cjs,cts}` via override. Noisy JSDoc `require-*` rules for typed codebases (`require-param-type`, `require-returns-type`, etc.) are off. Side-effect imports (CSS, `dotenv/config`) use `oxlint-disable-next-line import/no-unassigned-import` with a reason.
 - Strict TypeScript with `bun-types`, `moduleResolution: bundler`, `allowImportingTsExtensions: true`
 - `packages/code` has `noUncheckedIndexedAccess: false` (differs from `packages/pm` which enables it)
 

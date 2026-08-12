@@ -13,7 +13,6 @@
 
 import { join } from "node:path";
 import {
-  type ExistingTrackerConfig,
   PROBE_TIMEOUT_MS,
   defaultProbe,
   extractExistingTrackerConfig,
@@ -23,6 +22,7 @@ import {
   validateConnection,
   withTimeout,
 } from "@devintern/task-trackers";
+import type { ExistingTrackerConfig } from "@devintern/task-trackers";
 import { ensureGitignore } from "./init";
 import {
   PM_TRACKER_DOCS,

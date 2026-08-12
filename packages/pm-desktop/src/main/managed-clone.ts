@@ -13,8 +13,8 @@ import {
   formatGitHubRepoLabel,
   githubHttpsRemoteUrl,
   parseGitHubRepoInput,
-  type GitHubRepoRef,
 } from "../shared/github-repo.ts";
+import type { GitHubRepoRef } from "../shared/github-repo.ts";
 import type { ProjectBinding } from "../shared/project-binding.ts";
 import { probeGitHubRepo } from "./github-api.ts";
 import { getGitHubToken } from "./github-auth.ts";
@@ -24,8 +24,8 @@ import {
   isWouldOverwriteMergeFailure,
   softDirtyOverwriteMessage,
   defaultGitExec,
-  type GitExec,
 } from "./git-sync.ts";
+import type { GitExec } from "./git-sync.ts";
 import {
   findManagedBindingByRemote,
   rememberProjectBinding,

@@ -14,7 +14,8 @@
 
 import type { TaskTrackerClient } from "./task-tracker-client";
 import type { Comment } from "../types/task-tracker";
-import { type RetryState, hashDescription } from "./retry-state";
+import { hashDescription } from "./retry-state";
+import type { RetryState } from "./retry-state";
 
 export interface RetryGateInput {
   taskKey: string;

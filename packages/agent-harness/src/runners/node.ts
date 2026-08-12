@@ -6,7 +6,7 @@
  * written to the process stdin when `inputMethod === "stdin"`.
  */
 
-import { type ChildProcess } from "child_process";
+import type { ChildProcess } from "child_process";
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { assertModeSupported } from "../modes.js";

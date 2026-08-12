@@ -7,18 +7,20 @@ import {
   ticketAgentStatusLabel,
   ticketSubtitle,
   ticketTitle,
-  type TicketAgentStatus,
-  type TicketWorkspace,
 } from "../state/ticket-workspaces.ts";
+import type { TicketAgentStatus, TicketWorkspace } from "../state/ticket-workspaces.ts";
+import { useTicketWorkspacesStore } from "../state/ticket-workspaces-store.ts";
 import { CodeDiscoveryCard } from "./CodeDiscoveryCard.tsx";
 
 interface TicketSidebarProps {
-  tickets: TicketWorkspace[];
-  activeTicketId: string | null;
   onOpenTicket: () => void;
   /** When false, New is disabled (e.g. git folder still awaiting PM setup). */
   canOpenTicket?: boolean;
-  onActivateTicket: (id: string) => void;
+  /**
+   * Request to close a ticket. Goes through App's confirm-dialog orchestration
+   * (busy tickets prompt before closing), so this stays a prop rather than
+   * calling the store `closeTicket` action directly.
+   */
   onCloseTicket: (id: string) => void;
   /** Soft Code discovery strip in the sidebar footer. */
   showCodeDiscovery?: boolean;
@@ -116,19 +118,23 @@ function TicketRow({
 /**
  * Sidebar of open ticket workspaces. Switching does not cancel agent runs —
  * each row reflects that ticket's own phase so users know when to jump back.
+ * Reads `tickets` / `activeTicketId` from the workspaces store and calls the
+ * `activateTicket` action directly (no prop drilling). Closing stays a prop
+ * because it routes through App's busy-ticket confirm dialog.
  */
 export function TicketSidebar({
-  tickets,
-  activeTicketId,
   onOpenTicket,
   canOpenTicket = true,
-  onActivateTicket,
   onCloseTicket,
   showCodeDiscovery = false,
   onLearnMoreCode,
   onDismissCodeDiscovery,
   codeDiscoveryDismissError = null,
 }: TicketSidebarProps) {
+  const tickets = useTicketWorkspacesStore((s) => s.tickets);
+  const activeTicketId = useTicketWorkspacesStore((s) => s.activeTicketId);
+  const activateTicket = useTicketWorkspacesStore((s) => s.activateTicket);
+
   return (
     <aside
       className="flex w-56 shrink-0 flex-col border-r bg-card/40"
@@ -172,7 +178,7 @@ export function TicketSidebar({
               key={ticket.id}
               ticket={ticket}
               active={ticket.id === activeTicketId}
-              onActivate={() => onActivateTicket(ticket.id)}
+              onActivate={() => activateTicket(ticket.id)}
               onClose={() => onCloseTicket(ticket.id)}
             />
           ))

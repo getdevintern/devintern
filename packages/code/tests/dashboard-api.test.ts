@@ -10,7 +10,8 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "../src/lib/dashboard-api";
-import { RunStore, type RunStats } from "../src/lib/run-recorder";
+import { RunStore } from "../src/lib/run-recorder";
+import type { RunStats } from "../src/lib/run-recorder";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 import { startDashboardServer } from "../src/dashboard-server";

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Text, useInput, type Key } from "ink";
+import { Box, Text, useInput } from "ink";
+import type { Key } from "ink";
 import chalk from "chalk";
 
 interface PromptInputProps {

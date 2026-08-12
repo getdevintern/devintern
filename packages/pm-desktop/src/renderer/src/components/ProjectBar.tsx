@@ -1,5 +1,12 @@
 import type { ReactNode } from "react";
-import { ChevronsUpDown, CloudDownload, FolderOpen, GitBranch, GitPullRequest } from "lucide-react";
+import {
+  ChevronsUpDown,
+  CloudDownload,
+  FolderOpen,
+  GitBranch,
+  GitPullRequest,
+  Settings2,
+} from "lucide-react";
 import { AnalyticsSettings } from "@/components/AnalyticsSettings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +20,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatProjectDirLabel } from "@/lib/format-project-dir-label";
 import { cn } from "@/lib/utils";
+import { useProjectStore } from "../state/project-store.ts";
+import { useAnyTicketBusy } from "../state/selectors.ts";
 import type { ProjectStatus } from "../../../shared/ipc-contract.ts";
 import {
   canUpdateProjectFromRemote,
@@ -21,8 +30,7 @@ import {
 } from "../../../shared/project-git-sync.ts";
 
 interface ProjectBarProps {
-  status: ProjectStatus;
-  /** Primary: Connect GitHub → managed clone. */
+  /** Primary: Connect a GitHub repository → managed clone. */
   onConnectGitHub?: () => void;
   /** Advanced: open an existing local folder. */
   onChangeProject: () => void;
@@ -34,13 +42,13 @@ interface ProjectBarProps {
   onSwitchTracker: (trackerId: string) => void;
   onSwitchProjectKey: (projectKey: string) => void;
   onSwitchHarness: (harnessName: string) => void;
+  /**
+   * Open the in-app wizard in update mode so the user can add a new tracker or
+   * reconfigure credentials for an existing one (post-init PM settings).
+   */
+  onChangeTrackerSettings?: () => void;
   /** Fetch + ff-only pull when clean or soft-dirty. */
   onUpdateFromRemote?: () => void;
-  switching?: boolean;
-  /** True while any ticket has an agent/operation in flight. */
-  agentRunning?: boolean;
-  /** True while update-from-remote IPC is in flight. */
-  updatingFromRemote?: boolean;
   /** After removing a managed clone from Settings. */
   onProjectRemoved?: () => void;
 }
@@ -76,7 +84,6 @@ function activeProjectLabel(status: ProjectStatus): string | null {
 }
 
 export function ProjectBar({
-  status,
   onConnectGitHub,
   onChangeProject,
   recentProjects = [],
@@ -85,23 +92,28 @@ export function ProjectBar({
   onSwitchTracker,
   onSwitchProjectKey,
   onSwitchHarness,
+  onChangeTrackerSettings,
   onUpdateFromRemote,
-  switching = false,
-  agentRunning = false,
-  updatingFromRemote = false,
   onProjectRemoved,
 }: ProjectBarProps) {
+  const status = useProjectStore((s) => s.status);
+  const switching = useProjectStore((s) => s.loadingProject);
+  const updatingFromRemote = useProjectStore((s) => s.updatingFromRemote);
+  const agentRunning = useAnyTicketBusy();
+  // ProjectBar only mounts once a project is loaded, but guard defensively.
+  if (!status) return null;
   const trackers = status.configuredTrackers ?? [];
   const trackerLabel =
     status.activeTrackerDisplayName ?? status.backendName ?? status.activeTrackerId;
-  // Offer a menu when multiple trackers are ready, or when the active one
-  // failed to load but another configured tracker can take over. Busy states
-  // keep the dropdown mounted and disable it (same idea as the harness chip).
+  // Offer a menu when multiple trackers are ready, when the active one failed
+  // to load but another configured tracker can take over, or when the user can
+  // open the update wizard (post-init PM settings entry point).
   const activeTrackerConfigured = trackers.some((t) => t.id === status.activeTrackerId);
   // Tracker/project controls only apply to git-connected folders.
   const gitReady = status.isGitRepository;
+  const canChangeTrackerSettings = Boolean(onChangeTrackerSettings) && gitReady;
   const canSwitchTracker =
-    gitReady && trackers.length > 0 && (trackers.length > 1 || !activeTrackerConfigured);
+    gitReady && (trackers.length > 1 || !activeTrackerConfigured || canChangeTrackerSettings);
   const projectLabel = activeProjectLabel(status);
   // Prefer GitHub remote label for managed (and any bound) remotes.
   const remoteLabel = status.projectBinding?.remote;
@@ -136,7 +148,7 @@ export function ProjectBar({
         : null;
   const changeProjectTitle =
     busyTitle ??
-    `${remoteLabel ? `${remoteLabel} — ` : ""}${status.projectDir} — Connect GitHub or open folder`;
+    `${remoteLabel ? `${remoteLabel} — ` : ""}${status.projectDir} — Connect GitHub repository or open folder`;
   const trackerTitle = busyTitle ?? "Switch task tracker";
   const projectTitle = busyTitle ?? "Switch project";
   const harnessTitle = busyTitle ?? "Switch agent harness";
@@ -215,7 +227,7 @@ export function ProjectBar({
               data-testid="recent-projects-connect"
             >
               <GitPullRequest data-icon="inline-start" />
-              Connect GitHub…
+              Connect GitHub repository…
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
@@ -316,6 +328,19 @@ export function ProjectBar({
                     </DropdownMenuItem>
                   );
                 })}
+                {canChangeTrackerSettings ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      disabled={contextBusy}
+                      onSelect={() => onChangeTrackerSettings?.()}
+                      data-testid="tracker-change-settings"
+                    >
+                      <Settings2 data-icon="inline-start" />
+                      Add or change tracker…
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           ) : (

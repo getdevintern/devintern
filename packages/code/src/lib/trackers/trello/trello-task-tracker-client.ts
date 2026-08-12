@@ -5,12 +5,8 @@
  * Estimation operations are not supported (Trello has no story-points concept).
  */
 
-import {
-  TrelloClient,
-  type TrelloAction,
-  type TrelloAttachment,
-  type TrelloCardDetail,
-} from "@devintern/task-trackers";
+import { TrelloClient } from "@devintern/task-trackers";
+import type { TrelloAction, TrelloAttachment, TrelloCardDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -28,8 +24,8 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  type ClarityAssessmentLike,
 } from "../shared/markdown-comment-formatter";
+import type { ClarityAssessmentLike } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 

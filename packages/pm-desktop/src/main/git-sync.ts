@@ -9,7 +9,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ProjectGitSyncStatus } from "../shared/project-git-sync.ts";
-import { classifyPmWorkingTree, type WorkingTreeDirtiness } from "./git-soft-dirty.ts";
+import { classifyPmWorkingTree } from "./git-soft-dirty.ts";
+import type { WorkingTreeDirtiness } from "./git-soft-dirty.ts";
 
 export type { ProjectGitSyncStatus } from "../shared/project-git-sync.ts";
 

@@ -11,8 +11,8 @@ import {
   PM_TRACKER_SETUP,
   missingRequiredPmFields,
   stepLink,
-  type EnvPromptStep,
 } from "@getdevintern/pm/init-shared";
+import type { EnvPromptStep } from "@getdevintern/pm/init-shared";
 import { ExternalLink } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -33,38 +33,32 @@ import type {
   ProjectInitInspect,
   ProjectStatus,
 } from "../../../shared/ipc-contract.ts";
+import { useInspectProjectInit } from "../queries/useInspectProjectInit.ts";
+import {
+  firstWizardStep,
+  prefilledValues,
+  stepAfterOverwrite,
+} from "./ProjectSetupWizard.helpers.ts";
+import type { WizardMode, WizardStep } from "./ProjectSetupWizard.helpers.ts";
 
-type WizardStep =
-  | "loading"
-  | "overwrite"
-  | "reuse"
-  | "tracker"
-  | "credentials"
-  | "probing"
-  | "probe-failed"
-  | "saving"
-  | "error";
+export { type WizardMode } from "./ProjectSetupWizard.helpers.ts";
 
 interface ProjectSetupWizardProps {
   projectDir: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onComplete: (status: ProjectStatus) => void;
+  /**
+   * `"update"` opens the wizard in post-init mode: it skips the overwrite /
+   * reuse steps, starts at the tracker picker (prefilled with the active
+   * tracker and existing credential values), and merges credentials into the
+   * existing `.env` instead of overwriting it. Defaults to `"init"`.
+   */
+  mode?: WizardMode;
 }
 
 function isSecretKey(key: string): boolean {
   return /TOKEN|PAT|API_KEY|PASSWORD|SECRET/i.test(key);
-}
-
-function firstStep(inspect: ProjectInitInspect): WizardStep {
-  if (inspect.configExists) return "overwrite";
-  if (inspect.reusableFromCode) return "reuse";
-  return "tracker";
-}
-
-function stepAfterOverwrite(inspect: ProjectInitInspect): WizardStep {
-  if (inspect.reusableFromCode) return "reuse";
-  return "tracker";
 }
 
 function trackerDocs(trackers: PmTrackerInfo[], trackerId: string): string | undefined {
@@ -80,6 +74,7 @@ export function ProjectSetupWizard({
   open,
   onOpenChange,
   onComplete,
+  mode = "init",
 }: ProjectSetupWizardProps) {
   const [step, setStep] = useState<WizardStep>("loading");
   const [inspect, setInspect] = useState<ProjectInitInspect | null>(null);
@@ -90,9 +85,12 @@ export function ProjectSetupWizard({
   const [formError, setFormError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
 
+  const inspectQuery = useInspectProjectInit(projectDir, open);
+
+  // Reset wizard state each time the dialog opens (the query refetches via
+  // staleTime: 0 so the inspect is always fresh on open).
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
     setStep("loading");
     setInspect(null);
     setTrackerId("markdown");
@@ -101,26 +99,35 @@ export function ProjectSetupWizard({
     setProbeError(null);
     setFormError(null);
     setFatalError(null);
+  }, [open]);
 
-    void window.pm.inspectProjectInit(projectDir).then((result) => {
-      if (cancelled) return;
-      if (!result.ok) {
-        setFatalError(result.error.message);
-        setStep("error");
-        return;
-      }
-      setInspect(result.value);
-      const next = firstStep(result.value);
-      if (next === "tracker" && result.value.trackers[0]) {
-        setTrackerId(result.value.trackers[0].id);
-      }
-      setStep(next);
-    });
+  const inspectErrorMessage = inspectQuery.error?.message;
 
-    return () => {
-      cancelled = true;
-    };
-  }, [open, projectDir]);
+  // Drive step transitions from the shared inspect query result.
+  useEffect(() => {
+    if (!open) return;
+    if (inspectQuery.isError) {
+      setFatalError(inspectErrorMessage ?? "Failed to inspect project");
+      setStep("error");
+      return;
+    }
+    if (!inspectQuery.data) return;
+    setInspect(inspectQuery.data);
+    const next = firstWizardStep(inspectQuery.data, mode);
+    if (next === "tracker") {
+      // Update mode: start on the active tracker with its existing values.
+      // Init mode: default to the first tracker (markdown) with blank values.
+      const startTracker =
+        mode === "update" && inspectQuery.data.currentEnv.TASK_TRACKER
+          ? inspectQuery.data.currentEnv.TASK_TRACKER
+          : (inspectQuery.data.trackers[0]?.id ?? "markdown");
+      setTrackerId(startTracker);
+      if (mode === "update") {
+        setValues(prefilledValues(inspectQuery.data, startTracker));
+      }
+    }
+    setStep(next);
+  }, [open, inspectQuery.data, inspectQuery.isError, inspectErrorMessage, mode]);
 
   const steps: EnvPromptStep[] = useMemo(
     () => (trackerId ? (PM_TRACKER_SETUP[trackerId] ?? []) : []),
@@ -139,8 +146,19 @@ export function ProjectSetupWizard({
     setStep("credentials");
   };
 
+  const selectTracker = (nextTrackerId: string) => {
+    setTrackerId(nextTrackerId);
+    setFormError(null);
+    // In update mode, swap in the existing env values for the chosen tracker
+    // so the user edits known credentials instead of retyping them.
+    if (mode === "update" && inspect) {
+      setValues(prefilledValues(inspect, nextTrackerId));
+    } else {
+      setValues({});
+    }
+  };
+
   const goCredentialsFromTracker = () => {
-    setValues({});
     setFormError(null);
     setStep("credentials");
   };
@@ -184,15 +202,22 @@ export function ProjectSetupWizard({
 
     setStep("saving");
     setFatalError(null);
-    const result = await window.pm.initializeProject({
-      projectDir,
-      trackerId,
-      values,
-      // Only true after the overwrite step — cancel there never reaches finish.
-      overwrite: overwriteConfirmed,
-    });
+    const result =
+      mode === "update"
+        ? await window.pm.updateProjectTracker({
+            projectDir,
+            trackerId,
+            values,
+          })
+        : await window.pm.initializeProject({
+            projectDir,
+            trackerId,
+            values,
+            // Only true after the overwrite step — cancel there never reaches finish.
+            overwrite: overwriteConfirmed,
+          });
     if (!result.ok) {
-      if (result.error.code === "already_exists") {
+      if (mode === "init" && result.error.code === "already_exists") {
         setFatalError(result.error.message);
         setStep("overwrite");
         return;
@@ -220,10 +245,20 @@ export function ProjectSetupWizard({
         }}
       >
         <DialogHeader className="min-w-0 pr-6">
-          <DialogTitle>Set up project</DialogTitle>
+          <DialogTitle>{mode === "update" ? "Change task tracker" : "Set up project"}</DialogTitle>
           <DialogDescription className="min-w-0 break-words" title={projectDir}>
-            Connect a task tracker for{" "}
-            <span className="font-mono text-xs break-all">{projectDir}</span>
+            {mode === "update" ? (
+              <>
+                Update tracker settings for{" "}
+                <span className="font-mono text-xs break-all">{projectDir}</span>. Other trackers
+                and settings are kept.
+              </>
+            ) : (
+              <>
+                Connect a task tracker for{" "}
+                <span className="font-mono text-xs break-all">{projectDir}</span>
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -298,7 +333,7 @@ export function ProjectSetupWizard({
             <NativeSelect
               id="setup-tracker-select"
               value={trackerId}
-              onChange={(e) => setTrackerId(e.target.value)}
+              onChange={(e) => selectTracker(e.target.value)}
               data-testid="setup-tracker-select"
             >
               {inspect.trackers.map((t) => (
@@ -429,7 +464,15 @@ export function ProjectSetupWizard({
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => setStep(inspect?.reusableFromCode ? "reuse" : "tracker")}
+                    onClick={() =>
+                      setStep(
+                        mode === "update"
+                          ? "tracker"
+                          : inspect?.reusableFromCode
+                            ? "reuse"
+                            : "tracker",
+                      )
+                    }
                   >
                     Back
                   </Button>
@@ -438,9 +481,13 @@ export function ProjectSetupWizard({
                     data-testid="setup-finish"
                     onClick={() => void finish(false)}
                   >
-                    {needsProbe(inspect?.trackers ?? [], trackerId)
-                      ? "Validate and finish"
-                      : "Finish setup"}
+                    {mode === "update"
+                      ? needsProbe(inspect?.trackers ?? [], trackerId)
+                        ? "Validate and switch tracker"
+                        : "Switch tracker"
+                      : needsProbe(inspect?.trackers ?? [], trackerId)
+                        ? "Validate and finish"
+                        : "Finish setup"}
                   </Button>
                 </>
               )}
@@ -474,7 +521,7 @@ export function ProjectSetupWizard({
                 type="button"
                 onClick={() => {
                   setFatalError(null);
-                  setStep(inspect ? firstStep(inspect) : "loading");
+                  setStep(inspect ? firstWizardStep(inspect, mode) : "loading");
                 }}
               >
                 Try again

@@ -8,17 +8,24 @@ import {
   SetupEmptyState,
   Welcome,
 } from "./SetupEmptyState.tsx";
+import { qk } from "../queries/keys.ts";
+import { createTestQueryClient, withQueryClient } from "../test-helpers/query-client.tsx";
 
 const noop = () => {};
 
 describe("Welcome", () => {
   test("offers Connect GitHub as primary and open-folder as advanced", () => {
+    const client = createTestQueryClient();
+    client.setQueryData(qk.recentProjects, []);
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: false,
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: false,
+        }),
+        client,
+      ),
     );
     expect(html).toContain('data-testid="welcome-screen"');
     expect(html).toContain('data-testid="welcome-connect"');
@@ -33,11 +40,13 @@ describe("Welcome", () => {
 
   test("shows spinner and restore status while loading", () => {
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: true,
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: true,
+        }),
+      ),
     );
     expect(html).toContain('data-testid="welcome-connect"');
     expect(html).toContain("Opening project…");
@@ -48,13 +57,18 @@ describe("Welcome", () => {
   });
 
   test("shows a clear empty state when there are no recent projects", () => {
+    const client = createTestQueryClient();
+    client.setQueryData(qk.recentProjects, []);
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: false,
-        recentProjects: [],
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: false,
+          recentProjects: [],
+        }),
+        client,
+      ),
     );
     expect(html).toContain('data-testid="welcome-recent-projects"');
     expect(html).toContain('data-testid="recent-projects-empty"');
@@ -63,12 +77,14 @@ describe("Welcome", () => {
 
   test("omits empty-state copy while recent projects have not loaded yet", () => {
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: false,
-        recentProjects: null,
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: false,
+          recentProjects: null,
+        }),
+      ),
     );
     expect(html).toContain('data-testid="welcome-recent-projects"');
     expect(html).not.toContain('data-testid="recent-projects-empty"');
@@ -77,12 +93,14 @@ describe("Welcome", () => {
 
   test("does not claim empty recents while loading during last-project restore", () => {
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: true,
-        recentProjects: null,
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: true,
+          recentProjects: null,
+        }),
+      ),
     );
     expect(html).toContain('data-testid="welcome-loading-status"');
     expect(html).toContain("Opening project…");
@@ -91,14 +109,20 @@ describe("Welcome", () => {
   });
 
   test("lists recent projects for quick reopen", () => {
+    const projects = ["/work/alpha", "/work/beta"];
+    const client = createTestQueryClient();
+    client.setQueryData(qk.recentProjects, projects);
     const html = renderToStaticMarkup(
-      createElement(Welcome, {
-        onConnectGitHub: noop,
-        onChooseProject: noop,
-        loading: false,
-        recentProjects: ["/work/alpha", "/work/beta"],
-        onOpenRecentProject: noop,
-      }),
+      withQueryClient(
+        createElement(Welcome, {
+          onConnectGitHub: noop,
+          onChooseProject: noop,
+          loading: false,
+          recentProjects: projects,
+          onOpenRecentProject: noop,
+        }),
+        client,
+      ),
     );
     expect(html).toContain('data-testid="welcome-recent-projects"');
     expect(html).toContain("alpha");

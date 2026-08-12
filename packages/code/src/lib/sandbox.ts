@@ -10,11 +10,8 @@
  * picks up changes on restart, same as AGENT_HARNESS.
  */
 
-import {
-  resolveSandbox,
-  type DetectedSandboxProvider,
-  type ResolvedSandbox,
-} from "@devintern/agent-harness";
+import { resolveSandbox } from "@devintern/agent-harness";
+import type { DetectedSandboxProvider, ResolvedSandbox } from "@devintern/agent-harness";
 
 let cliOverride: string | undefined;
 let cached: Promise<ResolvedSandbox | null> | null = null;

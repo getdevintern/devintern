@@ -3,8 +3,8 @@ import {
   canUpdateProjectFromRemote,
   projectGitSyncLabel,
   shouldShowUpdateFromRemote,
-  type ProjectGitSyncStatus,
 } from "./project-git-sync.ts";
+import type { ProjectGitSyncStatus } from "./project-git-sync.ts";
 
 describe("shouldShowUpdateFromRemote", () => {
   test("hides Update only when there is no remote", () => {

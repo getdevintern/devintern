@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from "electron";
 import { MAX_ATTACHMENTS, attachmentExtensionError } from "@getdevintern/pm/attachments";
-import { EngineError, type EngineCallEvents } from "@getdevintern/pm/engine";
+import { EngineError } from "@getdevintern/pm/engine";
+import type { EngineCallEvents } from "@getdevintern/pm/engine";
 import {
   PmInitError,
   inspectPmInitContext,
@@ -16,17 +17,18 @@ import {
   probePmConnection,
   writePmProjectConfig,
 } from "@getdevintern/pm/init";
-import {
-  IPC_CHANNELS,
-  type ConnectGitHubRepoRequest,
-  type CreateTaskRequest,
-  type DecomposeStoryRequest,
-  type EditStoryRequest,
-  type GenerateStoryRequest,
-  type InitializeProjectRequest,
-  type IpcResult,
-  type SubtaskDraft,
-  type SubtaskOutcome,
+import { IPC_CHANNELS } from "../shared/ipc-contract.ts";
+import type {
+  ConnectGitHubRepoRequest,
+  CreateTaskRequest,
+  DecomposeStoryRequest,
+  EditStoryRequest,
+  GenerateStoryRequest,
+  InitializeProjectRequest,
+  IpcResult,
+  SubtaskDraft,
+  SubtaskOutcome,
+  UpdateProjectTrackerRequest,
 } from "../shared/ipc-contract.ts";
 import { getAnalyticsEnabled, setAnalyticsEnabled, track } from "./analytics.ts";
 import { toEngineCreateTaskOptions } from "./create-task-options.ts";
@@ -49,6 +51,7 @@ import {
 import { isGitHubOAuthAvailable, runDeviceFlow } from "./github-oauth.ts";
 import { connectManagedGitHubRepo } from "./managed-clone.ts";
 import { listProjectBindings } from "./project-bindings.ts";
+import { persistTrackerCredentials, readProjectEnv } from "./project-env.ts";
 import { removeConnectedProject } from "./remove-connected-project.ts";
 import {
   beginAgentRequest,
@@ -57,6 +60,7 @@ import {
   getSession,
   loadProject,
   requireSession,
+  switchContext,
   switchHarness,
   switchProjectKey,
   switchTracker,
@@ -366,7 +370,8 @@ export function registerIpcHandlers(): void {
 
   handle(IPC_CHANNELS.inspectProjectInit, async (_event, dir: string) => {
     const context = await inspectPmInitContext(dir);
-    return { ...context, trackers: listPmTrackers() };
+    const { env } = await readProjectEnv(dir);
+    return { ...context, trackers: listPmTrackers(), currentEnv: env };
   });
 
   handle(
@@ -399,6 +404,34 @@ export function registerIpcHandlers(): void {
       );
     }
     return status;
+  });
+
+  handle(IPC_CHANNELS.updateProjectTracker, async (_event, input: UpdateProjectTrackerRequest) => {
+    if (!input || typeof input !== "object") {
+      throw Object.assign(new Error("Invalid update tracker request."), { code: "invalid_input" });
+    }
+    if (typeof input.projectDir !== "string" || typeof input.trackerId !== "string") {
+      throw Object.assign(new Error("Invalid update tracker request."), { code: "invalid_input" });
+    }
+    if (!input.values || typeof input.values !== "object" || Array.isArray(input.values)) {
+      throw Object.assign(new Error("Invalid update tracker request."), { code: "invalid_input" });
+    }
+    // Match initializeProject's git gate so we never persist credentials for
+    // unsuitable folders.
+    if (!detectGitRepository(input.projectDir)) {
+      throw new Error(
+        "This folder is not a git repository. Choose a git-connected project before updating PM.",
+      );
+    }
+    // Hold the context-switch mutex so an agent IPC cannot interleave after the
+    // env is rewritten but before the new session is ready (same contract as
+    // switchTracker / switchHarness).
+    return switchContext(async (projectDir) => {
+      if (resolve(projectDir) !== resolve(input.projectDir)) {
+        throw new Error("Project directory does not match the active session.");
+      }
+      await persistTrackerCredentials(projectDir, input.trackerId, input.values);
+    });
   });
 
   handle(IPC_CHANNELS.listIssueTypes, async (_event, projectKey?: string) => {

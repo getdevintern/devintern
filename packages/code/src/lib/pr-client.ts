@@ -297,7 +297,7 @@ export class PRManager {
 
           if (remoteUrl.includes("github.com")) {
             // Extract owner/repo from GitHub URL
-            const match = remoteUrl.match(/github\.com[:\/]([^/]+)\/([^/.]+)/);
+            const match = remoteUrl.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
             if (match) {
               return resolve({
                 platform: "github",
@@ -306,7 +306,7 @@ export class PRManager {
             }
           } else if (remoteUrl.includes("bitbucket.org")) {
             // Extract workspace/repo from Bitbucket URL
-            const match = remoteUrl.match(/bitbucket\.org[:\/]([^/]+)\/([^/.]+)/);
+            const match = remoteUrl.match(/bitbucket\.org[:/]([^/]+)\/([^/.]+)/);
             if (match) {
               return resolve({
                 platform: "bitbucket",

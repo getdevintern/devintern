@@ -11,19 +11,15 @@
 import { execSync } from "child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import {
-  type AgentHarness,
-  spawnAgent,
-  reapTree,
-  resolveExecutablePathWithRetry,
-} from "@devintern/agent-harness";
+import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
+import type { AgentHarness } from "@devintern/agent-harness";
 import { getSandbox } from "./sandbox";
-import {
-  type AutoReviewLoopOptions,
-  type AutoReviewLoopResult,
-  type ReviewFeedback,
-  type ReviewFeedbackItem,
-  type ReviewPriority,
+import type {
+  AutoReviewLoopOptions,
+  AutoReviewLoopResult,
+  ReviewFeedback,
+  ReviewFeedbackItem,
+  ReviewPriority,
 } from "../types/auto-review.js";
 
 const PRIORITY_WEIGHTS: Record<ReviewPriority, number> = {

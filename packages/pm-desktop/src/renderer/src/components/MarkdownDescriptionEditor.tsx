@@ -16,7 +16,6 @@ import {
   ListsToggle,
   markdownShortcutPlugin,
   MDXEditor,
-  type MDXEditorMethods,
   quotePlugin,
   Separator,
   tablePlugin,
@@ -24,6 +23,8 @@ import {
   toolbarPlugin,
   UndoRedo,
 } from "@mdxeditor/editor";
+import type { MDXEditorMethods } from "@mdxeditor/editor";
+// oxlint-disable-next-line import/no-unassigned-import -- MDXEditor base styles
 import "@mdxeditor/editor/style.css";
 
 interface MarkdownDescriptionEditorProps {

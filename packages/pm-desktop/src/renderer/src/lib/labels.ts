@@ -1,10 +1,12 @@
 /**
- * Label cache / selection helpers for the desktop composer.
+ * Label selection helpers for the desktop composer.
  *
- * Kept pure so prune/cache behavior can be unit-tested without mounting App.
+ * Kept pure so prune behavior can be unit-tested without mounting App.
+ * Cache seeding is now handled by TanStack Query (`seedProjectStatusCaches`)
+ * and cache invalidation by `invalidateLabels`.
  */
 
-import type { LabelListResult, LabelRef, ProjectStatus } from "../../../shared/ipc-contract.ts";
+import type { LabelRef, ProjectStatus } from "../../../shared/ipc-contract.ts";
 
 /** Drop selected label ids that are no longer present in the available set. */
 export function pruneSelectedLabels(
@@ -19,44 +21,6 @@ export function pruneSelectedLabels(
 }
 
 /**
- * Clear both label caches and seed them from a freshly loaded project status.
- * Shared by tracker/directory loads and project-key switches.
- */
-export function applyLabelsFromProjectStatus(
-  next: Pick<
-    ProjectStatus,
-    "supportsLabels" | "defaultProjectKey" | "labels" | "labelsTruncated" | "labelsError"
-  >,
-  labelsCache: Map<string, LabelListResult>,
-  labelsFailedCache: Map<string, string>,
-): { labels: LabelRef[]; labelsTruncated: boolean; labelsError: string | null } {
-  labelsCache.clear();
-  labelsFailedCache.clear();
-  const labels = next.labels ?? [];
-  const labelsTruncated = next.labelsTruncated ?? false;
-  const labelsError = next.labelsError ?? null;
-  if (next.supportsLabels) {
-    const cacheKey = next.defaultProjectKey ?? "";
-    if (labelsError) {
-      labelsFailedCache.set(cacheKey, labelsError);
-    } else {
-      labelsCache.set(cacheKey, { labels, truncated: labelsTruncated });
-    }
-  }
-  return { labels, labelsTruncated, labelsError };
-}
-
-/** Bust success + failure cache entries for a project key (Retry). */
-export function clearLabelCachesForKey(
-  labelsCache: Map<string, LabelListResult>,
-  labelsFailedCache: Map<string, string>,
-  projectKey: string,
-): void {
-  labelsCache.delete(projectKey);
-  labelsFailedCache.delete(projectKey);
-}
-
-/**
  * Selection to keep when the available catalog cannot be loaded.
  * Clears prior-context ids so Create cannot submit stale labels — unless the
  * tracker allows freeform names (markdown), where typed labels remain valid.
@@ -68,3 +32,6 @@ export function selectionAfterLabelsFailure(
   if (options?.keepOnFailure) return selected;
   return selected.length === 0 ? selected : [];
 }
+
+// Re-export the type for callers that still import it from this module.
+export type { ProjectStatus };

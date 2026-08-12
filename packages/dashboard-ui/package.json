@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "format": "oxfmt \"src/**/*.ts\" \"src/**/*.tsx\" \"vite.config.ts\"",
     "format:check": "oxfmt --check \"src/**/*.ts\" \"src/**/*.tsx\" \"vite.config.ts\"",
-    "lint": "oxlint ."
+    "lint": "oxlint .",
+    "test": "bun test"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
@@ -20,10 +21,14 @@
     "radix-ui": "^1.6.4",
     "react": "19.2.5",
     "react-dom": "19.2.5",
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "@types/bun": "latest",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",

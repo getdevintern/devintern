@@ -15,9 +15,10 @@ import {
   initAutoUpdate,
   installUpdate,
   resetAutoUpdateForTests,
+  resolveElectronAutoUpdater,
   snoozeUpdate,
-  type UpdaterLike,
 } from "./auto-update.ts";
+import type { UpdaterLike } from "./auto-update.ts";
 import { setAnalyticsCaptureForTests } from "./analytics.ts";
 import { setUserDataDirForTests } from "./settings.ts";
 
@@ -101,6 +102,27 @@ describe("shouldPromptForUpdate / formatUpdateAvailableMessage", () => {
   });
 });
 
+describe("resolveElectronAutoUpdater", () => {
+  test("reads named autoUpdater export", () => {
+    const { updater } = createMockUpdater();
+    expect(resolveElectronAutoUpdater({ autoUpdater: updater })).toBe(updater);
+  });
+
+  test("falls back to default.autoUpdater (CJS/ESM interop)", () => {
+    const { updater } = createMockUpdater();
+    expect(resolveElectronAutoUpdater({ default: { autoUpdater: updater } })).toBe(updater);
+  });
+
+  test("throws when autoUpdater is missing (the production bug shape)", () => {
+    // What `const { autoUpdater } = await import("electron-updater")` can yield:
+    // a module namespace with no usable instance.
+    expect(() => resolveElectronAutoUpdater({ autoUpdater: undefined })).toThrow(
+      /autoUpdater is unavailable/,
+    );
+    expect(() => resolveElectronAutoUpdater({})).toThrow(/autoUpdater is unavailable/);
+  });
+});
+
 describe("auto-update service", () => {
   let tempDir: string;
 
@@ -111,6 +133,16 @@ describe("auto-update service", () => {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("createUpdater returning undefined becomes a clear error status", () => {
+    const status = initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.9.0",
+      createUpdater: () => undefined as unknown as UpdaterLike,
+    });
+    expect(status.phase).toBe("error");
+    expect(status.errorMessage).toMatch(/no instance/i);
   });
 
   test("unpackaged builds stay disabled and never call the updater", async () => {
@@ -156,7 +188,7 @@ describe("auto-update service", () => {
       now: () => 1_000,
     });
 
-    expect(updater.autoDownload).toBe(false);
+    expect(updater.autoDownload).toBe(true);
 
     const available = await checkForUpdates({ silent: false });
     expect(available.phase).toBe("available");
@@ -368,5 +400,344 @@ describe("auto-update service", () => {
     resolveDownload();
     await Promise.all([a, b]);
     expect(downloadUpdateFn).toHaveBeenCalledTimes(1);
+  });
+
+  test("a later update-available event does not regress a downloaded update", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+      downloadUpdate: mock(async () => {
+        emit("download-progress", { percent: 100, transferred: 100, total: 100 });
+        emit("update-downloaded", { version: "0.3.0" });
+      }),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+    });
+
+    await checkForUpdates({ silent: false });
+    await downloadUpdate();
+    expect(getUpdateStatus().phase).toBe("downloaded");
+
+    // A periodic re-check fires `update-available` again for the same version.
+    // The downloaded payload is already staged — we must not regress to
+    // "available" (which would re-prompt the user to download what they have),
+    // and must not trigger a duplicate underlying download.
+    await checkForUpdates({ silent: true });
+    expect(getUpdateStatus().phase).toBe("downloaded");
+    expect(getUpdateStatus().availableVersion).toBe("0.3.0");
+    expect(updater.downloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test("a periodic re-check does not regress an in-flight download", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    let resolveDownload: () => void = () => undefined;
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+      downloadUpdate: mock(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDownload = () => {
+              emit("update-downloaded", { version: "0.3.0" });
+              resolve();
+            };
+          }),
+      ),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+    });
+
+    await checkForUpdates({ silent: false });
+    const downloadPromise = downloadUpdate();
+    // Yield so the download-progress / phase flips to "downloading" settle.
+    await Promise.resolve();
+    expect(getUpdateStatus().phase).toBe("downloading");
+
+    // A periodic re-check fires while the download is in flight. The
+    // update-available event during the check must not regress us to
+    // "available" and lose the visible download progress, and must not
+    // trigger a duplicate underlying download (autoDownload is suppressed
+    // for the check while a download is in flight).
+    await checkForUpdates({ silent: true });
+    expect(getUpdateStatus().phase).toBe("downloading");
+    expect(getUpdateStatus().availableVersion).toBe("0.3.0");
+    expect(updater.downloadUpdate).toHaveBeenCalledTimes(1);
+
+    resolveDownload();
+    await downloadPromise;
+    expect(getUpdateStatus().phase).toBe("downloaded");
+    expect(updater.downloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test("snoozing gates autoInstallOnAppQuit so 'Later' is not cosmetic", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+      now: () => 1_000,
+    });
+
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    await checkForUpdates({ silent: false });
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    await snoozeUpdate();
+    // Snoozing the available version must disable install-on-quit so the
+    // update is not silently applied when the user later quits the app.
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+
+    // A manual check (force) clears snooze and re-enables install-on-quit.
+    await checkForUpdates({ silent: false });
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    // Snooze again, then let the window elapse: a background check must
+    // re-enable install-on-quit once snooze has expired.
+    await snoozeUpdate();
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+    const { updateSettings } = await import("./settings.ts");
+    await updateSettings({
+      updateSnoozedVersion: "0.3.0",
+      updateSnoozedUntil: 0,
+    });
+    await checkForUpdates({ silent: true });
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+  });
+
+  test("expired snooze clears while downloaded on silent and force checks", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    let now = 1_000;
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+      downloadUpdate: mock(async () => {
+        emit("update-downloaded", { version: "0.3.0" });
+      }),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+      now: () => now,
+    });
+
+    await checkForUpdates({ silent: false });
+    await downloadUpdate();
+    expect(getUpdateStatus().phase).toBe("downloaded");
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    await snoozeUpdate();
+    expect(getUpdateStatus().snoozed).toBe(true);
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+
+    // Expire snooze; silent re-check must re-assert downloaded + clear snooze
+    // (the early-return path must not preserve stale status.snoozed).
+    now = 1_000 + UPDATE_SNOOZE_MS + 1;
+    const silent = await checkForUpdates({ silent: true });
+    expect(silent.phase).toBe("downloaded");
+    expect(silent.snoozed).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    await snoozeUpdate();
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+    // About force-check clears snooze while package stays staged.
+    const forced = await checkForUpdates({ silent: false });
+    expect(forced.phase).toBe("downloaded");
+    expect(forced.snoozed).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+  });
+
+  test("expired snooze clears while downloading on silent check", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    let now = 1_000;
+    let resolveDownload: () => void = () => undefined;
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+      downloadUpdate: mock(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDownload = () => {
+              emit("update-downloaded", { version: "0.3.0" });
+              resolve();
+            };
+          }),
+      ),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+      now: () => now,
+    });
+
+    await checkForUpdates({ silent: false });
+    const downloadPromise = downloadUpdate();
+    await Promise.resolve();
+    expect(getUpdateStatus().phase).toBe("downloading");
+
+    await snoozeUpdate();
+    expect(getUpdateStatus().snoozed).toBe(true);
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+
+    now = 1_000 + UPDATE_SNOOZE_MS + 1;
+    const silent = await checkForUpdates({ silent: true });
+    expect(silent.phase).toBe("downloading");
+    expect(silent.snoozed).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+
+    resolveDownload();
+    await downloadPromise;
+    // Ready banner clears any lingering snooze and keeps install-on-quit on.
+    expect(getUpdateStatus().phase).toBe("downloaded");
+    expect(getUpdateStatus().snoozed).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(true);
+  });
+
+  test("silent check failure while downloading preserves in-flight progress", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    let resolveDownload: () => void = () => undefined;
+    let checkCalls = 0;
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        checkCalls += 1;
+        if (checkCalls === 1) {
+          emit("update-available", { version: "0.3.0" });
+          return { updateInfo: { version: "0.3.0" } };
+        }
+        // Simulate checking-for-update clearing progress, then a network error.
+        emit("checking-for-update");
+        throw new Error("offline during re-check");
+      }),
+      downloadUpdate: mock(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDownload = () => {
+              emit("update-downloaded", { version: "0.3.0" });
+              resolve();
+            };
+          }),
+      ),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+    });
+
+    await checkForUpdates({ silent: false });
+    const downloadPromise = downloadUpdate();
+    await Promise.resolve();
+    emit("download-progress", { percent: 42, transferred: 42, total: 100 });
+    expect(getUpdateStatus().phase).toBe("downloading");
+    expect(getUpdateStatus().download?.percent).toBe(42);
+
+    const failed = await checkForUpdates({ silent: true });
+    expect(failed.phase).toBe("downloading");
+    expect(failed.download?.percent).toBe(42);
+    expect(failed.errorMessage).toBeUndefined();
+
+    resolveDownload();
+    await downloadPromise;
+    expect(getUpdateStatus().phase).toBe("downloaded");
+  });
+
+  test("update-downloaded re-enables autoInstallOnAppQuit after a prior snooze", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-update-"));
+    setUserDataDirForTests(tempDir);
+    setAnalyticsCaptureForTests({
+      capture: () => undefined,
+      shutdown: async () => undefined,
+    });
+
+    const { updater, emit } = createMockUpdater({
+      checkForUpdates: mock(async () => {
+        emit("update-available", { version: "0.3.0" });
+        return { updateInfo: { version: "0.3.0" } };
+      }),
+      downloadUpdate: mock(async () => {
+        emit("update-downloaded", { version: "0.3.0" });
+      }),
+    });
+
+    initAutoUpdate({
+      isPackaged: true,
+      currentVersion: "0.2.0",
+      createUpdater: () => updater,
+      now: () => 1_000,
+    });
+
+    await checkForUpdates({ silent: false });
+    await snoozeUpdate();
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+
+    await downloadUpdate();
+    expect(getUpdateStatus().phase).toBe("downloaded");
+    expect(getUpdateStatus().snoozed).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(true);
   });
 });

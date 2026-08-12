@@ -3,12 +3,12 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import {
-  ReviewPollingAcquirer,
-  type ConditionalResult,
-  type PolledComment,
-  type PolledPr,
-  type PolledReview,
+import { ReviewPollingAcquirer } from "../src/lib/review-polling-acquirer";
+import type {
+  ConditionalResult,
+  PolledComment,
+  PolledPr,
+  PolledReview,
 } from "../src/lib/review-polling-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";

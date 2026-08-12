@@ -3,7 +3,8 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { RelayAcquirer, type RelayEnvelope } from "../src/lib/relay-acquirer";
+import { RelayAcquirer } from "../src/lib/relay-acquirer";
+import type { RelayEnvelope } from "../src/lib/relay-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 

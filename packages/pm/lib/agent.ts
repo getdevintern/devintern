@@ -6,10 +6,8 @@ import {
   constrainedModeAllowsExternalTools,
   isModeSupported,
   runAgentNode,
-  type AgentRunOptions,
-  type AgentRunResult,
-  type AgentHarness,
 } from "@devintern/agent-harness";
+import type { AgentRunOptions, AgentRunResult, AgentHarness } from "@devintern/agent-harness";
 
 export interface RunAgentOptions extends AgentRunOptions {}
 

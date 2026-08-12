@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { initialComposerValues, type ComposerValues } from "../components/ComposerForm.tsx";
+import { initialComposerValues } from "../components/ComposerForm.tsx";
+import type { ComposerValues } from "../components/ComposerForm.tsx";
 import {
   createTicketWorkspace,
   getActiveTicket,
@@ -10,8 +11,8 @@ import {
   ticketTitle,
   ticketWorkspacesReducer,
   initialTicketWorkspacesState,
-  type TicketWorkspacesState,
 } from "./ticket-workspaces.ts";
+import type { TicketWorkspacesState } from "./ticket-workspaces.ts";
 import { isBusy } from "./app-store.ts";
 
 const draft = { summary: "Auth redesign", description: "Body" };

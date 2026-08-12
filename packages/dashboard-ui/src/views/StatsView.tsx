@@ -10,7 +10,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { usePoll, type StatsResponse } from "@/lib/api";
+import { usePoll } from "@/lib/api";
+import type { StatsResponse } from "@/lib/api";
 import { formatDuration, formatRate } from "@/lib/utils";
 
 const WINDOWS = ["7d", "30d", "90d", "all"] as const;

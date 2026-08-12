@@ -244,11 +244,29 @@ export interface InitializeProjectRequest {
   overwrite?: boolean;
 }
 
+/**
+ * Payload for merging a tracker's credentials into an already-initialized
+ * project's `.devintern-pm/.env` and making it the active tracker. Unrelated
+ * settings and other trackers' credentials are preserved.
+ */
+export interface UpdateProjectTrackerRequest {
+  projectDir: string;
+  trackerId: string;
+  values: Record<string, string>;
+}
+
 /** Result of a tracker credential probe (ok envelope wraps this from IPC). */
 export type ProbeConnectionResult = { ok: true } | { ok: false; message: string };
 
 /** Init inspect payload: config snapshot + tracker menu for the wizard. */
-export type ProjectInitInspect = PmInitContext & { trackers: PmTrackerInfo[] };
+export type ProjectInitInspect = PmInitContext & {
+  trackers: PmTrackerInfo[];
+  /**
+   * Parsed `.devintern-pm/.env` values (including secrets) for update-mode
+   * prefill. Empty when no pm config exists yet (init mode).
+   */
+  currentEnv: Record<string, string>;
+};
 
 /** API surface exposed on `window.pm` by the preload script. */
 export interface PmDesktopApi {
@@ -316,6 +334,12 @@ export interface PmDesktopApi {
   ): Promise<IpcResult<ProbeConnectionResult>>;
   /** Write `.devintern-pm/.env` + gitignore secrets, then load the project session. */
   initializeProject(input: InitializeProjectRequest): Promise<IpcResult<ProjectStatus>>;
+  /**
+   * Merge a tracker's credentials into `.devintern-pm/.env` (preserving other
+   * trackers and settings), make it the active tracker, and reload the session.
+   * Use this for post-init tracker changes from the desktop app.
+   */
+  updateProjectTracker(input: UpdateProjectTrackerRequest): Promise<IpcResult<ProjectStatus>>;
   generateStory(requestId: string, input: GenerateStoryRequest): Promise<IpcResult<StoryDraft>>;
   editStory(requestId: string, input: EditStoryRequest): Promise<IpcResult<StoryDraft>>;
   decomposeStory(
@@ -372,7 +396,7 @@ export interface PmDesktopApi {
   onShowAbout(callback: () => void): () => void;
   /** Current auto-update snapshot (disabled in unpackaged/dev builds). */
   getUpdateStatus(): Promise<IpcResult<UpdateStatus>>;
-  /** Manual check (Settings / About). Surfaces errors; ignores snooze for display. */
+  /** Manual check (About). Surfaces errors; ignores snooze for display. */
   checkForUpdates(): Promise<IpcResult<UpdateStatus>>;
   /** Download the available update (shows progress via onUpdateStatus). */
   downloadUpdate(): Promise<IpcResult<UpdateStatus>>;
@@ -409,6 +433,7 @@ export const IPC_CHANNELS = {
   inspectProjectInit: "pm:inspect-project-init",
   probeTrackerConnection: "pm:probe-tracker-connection",
   initializeProject: "pm:initialize-project",
+  updateProjectTracker: "pm:update-project-tracker",
   generateStory: "pm:generate-story",
   editStory: "pm:edit-story",
   decomposeStory: "pm:decompose-story",

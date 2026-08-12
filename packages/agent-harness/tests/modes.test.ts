@@ -125,15 +125,15 @@ describe("CodexHarness modes", () => {
       "exec",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
+      "-c",
+      'approval_policy="never"',
     ]);
     expect(h.buildArgs({ mode: "readonly" })).toEqual([
       "exec",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
+      "-c",
+      'approval_policy="never"',
     ]);
   });
 
@@ -142,8 +142,16 @@ describe("CodexHarness modes", () => {
       "exec",
       "--sandbox",
       "workspace-write",
-      "--ask-for-approval",
-      "never",
+      "-c",
+      'approval_policy="never"',
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-c",
+      "features.network_proxy.enabled=true",
+      "-c",
+      "features.network_proxy.allow_local_binding=true",
+      "-c",
+      'features.network_proxy.domains={ "*" = "allow" }',
     ]);
   });
 });

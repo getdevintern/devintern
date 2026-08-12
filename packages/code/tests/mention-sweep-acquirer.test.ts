@@ -7,9 +7,8 @@ import {
   MentionSweepAcquirer,
   extractPrNumber,
   mentionsBot,
-  type SweptComment,
-  type SweptPrInfo,
 } from "../src/lib/mention-sweep-acquirer";
+import type { SweptComment, SweptPrInfo } from "../src/lib/mention-sweep-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 

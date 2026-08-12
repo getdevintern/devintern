@@ -29,15 +29,21 @@ export const MarkdownText: React.FC<MarkdownTextProps> = ({ children }) => {
     if (line.trim().startsWith("```")) {
       if (inCodeBlock) {
         // End code block
-        elements.push(
-          <Box key={`code-${i}`} flexDirection="column" paddingLeft={2}>
-            {codeBlockLines.map((codeLine, idx) => (
-              <Text key={idx} color="gray">
-                {codeLine}
-              </Text>
-            ))}
-          </Box>,
-        );
+        {
+          const codeLines: React.ReactNode[] = [];
+          for (let lineNo = 0; lineNo < codeBlockLines.length; lineNo++) {
+            codeLines.push(
+              <Text key={`code-${i}-L${lineNo}`} color="gray">
+                {codeBlockLines[lineNo]}
+              </Text>,
+            );
+          }
+          elements.push(
+            <Box key={`code-${i}`} flexDirection="column" paddingLeft={2}>
+              {codeLines}
+            </Box>,
+          );
+        }
         codeBlockLines = [];
         inCodeBlock = false;
       } else {
@@ -193,5 +199,5 @@ function renderInlineMarkdown(text: string): React.ReactNode {
     break;
   }
 
-  return <>{parts}</>;
+  return parts;
 }

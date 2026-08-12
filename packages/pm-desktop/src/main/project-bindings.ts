@@ -4,7 +4,8 @@
 
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { normalizeProjectBindings, type ProjectBinding } from "../shared/project-binding.ts";
+import { normalizeProjectBindings } from "../shared/project-binding.ts";
+import type { ProjectBinding } from "../shared/project-binding.ts";
 import { readSettings, updateSettings } from "./settings.ts";
 
 function bindingsFromSettings(settings: { projectBindings?: unknown }): ProjectBinding[] {

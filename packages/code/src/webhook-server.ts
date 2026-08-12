@@ -8,7 +8,8 @@
  */
 
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { createServer } from "http";
+import type { IncomingMessage, ServerResponse } from "http";
 import { join } from "path";
 import PQueue from "p-queue";
 import {

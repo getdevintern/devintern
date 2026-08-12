@@ -1,4 +1,5 @@
-import { textToADFDoc, type ADFDoc } from "@devintern/text-formatter";
+import { textToADFDoc } from "@devintern/text-formatter";
+import type { ADFDoc } from "@devintern/text-formatter";
 
 /**
  * Convert plain text or markdown to an ADF document for Jira descriptions.

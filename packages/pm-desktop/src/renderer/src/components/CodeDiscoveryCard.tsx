@@ -50,7 +50,8 @@ function DismissIconButton({ onDismiss, testId }: { onDismiss: () => void; testI
 function DismissError({ error }: { error: string }) {
   return (
     <p className="text-xs text-destructive" role="alert" data-testid="code-discovery-dismiss-error">
-      Couldn't save preference: {error}
+      {"Couldn't save preference: "}
+      {error}
     </p>
   );
 }
@@ -80,7 +81,7 @@ export function CodeDiscoveryCard({
           <DismissIconButton onDismiss={onDismiss} testId="code-discovery-dismiss" />
         </div>
         <p className="mt-1 text-[0.65rem] leading-relaxed text-muted-foreground">
-          Workers pick up ready tickets and open PRs while you're away.
+          {"Workers pick up ready tickets and open PRs while you're away."}
         </p>
         {dismissError && (
           <div className="mt-1">
@@ -130,7 +131,7 @@ export function CodeDiscoveryCard({
             onClick={onDismiss}
             data-testid="code-discovery-dismiss-link"
           >
-            Don't show again
+            {"Don't show again"}
           </Button>
           <Button
             type="button"
@@ -163,8 +164,9 @@ export function CodeDiscoveryCard({
           <DismissIconButton onDismiss={onDismiss} testId="code-discovery-dismiss" />
         </CardAction>
         <CardDescription>
-          Same tracker you already use. Workers pick up ready tickets, implement them, and open PRs
-          on a schedule or in a loop, so throughput isn't capped by who's at this desk.
+          {
+            "Same tracker you already use. Workers pick up ready tickets, implement them, and open PRs on a schedule or in a loop, so throughput isn't capped by who's at this desk."
+          }
         </CardDescription>
         {dismissError && <DismissError error={dismissError} />}
       </CardHeader>
@@ -176,7 +178,7 @@ export function CodeDiscoveryCard({
           onClick={onDismiss}
           data-testid="code-discovery-dismiss-link"
         >
-          Don't show again
+          {"Don't show again"}
         </Button>
         <Button
           type="button"

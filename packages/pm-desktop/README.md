@@ -11,6 +11,15 @@ bun run build        # compile only → out/
 bun run test
 ```
 
+## App icon
+
+Installer + dock/taskbar icon: `build/icon.png` (1024×1024). electron-builder picks it up via
+`icon: build/icon.png` in `electron-builder.yml`. To replace it, resize the new square source asset:
+
+```bash
+sips -z 1024 1024 /path/to/source-logo.png --out build/icon.png
+```
+
 ## Package (installable artifacts)
 
 Packaging uses [electron-builder](https://www.electron.build/). Scripts compile with electron-vite, then produce platform installers under `release/`.
@@ -25,21 +34,23 @@ bun run package:mac     # .dmg + .zip (macOS runner only)
 bun run package:dir     # unpacked app dir only (fast smoke)
 ```
 
-**Unsigned by default.** Signing and notarization are configured but gated on env vars (see below). Local and CI builds without secrets succeed and emit unsigned artifacts.
+**Unsigned by default.** Signing and notarization are configured but gated on env vars (see below). Local and CI builds without secrets succeed and emit unsigned artifacts. Early-adopter **public** installers on [`getdevintern/devintern` Releases](https://github.com/getdevintern/devintern/releases) (tags `pm-desktop-v*`) may also be unsigned on macOS — that is intentional until Developer ID + notarization land.
 
 | Platform | Artifacts | Signing today |
 | -------- | --------- | ------------- |
-| Linux    | AppImage, `.deb` | Not required (`rpm` optional if `rpmbuild` is installed) |
-| macOS    | `.dmg`, `.zip` | Blocked on Apple Developer certs → Gatekeeper / quarantine friction |
+| Linux    | AppImage, `.deb` | Not required (`rpm` optional if `rpmbuild` is installed) — smoother early-adopter path |
+| macOS    | `.dmg`, `.zip` | Optional; without Apple certs → Gatekeeper / quarantine friction |
 
 Windows packaging is intentionally out of scope for now.
 
-### macOS: open unsigned builds locally
+### macOS: open unsigned builds
 
-Until notarization lands, users may need System Settings → Privacy & Security → Open Anyway, or:
+Until notarization lands (local builds **and** early public downloads), macOS will block a normal open. Use System Settings → Privacy & Security → Open Anyway, right-click → Open, or:
 
 ```bash
-xattr -dr com.apple.quarantine "/path/to/DevIntern PM.app"
+# Bundle name follows executableName (DevIntern-PM), not the spaced productName.
+xattr -dr com.apple.quarantine "/Applications/DevIntern-PM.app"
+# or the path to a local .app / extracted build
 ```
 
 ## Signing & notarization env vars
@@ -71,11 +82,15 @@ When credentials are absent, `scripts/signing-env.ts` forces `CSC_IDENTITY_AUTO_
 
 ## Release process
 
-See [RELEASE.md](./RELEASE.md) for the versioned cut → package → attach workflow, auto-update feed requirements, platform coverage, and the certificate enablement checklist.
+See [RELEASE.md](./RELEASE.md) for the versioned cut → package → public feed workflow, early-adopter (unsigned macOS OK) vs future signed+notarized checklist, smoke checks, and CI secrets (`PM_DESKTOP_PUBLIC_RELEASE_TOKEN` is enough to open the public draft; CSC secrets are optional quality).
+
+**Download (early adopters):** published GitHub Releases on [`getdevintern/devintern`](https://github.com/getdevintern/devintern/releases) tagged `pm-desktop-vX.Y.Z`. Prefer Linux AppImage for the least friction; macOS needs the quarantine steps above until signing lands. Draft/prerelease tags are not the live update feed.
 
 ## Auto-update (packaged builds)
 
-`electron-updater` checks the GitHub Releases feed configured via `electron-builder.yml` `publish` + `package.json#repository`. Unpackaged `bun run dev` builds disable checks. In the app: Settings → **Check for updates**, or About → **Check for updates**. When an update is ready, a banner offers **Download & install** / **Restart & install** or **Later**.
+`electron-updater` checks the GitHub Releases feed configured via `electron-builder.yml` `publish` + `package.json#repository` (**published** releases on `getdevintern/devintern` only). Packaged builds check automatically in the background (short delay after launch, then about every 6 hours) and **download updates automatically** when one is found. A banner surfaces when an update is ready to install — **Restart & install** or **Later** (snoozes that version for 24h); a downloaded update is also applied on the next normal quit. Updates are fully automatic — Settings no longer has an Updates section; About retains a lightweight **Check for updates** for power users. Unpackaged `bun run dev` builds disable checks (`phase: disabled`) — no network calls, no error spam.
+
+On **unsigned macOS**, update discovery still uses `latest-mac.yml`; if applying the update is blocked by Gatekeeper, download the newer DMG/ZIP from the same Releases page and reinstall (same quarantine steps).
 
 ## Connect GitHub (managed clones)
 

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { GitPullRequest, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +12,36 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { parseGitHubRepoInput } from "../../../shared/github-repo.ts";
 import type { GitHubRepoListItem, ProjectStatus } from "../../../shared/ipc-contract.ts";
+import { qk } from "../queries/keys.ts";
+import { useGitHubAuthStatus } from "../queries/useGitHubAuthStatus.ts";
+import { useGitHubOAuthAvailable } from "../queries/useGitHubOAuthAvailable.ts";
+import { useGitHubRepos } from "../queries/useGitHubRepos.ts";
+
+/**
+ * Normalize typed/pasted repo input into a case-insensitive substring for list filtering.
+ * URLs become `owner/repo`; freeform text is lowercased as-is. Empty → no filter.
+ */
+export function repoListFilterQuery(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return "";
+  const parsed = parseGitHubRepoInput(trimmed);
+  return (parsed?.slug ?? trimmed).toLowerCase();
+}
+
+/** Filter already-loaded repos by substring match on `fullName` (case-insensitive). */
+export function filterGitHubRepos(
+  repos: GitHubRepoListItem[],
+  repoInput: string,
+): GitHubRepoListItem[] {
+  const query = repoListFilterQuery(repoInput);
+  if (!query) return repos;
+  return repos.filter((repo) => repo.fullName.toLowerCase().includes(query));
+}
+
+/** Stable empty list so `reposQuery.data ?? …` does not allocate every render. */
+const EMPTY_GITHUB_REPOS: GitHubRepoListItem[] = [];
 
 interface ConnectGitHubDialogProps {
   open: boolean;
@@ -26,9 +56,7 @@ interface ConnectGitHubDialogProps {
  * fallback for power users / CI-like setups.
  */
 export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: ConnectGitHubDialogProps) {
-  const [authConnected, setAuthConnected] = useState(false);
-  const [authMethod, setAuthMethod] = useState<"oauth" | "pat" | undefined>(undefined);
-  const [oauthAvailable, setOauthAvailable] = useState(false);
+  const queryClient = useQueryClient();
   const [oauthRunning, setOauthRunning] = useState(false);
   const [oauthPrompt, setOauthPrompt] = useState<{
     userCode: string;
@@ -39,13 +67,23 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
   const [savingToken, setSavingToken] = useState(false);
   const [repoInput, setRepoInput] = useState("");
   const [branch, setBranch] = useState("");
-  const [repos, setRepos] = useState<GitHubRepoListItem[]>([]);
-  const [loadingRepos, setLoadingRepos] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [showPat, setShowPat] = useState(false);
 
+  const oauthAvailableQuery = useGitHubOAuthAvailable(open);
+  const authStatusQuery = useGitHubAuthStatus(open);
+  const authConnected = authStatusQuery.data?.connected ?? false;
+  const authMethod = authStatusQuery.data?.method;
+  const oauthAvailable = oauthAvailableQuery.data ?? false;
+  const reposQuery = useGitHubRepos(open && authConnected);
+  // Stable empty fallback so useMemo deps don't churn every render when data is undefined.
+  const repos = reposQuery.data ?? EMPTY_GITHUB_REPOS;
+  const loadingRepos = reposQuery.isPending;
+
+  // Reset transient dialog state when opening; clear stale errors so a reopen
+  // after a failed connect doesn't carry the old message.
   useEffect(() => {
     if (!open) return;
     setError(null);
@@ -56,21 +94,25 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
     setShowPat(false);
     setOauthPrompt(null);
     setNeedsInstall(false);
-    void window.pm.isGitHubOAuthAvailable().then((result) => {
-      if (result.ok) setOauthAvailable(result.value);
-    });
-    void window.pm.getGitHubAuthStatus().then((result) => {
-      if (result.ok) {
-        setAuthConnected(result.value.connected);
-        setAuthMethod(result.value.method);
-        if (result.value.connected) {
-          void loadRepos();
-        } else {
-          setRepos([]);
-        }
-      }
-    });
   }, [open]);
+
+  // Surface repo fetch errors (auth_required / forbidden → re-auth prompt).
+  useEffect(() => {
+    if (!reposQuery.error) {
+      setError(null);
+      return;
+    }
+    setError(reposQuery.error.message);
+    if (reposQuery.error.code === "auth_required" || reposQuery.error.code === "forbidden") {
+      setNeedsAuth(true);
+    }
+  }, [reposQuery.error]);
+
+  // After OAuth sign-in, an empty repo list means the app isn't installed on
+  // any repos yet — prompt the user to install it.
+  useEffect(() => {
+    setNeedsInstall(authMethod === "oauth" && reposQuery.isSuccess && repos.length === 0);
+  }, [authMethod, reposQuery.isSuccess, repos.length]);
 
   // Surface the device-flow user code while polling runs.
   useEffect(() => {
@@ -79,25 +121,8 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
     });
   }, []);
 
-  const loadRepos = async () => {
-    setLoadingRepos(true);
-    try {
-      const result = await window.pm.listGitHubRepos();
-      if (result.ok) {
-        setRepos(result.value);
-        // After OAuth sign-in, an empty repo list means the app isn't installed
-        // on any repos yet — prompt the user to install it.
-        setNeedsInstall(authMethod === "oauth" && result.value.length === 0);
-        return;
-      }
-      setRepos([]);
-      setError(result.error.message);
-      if (result.error.code === "auth_required" || result.error.code === "forbidden") {
-        setNeedsAuth(true);
-      }
-    } finally {
-      setLoadingRepos(false);
-    }
+  const reloadRepos = () => {
+    void queryClient.invalidateQueries({ queryKey: qk.githubRepos });
   };
 
   const onSignInWithGitHub = async () => {
@@ -112,10 +137,10 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
         }
         return;
       }
-      setAuthConnected(result.value.connected);
-      setAuthMethod(result.value.method);
+      // Refresh auth status + repos from the shared cache.
+      await queryClient.invalidateQueries({ queryKey: qk.githubAuthStatus });
+      await queryClient.invalidateQueries({ queryKey: qk.githubRepos });
       setNeedsAuth(false);
-      await loadRepos();
     } finally {
       setOauthRunning(false);
       setOauthPrompt(null);
@@ -131,12 +156,12 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
         setError(result.error.message);
         return;
       }
-      setAuthConnected(true);
-      setAuthMethod(result.value.method);
       setToken("");
       setNeedsAuth(false);
       setShowPat(false);
-      await loadRepos();
+      // Refresh auth status + repos from the shared cache.
+      await queryClient.invalidateQueries({ queryKey: qk.githubAuthStatus });
+      await queryClient.invalidateQueries({ queryKey: qk.githubRepos });
     } finally {
       setSavingToken(false);
     }
@@ -172,14 +197,16 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
   const authRequired = needsAuth || !authConnected;
   const showAuthBlock = authRequired || showPat;
 
+  const filteredRepos = useMemo(() => filterGitHubRepos(repos, repoInput), [repos, repoInput]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg" data-testid="connect-github-dialog">
         <DialogHeader>
           <DialogTitle>Connect GitHub repository</DialogTitle>
           <DialogDescription>
-            Paste an owner/repo (or github.com URL). The app clones it into a managed folder and
-            runs setup there — you do not pick a path.
+            Type to filter your repos, or paste an owner/repo (or github.com URL). The app clones it
+            into a managed folder and runs setup there — you do not pick a path.
           </DialogDescription>
         </DialogHeader>
 
@@ -369,7 +396,7 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
                   size="icon-sm"
                   className="h-6 w-6"
                   disabled={loadingRepos}
-                  onClick={() => void loadRepos()}
+                  onClick={() => reloadRepos()}
                   title="Refresh repository list"
                   data-testid="connect-github-refresh-repos"
                 >
@@ -379,7 +406,7 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
             </div>
             <Input
               id="github-repo"
-              placeholder="owner/repo"
+              placeholder="Search or paste owner/repo"
               value={repoInput}
               onChange={(e) => setRepoInput(e.target.value)}
               disabled={connecting}
@@ -390,23 +417,32 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
                 className="max-h-36 space-y-1 overflow-y-auto"
                 data-testid="connect-github-repo-list"
               >
-                {repos.map((repo) => (
-                  <button
-                    key={repo.fullName}
-                    type="button"
-                    className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
-                    onClick={() => {
-                      // Fill owner/repo only — leave branch empty so reconnect
-                      // without an explicit branch keeps the existing checkout.
-                      setRepoInput(repo.fullName);
-                    }}
+                {filteredRepos.length > 0 ? (
+                  filteredRepos.map((repo) => (
+                    <button
+                      key={repo.fullName}
+                      type="button"
+                      className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
+                      onClick={() => {
+                        // Fill owner/repo only — leave branch empty so reconnect
+                        // without an explicit branch keeps the existing checkout.
+                        setRepoInput(repo.fullName);
+                      }}
+                    >
+                      <span className="truncate font-medium">{repo.fullName}</span>
+                      <span className="shrink-0 text-muted-foreground">
+                        {repo.private ? "private" : "public"}
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <p
+                    className="px-2 py-1.5 text-xs text-muted-foreground"
+                    data-testid="connect-github-repo-filter-empty"
                   >
-                    <span className="truncate font-medium">{repo.fullName}</span>
-                    <span className="shrink-0 text-muted-foreground">
-                      {repo.private ? "private" : "public"}
-                    </span>
-                  </button>
-                ))}
+                    No repositories match. You can still Connect with a valid owner/repo above.
+                  </p>
+                )}
               </div>
             ) : null}
             {loadingRepos ? (

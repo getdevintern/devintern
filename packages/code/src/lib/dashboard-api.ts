@@ -12,16 +12,11 @@
  */
 
 import { LockManager } from "./lock-manager";
-import {
-  RunStore,
-  type RunOrigin,
-  type RunRecord,
-  type RunStageRecord,
-  type RunStats,
-  type RunStatus,
-} from "./run-recorder";
+import { RunStore } from "./run-recorder";
+import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
-import { WorkerState, type Cursor } from "./worker-state";
+import { WorkerState } from "./worker-state";
+import type { Cursor } from "./worker-state";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",

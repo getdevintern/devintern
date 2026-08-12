@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import {
-  getAllowedBenefits,
-  isTeamAutomationEntitled,
-  type LicenseCheckResult,
-} from "../src/index";
+import { getAllowedBenefits, isTeamAutomationEntitled } from '../src/index';
+import type { LicenseCheckResult } from '../src/index';
 
 function result(overrides: Partial<LicenseCheckResult>): LicenseCheckResult {
   return { valid: true, source: "entitlement", message: "ok", ...overrides };

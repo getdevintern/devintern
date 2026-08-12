@@ -16,7 +16,8 @@
  *               explicitly asked for isolation must never silently run without it.
  */
 
-import { detectSandboxProviders, type DetectedSandboxProvider } from "./detect.js";
+import { detectSandboxProviders } from "./detect.js";
+import type { DetectedSandboxProvider } from "./detect.js";
 import { getSandboxProvider, listSandboxProviders } from "./registry.js";
 import type { ResolvedSandbox } from "./types.js";
 

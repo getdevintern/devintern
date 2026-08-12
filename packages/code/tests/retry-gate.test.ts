@@ -1,7 +1,8 @@
 import { describe, test, expect } from "bun:test";
 
 import { shouldSkipRetry } from "../src/lib/retry-gate";
-import { hashDescription, type RetryState } from "../src/lib/retry-state";
+import { hashDescription } from "../src/lib/retry-state";
+import type { RetryState } from "../src/lib/retry-state";
 import type { TaskTrackerClient } from "../src/lib/task-tracker-client";
 import type { Comment } from "../src/types/task-tracker";
 

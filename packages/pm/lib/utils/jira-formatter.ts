@@ -4,11 +4,11 @@
  */
 
 import {
-  type ADFNode,
   markdownToADFContent,
   parseTextWithFormatting,
   textToADFDoc,
 } from "@devintern/text-formatter";
+import type { ADFNode } from "@devintern/text-formatter";
 
 export type { ADFNode };
 

@@ -11,12 +11,8 @@
  * back to true once harness behavior is reliable; keep the helpers below.
  */
 
-import {
-  isConstrainedMode,
-  isModeSupported,
-  type AgentHarness,
-  type AgentRunOptions,
-} from "@devintern/agent-harness";
+import { isConstrainedMode, isModeSupported } from "@devintern/agent-harness";
+import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 
 /**
  * When true, analysis spawns prefer harness `readonly`/`plan` modes (with

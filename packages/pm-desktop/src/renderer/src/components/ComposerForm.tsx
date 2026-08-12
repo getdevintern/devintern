@@ -9,42 +9,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { isImageAttachmentName, mergeAttachments } from "@/lib/attachments";
 import { cn } from "@/lib/utils";
 import { orderIssueTypes } from "@/lib/issue-types";
+import { useProjectStore } from "../state/project-store.ts";
+import { useActiveTicket, useComposerBusy } from "../state/selectors.ts";
+import { useTicketWorkspacesStore } from "../state/ticket-workspaces-store.ts";
+import { initialComposerValues as baseInitialComposerValues } from "../state/composer-values.ts";
+import type { ComposerValues } from "../state/composer-values.ts";
 import { LabelsField } from "./LabelsField.tsx";
 import type {
   AttachmentRef,
   LabelRef,
-  ProjectStatus,
   PromptStyle,
   SourceType,
 } from "../../../shared/ipc-contract.ts";
 
-export interface ComposerValues {
-  sourceType: SourceType;
-  sourceContent: Record<SourceType, string>;
-  extraInstructions: string;
-  promptStyle: PromptStyle;
-  projectKey: string;
-  issueType: string;
-  epicKey: string;
-  /** Selected tracker label ids ({@link LabelRef.id}). */
-  labels: string[];
-  /** Local files for agent context + optional tracker upload. */
-  attachments: AttachmentRef[];
-  decompose: boolean;
-}
-
-export const initialComposerValues: ComposerValues = {
-  sourceType: "prompt",
-  sourceContent: { figma: "", log: "", prompt: "" },
-  extraInstructions: "",
-  promptStyle: "pm",
-  projectKey: "",
-  issueType: "Task",
-  epicKey: "",
-  labels: [],
-  attachments: [],
-  decompose: false,
-};
+// Re-export so existing imports from `./ComposerForm.tsx` keep working.
+export type { ComposerValues };
+export const initialComposerValues: ComposerValues = baseInitialComposerValues;
 
 const SOURCE_TABS: Array<{ type: SourceType; label: string; placeholder: string }> = [
   {
@@ -65,11 +45,7 @@ const SOURCE_TABS: Array<{ type: SourceType; label: string; placeholder: string 
 ];
 
 interface ComposerFormProps {
-  status: ProjectStatus;
-  values: ComposerValues;
-  onChange: (patch: Partial<ComposerValues>) => void;
   onGenerate: () => void;
-  busy: boolean;
   issueTypes: string[];
   loadingIssueTypes: boolean;
   labels: LabelRef[];
@@ -80,11 +56,7 @@ interface ComposerFormProps {
 }
 
 export function ComposerForm({
-  status,
-  values,
-  onChange,
   onGenerate,
-  busy,
   issueTypes,
   loadingIssueTypes,
   labels,
@@ -93,13 +65,22 @@ export function ComposerForm({
   labelsTruncated = false,
   onRetryLabels,
 }: ComposerFormProps) {
+  const status = useProjectStore((s) => s.status);
+  const activeTicket = useActiveTicket();
+  const busy = useComposerBusy();
+  const patchComposer = useTicketWorkspacesStore((s) => s.patchComposer);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  // ComposerForm only mounts when a ticket is active, but guard defensively.
+  if (!status || !activeTicket) return null;
+  const values = activeTicket.composer;
+  const onChange = (patch: Partial<ComposerValues>) => patchComposer(activeTicket.id, patch);
+
   const activeTab = SOURCE_TABS.find((t) => t.type === values.sourceType)!;
   const content = values.sourceContent[values.sourceType];
   const canGenerate = status.configured && content.trim().length > 0 && !busy;
   const orderedIssueTypes = orderIssueTypes(issueTypes);
   const showAttachments = values.sourceType === "prompt" || values.sourceType === "log";
-  const [attachError, setAttachError] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
 
   const applyIncomingAttachments = (incoming: AttachmentRef[]) => {
     const { next, error } = mergeAttachments(values.attachments, incoming);
@@ -141,6 +122,7 @@ export function ComposerForm({
         {SOURCE_TABS.map((tab) => (
           <button
             key={tab.type}
+            type="button"
             onClick={() => onChange({ sourceType: tab.type })}
             className={cn(
               "flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",

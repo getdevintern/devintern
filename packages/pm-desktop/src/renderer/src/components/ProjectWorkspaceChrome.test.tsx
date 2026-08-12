@@ -1,5 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ProjectStatus } from "../../../shared/ipc-contract.ts";
 
@@ -26,14 +25,15 @@ function baseStatus(overrides: Partial<ProjectStatus>): ProjectStatus {
 
 function render(status: ProjectStatus, setupOpen = false): string {
   return renderToStaticMarkup(
-    createElement(ProjectWorkspaceChrome, {
-      status,
-      setupOpen,
-      onSetupOpenChange: noop,
-      onSetupComplete: noop,
-      onChangeProject: noop,
-      children: createElement("div", { "data-testid": "ticket-workspace-chrome" }, "tickets"),
-    }),
+    <ProjectWorkspaceChrome
+      status={status}
+      setupOpen={setupOpen}
+      onSetupOpenChange={noop}
+      onSetupComplete={noop}
+      onChangeProject={noop}
+    >
+      <div data-testid="ticket-workspace-chrome">tickets</div>
+    </ProjectWorkspaceChrome>,
   );
 }
 

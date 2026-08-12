@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { render, Box, Text, useInput, useApp } from "ink";
-import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
+import { ScrollView } from "ink-scroll-view";
+import type { ScrollViewRef } from "ink-scroll-view";
 import { MarkdownText } from "./MarkdownText";
 import { PromptInput } from "./PromptInput";
 import { getDefaultIssueType, orderIssueTypes } from "../issue-types";
@@ -345,7 +346,9 @@ export async function runInteractiveMode(
         if (state.step === "issue-type" && !hasIssueTypeStep) {
           setState((prev) => ({ ...prev, step: "style" }));
         }
-      }, [state.step, hasEpicStep, hasIssueTypeStep]);
+        // hasEpicStep / hasIssueTypeStep are fixed for the form lifetime (closure
+        // constants from options), so they are not valid React dependencies.
+      }, [state.step]);
 
       // Keep imperative refs in sync with state for external readers
       useEffect(() => {
@@ -964,7 +967,9 @@ export async function runInteractiveMode(
               <Box flexDirection="column" paddingY={1}>
                 <Text bold>Custom instructions (optional, press Enter to skip):</Text>
                 <Text dimColor>Additional requirements or focus areas</Text>
-                <Text dimColor>Example: "Focus on accessibility" or "Prioritize performance"</Text>
+                <Text dimColor>
+                  {'Example: "Focus on accessibility" or "Prioritize performance"'}
+                </Text>
                 <PromptInput
                   key={`${state.step}-${inputVersion}`}
                   initialValue={input}
@@ -1204,7 +1209,7 @@ export async function runInteractiveMode(
                     What would you like to change?
                   </Text>
                   <Text dimColor>
-                    Example: "Add more details about error handling" or "Make it more concise"
+                    {'Example: "Add more details about error handling" or "Make it more concise"'}
                   </Text>
                   <PromptInput
                     key={`${state.step}-${inputVersion}`}

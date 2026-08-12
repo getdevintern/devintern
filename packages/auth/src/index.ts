@@ -1,16 +1,12 @@
-import { createClient, type Session, type User } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
+import type { Session, User } from "@supabase/supabase-js";
 import {
   AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
 } from "./auth-callback";
-import {
-  loginMethodLabel,
-  promptForEmail,
-  type ResolvedLogin,
-  resolveLogin,
-  type OAuthProvider,
-} from "./login-provider";
+import { loginMethodLabel, promptForEmail, resolveLogin } from "./login-provider";
+import type { ResolvedLogin, OAuthProvider } from "./login-provider";
 import { openBrowser, readTextFileIfExists, removeFileIfExists, writeTextFile } from "./runtime";
 import type { AuthenticatedUser, LoginMethod, SupabaseAuthConfig } from "./types";
 

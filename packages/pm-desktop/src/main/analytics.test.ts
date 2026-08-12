@@ -8,8 +8,8 @@ import {
   setAnalyticsCaptureForTests,
   setAnalyticsEnabled,
   track,
-  type AnalyticsCapture,
 } from "./analytics.ts";
+import type { AnalyticsCapture } from "./analytics.ts";
 import { setUserDataDirForTests, updateSettings } from "./settings.ts";
 
 describe("scrubProps", () => {

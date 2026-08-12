@@ -9,11 +9,8 @@
  * fully supported via the `Microsoft.VSTS.Scheduling.StoryPoints` field.
  */
 
-import {
-  AzureDevOpsClient,
-  type AzureDevOpsComment,
-  type AzureDevOpsWorkItemDetail,
-} from "@devintern/task-trackers";
+import { AzureDevOpsClient } from "@devintern/task-trackers";
+import type { AzureDevOpsComment, AzureDevOpsWorkItemDetail } from "@devintern/task-trackers";
 import { markdownToHtmlDescription } from "@devintern/text-formatter";
 import type {
   Comment,
@@ -34,8 +31,10 @@ import {
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
   isIncompleteImplementationCommentText,
-  type ClarityAssessmentLike,
-  type EstimationResultLike,
+} from "../shared/markdown-comment-formatter";
+import type {
+  ClarityAssessmentLike,
+  EstimationResultLike,
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";

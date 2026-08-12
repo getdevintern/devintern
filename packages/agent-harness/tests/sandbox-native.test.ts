@@ -87,7 +87,7 @@ describe("NativeSandboxProvider", () => {
   test("codex: keeps --sandbox workspace-write and widens writable roots", () => {
     const wrapped = new NativeSandboxProvider().wrapCommand(
       "/usr/bin/codex",
-      ["exec", "--sandbox", "workspace-write", "--ask-for-approval", "never"],
+      ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="never"'],
       policy({ harnessName: "codex" }),
     );
     expect(wrapped.path).toBe("/usr/bin/codex");
@@ -95,15 +95,41 @@ describe("NativeSandboxProvider", () => {
       "exec",
       "--sandbox",
       "workspace-write",
-      "--ask-for-approval",
-      "never",
+      "-c",
+      'approval_policy="never"',
     ]);
-    const cIndex = wrapped.args.indexOf("-c");
+    expect(wrapped.args).toContain("sandbox_workspace_write.network_access=true");
+    expect(wrapped.args).toContain("features.network_proxy.enabled=true");
+    expect(wrapped.args).toContain("features.network_proxy.allow_local_binding=true");
+    expect(wrapped.args).toContain('features.network_proxy.domains={ "*" = "allow" }');
+    const cIndex = wrapped.args.lastIndexOf("-c");
     expect(cIndex).toBeGreaterThan(-1);
     // Extra roots exclude the working dir (codex already allows the workspace).
     expect(wrapped.args[cIndex + 1]).toBe(
       `sandbox_workspace_write.writable_roots=${JSON.stringify(["/tmp/devintern-tasks"])}`,
     );
+  });
+
+  test("codex: maps a domain allowlist and replaces existing network config", () => {
+    const wrapped = new NativeSandboxProvider().wrapCommand(
+      "/usr/bin/codex",
+      [
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "-c",
+        'features.network_proxy.domains={ "*" = "allow" }',
+      ],
+      policy({
+        harnessName: "codex",
+        network: { allowedDomains: ["api.openai.com", "github.com"] },
+      }),
+    );
+    expect(wrapped.args).toContain('features.network_proxy.domains={ "api.openai.com" = "allow", "github.com" = "allow" }');
+    expect(wrapped.args).not.toContain('features.network_proxy.domains={ "*" = "allow" }');
+    expect(wrapped.args.filter((arg) => arg === "sandbox_workspace_write.network_access=true")).toHaveLength(1);
   });
 
   test("codex: adds --sandbox workspace-write when absent", () => {
@@ -126,11 +152,11 @@ describe("NativeSandboxProvider", () => {
 });
 
 describe("applyNestingGuard", () => {
-  const codexArgs = ["exec", "--sandbox", "workspace-write", "--ask-for-approval", "never"];
+  const codexArgs = ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="never"'];
 
   test("on macOS under nono, codex's own sandbox is switched off", () => {
     const guarded = applyNestingGuard("nono", "codex", codexArgs, "darwin");
-    expect(guarded).toEqual(["exec", "--sandbox", "danger-full-access", "--ask-for-approval", "never"]);
+    expect(guarded).toEqual(["exec", "--sandbox", "danger-full-access", "-c", 'approval_policy="never"']);
     expect(codexArgs[2]).toBe("workspace-write"); // input not mutated
   });
 

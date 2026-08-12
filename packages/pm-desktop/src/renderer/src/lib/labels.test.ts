@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-  applyLabelsFromProjectStatus,
-  clearLabelCachesForKey,
-  pruneSelectedLabels,
-  selectionAfterLabelsFailure,
-} from "./labels.ts";
-import type { LabelListResult, LabelRef } from "../../../shared/ipc-contract.ts";
+import { pruneSelectedLabels, selectionAfterLabelsFailure } from "./labels.ts";
+import type { LabelRef } from "../../../shared/ipc-contract.ts";
 
 const available: LabelRef[] = [
   { id: "bug", name: "bug" },
@@ -50,89 +45,5 @@ describe("selectionAfterLabelsFailure", () => {
 
   test("keeps selections when keepOnFailure is set", () => {
     expect(selectionAfterLabelsFailure(["typed"], { keepOnFailure: true })).toEqual(["typed"]);
-  });
-});
-
-describe("applyLabelsFromProjectStatus", () => {
-  test("seeds success cache and clears prior entries", () => {
-    const labelsCache = new Map<string, LabelListResult>([
-      ["OLD", { labels: [{ id: "x", name: "x" }], truncated: false }],
-    ]);
-    const labelsFailedCache = new Map<string, string>([["OLD", "boom"]]);
-
-    const result = applyLabelsFromProjectStatus(
-      {
-        supportsLabels: true,
-        defaultProjectKey: "ENG",
-        labels: available,
-        labelsTruncated: true,
-        labelsError: undefined,
-      },
-      labelsCache,
-      labelsFailedCache,
-    );
-
-    expect(result).toEqual({
-      labels: available,
-      labelsTruncated: true,
-      labelsError: null,
-    });
-    expect(labelsCache.get("ENG")).toEqual({ labels: available, truncated: true });
-    expect(labelsCache.has("OLD")).toBe(false);
-    expect(labelsFailedCache.size).toBe(0);
-  });
-
-  test("seeds failed-cache on labelsError so listLabels is not auto-retried", () => {
-    const labelsCache = new Map<string, LabelListResult>();
-    const labelsFailedCache = new Map<string, string>();
-
-    const result = applyLabelsFromProjectStatus(
-      {
-        supportsLabels: true,
-        defaultProjectKey: "ENG",
-        labels: [],
-        labelsError: "rate limited",
-      },
-      labelsCache,
-      labelsFailedCache,
-    );
-
-    expect(result).toEqual({ labels: [], labelsTruncated: false, labelsError: "rate limited" });
-    expect(labelsCache.size).toBe(0);
-    expect(labelsFailedCache.get("ENG")).toBe("rate limited");
-  });
-
-  test("skips cache seeding when labels are unsupported", () => {
-    const labelsCache = new Map<string, LabelListResult>();
-    const labelsFailedCache = new Map<string, string>();
-
-    applyLabelsFromProjectStatus(
-      {
-        supportsLabels: false,
-        defaultProjectKey: "ENG",
-        labels: available,
-      },
-      labelsCache,
-      labelsFailedCache,
-    );
-
-    expect(labelsCache.size).toBe(0);
-    expect(labelsFailedCache.size).toBe(0);
-  });
-});
-
-describe("clearLabelCachesForKey", () => {
-  test("removes both success and failure entries for the key", () => {
-    const labelsCache = new Map<string, LabelListResult>([
-      ["ENG", { labels: available, truncated: false }],
-      ["DES", { labels: [{ id: "a", name: "a" }], truncated: false }],
-    ]);
-    const labelsFailedCache = new Map<string, string>([["ENG", "boom"]]);
-
-    clearLabelCachesForKey(labelsCache, labelsFailedCache, "ENG");
-
-    expect(labelsCache.has("ENG")).toBe(false);
-    expect(labelsCache.has("DES")).toBe(true);
-    expect(labelsFailedCache.has("ENG")).toBe(false);
   });
 });

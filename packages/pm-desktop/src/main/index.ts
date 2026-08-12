@@ -4,7 +4,12 @@
 
 import { BrowserWindow, app } from "electron";
 import { appOpenedProps, shutdownAnalytics, track } from "./analytics.ts";
-import { initAutoUpdate, startAutoUpdateChecks, stopAutoUpdateChecks } from "./auto-update.ts";
+import {
+  initAutoUpdate,
+  resolveElectronAutoUpdater,
+  startAutoUpdateChecks,
+  stopAutoUpdateChecks,
+} from "./auto-update.ts";
 import { registerIpcHandlers } from "./ipc.ts";
 import { installAppMenu } from "./menu.ts";
 import { augmentPath } from "./path-fix.ts";
@@ -35,11 +40,14 @@ if (!hasLock) {
 
     if (app.isPackaged) {
       // Dynamic import: unpackaged/dev never loads electron-updater.
-      const { autoUpdater } = await import("electron-updater");
+      // Do NOT destructure `{ autoUpdater }` from the import — CJS/ESM interop
+      // often leaves the named export undefined (electron-builder#7976).
+      const electronUpdater = await import("electron-updater");
+      const autoUpdater = resolveElectronAutoUpdater(electronUpdater);
       initAutoUpdate({
         isPackaged: true,
         currentVersion: app.getVersion(),
-        createUpdater: () => autoUpdater as unknown as import("./auto-update.ts").UpdaterLike,
+        createUpdater: () => autoUpdater,
       });
       startAutoUpdateChecks();
     } else {

@@ -1,10 +1,26 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProjectBar } from "./ProjectBar.tsx";
 import type { ProjectStatus } from "../../../shared/ipc-contract.ts";
+import { withQueryClient } from "../test-helpers/query-client.tsx";
+import { resetProjectStore, useProjectStore } from "../state/project-store.ts";
+import {
+  resetTicketWorkspacesStore,
+  useTicketWorkspacesStore,
+} from "../state/ticket-workspaces-store.ts";
+import { createTicketWorkspace } from "../state/ticket-workspaces.ts";
+import { initialOutputState } from "../state/app-store.ts";
 
 const noop = () => {};
+
+function seedBusyTicket(): void {
+  const ticket = createTicketWorkspace("busy-1");
+  useTicketWorkspacesStore.setState({
+    tickets: [{ ...ticket, output: { ...initialOutputState, phase: "generating" } }],
+    activeTicketId: ticket.id,
+  });
+}
 
 function render(
   status: ProjectStatus,
@@ -15,25 +31,42 @@ function render(
     updatingFromRemote?: boolean;
     onUpdateFromRemote?: () => void;
     onConnectGitHub?: () => void;
+    onChangeTrackerSettings?: () => void;
   },
 ): string {
+  // Seed the project chrome store so ProjectBar reads status / flags without props.
+  useProjectStore.setState({
+    status,
+    loadingProject: options?.switching ?? false,
+    updatingFromRemote: options?.updatingFromRemote ?? false,
+    chromeError: null,
+  });
+  if (options?.agentRunning) seedBusyTicket();
   return renderToStaticMarkup(
-    createElement(ProjectBar, {
-      status,
-      onConnectGitHub: options?.onConnectGitHub,
-      onChangeProject: noop,
-      recentProjects: options?.recentProjects,
-      onOpenRecentProject: noop,
-      onSwitchTracker: noop,
-      onSwitchProjectKey: noop,
-      onSwitchHarness: noop,
-      onUpdateFromRemote: options?.onUpdateFromRemote,
-      agentRunning: options?.agentRunning,
-      switching: options?.switching,
-      updatingFromRemote: options?.updatingFromRemote,
-    }),
+    withQueryClient(
+      createElement(ProjectBar, {
+        onConnectGitHub: options?.onConnectGitHub,
+        onChangeProject: noop,
+        recentProjects: options?.recentProjects,
+        onOpenRecentProject: noop,
+        onSwitchTracker: noop,
+        onSwitchProjectKey: noop,
+        onSwitchHarness: noop,
+        onChangeTrackerSettings: options?.onChangeTrackerSettings,
+        onUpdateFromRemote: options?.onUpdateFromRemote,
+      }),
+    ),
   );
 }
+
+beforeEach(() => {
+  resetProjectStore();
+  resetTicketWorkspacesStore();
+});
+afterEach(() => {
+  resetProjectStore();
+  resetTicketWorkspacesStore();
+});
 
 describe("ProjectBar", () => {
   test("labels tracker, project, and harness in read-only chips", () => {
@@ -274,7 +307,7 @@ describe("ProjectBar", () => {
     });
 
     expect(html).toContain('aria-label="Project: repo"');
-    expect(html).toContain("Connect GitHub or open folder");
+    expect(html).toContain("Connect GitHub repository or open folder");
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain(">repo<");
   });
@@ -420,5 +453,82 @@ describe("ProjectBar", () => {
     expect(updateBtn).not.toContain("disabled=");
     // Apostrophe is HTML-escaped in the title attribute.
     expect(updateBtn).toContain("Couldn&#x27;t download updates. network unreachable");
+  });
+
+  test("tracker chip stays read-only when only one tracker is configured and no settings callback", () => {
+    const html = render({
+      projectDir: "/repo",
+      configured: true,
+      isGitRepository: true,
+      activeTrackerId: "jira",
+      activeTrackerDisplayName: "Jira",
+      configuredTrackers: [
+        { id: "jira", displayName: "Jira", projectKeyEnv: "JIRA_DEFAULT_PROJECT_KEY" },
+      ],
+    });
+
+    expect(html).toContain('aria-label="Task tracker: Jira"');
+    expect(html).not.toContain('title="Switch task tracker"');
+    expect(html).not.toContain('data-testid="tracker-change-settings"');
+  });
+
+  test("offers the Add or change tracker entry point even with a single configured tracker", () => {
+    const html = render(
+      {
+        projectDir: "/repo",
+        configured: true,
+        isGitRepository: true,
+        activeTrackerId: "markdown",
+        activeTrackerDisplayName: "Markdown files",
+        configuredTrackers: [{ id: "markdown", displayName: "Markdown files" }],
+      },
+      { onChangeTrackerSettings: noop },
+    );
+
+    // The chip becomes a dropdown so the post-init settings entry point is
+    // reachable. (Menu body is portal-rendered; assert on the trigger button.)
+    expect(html).toContain('aria-label="Task tracker: Markdown files"');
+    expect(html).toContain('title="Switch task tracker"');
+  });
+
+  test("lists configured trackers and the settings entry point together", () => {
+    const html = render(
+      {
+        projectDir: "/repo",
+        configured: true,
+        isGitRepository: true,
+        activeTrackerId: "jira",
+        activeTrackerDisplayName: "Jira",
+        configuredTrackers: [
+          { id: "jira", displayName: "Jira", projectKeyEnv: "JIRA_DEFAULT_PROJECT_KEY" },
+          { id: "linear", displayName: "Linear", projectKeyEnv: "LINEAR_DEFAULT_TEAM_KEY" },
+        ],
+      },
+      { onChangeTrackerSettings: noop },
+    );
+
+    // The chip stays a dropdown (configured trackers + settings entry point).
+    expect(html).toContain('title="Switch task tracker"');
+    expect(html).toContain('aria-label="Task tracker: Jira"');
+  });
+
+  test("disables the Add or change tracker entry point while an agent is running", () => {
+    const html = render(
+      {
+        projectDir: "/repo",
+        configured: true,
+        isGitRepository: true,
+        activeTrackerId: "jira",
+        activeTrackerDisplayName: "Jira",
+        configuredTrackers: [
+          { id: "jira", displayName: "Jira", projectKeyEnv: "JIRA_DEFAULT_PROJECT_KEY" },
+        ],
+      },
+      { onChangeTrackerSettings: noop, agentRunning: true },
+    );
+
+    expect(html).toContain('title="Unavailable while an agent is running"');
+    // The dropdown stays mounted (so the reason is visible) but is disabled.
+    expect(html).toContain('aria-label="Task tracker: Jira"');
   });
 });

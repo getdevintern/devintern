@@ -19,7 +19,8 @@
  * (see `KillMode=control-group`, the default); see the server-automation docs.
  */
 
-import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
+import { spawn } from "child_process";
+import type { ChildProcess, SpawnOptions } from "child_process";
 
 /** PGIDs of process groups spawned via {@link spawnReapable} that are still alive. */
 const trackedGroups = new Set<number>();

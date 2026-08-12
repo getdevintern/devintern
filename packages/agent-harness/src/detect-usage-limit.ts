@@ -46,14 +46,30 @@ const USAGE_LIMIT_PATTERNS = [
   /(?:usage|session|account|fast|usage credit) limit reached/i,
   // generic Claude/Anthropic phrasing
   /claude (?:ai )?usage limit/i,
-  // API/provider rate limits (qualified to avoid matching benign prose).
-  // Covers "rate limit error/exceeded/reached" and "rate_limit_error" (opencode/AI SDK).
+] as const;
+
+// These are intentionally evaluated line-by-line and only when the line looks
+// like a provider diagnostic. Agent transcripts routinely contain source code,
+// diffs, test counts, and docs that mention HTTP 429 / "Too Many Requests".
+const PROVIDER_LIMIT_PATTERNS = [
+  // Covers "rate limit error/exceeded/reached" and rate_limit_error (AI SDK).
   /rate[ _-]?limit(?: error| exceeded| reached)/i,
-  /\brate_limit/i,
+  /\brate_limit(?:_error)?\b/i,
   /\btoo many requests\b/i,
   /\bquota exceeded\b/i,
+  // Require an HTTP/status/error context below before accepting a 429.
   /\b429\b/,
 ] as const;
+
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
+
+type OutputStream = "stdout" | "stderr";
+
+interface OutputLine {
+  raw: string;
+  normalized: string;
+  stream: OutputStream;
+}
 
 const RESET_PATTERNS = [
   // "resets 7:20pm (Asia/Ho_Chi_Minh)", "resets at 9am", "resets in 2 hours"
@@ -78,7 +94,7 @@ export interface UsageLimitResult {
 /**
  * Extract a human-readable reset hint from limit output, if present.
  *
- * @param text - Combined stdout/stderr
+ * @param text - One diagnostic line
  */
 function extractResetHint(text: string): string | undefined {
   for (const pattern of RESET_PATTERNS) {
@@ -88,6 +104,105 @@ function extractResetHint(text: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Strip terminal styling before matching, while retaining the original line
+ * for diagnostics.
+ */
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+/**
+ * Split one captured stream into matchable lines with their source stream.
+ */
+function outputLines(text: string, stream: OutputStream): OutputLine[] {
+  return text.split(/\r?\n/).map((raw) => ({
+    raw,
+    normalized: stripAnsi(raw),
+    stream,
+  }));
+}
+
+/**
+ * Avoid treating source code, comments, and diff hunks as provider errors.
+ * Codex's verbose transcript can include arbitrary command output, including
+ * bundled source that contains literal strings such as "429 Too Many Requests".
+ */
+function isSourceOrDiffLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^(?:diff --git|index\b|---\s|\+\+\+\s|@@\s)/i.test(trimmed) ||
+    /^[+-]{1,3}\s/.test(trimmed) ||
+    /^(?:\/\/|\/\*|\*|#)/.test(trimmed) ||
+    /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||
+    /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
+    /=>/.test(trimmed)
+  );
+}
+
+/**
+ * Provider rate-limit phrases need stronger evidence than a subscription
+ * limit phrase. In particular, a bare `429` or `Too Many Requests` in agent
+ * stdout is often just text from a file the agent inspected.
+ */
+function isLikelyProviderDiagnostic(line: OutputLine): boolean {
+  const trimmed = line.normalized.trim();
+  if (isSourceOrDiffLine(trimmed)) {
+    return false;
+  }
+
+  // Provider CLIs commonly write transport failures to stderr.
+  if (line.stream === "stderr") {
+    return true;
+  }
+
+  // Also accept structured or explicitly diagnostic stdout from SDK-backed
+  // harnesses (for example AI_RetryError and JSON error responses).
+  if (
+    /^(?:error|fatal|warning)\b/i.test(trimmed) ||
+    /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
+    /^HTTP\s*429\b/i.test(trimmed) ||
+    /^\s*[{"[].*(?:rate_limit|quota).*[}\]]\s*$/i.test(trimmed) ||
+    /\b(?:error|exception|failed|failure|last error|provider|response|returned|status|retry)\b/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+
+  // Preserve concise provider messages such as "rate limit exceeded" while
+  // rejecting longer prose/source lines that merely mention the phrase.
+  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:http\s*)?429(?:\s+too many requests)?)\s*[.!]?$/i.test(
+    trimmed,
+  );
+}
+
+/**
+ * Find a usage-limit line without scanning arbitrary transcript content as if
+ * it were a provider diagnostic.
+ */
+function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefined {
+  // Check stderr first because it is the conventional diagnostic channel, then
+  // inspect stdout for explicit subscription-limit and structured SDK errors.
+  const lines = [...outputLines(stderr, "stderr"), ...outputLines(stdout, "stdout")];
+
+  return lines.find((line) => {
+    const normalized = line.normalized.trim();
+    if (!normalized || isSourceOrDiffLine(normalized)) {
+      return false;
+    }
+
+    if (USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+      return true;
+    }
+
+    return (
+      PROVIDER_LIMIT_PATTERNS.some((pattern) => pattern.test(normalized)) &&
+      isLikelyProviderDiagnostic(line)
+    );
+  });
 }
 
 /**
@@ -150,22 +265,17 @@ export function resetHintToMs(hint: string | undefined, nowMs: number): number |
  * @param stderr - Captured standard error
  */
 export function detectUsageLimit(stdout: string, stderr: string): UsageLimitResult {
-  const combined = `${stdout}\n${stderr}`;
-
-  const matchedPattern = USAGE_LIMIT_PATTERNS.find((pattern) => pattern.test(combined));
-  if (!matchedPattern) {
+  const matchedLine = findUsageLimitLine(stdout, stderr);
+  if (!matchedLine) {
     return { limited: false };
   }
 
-  // Capture the specific line for logging context.
-  const matchedLine = combined
-    .split("\n")
-    .find((line) => matchedPattern.test(line))
-    ?.trim();
-
   return {
     limited: true,
-    resetsAt: extractResetHint(combined),
-    matchedLine,
+    // Only extract a reset hint from the matched diagnostic line. Searching
+    // the entire transcript can borrow an unrelated "try again" from source
+    // code or a tool result, as happened with the Cloudflare tunnel bundle.
+    resetsAt: extractResetHint(matchedLine.normalized),
+    matchedLine: matchedLine.raw.trim(),
   };
 }

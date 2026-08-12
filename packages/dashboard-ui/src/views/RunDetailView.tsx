@@ -2,10 +2,13 @@ import { useState } from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 
 import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
+import { StageDetailFields } from "@/components/StageDetailFields";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { usePoll, type RunDetailResponse, type RunStageRecord } from "@/lib/api";
+import { Markdown } from "@/lib/markdown";
+import { usePoll } from "@/lib/api";
+import type { RunDetailResponse, RunStageRecord } from "@/lib/api";
+import { parseStageDetail } from "@/lib/stage-detail";
 import { formatDuration, formatTime } from "@/lib/utils";
 
 const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
@@ -17,49 +20,71 @@ const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
 };
 
 /**
- * Split a stage's detail blob into a free-text report (the agent's own
- * markdown summary, stored under `report`) and the remaining structured
- * fields, so prose is not shown as an escaped JSON string.
+ * Human-readable rendering of a stage's detail blob, surfaced directly under
+ * the stage so the full content (markdown prose + structured fields) is
+ * visible without expanding a toggle or scrolling inside a boxed region.
+ *
+ * The friendly view is always shown; the underlying raw JSON/text is available
+ * behind a "raw" toggle so the original payload is never lost.
+ *
+ * `summary` is the stage's summary column (already rendered above the detail);
+ * when the parsed markdown matches it we skip re-rendering the prose to avoid
+ * duplicating the same text (notably the feasibility stage, where the detail
+ * blob's `summary` field is the same string as the stage summary).
  */
-function parseDetail(detail: string): { report?: string; json?: string } {
-  try {
-    const parsed = JSON.parse(detail);
-    if (parsed && typeof parsed === "object" && typeof parsed.report === "string") {
-      const { report, ...rest } = parsed as { report: string } & Record<string, unknown>;
-      return {
-        report,
-        json: Object.keys(rest).length > 0 ? JSON.stringify(rest, null, 2) : undefined,
-      };
-    }
-    return { json: JSON.stringify(parsed, null, 2) };
-  } catch {
-    // Not JSON; show as-is.
-    return { json: detail };
-  }
-}
+function StageDetail({
+  stage,
+  detail,
+  summary,
+}: {
+  stage: RunStageRecord["stage"];
+  detail: string;
+  summary?: string;
+}) {
+  const [rawOpen, setRawOpen] = useState(false);
+  const parsed = parseStageDetail(stage, detail);
 
-function StageDetail({ detail }: { detail: string }) {
-  const [open, setOpen] = useState(false);
-  const { report, json } = parseDetail(detail);
+  if (
+    parsed.fallback !== undefined &&
+    parsed.markdown === undefined &&
+    parsed.fields === undefined
+  ) {
+    return <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{parsed.fallback}</pre>;
+  }
+
+  const markdown =
+    parsed.markdown !== undefined && parsed.markdown.trim() === (summary ?? "").trim()
+      ? undefined
+      : parsed.markdown;
+
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="mt-2">
-      <CollapsibleTrigger className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        detail
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        {report ? (
-          <pre className="mt-2 max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap">
-            {report}
-          </pre>
-        ) : null}
-        {json ? (
-          <pre className="mt-2 max-h-96 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-            {json}
-          </pre>
-        ) : null}
-      </CollapsibleContent>
-    </Collapsible>
+    <div className="mt-2">
+      {markdown ? <Markdown>{markdown}</Markdown> : null}
+      {parsed.fields && parsed.fields.length > 0 ? (
+        <div className={markdown ? "mt-3" : ""}>
+          <StageDetailFields fields={parsed.fields} />
+        </div>
+      ) : null}
+      {parsed.raw ? (
+        <div className={markdown || parsed.fields ? "mt-3" : ""}>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setRawOpen((v) => !v)}
+            aria-expanded={rawOpen}
+            className="-ml-1 text-muted-foreground"
+          >
+            {rawOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            raw
+          </Button>
+          {rawOpen ? (
+            <pre className="mt-1 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+              {parsed.raw}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -165,7 +190,13 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                   {stage.summary ? (
                     <p className="mt-1 text-sm text-muted-foreground">{stage.summary}</p>
                   ) : null}
-                  {stage.detail ? <StageDetail detail={stage.detail} /> : null}
+                  {stage.detail ? (
+                    <StageDetail
+                      stage={stage.stage}
+                      detail={stage.detail}
+                      summary={stage.summary}
+                    />
+                  ) : null}
                 </div>
               </div>
             ))}

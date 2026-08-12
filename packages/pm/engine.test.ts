@@ -2,13 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getModuleDir } from "./lib/runtime/path.js";
-import {
-  createEngine,
-  DEFAULT_ISSUE_TYPES,
-  EngineError,
-  extractJsonPayload,
-  type StoryDraft,
-} from "./lib/engine";
+import { createEngine, DEFAULT_ISSUE_TYPES, EngineError, extractJsonPayload } from "./lib/engine";
+import type { StoryDraft } from "./lib/engine";
 import type { Config } from "./lib/config";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./lib/backends";
 import type { AgentRunResult } from "@devintern/agent-harness";

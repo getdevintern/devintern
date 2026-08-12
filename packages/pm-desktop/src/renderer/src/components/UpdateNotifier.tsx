@@ -3,7 +3,10 @@
  */
 
 import { useEffect, useState } from "react";
-import { formatUpdateAvailableMessage, type UpdateStatus } from "../../../shared/auto-update.ts";
+import { useQueryClient } from "@tanstack/react-query";
+import { formatUpdateAvailableMessage } from "../../../shared/auto-update.ts";
+import type { UpdateStatus } from "../../../shared/auto-update.ts";
+import type { IpcResult } from "../../../shared/ipc-contract.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { qk } from "../queries/keys.ts";
+import { useUpdateStatus } from "../queries/useUpdateStatus.ts";
 
 export interface UpdateNotifierProps {
   /** True when any ticket has an agent/tracker operation in flight. */
@@ -30,7 +35,11 @@ function shortNotes(notes: string | null | undefined): string | null {
 /** Whether the status should show the interruptive update dialog. */
 export function shouldShowUpdateDialog(status: UpdateStatus): boolean {
   if (status.phase === "disabled") return false;
-  if (status.phase === "downloading") return true;
+  // Background auto-download while snoozed stays quiet — the user said "Later"
+  // and a non-modal progress banner would still feel like an interruption.
+  // The "downloaded" (ready) state below is the action-needed surface and
+  // is shown once even when previously snoozed.
+  if (status.phase === "downloading") return !status.snoozed;
   if (status.phase === "error" && status.errorMessage) return true;
   if (status.phase === "downloaded") return !status.snoozed;
   if (status.phase === "available") return !status.snoozed;
@@ -44,20 +53,17 @@ export function formatDownloadLabel(status: UpdateStatus): string {
 }
 
 export function UpdateNotifier({ hasBusyWork }: UpdateNotifierProps) {
-  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const queryClient = useQueryClient();
+  const { data: status } = useUpdateStatus();
   const [busyWarningOpen, setBusyWarningOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
+  // Clear any prior action error when a fresh status arrives from the shared
+  // subscription (download progress, error recovery, etc.).
   useEffect(() => {
-    void window.pm.getUpdateStatus().then((result) => {
-      if (result.ok) setStatus(result.value);
-    });
-    return window.pm.onUpdateStatus((next) => {
-      setStatus(next);
-      setActionError(null);
-    });
-  }, []);
+    setActionError(null);
+  }, [status]);
 
   if (!status || !shouldShowUpdateDialog(status)) {
     return null;
@@ -69,14 +75,17 @@ export function UpdateNotifier({ hasBusyWork }: UpdateNotifierProps) {
       ? formatUpdateAvailableMessage(status.availableVersion, status.currentVersion)
       : null;
 
-  const run = (fn: () => Promise<{ ok: boolean; error?: { message: string } }>) => {
+  const run = (fn: () => Promise<IpcResult<UpdateStatus>>) => {
     setPending(true);
     setActionError(null);
     void fn().then((result) => {
       setPending(false);
       if (!result.ok) {
-        setActionError(result.error?.message ?? "Something went wrong");
+        setActionError(result.error.message ?? "Something went wrong");
+        return;
       }
+      // Keep the shared update-status cache in sync for other readers.
+      queryClient.setQueryData(qk.updateStatus, result.value);
     });
   };
 

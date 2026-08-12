@@ -1,4 +1,5 @@
-import { createServer, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
+import type { ServerResponse } from "node:http";
 
 const CALLBACK_TIMEOUT_MS = 180_000;
 const EMAIL_CALLBACK_TIMEOUT_MS = 600_000;

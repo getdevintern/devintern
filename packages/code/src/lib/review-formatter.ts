@@ -242,14 +242,14 @@ export function extractAgentSummary(output: string): string {
   };
 
   // Try to find a "Summary" section (## Summary or ## summary)
-  const summaryMatch = cleanOutput.match(/##\s*Summary\s*\n+([\s\S]*?)(?=\n##|\n---|\z)/i);
+  const summaryMatch = cleanOutput.match(/##\s*Summary\s*\n+([\s\S]*?)(?=\n##|\n---|z)/i);
   if (summaryMatch && summaryMatch[1].trim()) {
     return truncate(summaryMatch[1].trim());
   }
 
   // Try to find "Changes Made" section (### Changes Made:)
   const changesMatch = cleanOutput.match(
-    /###\s*Changes Made:?\s*\n+([\s\S]*?)(?=\n###|\n##|\n---|\z)/i,
+    /###\s*Changes Made:?\s*\n+([\s\S]*?)(?=\n###|\n##|\n---|z)/i,
   );
   if (changesMatch && changesMatch[1].trim()) {
     const text = `**Changes Made:**\n${changesMatch[1].trim()}`;
@@ -258,7 +258,7 @@ export function extractAgentSummary(output: string): string {
 
   // Look for a paragraph after "Perfect!" or "I've successfully"
   const successMatch = cleanOutput.match(
-    /(?:Perfect!|I've successfully[^\n]*)\s*\n+([\s\S]*?)(?=\n##|\n###|\z)/,
+    /(?:Perfect!|I've successfully[^\n]*)\s*\n+([\s\S]*?)(?=\n##|\n###|z)/,
   );
   if (successMatch && successMatch[1].trim()) {
     return truncate(successMatch[1].trim());

@@ -563,7 +563,7 @@ export class JiraClient {
     // Extract JIRA attachment URLs from HTML content
     // Pattern: /rest/api/[2|3]/attachment/content/[id] or full URLs
     const attachmentUrlPattern =
-      /(?:https?:\/\/[^\/\s]+)?\/rest\/api\/[23]\/attachment\/content\/(\d+)/g;
+      /(?:https?:\/\/[^/\s]+)?\/rest\/api\/[23]\/attachment\/content\/(\d+)/g;
     const urls = new Set<string>();
 
     let match;

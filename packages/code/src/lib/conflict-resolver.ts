@@ -15,7 +15,8 @@
 
 import { runAgent } from "./address-review";
 import { GitHubAppAuth } from "./github-app-auth";
-import { GitHubReviewsClient, type PullRequestInfo } from "./github-reviews";
+import { GitHubReviewsClient } from "./github-reviews";
+import type { PullRequestInfo } from "./github-reviews";
 import { Utils } from "./utils";
 
 export interface ResolveConflictsOptions {

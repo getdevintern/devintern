@@ -1,0 +1,39 @@
+/**
+ * Composer form values — extracted from `ComposerForm.tsx` so state modules
+ * (`ticket-workspaces.ts`, `ticket-workspaces-store.ts`) can depend on the
+ * shape without importing `ComposerForm.tsx` (which now pulls in the stores
+ * and would form a module cycle: ComposerForm → selectors → store →
+ * ticket-workspaces → ComposerForm).
+ *
+ * `ComposerForm.tsx` re-exports these to preserve its existing import surface.
+ */
+
+import type { AttachmentRef, PromptStyle, SourceType } from "../../../shared/ipc-contract.ts";
+
+export interface ComposerValues {
+  sourceType: SourceType;
+  sourceContent: Record<SourceType, string>;
+  extraInstructions: string;
+  promptStyle: PromptStyle;
+  projectKey: string;
+  issueType: string;
+  epicKey: string;
+  /** Selected tracker label ids ({@link LabelRef.id}). */
+  labels: string[];
+  /** Local files for agent context + optional tracker upload. */
+  attachments: AttachmentRef[];
+  decompose: boolean;
+}
+
+export const initialComposerValues: ComposerValues = {
+  sourceType: "prompt",
+  sourceContent: { figma: "", log: "", prompt: "" },
+  extraInstructions: "",
+  promptStyle: "pm",
+  projectKey: "",
+  issueType: "Task",
+  epicKey: "",
+  labels: [],
+  attachments: [],
+  decompose: false,
+};
