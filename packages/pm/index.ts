@@ -9,7 +9,7 @@ import { askConfirm } from "./lib/runtime/stdin.js";
 import { getArgs } from "./lib/runtime/args.js";
 import { configureTerminalEncoding } from "./lib/runtime/terminal.js";
 import { getModuleDir } from "./lib/runtime/path.js";
-import { loadConfig, migrateLegacyConfigDir } from "./lib/config";
+import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "./lib/config";
 import { createEngine, DEFAULT_ISSUE_TYPES, EngineError } from "./lib/engine";
 import type { PmEngine, SourceInput, StoryDraft } from "./lib/engine";
 import { runInteractiveMode } from "./lib/components/interactive";
@@ -17,11 +17,14 @@ import { initializeProject } from "./lib/init";
 import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
 import { extractHarnessFlags, parseArgs, validateHarnessName } from "./lib/parse-args";
 import type { CLIArgs } from "./lib/parse-args";
+import { runConnect } from "./lib/chat/connect";
+import { runServe } from "./lib/chat/serve";
 import {
   listInstalledHarnesses,
   resolveExecutablePathStrict,
   resolveHarness,
 } from "@devintern/agent-harness";
+import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
 import { maybeOfferCliUpdate } from "@devintern/utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -126,6 +129,53 @@ async function main() {
     } else {
       await initializeProject();
     }
+    return;
+  }
+
+  if (parsedArgs === "serve") {
+    const platformFlag = args[args.indexOf("--platform") + 1];
+    const modelFlag = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
+    await runServe({
+      platforms:
+        args.includes("--platform") && (platformFlag === "slack" || platformFlag === "telegram")
+          ? [platformFlag]
+          : undefined,
+      model: modelFlag,
+    });
+    return;
+  }
+
+  if (typeof parsedArgs === "object" && parsedArgs !== null && "connect" in parsedArgs) {
+    await runConnect(parsedArgs.connect);
+    return;
+  }
+
+  if (parsedArgs === "login") {
+    try {
+      const supabaseConfig = await loadSupabaseConfig();
+      const resolved = await resolveLogin(process.argv);
+      const user = await login(supabaseConfig, resolved);
+      console.log(`✅ Signed in as ${user.email || user.id}`);
+    } catch (error) {
+      console.error(`❌ ${(error as Error).message}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (parsedArgs === "logout") {
+    const supabaseConfig = await loadSupabaseConfig();
+    await logout(supabaseConfig);
+    console.log("✅ Signed out");
+    return;
+  }
+
+  if (parsedArgs === "whoami") {
+    const supabaseConfig = await loadSupabaseConfig();
+    const user = await getAuthenticatedUser(supabaseConfig);
+    console.log(
+      user ? `Signed in as ${user.email || user.id}` : "Not signed in. Run `devpm login`.",
+    );
     return;
   }
 

@@ -3,7 +3,6 @@
 
 appId: com.getdevintern.pm-desktop
 productName: DevIntern PM
-executableName: DevIntern-PM
 copyright: Copyright © DevIntern
 forceCodeSigning: false
 npmRebuild: false
@@ -37,6 +36,9 @@ asar: true
 afterSign: build/notarize.cjs
 
 mac:
+  # Keep the installed bundle user-facing (`DevIntern PM.app`). Artifact names
+  # remain explicitly hyphenated below for GitHub and electron-updater safety.
+  executableName: DevIntern PM
   category: public.app-category.developer-tools
   # Keep ZIP names GitHub-safe. The default uses productName ("DevIntern PM")
   # for the archive while latest-mac.yml uses a hyphenated safeArtifactName.
@@ -54,7 +56,7 @@ mac:
         - x64
         - arm64
   # Identity is resolved from CSC_* / keychain when present.
-  # Leave unset so unsigned local/CI builds skip signing instead of failing.
+  # Leave unset so contributor-local builds can package without release credentials.
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
@@ -64,9 +66,12 @@ mac:
 
 dmg:
   artifactName: DevIntern-PM-${version}-mac-${arch}.${ext}
+  # Do not add a custom Finder volume icon. Its hidden `.VolumeIcon.icns`
+  # metadata file becomes visible when Finder's hidden-file mode is enabled.
+  icon: null
   # Solid color only — do NOT use the default background.tiff template.
   # That asset is copied into the volume as `.background.tiff` and often shows
-  # as a loose file in Finder when DMG window scripting fails (unsigned CI).
+  # as a loose file in Finder when DMG window scripting fails.
   # backgroundColor and background are mutually exclusive in dmg-builder.
   backgroundColor: "#f5f5f5"
   contents:
@@ -81,6 +86,8 @@ dmg:
     height: 380
 
 linux:
+  # Linux executable names cannot contain spaces; keep the existing command.
+  executableName: DevIntern-PM
   category: Development
   syncDesktopName: true
   maintainer: DevIntern <hello@getdevintern.com>
@@ -93,7 +100,7 @@ linux:
     - target: deb
       arch:
         - x64
-  # AppImage + .deb are enough for a usable unsigned Linux release path.
+  # AppImage + .deb cover the current Linux release path.
   # Optional .rpm needs `rpmbuild` on the builder (install `rpm` on Debian/Ubuntu CI).
 
 appImage:

@@ -6,7 +6,15 @@ await Bun.build({
   target: "node",
   format: "esm",
   minify: true,
-  external: ["ink", "react", "ink-scroll-view"],
+  external: [
+    "ink",
+    "react",
+    "ink-scroll-view",
+    "chat",
+    "@chat-adapter/slack",
+    "@chat-adapter/telegram",
+    "@chat-adapter/state-memory",
+  ],
   define: {
     __VERSION__: JSON.stringify(pkg.version),
   },

@@ -1,7 +1,7 @@
 {
   "name": "@devintern/pm-desktop",
   "productName": "DevIntern PM",
-  "version": "0.9.6",
+  "version": "0.9.9",
   "private": true,
   "description": "Desktop app for @devintern/pm — multi-ticket AI task creation for your tracker.",
   "author": "DevIntern <hello@getdevintern.com>",

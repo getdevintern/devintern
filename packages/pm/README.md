@@ -15,6 +15,8 @@
 
 Pair with **[`@getdevintern/code`](https://www.npmjs.com/package/@getdevintern/code)** (`devintern`) when you want those tickets implemented into self-reviewed pull requests.
 
+Chat bot (alpha): run `devpm serve` to create and refine tasks from Slack or Telegram (`devpm connect slack|telegram` to set up). This experimental feature may not work properly and can change without notice. It connects outbound (Socket Mode / long polling), so no public URL is needed.
+
 ## Install
 
 ```bash
@@ -40,6 +42,7 @@ Full docs: **[devintern.com/docs/pm](https://devintern.com/docs/pm/quick-start)*
 - [Quick start](https://devintern.com/docs/pm/quick-start)
 - [Configuration](https://devintern.com/docs/pm/configuration)
 - [Usage](https://devintern.com/docs/pm/usage)
+- [Chat bot (alpha)](https://devintern.com/docs/pm/chat-bot)
 
 Source monorepo: [getdevintern/devintern](https://github.com/getdevintern/devintern)
 

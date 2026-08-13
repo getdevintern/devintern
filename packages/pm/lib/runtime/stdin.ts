@@ -77,6 +77,32 @@ function readStdinLine(): Promise<string | null> {
  * @returns `true` for yes (including empty input), `false` for no or when
  * stdin closes before an answer arrives.
  */
+/**
+ * Ask the user for a free-text answer on stdin.
+ *
+ * @param message - Prompt text displayed before the input cursor.
+ * @returns Trimmed answer; empty string on read error/close.
+ */
+export async function askText(message: string): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const safeResolve = (value: string): void => {
+      if (!resolved) {
+        resolved = true;
+        rl.close();
+        resolve(value.trim());
+      }
+    };
+    rl.on("close", () => safeResolve(""));
+    rl.question(message, safeResolve);
+  });
+}
+
 export async function askConfirm(message: string): Promise<boolean> {
   process.stdout.write(`${message} (Y/n): `);
 

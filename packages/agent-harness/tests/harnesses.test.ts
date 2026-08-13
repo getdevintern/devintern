@@ -79,12 +79,13 @@ describe("CodexHarness", () => {
   });
 
   test("buildArgs empty", () => {
-    expect(h.buildArgs({})).toEqual(["exec"]);
+    expect(h.buildArgs({})).toEqual(["exec", "--skip-git-repo-check"]);
   });
 
   test("buildArgs with all options", () => {
     expect(h.buildArgs({ skipPermissions: true, model: "gpt-4o" })).toEqual([
       "exec",
+      "--skip-git-repo-check",
       "--sandbox",
       "workspace-write",
       "-c",

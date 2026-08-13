@@ -1,0 +1,23 @@
+{
+  "name": "@getdevintern/license-policy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared DevIntern entitlement policy and secretless Polar license-key validation.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo \"license-policy: source-only package\"",
+    "format": "oxfmt \"src/**/*.ts\" \"*.test.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"*.test.ts\"",
+    "lint": "oxlint .",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

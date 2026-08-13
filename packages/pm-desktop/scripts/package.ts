@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Compile with electron-vite, then package with electron-builder.
- * Applies gated signing env (unsigned by default).
+ * Applies gated signing env. Contributor-local builds may omit release credentials.
  *
  * Usage:
  *   bun run scripts/package.ts            # current platform

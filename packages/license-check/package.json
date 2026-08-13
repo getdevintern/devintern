@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@devintern/auth": "workspace:*",
-    "@devintern/utils": "workspace:*"
+    "@devintern/utils": "workspace:*",
+    "@getdevintern/license-policy": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",

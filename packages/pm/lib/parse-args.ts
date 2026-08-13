@@ -25,13 +25,21 @@ export interface CLIArgs {
   attachments?: Array<{ path: string }>;
 }
 
-export type ParsedArgs = CLIArgs | null | "init";
+export type ParsedArgs =
+  | CLIArgs
+  | null
+  | "init"
+  | "login"
+  | "logout"
+  | "whoami"
+  | "serve"
+  | { connect: string };
 
 /**
  * Parse CLI arguments from an argv slice (typically `getArgs()`).
  *
  * @param argv - Raw argv without the node/bun binary and script path.
- * @returns Parsed task-creation args, `null` for interactive mode, `"init"`,
+ * @returns Parsed task-creation args, `null` for interactive mode, a command sentinel,
  *   or exits the process on `--help`/validation errors.
  */
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -41,6 +49,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (args.includes("init") || args.includes("--init")) {
     return "init"; // Signal to run init
   }
+  if (args.includes("login")) return "login";
+  if (args.includes("logout")) return "logout";
+  if (args.includes("whoami")) return "whoami";
+  if (args[0] === "serve") return "serve";
+  if (args[0] === "connect") return { connect: args[1] ?? "" };
 
   // Check for interactive mode early
   if (args.includes("--interactive")) {
@@ -50,6 +63,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`
 Usage: devpm init [--yes]
+       devpm login [method|email]
+       devpm logout
+       devpm whoami
+       devpm connect <telegram|slack>
+       devpm serve [--platform <slack|telegram>]
        devpm --figma <url> [options]
        devpm --log <text> [options]
        devpm --prompt <text> [options]
@@ -58,6 +76,11 @@ Usage: devpm init [--yes]
 Commands:
   init                 Initialize .devintern-pm configuration in current directory
                        (guided wizard; --yes or --no-interactive writes the template instead)
+  login [method]       Sign in (github | google | x | email; prompts if omitted)
+  logout               Clear local auth session
+  whoami               Show current authenticated user
+  connect <platform>   Set up a chat platform bot (Telegram or Slack)
+  serve                Run the chat bot daemon (create tasks from Slack/Telegram)
 
 Modes:
   --interactive        Interactive mode - step-by-step task creation (recommended)

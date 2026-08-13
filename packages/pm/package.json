@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/pm",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "description": "Turn rough notes, logs, and Figma into codebase-grounded tracker tickets with any coding agent. Self-hosted, BYOK.",
   "type": "module",
   "bin": {
@@ -79,6 +79,8 @@
   },
   "devDependencies": {
     "@devintern/agent-harness": "workspace:*",
+    "@devintern/auth": "workspace:*",
+    "@devintern/license-check": "workspace:*",
     "@devintern/task-trackers": "workspace:*",
     "@devintern/text-formatter": "workspace:*",
     "@devintern/utils": "workspace:*",
@@ -88,7 +90,11 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@chat-adapter/slack": "^4.32.0",
+    "@chat-adapter/state-memory": "^4.32.0",
+    "@chat-adapter/telegram": "^4.32.0",
     "@types/react": "^19.2.7",
+    "chat": "^4.32.0",
     "ink": "^6.6.0",
     "ink-scroll-view": "^0.3.2",
     "ink-text-input": "^6.0.0",

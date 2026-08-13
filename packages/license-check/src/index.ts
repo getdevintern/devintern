@@ -19,8 +19,12 @@ import { dirname, join } from "node:path";
 import { getAuthenticatedUser } from "@devintern/auth";
 import type { AuthenticatedUser, SupabaseAuthConfig } from "@devintern/auth";
 import { fetchWithRetry } from "@devintern/utils";
-import { getAllowedBenefits, isAutomationSource, validatePolarLicenseKey } from "./polar.ts";
-import type { EntitlementSource } from "./polar.ts";
+import {
+  getAllowedBenefits,
+  isAutomationSource,
+  validatePolarLicenseKey,
+} from "@getdevintern/license-policy";
+import type { EntitlementSource } from "@getdevintern/license-policy";
 
 export {
   type EntitlementSource,
@@ -30,7 +34,7 @@ export {
   getAllowedBenefits,
   isAutomationSource,
   validatePolarLicenseKey,
-} from "./polar.ts";
+} from "@getdevintern/license-policy";
 
 const DEFAULT_API_BASE = "https://devintern.com";
 

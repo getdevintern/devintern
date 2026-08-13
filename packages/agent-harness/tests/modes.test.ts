@@ -48,9 +48,7 @@ describe("mode helpers", () => {
   });
 
   test("getSupportedModes covers all registered harnesses", () => {
-    const support = Object.fromEntries(
-      listHarnesses().map((h) => [h.name, getSupportedModes(h)]),
-    );
+    const support = Object.fromEntries(listHarnesses().map((h) => [h.name, getSupportedModes(h)]));
     expect(support["claude-code"]).toEqual(["plan", "readonly"]);
     expect(support["codex"]).toEqual(["plan", "readonly"]);
     expect(support["cursor"]).toEqual(["plan", "readonly"]);
@@ -123,6 +121,7 @@ describe("CodexHarness modes", () => {
   test("plan/readonly use read-only sandbox", () => {
     expect(h.buildArgs({ mode: "plan", skipPermissions: true })).toEqual([
       "exec",
+      "--skip-git-repo-check",
       "--sandbox",
       "read-only",
       "-c",
@@ -130,6 +129,7 @@ describe("CodexHarness modes", () => {
     ]);
     expect(h.buildArgs({ mode: "readonly" })).toEqual([
       "exec",
+      "--skip-git-repo-check",
       "--sandbox",
       "read-only",
       "-c",
@@ -140,6 +140,7 @@ describe("CodexHarness modes", () => {
   test("default skipPermissions still workspace-write", () => {
     expect(h.buildArgs({ skipPermissions: true })).toEqual([
       "exec",
+      "--skip-git-repo-check",
       "--sandbox",
       "workspace-write",
       "-c",

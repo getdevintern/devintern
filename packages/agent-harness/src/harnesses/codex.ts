@@ -1,7 +1,7 @@
 /**
  * Codex CLI harness.
  *
- * CLI: codex exec [--sandbox workspace-write -c 'approval_policy="never"' <network config>] [--model <model>] [prompt]
+ * CLI: codex exec --skip-git-repo-check [--sandbox workspace-write -c 'approval_policy="never"' <network config>] [--model <model>] [prompt]
  *
  * Uses `codex exec` (non-interactive mode) so the agent runs without
  * launching the TUI.
@@ -120,7 +120,11 @@ export class CodexHarness implements AgentHarness {
    */
   buildArgs(options: AgentRunOptions): string[] {
     assertModeSupported(this, options.mode);
-    const args: string[] = ["exec"];
+    // The embedding application owns cwd selection and any repository gate.
+    // Codex's interactive trust check cannot be answered in `exec` mode and can
+    // reject otherwise valid repositories that have not previously been opened
+    // in Codex, so bypass it for every non-interactive harness invocation.
+    const args: string[] = ["exec", "--skip-git-repo-check"];
 
     if (isConstrainedMode(options.mode)) {
       // Hard read-only sandbox for both plan and readonly (Codex has no separate plan flag).

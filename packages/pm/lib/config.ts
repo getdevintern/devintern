@@ -5,8 +5,11 @@
 import { join } from "node:path";
 import { rename } from "node:fs/promises";
 import { pathExists } from "./runtime/fs.js";
+import { createDefaultSupabaseAuthConfig } from "@devintern/auth";
+import type { SupabaseAuthConfig } from "@devintern/auth";
 import { resolveHarness, resolveExecutablePathStrict } from "@devintern/agent-harness";
 import type { ResolvedHarness } from "@devintern/agent-harness";
+import { resolveConfigDir } from "@devintern/utils";
 import { loadTrackerConfig } from "@devintern/task-trackers";
 import type { TrackerConfig, TrackerType } from "@devintern/task-trackers";
 
@@ -23,6 +26,12 @@ export interface LoadConfigOptions {
   cliPath?: string;
   /** Directory to resolve config from (defaults to cwd). */
   baseDir?: string;
+}
+
+/** Build auth configuration for the CLI's persisted Supabase session. */
+export function loadSupabaseConfig(baseDir?: string): SupabaseAuthConfig {
+  const configDir = resolveConfigDir({ configDirName: ".devintern-pm", startDir: baseDir });
+  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
 /**
