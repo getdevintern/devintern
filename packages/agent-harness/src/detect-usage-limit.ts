@@ -126,16 +126,19 @@ function outputLines(text: string, stream: OutputStream): OutputLine[] {
 }
 
 /**
- * Avoid treating source code, comments, and diff hunks as provider errors.
- * Codex's verbose transcript can include arbitrary command output, including
- * bundled source that contains literal strings such as "429 Too Many Requests".
+ * Avoid treating source code, comments, quoted Markdown, search results, and
+ * diff hunks as provider errors. Agent transcripts can include arbitrary file
+ * content from tools such as `sed`, `rg`, and `git diff`, including literal
+ * provider diagnostics such as "429 Too Many Requests".
  */
 function isSourceOrDiffLine(line: string): boolean {
   const trimmed = line.trim();
   return (
     /^(?:diff --git|index\b|---\s|\+\+\+\s|@@\s)/i.test(trimmed) ||
     /^[+-]{1,3}\s/.test(trimmed) ||
-    /^(?:\/\/|\/\*|\*|#)/.test(trimmed) ||
+    /^(?:\/\/|\/\*|\*|#|>|```|~~~)/.test(trimmed) ||
+    // `rg -n`, grep, and compiler-style locations: path:line[:column]:content.
+    /^(?:(?:\.?\.?\/|\/)?(?:[^:\s]+\/)+[^:\s]+|[^:\s]+\.[a-z\d]+):\d+(?::\d+)?:/i.test(trimmed) ||
     /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||
     /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
     /=>/.test(trimmed)

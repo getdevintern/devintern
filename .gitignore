@@ -9,15 +9,10 @@ dist/
 .devintern-pm/.env
 .devintern-pm/.auth-session.json
 
-# @devintern/code - runtime state and secrets live here; only commit explicit config
+# @devintern/code runtime state and secrets; only commit explicit config
 .devintern-code/*
 !.devintern-code/settings.json
 !.devintern-code/.env.example
 
-# Supabase CLI local cache (linked project ref, pooler URL, version info)
-supabase/.temp/
 packages/pm-desktop/out/
-
-# Internal strategy docs — never publish
-/docs/
-packages/website/docs/
+packages/pm-desktop/release/

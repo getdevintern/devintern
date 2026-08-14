@@ -91,6 +91,22 @@ describe("detectUsageLimit", () => {
     expect(result.resetsAt).toBeUndefined();
   });
 
+  test("ignores provider-like prose quoted from a Markdown file", () => {
+    const source =
+      "> 3. What should a limited request receive? 429 with Retry-After is standard, " +
+      "but the mobile client does not handle 429 and will surface a generic error.";
+
+    expect(detectUsageLimit(source, "").limited).toBe(false);
+    expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores provider-like content in file-location search output", () => {
+    const source = "docs/troubleshooting.md:43:Claude usage limit reached; retry later.";
+
+    expect(detectUsageLimit(source, "").limited).toBe(false);
+    expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
   test("ignores a test count containing 429", () => {
     expect(detectUsageLimit("Ran 429 tests across 47 files.", "").limited).toBe(false);
   });

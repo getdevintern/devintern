@@ -86,7 +86,7 @@ bun run --filter @getdevintern/pm build
 
 ## Documentation
 
-Product documentation lives at https://devintern.com/docs. When changing CLI behavior, flags, or env vars, mention it in the PR description so the docs can be updated alongside the release.
+Product documentation lives in `docs/{code,pm}` and is also rendered at https://devintern.com/docs. Update the relevant Markdown guide when changing user-facing CLI behavior, flags, or environment variables.
 
 ## References
 

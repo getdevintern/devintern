@@ -7,7 +7,7 @@
  * parameters on pm's config loaders.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { listInstalledHarnesses } from "@devintern/agent-harness";
@@ -233,8 +233,19 @@ export function detectPmConfig(projectDir: string): boolean {
 export function detectGitRepository(projectDir: string): boolean {
   let currentDir = resolve(projectDir);
   while (true) {
-    if (existsSync(join(currentDir, ".git"))) {
-      return true;
+    const gitPath = join(currentDir, ".git");
+    if (existsSync(gitPath)) {
+      try {
+        const gitStat = statSync(gitPath);
+        // A working-tree .git directory always contains HEAD. Ignore empty
+        // ancestor markers such as a sandbox mount at /tmp/.git; merely
+        // existing is not enough to prove that the project is in a repo.
+        if (!gitStat.isDirectory() || existsSync(join(gitPath, "HEAD"))) {
+          return true;
+        }
+      } catch {
+        // Treat an unreadable or concurrently removed marker as absent.
+      }
     }
     const parentDir = dirname(currentDir);
     if (parentDir === currentDir) {

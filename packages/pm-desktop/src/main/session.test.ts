@@ -50,6 +50,11 @@ function branchRevParse(
   return null;
 }
 
+async function createGitDirectory(projectDir: string): Promise<void> {
+  await mkdir(join(projectDir, ".git"), { recursive: true });
+  await writeFile(join(projectDir, ".git", "HEAD"), "ref: refs/heads/main\n");
+}
+
 describe("detectCodeConfig", () => {
   let tempDir: string;
 
@@ -99,15 +104,23 @@ describe("detectGitRepository", () => {
     expect(detectGitRepository(tempDir)).toBe(false);
   });
 
-  test("returns true when .git is a directory at the project root", async () => {
+  test("ignores an empty ancestor .git directory", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-git-"));
     await mkdir(join(tempDir, ".git"));
+    const nested = join(tempDir, "project");
+    await mkdir(nested);
+    expect(detectGitRepository(nested)).toBe(false);
+  });
+
+  test("returns true when .git is a directory at the project root", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-git-"));
+    await createGitDirectory(tempDir);
     expect(detectGitRepository(tempDir)).toBe(true);
   });
 
   test("returns true for a nested package under a monorepo git root", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-git-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     const nested = join(tempDir, "packages", "app");
     await mkdir(nested, { recursive: true });
     expect(detectGitRepository(nested)).toBe(true);
@@ -141,7 +154,7 @@ describe("loadProject suitability", () => {
   test("marks a git folder without PM config as suitable but unconfigured", async () => {
     setSessionGitExecForTests(noRemoteGitExec());
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-load-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     const status = await loadProject(tempDir);
     expect(status.isGitRepository).toBe(true);
     expect(status.configured).toBe(false);
@@ -156,7 +169,7 @@ describe("loadProject suitability", () => {
   test("marks a git folder with incomplete .devintern-pm as unconfigured with configError", async () => {
     setSessionGitExecForTests(noRemoteGitExec());
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-load-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     await mkdir(join(tempDir, ".devintern-pm"));
     await writeFile(join(tempDir, ".devintern-pm", ".env"), "TASK_TRACKER=jira\n");
     const status = await loadProject(tempDir);
@@ -169,7 +182,7 @@ describe("loadProject suitability", () => {
     setSessionGitExecForTests(noRemoteGitExec());
     // Mirrors folders like security-agent: git + root .env, no PM config dir.
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-load-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     await writeFile(join(tempDir, ".env"), "GITHUB_TOKEN=not-pm-config\n");
     const status = await loadProject(tempDir);
     expect(status.isGitRepository).toBe(true);
@@ -182,7 +195,7 @@ describe("loadProject suitability", () => {
     // After opening a configured project, Electron main keeps Jira vars in process.env.
     // A later folder with only a plain .env must not look configured.
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-load-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     await writeFile(join(tempDir, ".env"), "GITHUB_TOKEN=not-pm-config\n");
     process.env.TASK_TRACKER = "jira";
     process.env.JIRA_BASE_URL = "https://example.atlassian.net";
@@ -222,7 +235,7 @@ describe("loadProject suitability", () => {
     const plainDir = join(tempDir, "no-git");
     await mkdir(gitDir);
     await mkdir(plainDir);
-    await mkdir(join(gitDir, ".git"));
+    await createGitDirectory(gitDir);
 
     const withGit = await loadProject(gitDir);
     expect(withGit.isGitRepository).toBe(true);
@@ -258,7 +271,7 @@ describe("session git sync integration", () => {
   test("skipGitSync reuses provided snapshot without calling git", async () => {
     setSessionGitExecForTests(countingNoRemoteGit());
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     const snapshot: ProjectGitSyncStatus = {
       kind: "ok",
@@ -276,7 +289,7 @@ describe("session git sync integration", () => {
   test("underContextSwitch reuses lastGitSync without re-fetch", async () => {
     setSessionGitExecForTests(countingNoRemoteGit());
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     const first = await loadProject(tempDir);
     expect(first.gitSync?.kind).toBe("no_remote");
@@ -314,7 +327,7 @@ describe("session git sync integration", () => {
     setSessionGitExecForTests(git);
 
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     await loadProject(tempDir);
     expect(fetchCount).toBe(1);
 
@@ -361,7 +374,7 @@ describe("session git sync integration", () => {
     setSessionGitExecForTests(git);
 
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
     // Seed with a fast no-remote exec so open does not hang on fetchBlocked.
     setSessionGitExecForTests(noRemoteGitExec());
     await loadProject(tempDir);
@@ -411,7 +424,7 @@ describe("session git sync integration", () => {
     setSessionGitExecForTests(git);
 
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     const opened = await loadProject(tempDir);
     expect(opened.gitSync?.kind).toBe("skipped_dirty");
@@ -436,7 +449,7 @@ describe("session git sync integration", () => {
     const userData = await mkdtemp(join(tmpdir(), "pm-desktop-lastfetch-"));
     setUserDataDirForTests(userData);
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     await rememberProjectBinding({
       id: "bind1",
@@ -484,7 +497,7 @@ describe("session git sync integration", () => {
     // Bare checkout: merge materializes `.devintern-pm` — sync must finish before
     // loadConfig/createEngine so the live session sees the remote tip.
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-open-ff-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     const git: GitExec = async (_cwd, args) => {
       if (args[0] === "rev-parse" && args.includes("--show-toplevel")) {
@@ -534,7 +547,7 @@ describe("session git sync integration", () => {
       signalFetchEntered = resolve;
     });
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-open-mutex-"));
-    await mkdir(join(tempDir, ".git"));
+    await createGitDirectory(tempDir);
 
     const git: GitExec = async (_cwd, args) => {
       if (args[0] === "rev-parse" && args.includes("--show-toplevel")) {

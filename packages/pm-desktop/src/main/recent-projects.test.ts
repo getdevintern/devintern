@@ -16,6 +16,7 @@ import { setUserDataDirForTests } from "./settings.ts";
 async function makePmReadyProject(root: string, name: string): Promise<string> {
   const dir = join(root, name);
   await mkdir(join(dir, ".git"), { recursive: true });
+  await writeFile(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
   await mkdir(join(dir, ".devintern-pm"), { recursive: true });
   await writeFile(join(dir, ".devintern-pm", ".env"), "TASK_TRACKER=markdown\n");
   return dir;
@@ -58,6 +59,7 @@ describe("recent-projects", () => {
     const ready = await makePmReadyProject(tempDir, "ready");
     const gitOnly = join(tempDir, "git-only");
     await mkdir(join(gitOnly, ".git"), { recursive: true });
+    await writeFile(join(gitOnly, ".git", "HEAD"), "ref: refs/heads/main\n");
     const pmOnly = join(tempDir, "pm-only");
     await mkdir(join(pmOnly, ".devintern-pm"), { recursive: true });
     const missing = join(tempDir, "missing");
@@ -74,6 +76,7 @@ describe("recent-projects", () => {
     const b = await makePmReadyProject(tempDir, "b");
     const gitOnly = join(tempDir, "git-only");
     await mkdir(join(gitOnly, ".git"), { recursive: true });
+    await writeFile(join(gitOnly, ".git", "HEAD"), "ref: refs/heads/main\n");
 
     expect(filterEligibleRecentProjects([a, gitOnly, a, b, join(tempDir, "gone")])).toEqual([a, b]);
   });
@@ -134,6 +137,7 @@ describe("recent-projects", () => {
     const b = await makePmReadyProject(tempDir, "b");
     const gitOnly = join(tempDir, "git-only");
     await mkdir(join(gitOnly, ".git"), { recursive: true });
+    await writeFile(join(gitOnly, ".git", "HEAD"), "ref: refs/heads/main\n");
 
     await recordRecentProjectDir(gitOnly);
     expect(await listRecentProjectDirs()).toEqual([]);
