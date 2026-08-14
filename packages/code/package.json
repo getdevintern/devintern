@@ -4,6 +4,10 @@
   "description": "Turn tracker tickets into pull requests with any coding agent. Self-hosted, BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./pipeline": "./src/lib/pipeline/index.ts"
+  },
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
@@ -87,6 +91,7 @@
   },
   "files": [
     "dist/**/*",
+    "src/**/*",
     "README.md",
     "LICENSE.md",
     ".env.example"

@@ -159,7 +159,7 @@ ${commitInstruction}
  * @returns Unified diff from merge-base to HEAD
  * @throws When the remote base branch cannot be resolved or diff generation fails
  */
-function getPRDiff(baseBranch: string, workingDir: string): string {
+export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Strip origin/ prefix if present for fetch command
   const branchName = baseBranch.replace(/^origin\//, "");
   const remoteBase = `origin/${branchName}`;
@@ -279,7 +279,7 @@ function getPRDiff(baseBranch: string, workingDir: string): string {
  * @returns Validated {@link ReviewFeedback} object
  * @throws When no JSON is found or the structure is invalid
  */
-function parseReviewFeedback(agentOutput: string): ReviewFeedback {
+export function parseReviewFeedback(agentOutput: string): ReviewFeedback {
   // Extract JSON from potential markdown code blocks
   const jsonMatch =
     agentOutput.match(/```json\s*([\s\S]*?)\s*```/) || agentOutput.match(/\{[\s\S]*\}/);
@@ -318,7 +318,7 @@ function parseReviewFeedback(agentOutput: string): ReviewFeedback {
  * @returns Agent stdout on success
  * @throws When the agent times out or exits with a non-zero code
  */
-async function runAgentPrompt(
+export async function runAgentPrompt(
   prompt: string,
   workingDir: string,
   harness: AgentHarness,
@@ -407,7 +407,7 @@ async function runAgentPrompt(
  * @param minPriority - Minimum priority to include
  * @returns Items meeting the priority threshold
  */
-function filterByPriority(
+export function filterByPriority(
   items: ReviewFeedbackItem[],
   minPriority: ReviewPriority,
 ): ReviewFeedbackItem[] {

@@ -61,6 +61,34 @@ export type GitHubProjectConfig = BaseProjectConfig;
 export type MarkdownProjectConfig = BaseProjectConfig;
 
 /**
+ * One entry in `pipeline.steps`: the registered step name plus arbitrary
+ * step-specific configuration passed to the step's factory.
+ */
+export interface PipelineStepConfig {
+  /** Registered step name (e.g. "implement", "verify", or a plugin step). */
+  use: string;
+  /** Step-specific configuration (e.g. `onFail`, `minSeverity`). */
+  [key: string]: unknown;
+}
+
+/**
+ * Pipeline configuration (global, not per-project).
+ */
+export interface PipelineConfig {
+  /**
+   * Ordered pipeline steps. When omitted, the default pipeline is used:
+   * implement -> commit -> auto-review -> finalize.
+   */
+  steps?: PipelineStepConfig[];
+  /**
+   * Step plugin modules to load before resolving `steps`. Each entry is a
+   * file path (resolved against the project root) or an npm package name;
+   * the module must default-export a StepDefinition.
+   */
+  plugins?: string[];
+}
+
+/**
  * A tracker-specific section containing per-project configurations.
  */
 export interface TrackerSection<T = BaseProjectConfig> {
@@ -104,4 +132,7 @@ export interface ProjectSettings {
   github?: TrackerSection<GitHubProjectConfig>;
   /** Markdown-specific project configurations */
   markdown?: TrackerSection<MarkdownProjectConfig>;
+
+  /** Task pipeline configuration (steps and step plugins). */
+  pipeline?: PipelineConfig;
 }
