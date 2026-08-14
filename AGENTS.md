@@ -8,7 +8,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- | --------------- |
 | `@getdevintern/code`           | CLI for task automation (`devintern`): Jira + multi-PM support, configurable AI agent                                 | yes             |
 | `@getdevintern/pm`             | CLI for PM task/story creation (`devpm`): supports Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, Markdown | yes             |
-| `@devintern/pm-desktop`        | Electron desktop app for `@getdevintern/pm`: multi-ticket AI task creation for your tracker                           | no, private     |
+| `@devintern/pm-desktop`        | Electron desktop app for `@getdevintern/pm`: multi-ticket AI task creation for your tracker                           | no, application |
 | `@devintern/agent-harness`     | Shared agent harness abstraction                                                                                      | no, source-only |
 | `@devintern/dashboard-ui`      | Local observability dashboard UI (Vite + React), bundled into `@getdevintern/code` at build time                      | no, source-only |
 | `@devintern/auth`              | Shared Supabase auth utilities (CLI login/session)                                                                    | no, source-only |
@@ -51,10 +51,8 @@ bun run --filter @getdevintern/pm build
 
 ### `@getdevintern/pm`
 
-- Entry: `index.ts` (flat, no `src/`)
-- Uses `ink` (React for CLI) + `react`: JSX/TSX files in `lib/`
-- Build: `bun build index.ts --target=bun --outdir=dist --format=esm --external=ink --external=react --external=ink-scroll-view --minify`
-- Run locally: `bun run index.ts`
+- Runtime abstraction: file I/O, path resolution, stdin, and CLI args are centralized under `lib/runtime/` using Node.js built-ins. Application code must not use `Bun.*` runtime APIs.
+- Build target is Node.js so the bundle runs under plain Node.js and Electron; `ink`, `react`, and `ink-scroll-view` stay external and resolve at runtime.
 
 ### `@devintern/pm-desktop`
 
@@ -62,7 +60,7 @@ bun run --filter @getdevintern/pm build
 - Runtime pin: Electron `43.3.0` (exact — electron-builder rejects ranges) with `electron-vite` `^5.0.0`. Requires macOS 12+ (Electron dropped 11 in v38). Electron 42+ downloads its binary lazily on first `electron`/`electron-vite` run (no npm `postinstall`); root `trustedDependencies` still lists `electron` for Bun lifecycle trust.
 - Dev: `bun run dev`; build: `bun run build` (output in `out/`, not committed)
 - Package installers: `bun run package` / `package:linux|mac` (electron-builder → `release/`). Public macOS releases are Developer ID signed and notarized; see `packages/pm-desktop/README.md` and `RELEASE.md`
-- Binaries: **published** GitHub Releases on this repo (`pm-desktop-v*`) with installers + `latest-mac.yml` / `latest-linux.yml` (source sync via the monorepo allowlist is separate from the binary feed)
+- Binaries: **published** GitHub Releases on this repo (`pm-desktop-v*`) with installers + `latest-mac.yml` / `latest-linux.yml`
 - Auto-update via `electron-updater` against those published Releases (packaged builds only; no-op in dev)
 - Reuses the pm engine via `@getdevintern/pm/engine` and `@getdevintern/pm/config`; issue-type defaults via `@getdevintern/pm/issue-types`; in-app project setup via `@getdevintern/pm/init` (main) and `@getdevintern/pm/init-shared` (renderer-safe metadata)
 - Multi-ticket workspaces: sidebar of open tickets with independent composer/output state; agent streams route by `requestId` (see `renderer/src/state/ticket-workspaces.ts`)

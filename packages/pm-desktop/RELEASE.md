@@ -2,14 +2,7 @@
 
 Versioned process for cutting installable `@devintern/pm-desktop` builds for macOS and Linux, including the public auto-update feed.
 
-## Two channels (do not confuse)
-
-| Channel | What it is | Who consumes it |
-| ------- | ---------- | --------------- |
-| **Source sync** | `publish/sync.sh` allowlists `packages/pm-desktop` into `getdevintern/devintern` | Contributors building from source |
-| **Binary / update feed** | GitHub **Releases** on `getdevintern/devintern` with installers + `latest-*.yml` | Packaged apps (`electron-updater`) and users downloading installers |
-
-This document is about the **binary / update feed**. Source already ships via the allowlist; installable releases are a separate path.
+Product source and the binary update feed are both maintained in `getdevintern/devintern`. Installable releases remain separate from npm package publishing.
 
 ## Public releases
 
@@ -44,29 +37,14 @@ Local packaging can still run without Apple credentials for contributor testing,
 5. **CI packaging** (`.github/workflows/pm-desktop-release.yml` on `pm-desktop-v*` tags):
    - Builds installers on Linux / macOS and uploads artifacts (including `latest-mac.yml` / `latest-linux.yml` and `*.blockmap`).
    - Verifies every artifact URL in `latest-*.yml` has an exact filename match before uploading. This catches GitHub filename normalization mismatches that would break auto-update downloads.
-   - Creates a **private staging draft** on the repo that ran the workflow (typically this private monorepo). That draft is for humans to inspect — it is **not** the electron-updater feed.
+   - Creates a draft GitHub Release in this repository for inspection before publishing.
    - The macOS job requires signing and notarization credentials, then verifies both app bundles with `codesign`, `stapler`, and `spctl`.
-   - **If** `PM_DESKTOP_PUBLIC_RELEASE_TOKEN` (PAT with `contents:write` on `getdevintern/devintern`) is set, CI also opens a **draft** release on the public update-feed repo `getdevintern/devintern` with the same tag and artifacts.
-   - Without the PAT, tagging private `pm-desktop-v*` alone does **not** make packaged apps see an update — use [manual public-feed handoff](#manual-public-feed-handoff-when-ci-skips-the-public-draft).
 6. **Smoke-test** one artifact per platform before going live (see [Smoke checks](#smoke-checks)).
 7. **Publish the public feed** (undraft the release on `getdevintern/devintern`):
    - Open https://github.com/getdevintern/devintern/releases
    - Find the matching `pm-desktop-v*` **draft**, verify artifacts + yml/blockmap files, then **Publish release** (not prerelease).
    - Draft and prerelease tags are invisible to `electron-updater`'s "latest" channel.
-   - Keep or discard the private monorepo draft; clients never read it.
    - Confirm the release body identifies the macOS artifacts as Developer ID signed and notarized.
-
-### Manual public-feed handoff (when CI skips the public draft)
-
-If `PM_DESKTOP_PUBLIC_RELEASE_TOKEN` was missing (or you packaged only locally):
-
-1. Download the private staging draft assets (or local `packages/pm-desktop/release/` outputs).
-2. Create a release on `getdevintern/devintern` with tag `pm-desktop-vX.Y.Z` (same version as `package.json`).
-3. Attach platform installers plus `latest-mac.yml` / `latest-linux.yml` and `*.blockmap`.
-4. Confirm the macOS artifacts are signed, notarized, and Gatekeeper accepted before attaching them.
-5. Write release notes that mirror the CI body, then **Publish** (undraft).
-
-Linux-only public releases are acceptable if mac assets are unavailable for a given cut (document that in the release notes). Prefer shipping both platforms when CI matrix succeeds.
 
 ## Auto-update (electron-updater)
 
@@ -110,12 +88,6 @@ Before publishing a public release:
 
 Configure these on the repo / environment that runs `.github/workflows/pm-desktop-release.yml`. The release workflow fails when signing/notarization credentials are incomplete.
 
-### Public update feed
-
-| Secret | Purpose |
-| ------ | ------- |
-| `PM_DESKTOP_PUBLIC_RELEASE_TOKEN` | PAT with `contents:write` on `getdevintern/devintern`. **Required** for CI to open the public draft that electron-updater will read after you publish it. Independent of macOS CSC secrets. |
-
 ### Analytics (build-time)
 
 | Secret | Maps to env |
@@ -141,7 +113,7 @@ No signing secrets required.
 
 ## Release readiness checklist
 
-1. [ ] `PM_DESKTOP_PUBLIC_RELEASE_TOKEN` and all macOS signing/notarization secrets are configured
+1. [ ] All macOS signing/notarization secrets are configured
 2. [ ] Tag `pm-desktop-vX.Y.Z`; CI package matrix is green
 3. [ ] CI verifies both macOS architectures with `codesign`, `stapler`, and `spctl`
 4. [ ] Public draft has Linux + macOS installers, `latest-mac.yml` / `latest-linux.yml`, and blockmaps
@@ -154,4 +126,3 @@ No signing secrets required.
 - Packaging scripts & env reference: [README.md](./README.md)
 - Config: `electron-builder.yml`, `build/notarize.cjs`, `scripts/signing-env.ts`
 - Workflow: `../../.github/workflows/pm-desktop-release.yml`
-- Source sync (not this feed): `publish/PUBLISHING.md`

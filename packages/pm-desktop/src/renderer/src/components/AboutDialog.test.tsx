@@ -157,10 +157,14 @@ describe("AboutDialog", () => {
       queryClient = createTestQueryClient();
     });
 
-    afterEach(() => {
-      act(() => root.unmount());
-      queryClient.clear();
-      queryClient.unmount();
+    afterEach(async () => {
+      await act(async () => {
+        await queryClient.cancelQueries();
+        root.unmount();
+        queryClient.clear();
+        queryClient.unmount();
+        await flushMicrotasks();
+      });
       container.remove();
       // @ts-expect-error test teardown
       delete globalThis.document;
@@ -221,10 +225,14 @@ describe("AboutDialog", () => {
       checkForUpdates = mock(async () => ok({ phase: "not-available", currentVersion: "0.2.0" }));
     });
 
-    afterEach(() => {
-      act(() => root.unmount());
-      queryClient.clear();
-      queryClient.unmount();
+    afterEach(async () => {
+      await act(async () => {
+        await queryClient.cancelQueries();
+        root.unmount();
+        queryClient.clear();
+        queryClient.unmount();
+        await flushMicrotasks();
+      });
       container.remove();
       // @ts-expect-error test teardown
       delete globalThis.document;
