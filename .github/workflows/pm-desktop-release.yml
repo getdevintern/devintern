@@ -1,0 +1,121 @@
+name: pm-desktop release
+
+on:
+  push:
+    tags:
+      - "pm-desktop-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: package:linux
+            artifact_glob: |
+              packages/pm-desktop/release/*.AppImage
+              packages/pm-desktop/release/*.deb
+              packages/pm-desktop/release/*.yml
+              packages/pm-desktop/release/*.blockmap
+          - os: macos-latest
+            script: package:mac
+            artifact_glob: |
+              packages/pm-desktop/release/*.dmg
+              packages/pm-desktop/release/*.zip
+              packages/pm-desktop/release/*.yml
+              packages/pm-desktop/release/*.blockmap
+
+    runs-on: ${{ matrix.os }}
+    env:
+      POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+      POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: bun run --filter @devintern/pm-desktop ${{ matrix.script }}
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.PM_DESKTOP_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.PM_DESKTOP_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.PM_DESKTOP_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.PM_DESKTOP_APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.PM_DESKTOP_APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.PM_DESKTOP_APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.PM_DESKTOP_APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.PM_DESKTOP_APPLE_API_KEY }}
+        run: |
+          if [ -z "$CSC_LINK" ] || [ -z "$CSC_KEY_PASSWORD" ]; then
+            echo "macOS release requires PM_DESKTOP_CSC_LINK and PM_DESKTOP_CSC_KEY_PASSWORD." >&2
+            exit 1
+          fi
+          if ! { [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_KEY" ]; } &&
+             ! { [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; }; then
+            echo "macOS release requires a complete App Store Connect API key or Apple ID notarization credential set." >&2
+            exit 1
+          fi
+          bun run --filter @devintern/pm-desktop ${{ matrix.script }}
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS'
+        working-directory: packages/pm-desktop
+        run: |
+          shopt -s nullglob
+          apps=(release/mac*/DevIntern\ PM.app)
+          if [ "${#apps[@]}" -ne 2 ]; then
+            echo "Expected signed x64 and arm64 app bundles, found ${#apps[@]}." >&2
+            exit 1
+          fi
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+          done
+
+      - name: Verify update metadata matches packaged artifacts
+        run: bun run --filter @devintern/pm-desktop verify:update-artifacts -- release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pm-desktop-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
