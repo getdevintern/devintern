@@ -99,9 +99,9 @@ Configure these on the repo / environment that runs `.github/workflows/pm-deskto
 
 ### GitHub OAuth (build-time)
 
-| Repository setting       | Kind             | Maps to env                                                                                                                                                                |
-| ------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GITHUB_OAUTH_CLIENT_ID` | Actions variable | Public GitHub App client ID baked into the main bundle. Missing → GitHub OAuth sign-in is hidden; PAT sign-in remains available. Do not configure or ship a client secret. |
+| Repository setting                  | Kind             | Maps to env                                                                                                                                                                                                      |
+| ----------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PM_DESKTOP_GITHUB_OAUTH_CLIENT_ID` | Actions variable | Maps to `GITHUB_OAUTH_CLIENT_ID`, the public GitHub App client ID baked into the main bundle. Missing → GitHub OAuth sign-in is hidden; PAT sign-in remains available. Do not configure or ship a client secret. |
 
 ### macOS (Apple Developer) — required
 
