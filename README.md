@@ -66,7 +66,7 @@ DevIntern connects the tracker your team already uses to the coding agent and mo
 </p>
 
 <p align="center">
-  <a href="https://devintern.com/docs/code/quick-start/"><strong>Docs</strong></a>
+  <a href="docs/code/quick-start.md"><strong>Docs</strong></a>
   ·
   <a href="https://www.npmjs.com/package/@getdevintern/code"><strong>npm</strong></a>
   ·
@@ -94,7 +94,7 @@ devintern init                 # interactive setup for your tracker + agent
 devintern PROJ-123 --create-pr
 ```
 
-Full tracker and agent guides: [devintern.com/docs](https://devintern.com/docs/code/quick-start/)
+Product guides are available locally for [Code](docs/code/quick-start.md) and [PM](docs/pm/quick-start.md). The same guides are rendered at [devintern.com/docs](https://devintern.com/docs/code/quick-start/).
 
 ## Why teams use it
 

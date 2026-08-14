@@ -19,6 +19,9 @@
  * `cwd` to the helper / `execSync` call rather than changing the process cwd.
  */
 
+import { tmpdir } from "node:os";
+import { delimiter, resolve } from "node:path";
+
 // When the test suite runs from a git hook (lefthook pre-push runs the full
 // suite), git exports GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE to the hook
 // process. Child `git` commands inherit them and ignore their { cwd }, so a
@@ -45,6 +48,26 @@ if (leaked.length > 0) {
       "process-start environment, so the guard cannot strip it in-process).\n" +
       "Re-run with the variables removed, e.g.: env -u GIT_DIR -u GIT_WORK_TREE " +
       "-u GIT_INDEX_FILE -u GIT_COMMON_DIR bun test",
+  );
+  process.exit(1);
+}
+
+// An ambient ancestor marker (for example an empty /tmp/.git injected by a
+// sandbox) makes `git init` in a fixture reuse that ancestor instead of
+// creating a nested repository. GIT_CEILING_DIRECTORIES must be present in
+// the environment captured when Bun starts; tests/run-tests.ts supplies it.
+const tempRoot = resolve(tmpdir());
+const gitCeilings = (process.env.GIT_CEILING_DIRECTORIES ?? "")
+  .split(delimiter)
+  .filter(Boolean)
+  .map((directory) => resolve(directory));
+if (!gitCeilings.includes(tempRoot)) {
+  // eslint-disable-next-line no-console
+  console.error(
+    `Refusing to run tests: GIT_CEILING_DIRECTORIES must include ${tempRoot}.\n` +
+      "Fixture git init commands could otherwise discover an ambient ancestor " +
+      ".git directory and rewrite the real repository. Run `bun run test` so " +
+      "tests/run-tests.ts can launch Bun with the safe environment.",
   );
   process.exit(1);
 }

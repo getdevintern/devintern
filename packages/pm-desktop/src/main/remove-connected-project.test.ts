@@ -59,6 +59,7 @@ describe("removeConnectedProject", () => {
 
     const localPath = join(projectsRoot, "acme-web-abcd1234");
     await mkdir(join(localPath, ".git"), { recursive: true });
+    await writeFile(join(localPath, ".git", "HEAD"), "ref: refs/heads/main\n");
     await mkdir(join(localPath, ".devintern-pm"), { recursive: true });
     await writeFile(
       join(localPath, ".devintern-pm", ".env"),
@@ -92,6 +93,7 @@ describe("removeConnectedProject", () => {
 
     const localPath = join(projectsRoot, "acme-web-busy1234");
     await mkdir(join(localPath, ".git"), { recursive: true });
+    await writeFile(join(localPath, ".git", "HEAD"), "ref: refs/heads/main\n");
     await rememberProjectBinding({
       id: "busy1234",
       remote: "acme/web",
