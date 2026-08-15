@@ -108,8 +108,8 @@ export function ConnectGitHubDialog({ open, onOpenChange, onConnected }: Connect
     }
   }, [reposQuery.error]);
 
-  // After OAuth sign-in, an empty repo list means the app isn't installed on
-  // any repos yet — prompt the user to install it.
+  // After OAuth, an empty installation-backed list means the app isn't
+  // installed (or the user can't see any installation repos) — offer install.
   useEffect(() => {
     setNeedsInstall(authMethod === "oauth" && reposQuery.isSuccess && repos.length === 0);
   }, [authMethod, reposQuery.isSuccess, repos.length]);

@@ -756,6 +756,43 @@ describe("ConnectGitHubDialog", () => {
     expect(domWindow.document.querySelector('[data-testid="connect-github-auth"]')).not.toBeNull();
   });
 
+  test("shows install prompt when OAuth list is empty", async () => {
+    const connectedStatus: GitHubAuthStatus = {
+      connected: true,
+      method: "oauth",
+      login: "dana",
+      encryptionAvailable: true,
+      tokenEncrypted: true,
+    };
+    getGitHubAuthStatus.mockImplementation(async () => ok(connectedStatus));
+    listGitHubRepos.mockImplementation(async () => ok([]));
+    seedQueries(queryClient, { authStatus: connectedStatus, repos: [] });
+    await renderOpen();
+
+    expect(
+      domWindow.document.querySelector('[data-testid="connect-github-needs-install"]'),
+    ).not.toBeNull();
+    expect(domWindow.document.querySelector('[data-testid="connect-github-repo-list"]')).toBeNull();
+  });
+
+  test("does not show install prompt when a PAT list is empty", async () => {
+    const connectedStatus: GitHubAuthStatus = {
+      connected: true,
+      method: "pat",
+      login: "dana",
+      encryptionAvailable: true,
+      tokenEncrypted: true,
+    };
+    getGitHubAuthStatus.mockImplementation(async () => ok(connectedStatus));
+    listGitHubRepos.mockImplementation(async () => ok([]));
+    seedQueries(queryClient, { authStatus: connectedStatus, repos: [] });
+    await renderOpen();
+
+    expect(
+      domWindow.document.querySelector('[data-testid="connect-github-needs-install"]'),
+    ).toBeNull();
+  });
+
   test("surfaces forbidden listRepos error", async () => {
     const connectedStatus: GitHubAuthStatus = {
       connected: true,

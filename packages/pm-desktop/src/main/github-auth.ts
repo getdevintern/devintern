@@ -176,6 +176,12 @@ export async function getGitHubAuthStatus(): Promise<GitHubAuthStatus> {
       if (!payload) {
         return { connected: false, encryptionAvailable };
       }
+      // Refresh if needed; a stored file without a usable token is not connected
+      // (list/clone would otherwise look signed-in and return an empty repo list).
+      const token = await getGitHubToken();
+      if (!token) {
+        return { connected: false, encryptionAvailable };
+      }
       return {
         connected: true,
         method: "oauth",
