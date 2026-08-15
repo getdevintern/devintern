@@ -8,6 +8,27 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Architecture
 
+### Core Components
+
+- **[src/index.ts](src/index.ts)** - Main entry, CLI parsing, orchestrates workflow: fetch → format → git → claude → commit → PR
+- **[src/lib/task-tracker-client.ts](src/lib/task-tracker-client.ts)** - Interface for all task tracker clients (JIRA, Linear, Trello, etc.)
+- **[src/lib/task-tracker-manager.ts](src/lib/task-tracker-manager.ts)** - Factory that resolves the concrete tracker from the `TASK_TRACKER` environment variable (defaults to JIRA)
+- **[src/lib/trackers/jira/jira-task-tracker-client.ts](src/lib/trackers/jira/jira-task-tracker-client.ts)** - JIRA implementation of `TaskTrackerClient`; delegates HTTP to `JiraClient` and issue parsing to `@devintern/task-trackers`
+- **[src/lib/trackers/jira/jira-formatter.ts](src/lib/trackers/jira/jira-formatter.ts)** - JIRA-specific ADF comment formatting for @devintern/code automation
+- **[src/lib/task-formatter.ts](src/lib/task-formatter.ts)** - Formats task tracker data (ADF/HTML → Markdown) for LLM prompts
+- **[src/lib/utils.ts](src/lib/utils.ts)** - Git operations, file handling utilities
+- **[src/lib/github-reviews.ts](src/lib/github-reviews.ts)** - GitHub API client for PR reviews
+- **[src/lib/review-formatter.ts](src/lib/review-formatter.ts)** - Formats PR review feedback for Claude
+- **[src/lib/address-review.ts](src/lib/address-review.ts)** - Handles PR review responses
+- **[src/lib/auto-review-loop.ts](src/lib/auto-review-loop.ts)** - Automatic PR self-review and improvement loop; exports the `runAgentPrompt` / `parseReviewFeedback` / `filterByPriority` / `getPRDiff` primitives reused by pipeline steps
+- **[src/lib/pipeline/](src/lib/pipeline/)** - Extensible task pipeline (types, registry, runner, config, built-in steps); public plugin API via the `@getdevintern/code/pipeline` subpath export
+- **[src/lib/project-settings.ts](src/lib/project-settings.ts)** - settings.json loading + per-project status resolution (extracted from index.ts so steps avoid an import cycle)
+- **[src/lib/clarity-check.ts](src/lib/clarity-check.ts)** - Pre-implementation feasibility assessment (`runClarityCheck`)
+- **[src/lib/errors.ts](src/lib/errors.ts)** - `UsageLimitError` (aborts a batch; re-thrown by the pipeline runner, never retried)
+- **[src/webhook-server.ts](src/webhook-server.ts)** - Webhook server for automated PR review handling
+- **[src/types/](src/types/)** - TypeScript interfaces
+  - `task-tracker.ts` - Platform-agnostic domain types (`Task`, `Comment`, `FormattedTaskDetails`, etc.)
+  - `jira.ts` - JIRA-specific type aliases (re-exports generic types for backward compatibility)
 ### Key Workflows
 
 **JIRA Task Processing:**
@@ -21,6 +42,38 @@ This file provides guidance to Claude Code when working with this repository.
 **PR Review Handling:**
 
 1. Webhook receives review → 2. Check bot mention → 3. Queue review → 4. Switch worktree to PR branch → 5. Fetch comments → 6. Run Claude → 7. Commit fixes → 8. Push & reply
+
+### Pipeline & Steps
+
+Task execution (everything after the `processSingleTask` preamble: fetch → clarity check → branch → In-Progress transition) runs through an ordered pipeline of steps sharing one mutable `TaskContext` (`src/lib/pipeline/`).
+
+**Default pipeline** (used when `settings.pipeline` is absent; reproduces the classic flow):
+
+```
+implement → commit → auto-review → finalize
+```
+
+- `implement` — runs the agent (`runImplementation`); consumes `ctx.loopbackFeedback` / `ctx.pendingPromptOverride` as prompt overrides
+- `commit` — commit with git-hook auto-fix retries; detects plan-only output and loops back to `implement` once with a "now implement the plan" prompt
+- `auto-review` — self-gates on `--auto-review`; validates pre-push hook, runs `runAutoReviewLoop({ skipPush: true })`, re-validates
+- `finalize` — hook validation (if not already done) → push → tracker comment → PR creation → status transition
+- `clarity` and `verify` are registered but **not** in the default list. The preamble clarity check in `processSingleTask` still runs before branch creation; the `clarity` step exists for custom pipelines. `verify` is the opt-in requirements checker.
+
+**Commit ordering matters:** `commit` must run before `auto-review`/`verify` because both diff `origin/<base>...HEAD`; uncommitted changes would be invisible.
+
+**Failure model (two channels):**
+
+- Execution errors (subprocess crash, unparseable verdict JSON) — steps **throw** `StepExecutionError`; the runner retries the step (default 1 retry) then halts.
+- Verdict failures (requirements genuinely unmet) — steps **return** `status: "loopback"` with `ReviewFeedback`; the runner jumps back to `loopbackTo` (default `implement`), bounded by `maxLoopbacks`, then halts.
+- `Halt` with `haltKind: "incomplete"` (default) triggers the `onHalt` callback (incomplete-implementation comment + revert to To Do); `haltKind: "stop"` stops quietly (e.g. unfixable pre-push hook).
+- `UsageLimitError` is always re-thrown so a batch aborts (never retried).
+
+**User extensibility (two tiers), via `settings.pipeline`:**
+
+1. Declarative: `pipeline.steps: [{ "use": "verify", "onFail": "loopback", "minSeverity": "high", "maxIterations": 3 }, ...]` — any number of `verify` instances with different `prompt`/`onFail`/`minSeverity`.
+2. Code plugins: `pipeline.plugins: ["./.devintern-code/steps/my-step.ts", "@org/pkg"]` — each module default-exports a `StepDefinition`; loaded via dynamic `import()` before step resolution, registered in the same registry as built-ins (name collisions error out). Typed API surface: `@getdevintern/code/pipeline` (exports live at `src/lib/pipeline/index.ts`; `src/**` ships in the npm tarball for this reason).
+
+`runAgentHarness` in `src/index.ts` remains as a thin back-compat shim: it builds the `TaskContext`, loads plugins, resolves the pipeline (default when unconfigured), and runs it — preserving the old contract (resolves for normal/incomplete/max-turns so batches continue; rejects on timeout, non-zero exit, and `UsageLimitError`).
 
 ### Configuration
 

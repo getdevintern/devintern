@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
 section: "Code"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-08-12
 ---
 
 # @devintern/code Configuration
@@ -208,6 +208,75 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
   }
 }
 ```
+
+## Pipeline Customization
+
+The task workflow is built from pluggable pipeline steps. By default @devintern/code runs: implement, commit, auto-review (when `--auto-review` is set), and finalize (push, comment, PR, status transition). You can reorder steps, add extra checks, or plug in your own steps via the `pipeline` section of `.devintern-code/settings.json`.
+
+```json
+{
+  "pipeline": {
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "loopback", "minSeverity": "high", "maxIterations": 3 },
+      { "use": "auto-review" },
+      { "use": "finalize" }
+    ]
+  }
+}
+```
+
+**Built-in steps:** `clarity`, `implement`, `commit`, `auto-review`, `verify`, `finalize`.
+
+### The verify step
+
+`verify` is an agent-backed requirements checker: it reads the task and the committed diff, asks the agent for a structured verdict, and acts on the result. It is not part of the default pipeline; add it when you want an extra gate. Options:
+
+- `prompt`: custom verification instructions (inline text or a path to a prompt file)
+- `onFail`: `"loopback"` (default, feed findings back to the implement step and re-verify), `"halt"` (stop and mark the task incomplete), or `"warn"` (record a warning and continue)
+- `minSeverity`: findings at or above this priority fail the verdict (default `"high"`)
+- `maxIterations`: bound for the loopback cycle (default `3`)
+
+You can add several `verify` entries with different prompts, for example one for functional requirements and one for security review.
+
+### Custom step plugins
+
+For logic that config alone cannot express, write a step module that default-exports a step definition and list it under `pipeline.plugins`. Entries are file paths (resolved against your project root) or npm package names; no rebuild of @devintern/code is required.
+
+```json
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/my-lint.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "my-lint", "threshold": 0.9 },
+      { "use": "finalize" }
+    ]
+  }
+}
+```
+
+```ts
+// .devintern-code/steps/my-lint.ts
+import type { StepDefinition } from "@getdevintern/code/pipeline";
+
+const definition: StepDefinition = {
+  name: "my-lint",
+  create: (config) => ({
+    name: "my-lint",
+    async run(ctx) {
+      // run checks against ctx.workingDir ...
+      return { status: "continue" };
+    },
+  }),
+};
+
+export default definition;
+```
+
+Steps return one of four statuses: `continue`, `warn` (record a warning and continue), `halt` (stop; by default the task is reverted to To Do with an incomplete-implementation comment), or `loopback` (jump back to an earlier step with structured findings). Throw `StepExecutionError` for transient failures you want retried.
 
 ## Verbose API Logging
 

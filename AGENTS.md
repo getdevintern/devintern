@@ -43,6 +43,7 @@ bun run --filter @getdevintern/pm build
 ### `@getdevintern/code`
 
 - Entry: `src/index.ts`
+- Public plugin API: `@getdevintern/code/pipeline` (implemented under `src/lib/pipeline/`); `src/**/*` is included in the published package for this subpath export
 - Tests: `bun test` (Bun native test runner in `tests/`)
 - Build: `bun run build.ts`: bundles with `Bun.build`, then replaces shebang from `node` to `bun` in `dist/index.js`
 - Run locally: `bun start TASK-123`

@@ -48,6 +48,30 @@ Full docs: **[devintern.com/docs/code](https://devintern.com/docs/code/quick-sta
 
 Source monorepo: [getdevintern/devintern](https://github.com/getdevintern/devintern)
 
+## Extensible pipeline
+
+The task workflow is an ordered pipeline of pluggable steps (default: `implement` → `commit` → `auto-review` → `finalize`). Customize it in `.devintern-code/settings.json`:
+
+```json
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/my-step.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "loopback", "minSeverity": "high" },
+      { "use": "my-step" },
+      { "use": "finalize" }
+    ]
+  }
+}
+```
+
+- **Declarative (no code):** add the built-in `verify` step — an agent-backed requirements checker that feeds findings back to the implementer (`onFail: "loopback"`), halts, or warns. Multiple instances with different prompts are supported.
+- **Code plugins:** a plugin module default-exports a `StepDefinition` (typed API from `@getdevintern/code/pipeline`) and is loaded at startup from a file path or npm package name — no rebuild required.
+
+See the [Configuration guide](https://devintern.com/docs/code/configuration) for details.
+
 ## License
 
 [FSL-1.1-Apache-2.0](./LICENSE.md). Interactive use free forever; unattended automation requires a license — see [pricing](https://devintern.com/pricing/).
