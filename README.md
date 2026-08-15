@@ -71,6 +71,8 @@ DevIntern connects the tracker your team already uses to the coding agent and mo
   <a href="https://www.npmjs.com/package/@getdevintern/code"><strong>npm</strong></a>
   ·
   <a href="https://devintern.com"><strong>Website</strong></a>
+  ·
+  <a href="https://devintern.com/pm-desktop/"><strong>PM desktop</strong></a>
   <!-- · <a href="YOUR-DISCORD-OR-DISCUSSIONS-URL"><strong>Community</strong></a> -->
 </p>
 
@@ -100,6 +102,7 @@ Product guides are available locally for [Code](docs/code/quick-start.md) and [P
 
 | Capability                | What it does                                                                      |
 | ------------------------- | --------------------------------------------------------------------------------- |
+| **Ticket drafting**       | Desktop app turns a prompt, log, or Figma frame into a ticket before Code runs it |
 | **Feasibility gate**      | Vague tickets get questions back on the tracker instead of a confidently wrong PR |
 | **Self-review loop**      | The agent reviews and fixes its own diff before a human sees it                   |
 | **Unattended automation** | Scheduled pickup; review comments become commits on the same branch               |
@@ -112,7 +115,14 @@ Product guides are available locally for [Code](docs/code/quick-start.md) and [P
 </p>
 -->
 
-Also available: **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) — turn rough notes, logs, or Figma into well-specified tickets, then run them with `devintern`.
+Write the ticket first with **[DevIntern PM](https://devintern.com/pm-desktop/)** (desktop, free, no signup) or **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) in the terminal, then run it with `devintern`.
+
+<p align="center">
+  <a href="https://devintern.com/pm-desktop/">
+    <img src=".github/readme/pm-desktop.jpg" width="100%" alt="DevIntern PM: a prompt becomes a ready-to-create ticket">
+  </a>
+</p>
+<p align="center"><em>Prompt → drafted ticket → Create Task</em></p>
 
 ## License and pricing
 
@@ -127,11 +137,12 @@ The FSL grants no trademark rights: the DevIntern name and logo are trademarks o
 
 ## Repository layout
 
-| Package                               | Purpose                                                        |
-| ------------------------------------- | -------------------------------------------------------------- |
-| [`@getdevintern/code`](packages/code) | The `devintern` CLI: ticket → agent → self-reviewed PR         |
-| [`@getdevintern/pm`](packages/pm)     | The `devpm` CLI: rough input → well-specified tickets          |
-| `packages/*` (shared)                 | Agent harness, tracker clients, auth, license check, utilities |
+| Package                                        | Purpose                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| [`@getdevintern/code`](packages/code)          | The `devintern` CLI: ticket → agent → self-reviewed PR           |
+| [`@getdevintern/pm`](packages/pm)              | The `devpm` CLI: rough input → well-specified tickets            |
+| [`@devintern/pm-desktop`](packages/pm-desktop) | Desktop app for ticket drafting: prompt, log, or Figma → tracker |
+| `packages/*` (shared)                          | Agent harness, tracker clients, auth, license check, utilities   |
 
 Website and control plane live elsewhere; this repo is the tool packages.
 
