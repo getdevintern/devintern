@@ -63,11 +63,13 @@ describe("validateGitHubToken", () => {
 });
 
 describe("listGitHubRepos", () => {
-  test("returns empty without a token", async () => {
-    expect(await listGitHubRepos(null)).toEqual([]);
+  test("throws auth_required without a token instead of empty list", async () => {
+    await expect(listGitHubRepos(null)).rejects.toMatchObject({
+      code: "auth_required",
+    });
   });
 
-  test("maps API rows", async () => {
+  test("maps PAT /user/repos rows", async () => {
     const rows = await listGitHubRepos("tok", async () =>
       jsonResponse(200, [
         { full_name: "acme/web", private: true, default_branch: "develop" },
@@ -75,6 +77,12 @@ describe("listGitHubRepos", () => {
       ]),
     );
     expect(rows).toEqual([{ fullName: "acme/web", private: true, defaultBranch: "develop" }]);
+  });
+
+  test("throws on non-array /user/repos payload instead of empty list", async () => {
+    await expect(
+      listGitHubRepos("tok", async () => jsonResponse(200, { repositories: [] })),
+    ).rejects.toMatchObject({ code: "error" });
   });
 
   test("throws auth_required on 401 instead of empty list", async () => {
@@ -100,5 +108,68 @@ describe("listGitHubRepos", () => {
       code: "error",
       message: expect.stringMatching(/timed out/i),
     });
+  });
+
+  test("lists GitHub App user-token repos via installations, not /user/repos", async () => {
+    const paths: string[] = [];
+    const rows = await listGitHubRepos("ghu_token", async (input) => {
+      const url = new URL(input);
+      paths.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/user/installations") {
+        return jsonResponse(200, {
+          total_count: 2,
+          installations: [{ id: 11 }, { id: 22 }],
+        });
+      }
+      if (url.pathname === "/user/installations/11/repositories") {
+        return jsonResponse(200, {
+          total_count: 1,
+          repositories: [{ full_name: "acme/web", private: true, default_branch: "develop" }],
+        });
+      }
+      if (url.pathname === "/user/installations/22/repositories") {
+        return jsonResponse(200, {
+          total_count: 1,
+          repositories: [{ full_name: "acme/api", private: false, default_branch: "main" }],
+        });
+      }
+      return jsonResponse(500, { message: `unexpected ${url.pathname}` });
+    });
+    expect(rows).toEqual([
+      { fullName: "acme/web", private: true, defaultBranch: "develop" },
+      { fullName: "acme/api", private: false, defaultBranch: "main" },
+    ]);
+    expect(paths.some((p) => p.startsWith("/user/repos"))).toBe(false);
+    expect(paths.some((p) => p.startsWith("/user/installations?"))).toBe(true);
+  });
+
+  test("dedupes the same repo across installations", async () => {
+    const rows = await listGitHubRepos("ghu_token", async (input) => {
+      const url = new URL(input);
+      if (url.pathname === "/user/installations") {
+        return jsonResponse(200, { installations: [{ id: 1 }, { id: 2 }] });
+      }
+      return jsonResponse(200, {
+        repositories: [{ full_name: "acme/web", private: true, default_branch: "main" }],
+      });
+    });
+    expect(rows).toEqual([{ fullName: "acme/web", private: true, defaultBranch: "main" }]);
+  });
+
+  test("returns empty when the GitHub App has no installations", async () => {
+    const rows = await listGitHubRepos("ghu_token", async (input) => {
+      const url = new URL(input);
+      if (url.pathname === "/user/installations") {
+        return jsonResponse(200, { total_count: 0, installations: [] });
+      }
+      return jsonResponse(500, { message: `unexpected ${url.pathname}` });
+    });
+    expect(rows).toEqual([]);
+  });
+
+  test("throws when installations payload is not the documented object", async () => {
+    await expect(
+      listGitHubRepos("ghu_token", async () => jsonResponse(200, [{ id: 1 }])),
+    ).rejects.toMatchObject({ code: "error" });
   });
 });

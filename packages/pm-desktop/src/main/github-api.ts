@@ -152,58 +152,187 @@ export async function probeGitHubRepo(
   };
 }
 
+/** GitHub App user-to-server tokens (`ghu_`). Installation list is the supported repo source. */
+function isGitHubAppUserToken(token: string): boolean {
+  return token.startsWith("ghu_");
+}
+
+function listError(code: string, message: string): Error & { code: string } {
+  const err = new Error(message) as Error & { code: string };
+  err.code = code;
+  return err;
+}
+
+async function throwIfListFailed(response: Response): Promise<void> {
+  if (response.ok) return;
+  if (response.status === 401) {
+    throw listError(
+      "auth_required",
+      "GitHub rejected this token. Sign in again, or paste a valid personal access token with repo access.",
+    );
+  }
+  if (response.status === 403) {
+    const body = await response.text().catch(() => "");
+    if (/rate limit/i.test(body)) {
+      throw listError("rate_limited", "GitHub rate limit reached. Try again in a few minutes.");
+    }
+    throw listError(
+      "forbidden",
+      "This token does not have access to list repositories. Check the token scopes.",
+    );
+  }
+  throw listError("error", `GitHub returned ${response.status}. Try again later.`);
+}
+
+interface GitHubRepoApiRow {
+  full_name?: string;
+  private?: boolean;
+  default_branch?: string;
+}
+
+function mapRepoRows(rows: GitHubRepoApiRow[]): GitHubRepoListItem[] {
+  return rows
+    .filter((r): r is GitHubRepoApiRow & { full_name: string } => {
+      return typeof r.full_name === "string" && r.full_name.includes("/");
+    })
+    .map((r) => ({
+      fullName: r.full_name,
+      private: r.private === true,
+      defaultBranch: r.default_branch ?? "main",
+    }));
+}
+
+/** PAT / classic OAuth: first page of `/user/repos`. */
+async function listUserRepos(
+  token: string,
+  fetchImpl: FetchLike,
+  perPage: number,
+): Promise<GitHubRepoListItem[]> {
+  const response = await githubFetch(
+    `/user/repos?sort=updated&per_page=${perPage}&affiliation=owner,collaborator,organization_member`,
+    token,
+    fetchImpl,
+  );
+  await throwIfListFailed(response);
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) {
+    throw listError("error", "GitHub returned an unexpected repository list.");
+  }
+  return mapRepoRows(data as GitHubRepoApiRow[]);
+}
+
 /**
- * List repositories visible to the authenticated user (first page, capped).
- * Requires a token; returns [] when unauthenticated.
- * Throws an Error with `code` on auth/API failures (so Connect can show them).
+ * GitHub App user tokens only see installation repos reliably.
+ * Walk `/user/installations` then `/user/installations/{id}/repositories`.
+ */
+async function listInstallationRepos(
+  token: string,
+  fetchImpl: FetchLike,
+  perPage: number,
+): Promise<GitHubRepoListItem[]> {
+  const installationIds = await listInstallationIds(token, fetchImpl);
+  const seen = new Set<string>();
+  const repos: GitHubRepoListItem[] = [];
+  for (const installationId of installationIds) {
+    if (repos.length >= perPage) break;
+    const remaining = perPage - repos.length;
+    const page = await listReposForInstallation(token, fetchImpl, installationId, remaining);
+    for (const repo of page) {
+      if (seen.has(repo.fullName)) continue;
+      seen.add(repo.fullName);
+      repos.push(repo);
+      if (repos.length >= perPage) break;
+    }
+  }
+  return repos;
+}
+
+async function listInstallationIds(token: string, fetchImpl: FetchLike): Promise<number[]> {
+  const ids: number[] = [];
+  const perPage = 100;
+  for (let page = 1; page <= 3; page++) {
+    const response = await githubFetch(
+      `/user/installations?per_page=${perPage}&page=${page}`,
+      token,
+      fetchImpl,
+    );
+    await throwIfListFailed(response);
+    const data: unknown = await response.json();
+    const installations =
+      data && typeof data === "object" && "installations" in data
+        ? (data as { installations?: unknown }).installations
+        : undefined;
+    if (!Array.isArray(installations)) {
+      throw listError("error", "GitHub returned an unexpected installations list.");
+    }
+    for (const installation of installations) {
+      const id =
+        installation && typeof installation === "object" && "id" in installation
+          ? (installation as { id?: unknown }).id
+          : undefined;
+      if (typeof id === "number" && Number.isFinite(id)) ids.push(id);
+    }
+    if (installations.length < perPage) break;
+  }
+  return ids;
+}
+
+async function listReposForInstallation(
+  token: string,
+  fetchImpl: FetchLike,
+  installationId: number,
+  limit: number,
+): Promise<GitHubRepoListItem[]> {
+  const repos: GitHubRepoListItem[] = [];
+  const perPage = Math.min(Math.max(limit, 1), 100);
+  for (let page = 1; page <= 3 && repos.length < limit; page++) {
+    const response = await githubFetch(
+      `/user/installations/${installationId}/repositories?per_page=${perPage}&page=${page}`,
+      token,
+      fetchImpl,
+    );
+    await throwIfListFailed(response);
+    const data: unknown = await response.json();
+    const rows =
+      data && typeof data === "object" && "repositories" in data
+        ? (data as { repositories?: unknown }).repositories
+        : undefined;
+    if (!Array.isArray(rows)) {
+      throw listError("error", "GitHub returned an unexpected repository list.");
+    }
+    for (const repo of mapRepoRows(rows as GitHubRepoApiRow[])) {
+      repos.push(repo);
+      if (repos.length >= limit) break;
+    }
+    if (rows.length < perPage) break;
+  }
+  return repos;
+}
+
+/**
+ * List repositories visible to the stored token (capped).
+ * GitHub App user tokens (`ghu_`) walk installations — `/user/repos` often
+ * returns [] for org installs even when the app is installed.
+ * PAT / other tokens use `/user/repos`.
+ * Throws an Error with `code` when unauthenticated or on auth/API failures
+ * (so Connect can show them instead of an empty list).
  */
 export async function listGitHubRepos(
   token: string | null,
   fetchImpl: FetchLike = fetch,
   options: { perPage?: number } = {},
 ): Promise<GitHubRepoListItem[]> {
-  if (!token) return [];
-  const perPage = Math.min(options.perPage ?? 50, 100);
-  const response = await githubFetch(
-    `/user/repos?sort=updated&per_page=${perPage}&affiliation=owner,collaborator,organization_member`,
-    token,
-    fetchImpl,
-  );
-  if (!response.ok) {
-    const err = new Error() as Error & { code?: string };
-    if (response.status === 401) {
-      err.code = "auth_required";
-      err.message =
-        "GitHub rejected this token. Paste a valid personal access token with repo access.";
-    } else if (response.status === 403) {
-      const body = await response.text().catch(() => "");
-      if (/rate limit/i.test(body)) {
-        err.code = "rate_limited";
-        err.message = "GitHub rate limit reached. Try again in a few minutes.";
-      } else {
-        err.code = "forbidden";
-        err.message =
-          "This token does not have access to list repositories. Check the token scopes.";
-      }
-    } else {
-      err.code = "error";
-      err.message = `GitHub returned ${response.status}. Try again later.`;
-    }
-    throw err;
+  if (!token) {
+    throw listError(
+      "auth_required",
+      "GitHub sign-in expired. Sign in again to list your repositories.",
+    );
   }
-  const data = (await response.json()) as Array<{
-    full_name?: string;
-    private?: boolean;
-    default_branch?: string;
-  }>;
-  if (!Array.isArray(data)) return [];
-  return data
-    .filter((r) => typeof r.full_name === "string" && r.full_name.includes("/"))
-    .map((r) => ({
-      fullName: r.full_name!,
-      private: r.private === true,
-      defaultBranch: r.default_branch ?? "main",
-    }));
+  const perPage = Math.min(options.perPage ?? 50, 100);
+  if (isGitHubAppUserToken(token)) {
+    return listInstallationRepos(token, fetchImpl, perPage);
+  }
+  return listUserRepos(token, fetchImpl, perPage);
 }
 
 /** Validate a token by calling `/user`. */

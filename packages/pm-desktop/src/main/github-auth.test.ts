@@ -140,6 +140,11 @@ describe("github-auth", () => {
     expect(await getGitHubToken()).toBe("ghu_new");
     // A second read reuses the refreshed token (no second refresh call).
     expect(await getGitHubToken()).toBe("ghu_new");
+    expect(await getGitHubAuthStatus()).toMatchObject({
+      connected: true,
+      method: "oauth",
+      login: "dana",
+    });
   });
 
   test("returns null when refresh fails", async () => {
@@ -156,6 +161,10 @@ describe("github-auth", () => {
       throw new Error("refresh denied");
     });
     expect(await getGitHubToken()).toBeNull();
+    expect(await getGitHubAuthStatus()).toEqual({
+      connected: false,
+      encryptionAvailable: false,
+    });
   });
 
   test("clear removes both PAT and OAuth tokens", async () => {
