@@ -245,11 +245,10 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "regenerating");
 
     const result = await editPromise;
-    expect(result).toEqual({
-      editPrompt: "Make it shorter",
-      currentSummary: "Summary",
-      currentDescription: "Description",
-    });
+    expect(result.editPrompt).toBe("Make it shorter");
+    expect(result.currentSummary).toBe("Summary");
+    expect(result.currentDescription).toBe("Description");
+    expect(result.ticketId).toBe(handle.getActiveTicketId()!);
   });
 
   test("Esc from preview after setPreviewData stays on preview with data (no blank step)", async () => {
@@ -467,6 +466,133 @@ describe("runInteractiveMode", () => {
     handle.cleanup();
 
     await expect(restartPromise).rejects.toThrow("Interactive mode cancelled");
+  });
+});
+
+describe("multi-ticket workspaces", () => {
+  let handle: Awaited<ReturnType<typeof runInteractiveMode>>;
+  let stdin: FakeStdin;
+
+  beforeEach(async () => {
+    stdin = new FakeStdin();
+    handle = await runInteractiveMode({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+    });
+    // Allow the Ink tree to commit the seeded ticket before multi-ticket actions.
+    await waitFor(() => handle.getActiveTicketId() !== null);
+  });
+
+  afterEach(() => {
+    handle?.cleanup();
+  });
+
+  test("session starts with one open ticket (smooth single-ticket path)", () => {
+    const ws = handle.getWorkspaces();
+    expect(ws.tickets).toHaveLength(1);
+    expect(ws.activeTicketId).toBe(ws.tickets[0]!.id);
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("opening a second ticket focuses it without losing the first", async () => {
+    const firstId = handle.getActiveTicketId()!;
+    handle.setPreviewData("First draft", "Body A", firstId);
+    await waitFor(() => handle.getStep() === "preview");
+
+    const secondId = handle.openTicket();
+    await waitFor(
+      () => handle.getWorkspaces().tickets.length === 2 && handle.getStep() === "source-type",
+    );
+
+    const ws = handle.getWorkspaces();
+    expect(ws.tickets).toHaveLength(2);
+    expect(ws.activeTicketId).toBe(secondId);
+    expect(handle.getStep()).toBe("source-type");
+
+    const first = ws.tickets.find((t) => t.id === firstId)!;
+    expect(first.wizard.step).toBe("preview");
+    expect(first.wizard.previewData?.summary).toBe("First draft");
+  });
+
+  test("closing the active ticket selects a sensible neighbor with state intact", async () => {
+    const firstId = handle.getActiveTicketId()!;
+    handle.setPreviewData("Ticket A", "Desc A", firstId);
+    await waitFor(() => handle.getStep() === "preview");
+
+    const secondId = handle.openTicket();
+    await waitFor(() => handle.getActiveTicketId() === secondId);
+
+    handle.closeTicket(secondId);
+    await waitFor(() => handle.getWorkspaces().tickets.length === 1);
+
+    const ws = handle.getWorkspaces();
+    expect(ws.tickets).toHaveLength(1);
+    expect(ws.tickets[0]!.id).toBe(firstId);
+    expect(ws.activeTicketId).toBe(firstId);
+    expect(ws.tickets[0]!.wizard.previewData?.summary).toBe("Ticket A");
+    await waitFor(() => handle.getStep() === "preview");
+    expect(handle.getPreviewData()?.summary).toBe("Ticket A");
+  });
+
+  test("background ticket can finish while another is active", async () => {
+    const firstId = handle.getActiveTicketId()!;
+    handle.setGenerating(firstId);
+    await waitFor(() => handle.getStep() === "generating");
+
+    const secondId = handle.openTicket();
+    await waitFor(
+      () => handle.getActiveTicketId() === secondId && handle.getStep() === "source-type",
+    );
+
+    // Complete generation on background ticket A
+    handle.setPreviewData("Done in background", "Body", firstId);
+    await waitFor(() => {
+      const t = handle.getWorkspaces().tickets.find((x) => x.id === firstId);
+      return t?.wizard.step === "preview" && t.wizard.previewData?.summary === "Done in background";
+    });
+
+    // Active ticket still on source-type
+    expect(handle.getActiveTicketId()).toBe(secondId);
+    expect(handle.getStep()).toBe("source-type");
+
+    // Switch back to A and see completed preview
+    handle.activateTicket(firstId);
+    await waitFor(() => handle.getActiveTicketId() === firstId && handle.getStep() === "preview");
+    expect(handle.getPreviewData()?.summary).toBe("Done in background");
+  });
+
+  test("closing the last ticket shows empty session (no active ticket)", async () => {
+    const id = handle.getActiveTicketId()!;
+    expect(handle.getWorkspaces().tickets).toHaveLength(1);
+
+    handle.closeTicket(id);
+    await waitFor(() => handle.getWorkspaces().tickets.length === 0);
+    await waitFor(() => handle.getActiveTicketId() === null);
+
+    expect(handle.getWorkspaces().activeTicketId).toBeNull();
+    // getStep falls back when empty
+    expect(handle.getStep()).toBe("source-type");
+  });
+
+  test("waitForAction delivers create with ticketId", async () => {
+    const actionPromise = handle.waitForAction();
+
+    handle.setPreviewData("Title", "Body");
+    await waitFor(() => handle.getStep() === "preview");
+
+    stdin.write("y");
+    const action = await actionPromise;
+    expect(action.type).toBe("create");
+    if (action.type === "create") {
+      expect(action.ticketId).toBeTruthy();
+      expect(action.config.previewData?.summary).toBe("Title");
+    }
+  });
+
+  test("Ctrl+N keyboard shortcut opens a new ticket", async () => {
+    await waitFor(() => handle.getActiveTicketId() !== null);
+    stdin.write("\x0e"); // Ctrl+N
+    await waitFor(() => handle.getWorkspaces().tickets.length === 2);
+    expect(handle.getWorkspaces().tickets.length).toBe(2);
   });
 });
 

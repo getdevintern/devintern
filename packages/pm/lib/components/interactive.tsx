@@ -1,74 +1,87 @@
-import React, { useState, useRef, useEffect } from "react";
-import { render, Box, Text, useInput, useApp } from "ink";
+import React, { useState, useRef, useEffect, useReducer, useCallback } from "react";
+import { render, Box, Text, useInput, useApp, useStdout } from "ink";
 import { ScrollView } from "ink-scroll-view";
 import type { ScrollViewRef } from "ink-scroll-view";
 import { MarkdownText } from "./MarkdownText";
 import { PromptInput } from "./PromptInput";
+import { TicketSidebar } from "./TicketSidebar";
+import { NoTicketsEmptyState } from "./NoTicketsEmptyState";
 import { getDefaultIssueType, orderIssueTypes } from "../issue-types";
 import { uiSymbols } from "../runtime/terminal.js";
+import {
+  createInitialWizard,
+  getActiveTicket,
+  getTicket,
+  initialTicketWorkspacesState,
+  isTicketBusy,
+  nextTicketId,
+  ticketWorkspacesReducer,
+} from "../ticket-workspaces.ts";
+import type { TicketWizardState, TicketWorkspacesState, WizardStep } from "../ticket-workspaces.ts";
 
-interface Task {
-  summary: string;
-  description: string;
-  type: "Story" | "Task" | "Bug" | "Epic";
-}
+/** Wizard + ticket fields exposed to the CLI orchestrator. */
+export type InteractiveState = TicketWizardState;
 
-interface InteractiveState {
-  step:
-    | "project"
-    | "source-type"
-    | "source-input"
-    | "custom"
-    | "epic"
-    | "style"
-    | "issue-type"
-    | "harness"
-    | "confirm"
-    | "generating"
-    | "preview"
-    | "edit-prompt"
-    | "regenerating"
-    | "done"
-    | "success";
-  projectKey?: string;
-  sourceType?: "figma" | "log" | "prompt";
-  sourceContent?: string;
-  customInstructions?: string;
-  epicKey?: string;
-  promptStyle: "pm" | "technical";
-  issueType: string;
-  harnessName?: string;
-  decompose: boolean;
-  tasks: Task[];
-  previewData?: {
-    summary: string;
-    description: string;
-  };
-  editPrompt?: string;
-  successMessage?: string;
-  statusMessage?: string;
-}
+/**
+ * User-driven actions from any open ticket. The orchestrator listens with
+ * `waitForAction` so multiple tickets can generate concurrently.
+ */
+export type InteractiveTicketAction =
+  | { type: "generate"; ticketId: string; config: InteractiveState }
+  | { type: "create"; ticketId: string; config: InteractiveState }
+  | {
+      type: "edit";
+      ticketId: string;
+      editPrompt: string;
+      currentSummary: string;
+      currentDescription: string;
+    }
+  | { type: "restart"; ticketId: string };
 
 export interface InteractiveModeHandle {
-  setGenerating: () => void;
-  setStatusMessage: (message: string) => void;
-  setPreviewData: (summary: string, description: string) => void;
+  /** Primary multi-ticket API: next user action on any open ticket. */
+  waitForAction: () => Promise<InteractiveTicketAction>;
+  /**
+   * @deprecated Prefer waitForAction. Resolves on generate or create confirm
+   * for any ticket (tests / single-ticket paths).
+   */
   waitForCompletion: () => Promise<InteractiveState>;
+  /**
+   * @deprecated Prefer waitForAction. Resolves when the user submits an edit
+   * prompt on any ticket.
+   */
   waitForEdit: () => Promise<{
     editPrompt: string;
     currentSummary: string;
     currentDescription: string;
+    ticketId: string;
   }>;
-  showSuccess: (message: string) => void;
-  waitForRestart: () => Promise<void>;
-  restart: () => void;
+  /**
+   * @deprecated Prefer waitForAction. Resolves when the user restarts a ticket
+   * after success.
+   */
+  waitForRestart: () => Promise<{ ticketId: string }>;
+
+  setGenerating: (ticketId?: string) => void;
+  setStatusMessage: (message: string, ticketId?: string) => void;
+  setPreviewData: (summary: string, description: string, ticketId?: string) => void;
+  updatePreviewData: (summary: string, description: string, ticketId?: string) => void;
+  showSuccess: (message: string, options?: { ticketId?: string; createdKey?: string }) => void;
+  restart: (ticketId?: string) => void;
   cleanup: () => void;
-  getStep: () => InteractiveState["step"];
+  getStep: () => WizardStep;
   getPreviewData: () => { summary: string; description: string } | undefined;
-  /** Current harness name selected in the wizard (if any). */
+  /** Current harness selected for the active ticket. */
   getHarnessName: () => string | undefined;
-  /** Updates preview data without changing the current step. */
-  updatePreviewData: (summary: string, description: string) => void;
+  getActiveTicketId: () => string | null;
+  /** Snapshot of open workspaces (tests / debugging / orchestrator). */
+  getWorkspaces: () => TicketWorkspacesState;
+  /** Open a new ticket workspace and focus it. */
+  openTicket: () => string;
+  /** Close a ticket (busy tickets still close; UI may confirm first via keyboard). */
+  closeTicket: (id: string) => void;
+  /** Switch the active ticket without cancelling background work. */
+  activateTicket: (id: string) => void;
 }
 
 export interface InteractiveModeOptions {
@@ -77,11 +90,9 @@ export interface InteractiveModeOptions {
   issueTypes?: string[];
   fetchIssueTypes?: (projectKey: string) => Promise<string[]>;
   backendName?: string;
-  /** @deprecated Prefer `harnesses` + `currentHarnessName` for on-the-fly switching. */
+  /** @deprecated Prefer `harnesses` + `currentHarnessName`. */
   harnessDisplayName?: string;
-  /** Installed harnesses offered in the Ctrl+G picker. */
   harnesses?: Array<{ name: string; displayName: string }>;
-  /** Active harness name at wizard start. */
   currentHarnessName?: string;
   /**
    * Whether the selected tracker can persist an epic/parent link. When
@@ -91,15 +102,13 @@ export interface InteractiveModeOptions {
   stdin?: NodeJS.ReadStream;
 }
 
-const TEXT_ENTRY_STEPS = new Set<InteractiveState["step"]>([
+const TEXT_ENTRY_STEPS = new Set<WizardStep>([
   "project",
   "source-input",
   "custom",
   "epic",
   "edit-prompt",
 ]);
-
-type WizardStep = InteractiveState["step"];
 
 interface StepNavFlags {
   hasEpicStep: boolean;
@@ -137,13 +146,11 @@ export function getPreviousStep(step: WizardStep, flags: StepNavFlags): WizardSt
       return "custom";
     case "confirm":
       return "style";
-    case "harness":
-      // Modal step: Esc is handled via stepBeforeHarness, not the linear map.
-      return null;
     case "edit-prompt":
       return "preview";
-    // Preview stays put: index.ts holds a waitForCompletion/waitForEdit race;
-    // navigating away without resolving either promise would strand the agent loop.
+    case "harness":
+      return null;
+    // Preview stays put: orchestrator holds waitForAction race.
     // Generating/regenerating/done: agent is in flight — Esc cannot cancel safely.
     // Success: any-key restart is handled separately in useInput.
     case "preview":
@@ -163,13 +170,14 @@ export function canNavigateBack(step: WizardStep, flags: StepNavFlags): boolean 
 }
 
 /**
- * Launches the multi-step Ink interactive wizard for creating PM tasks.
+ * Launches the multi-ticket Ink interactive shell for creating PM tasks.
  *
- * Renders the form, exposes imperative hooks for generation/preview/edit flows,
- * and resolves when the user confirms or cancels.
+ * Renders a sidebar of open ticket workspaces plus the active ticket's wizard,
+ * exposes imperative hooks for generation/preview/edit flows, and supports
+ * concurrent agent runs across tickets.
  *
  * @param options - Optional projects, issue types, fetcher, and backend display name.
- * @returns Handle with methods to drive generation, preview, edit, and restart cycles.
+ * @returns Handle with methods to drive generation, preview, edit, and multi-ticket actions.
  */
 export async function runInteractiveMode(
   options?: InteractiveModeOptions,
@@ -177,18 +185,47 @@ export async function runInteractiveMode(
   return new Promise((resolve, reject) => {
     let completed = false;
     let cancelled = false;
-    let updateState: ((updates: Partial<InteractiveState>) => void) | null = null;
+
+    type DispatchFn = (action: Parameters<typeof ticketWorkspacesReducer>[1]) => void;
+    let dispatchRef: DispatchFn | null = null;
+    let openTicketFn: (() => string) | null = null;
+    let closeTicketFn: ((id: string) => void) | null = null;
+    let activateTicketFn: ((id: string) => void) | null = null;
+    /**
+     * Immediate workspace snapshot for the orchestrator (ticket still open?).
+     * Updated on every dispatch so background agent completions see closes promptly.
+     */
+    let workspacesRef: TicketWorkspacesState = initialTicketWorkspacesState;
+    /**
+     * Post-commit snapshot for getStep/getPreviewData. Updated only after React
+     * applies state so tests waiting on getStep() are synchronized with useInput
+     * handlers that close over the last render.
+     */
+    let publishedWorkspaces: TicketWorkspacesState = initialTicketWorkspacesState;
+    /** Preview updates deferred while a ticket is on the edit-prompt step. */
+    const previewBuffer = new Map<string, { summary: string; description: string }>();
+    /** Patches queued before the Ink tree mounts and registers dispatch. */
+    const pendingUpdates: Array<{
+      ticketId: string;
+      updates: Partial<TicketWizardState>;
+    }> = [];
+
+    const actionQueue: InteractiveTicketAction[] = [];
+    let actionWaiter: ((action: InteractiveTicketAction) => void) | null = null;
+
     let completePromiseResolve: ((config: InteractiveState) => void) | null = null;
     let completePromiseReject: ((error: Error) => void) | null = null;
     let editPromiseResolve:
-      | ((data: { editPrompt: string; currentSummary: string; currentDescription: string }) => void)
+      | ((data: {
+          editPrompt: string;
+          currentSummary: string;
+          currentDescription: string;
+          ticketId: string;
+        }) => void)
       | null = null;
     let editPromiseReject: ((error: Error) => void) | null = null;
-    let restartPromiseResolve: (() => void) | null = null;
+    let restartPromiseResolve: ((data: { ticketId: string }) => void) | null = null;
     let restartPromiseReject: ((error: Error) => void) | null = null;
-    let currentStep: InteractiveState["step"] = "source-type";
-    let visiblePreviewDataRef: { summary: string; description: string } | null = null;
-    let currentHarnessNameRef: string | undefined = options?.currentHarnessName;
 
     const cancelError = () => new Error("Interactive mode cancelled");
 
@@ -196,6 +233,8 @@ export async function runInteractiveMode(
     const rejectPendingWaiters = () => {
       cancelled = true;
       const error = cancelError();
+      actionWaiter = null;
+      actionQueue.length = 0;
       if (completePromiseReject) {
         completePromiseReject(error);
         completePromiseReject = null;
@@ -213,6 +252,52 @@ export async function runInteractiveMode(
       }
     };
 
+    const emitAction = (action: InteractiveTicketAction) => {
+      if (cancelled) return;
+      if (actionWaiter) {
+        const resolveAction = actionWaiter;
+        actionWaiter = null;
+        resolveAction(action);
+      } else {
+        actionQueue.push(action);
+      }
+
+      if (action.type === "generate" || action.type === "create") {
+        if (completePromiseResolve) {
+          const resolveComplete = completePromiseResolve;
+          completePromiseResolve = null;
+          completePromiseReject = null;
+          resolveComplete(action.config);
+        }
+      } else if (action.type === "edit") {
+        if (editPromiseResolve) {
+          const resolveEdit = editPromiseResolve;
+          editPromiseResolve = null;
+          editPromiseReject = null;
+          resolveEdit({
+            editPrompt: action.editPrompt,
+            currentSummary: action.currentSummary,
+            currentDescription: action.currentDescription,
+            ticketId: action.ticketId,
+          });
+        }
+      } else if (action.type === "restart") {
+        if (restartPromiseResolve) {
+          const resolveRestart = restartPromiseResolve;
+          restartPromiseResolve = null;
+          restartPromiseReject = null;
+          resolveRestart({ ticketId: action.ticketId });
+        }
+      }
+    };
+
+    const resolveTicketId = (ticketId?: string): string | null => {
+      if (ticketId) {
+        return getTicket(workspacesRef, ticketId) ? ticketId : null;
+      }
+      return workspacesRef.activeTicketId;
+    };
+
     // Use provided projects or empty array
     const allProjects = options?.projects || [];
     const defaultProjectKey = options?.defaultProjectKey;
@@ -225,13 +310,8 @@ export async function runInteractiveMode(
         ]
       : allProjects;
 
-    // Whether to show the issue type selection step at all
     const hasIssueTypeStep = options?.issueTypes !== undefined;
-
-    // Whether to show the epic linking step at all (skip for trackers that
-    // can't persist an epic/parent link). Defaults to true for compatibility.
     const hasEpicStep = options?.supportsEpicLinking ?? true;
-
     const allHarnesses = options?.harnesses || [];
     const currentHarnessName = options?.currentHarnessName;
     const orderedHarnesses = currentHarnessName
@@ -241,125 +321,143 @@ export async function runInteractiveMode(
         ]
       : allHarnesses;
     const hasHarnessStep = orderedHarnesses.length > 0;
-    currentHarnessNameRef = currentHarnessName;
-
-    // Tracks the step the user was on before opening the harness modal via Ctrl+G,
-    // so ESC / Enter / number selection return there instead of always jumping
-    // to confirm or style. Reset on every transition out of "harness".
-    let stepBeforeHarness: InteractiveState["step"] | null = null;
-
-    // First step after collecting custom instructions, accounting for skips.
     const stepAfterCustom = hasEpicStep ? "epic" : hasIssueTypeStep ? "issue-type" : "style";
 
-    // Use provided issue types or default fallback
     const defaultIssueTypes =
       options?.issueTypes && options.issueTypes.length > 0
         ? options.issueTypes
         : ["Story", "Task", "Bug", "Epic"];
 
-    /**
-     * Root Ink component for the interactive task-creation wizard.
-     *
-     * @returns Full-screen wizard UI with step-specific prompts and preview panes.
-     */
-    const InteractiveFormWithPreview: React.FC = () => {
-      const { exit } = useApp();
-      const initialIssueType = getDefaultIssueType(defaultIssueTypes);
-      const [state, setState] = useState<InteractiveState>({
-        step: "source-type",
-        projectKey: defaultProjectKey, // Start with default project
-        promptStyle: "pm",
-        issueType: initialIssueType,
+    const makeFreshWizard = (): TicketWizardState =>
+      createInitialWizard({
+        projectKey: defaultProjectKey,
+        issueType: getDefaultIssueType(defaultIssueTypes),
         harnessName: currentHarnessName,
-        decompose: false,
-        tasks: [],
       });
-      const [input, setInput] = useState("");
+
+    // Seed one ticket synchronously so single-ticket use and getStep() work before paint.
+    const seededWorkspaces = ticketWorkspacesReducer(initialTicketWorkspacesState, {
+      type: "session-started",
+      id: nextTicketId(),
+      wizard: makeFreshWizard(),
+    });
+    workspacesRef = seededWorkspaces;
+    publishedWorkspaces = seededWorkspaces;
+
+    /**
+     * Root Ink component: multi-ticket sidebar + active ticket wizard.
+     */
+    const InteractiveShell: React.FC = () => {
+      const { exit } = useApp();
+      const { stdout } = useStdout();
+      const terminalWidth = stdout?.columns ?? 80;
+
+      const [workspaces, reactDispatch] = useReducer(ticketWorkspacesReducer, seededWorkspaces);
+      /** Keeps workspacesRef in lockstep with every UI and imperative update. */
+      const dispatch = useCallback((action: Parameters<typeof ticketWorkspacesReducer>[1]) => {
+        workspacesRef = ticketWorkspacesReducer(workspacesRef, action);
+        reactDispatch(action);
+      }, []);
       const [inputVersion, setInputVersion] = useState(0);
       const [issueTypes, setIssueTypes] = useState<string[]>(defaultIssueTypes);
       const orderedIssueTypes = orderIssueTypes(issueTypes);
       const [isLoadingIssueTypes, setIsLoadingIssueTypes] = useState(false);
+      const [closeConfirmId, setCloseConfirmId] = useState<string | null>(null);
       const scrollViewRef = useRef<ScrollViewRef>(null);
       const sym = uiSymbols();
-      const bufferedPreviewData = useRef<{ summary: string; description: string } | null>(null);
-      const prevStepRef = useRef<InteractiveState["step"]>(state.step);
-      const stateRef = useRef(state);
+      const prevStepByTicket = useRef<Map<string, WizardStep>>(new Map());
+      const prevActiveIdRef = useRef<string | null>(seededWorkspaces.activeTicketId);
       const [elapsedSeconds, setElapsedSeconds] = useState(0);
       const generatingStartedAt = useRef<number | null>(null);
-
-      // Cache for issue types per project
       const issueTypesCache = useRef<Map<string, string[]>>(new Map());
+      const stepBeforeHarness = useRef<Map<string, WizardStep>>(new Map());
 
-      /**
-       * Resets the text input field and bumps the key to remount ink-text-input.
-       *
-       * @param nextValue - Value to seed into the input after reset (default empty string).
-       */
-      const resetInput = (nextValue = "") => {
-        setInput(nextValue);
-        setInputVersion((version) => version + 1);
-      };
+      const activeTicket = getActiveTicket(workspaces);
+      const activeWizard = activeTicket?.wizard;
+      const activeStep = activeWizard?.step;
 
-      // Initialize cache with default project's issue types if available
-      React.useEffect(() => {
+      // Register dispatch; publish committed state for getStep/getPreviewData;
+      // flush pre-mount patches once.
+      useEffect(() => {
+        dispatchRef = dispatch;
+        publishedWorkspaces = workspaces;
+        if (pendingUpdates.length > 0) {
+          const queued = pendingUpdates.splice(0, pendingUpdates.length);
+          for (const item of queued) {
+            // Snapshot already has these patches; only push into React.
+            reactDispatch({
+              type: "wizard-patched",
+              id: item.ticketId,
+              patch: item.updates,
+            });
+          }
+        }
+      }, [dispatch, reactDispatch, workspaces]);
+
+      useEffect(() => {
         if (defaultProjectKey && defaultIssueTypes.length > 0) {
           issueTypesCache.current.set(defaultProjectKey, defaultIssueTypes);
         }
       }, []);
 
-      // Apply buffered previewData when leaving edit-prompt for any other step,
-      // and clear any stale buffer when entering edit-prompt.
-      React.useEffect(() => {
-        const prevStep = prevStepRef.current;
-        const nextStep = state.step;
-
-        if (prevStep !== "edit-prompt" && nextStep === "edit-prompt") {
-          bufferedPreviewData.current = null;
+      // Remount text inputs when switching tickets so draftInput seeds correctly
+      useEffect(() => {
+        if (activeTicket?.id !== prevActiveIdRef.current) {
+          prevActiveIdRef.current = activeTicket?.id ?? null;
+          setInputVersion((v) => v + 1);
         }
+      }, [activeTicket?.id]);
 
-        // Apply buffered previewData on any transition out of edit-prompt so
-        // updates are not lost when the orchestrator transitions through
-        // intermediate states before reaching preview.
-        if (
-          prevStep === "edit-prompt" &&
-          nextStep !== "edit-prompt" &&
-          bufferedPreviewData.current
-        ) {
-          const buffered = bufferedPreviewData.current;
-          bufferedPreviewData.current = null;
-          setState((prev) => ({ ...prev, previewData: buffered }));
+      // Apply buffered previewData when any ticket leaves edit-prompt (e.g. Esc).
+      useEffect(() => {
+        for (const ticket of workspaces.tickets) {
+          const prevStep = prevStepByTicket.current.get(ticket.id);
+          const nextStep = ticket.wizard.step;
+
+          if (prevStep === "edit-prompt" && nextStep !== "edit-prompt") {
+            const buffered = previewBuffer.get(ticket.id);
+            if (buffered) {
+              previewBuffer.delete(ticket.id);
+              if (
+                ticket.wizard.previewData?.summary !== buffered.summary ||
+                ticket.wizard.previewData?.description !== buffered.description
+              ) {
+                dispatch({
+                  type: "wizard-patched",
+                  id: ticket.id,
+                  patch: { previewData: buffered },
+                });
+              }
+            }
+          }
+
+          prevStepByTicket.current.set(ticket.id, nextStep);
         }
+      }, [dispatch, workspaces.tickets]);
 
-        prevStepRef.current = nextStep;
-      }, [state.step]);
-
-      // If a skipped step is ever set (stale state / future callers), redirect
-      // to a reachable step so renderStep never shows an empty body.
-      React.useEffect(() => {
-        if (state.step === "epic" && !hasEpicStep) {
-          setState((prev) => ({
-            ...prev,
-            step: hasIssueTypeStep ? "issue-type" : "style",
-          }));
+      // Redirect skipped steps
+      useEffect(() => {
+        if (!activeTicket || !activeWizard) return;
+        if (activeWizard.step === "epic" && !hasEpicStep) {
+          dispatch({
+            type: "wizard-patched",
+            id: activeTicket.id,
+            patch: { step: hasIssueTypeStep ? "issue-type" : "style" },
+          });
           return;
         }
-        if (state.step === "issue-type" && !hasIssueTypeStep) {
-          setState((prev) => ({ ...prev, step: "style" }));
+        if (activeWizard.step === "issue-type" && !hasIssueTypeStep) {
+          dispatch({
+            type: "wizard-patched",
+            id: activeTicket.id,
+            patch: { step: "style" },
+          });
         }
-        // hasEpicStep / hasIssueTypeStep are fixed for the form lifetime (closure
-        // constants from options), so they are not valid React dependencies.
-      }, [state.step]);
+      }, [activeTicket, activeWizard, dispatch]);
 
-      // Keep imperative refs in sync with state for external readers
+      // Elapsed timer for generating steps on the active ticket
       useEffect(() => {
-        stateRef.current = state;
-        currentStep = state.step;
-        visiblePreviewDataRef = state.previewData ?? null;
-        currentHarnessNameRef = state.harnessName;
-      });
-
-      useEffect(() => {
-        if (state.step === "generating" || state.step === "regenerating") {
+        if (activeStep === "generating" || activeStep === "regenerating") {
           generatingStartedAt.current = Date.now();
           setElapsedSeconds(0);
           const interval = setInterval(() => {
@@ -370,143 +468,224 @@ export async function runInteractiveMode(
           return () => clearInterval(interval);
         }
         generatingStartedAt.current = null;
-      }, [state.step]);
+      }, [activeStep, activeTicket?.id]);
 
-      // Expose setState to parent
-      React.useEffect(() => {
-        updateState = (updates) => {
-          setState((prev) => {
-            // Buffer previewData updates when user is actively editing so
-            // the description preview is not rewritten mid-typing. When the
-            // same update also moves the step away from edit-prompt, apply it
-            // atomically instead — buffering it just to re-apply one render
-            // later would flash the stale preview for a frame.
-            const staysInEditPrompt = (updates.step ?? prev.step) === "edit-prompt";
-            if (updates.previewData && prev.step === "edit-prompt" && staysInEditPrompt) {
-              bufferedPreviewData.current = updates.previewData;
-              const { previewData: _, ...rest } = updates;
-              return { ...prev, ...rest };
-            }
-            return { ...prev, ...updates };
-          });
-        };
-      }, []);
+      // Fetch issue types when active ticket project changes
+      useEffect(() => {
+        const projectKey = activeWizard?.projectKey;
+        if (!projectKey || !activeTicket) return;
 
-      // Fetch issue types when project changes
-      React.useEffect(() => {
-        /**
-         * Loads issue types for the selected project from cache or the backend fetcher.
-         */
         const fetchTypesForProject = async () => {
-          if (!state.projectKey) {
-            return;
-          }
-
-          // Check if we have cached issue types for this project
-          const cached = issueTypesCache.current.get(state.projectKey);
+          const cached = issueTypesCache.current.get(projectKey);
           if (cached && cached.length > 0) {
             setIssueTypes(cached);
-            // Reset issue type to the best default if current is not available
-            if (!cached.includes(state.issueType)) {
-              setState((prev) => ({
-                ...prev,
-                issueType: getDefaultIssueType(cached),
-              }));
+            if (!cached.includes(activeWizard.issueType)) {
+              dispatch({
+                type: "wizard-patched",
+                id: activeTicket.id,
+                patch: { issueType: getDefaultIssueType(cached) },
+              });
             }
             return;
           }
 
-          // No cache hit - fetch from API if fetcher is available
-          if (!options?.fetchIssueTypes) {
-            return;
-          }
+          if (!options?.fetchIssueTypes) return;
 
           setIsLoadingIssueTypes(true);
           try {
-            const types = await options.fetchIssueTypes(state.projectKey);
+            const types = await options.fetchIssueTypes(projectKey);
             if (types.length > 0) {
-              // Cache the fetched types
-              issueTypesCache.current.set(state.projectKey, types);
+              issueTypesCache.current.set(projectKey, types);
               setIssueTypes(types);
-              // Reset issue type to the best default if current is not available
-              if (!types.includes(state.issueType)) {
-                setState((prev) => ({
-                  ...prev,
-                  issueType: getDefaultIssueType(types),
-                }));
+              if (!types.includes(activeWizard.issueType)) {
+                dispatch({
+                  type: "wizard-patched",
+                  id: activeTicket.id,
+                  patch: { issueType: getDefaultIssueType(types) },
+                });
               }
             }
           } catch {
-            // Silently fall back to default issue types on error
             setIssueTypes(defaultIssueTypes);
           } finally {
             setIsLoadingIssueTypes(false);
           }
         };
 
-        fetchTypesForProject();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [state.projectKey, state.issueType]);
+        void fetchTypesForProject();
+      }, [activeTicket, activeWizard, dispatch]);
 
+      const openTicket = useCallback((): string => {
+        const id = nextTicketId();
+        dispatch({
+          type: "ticket-opened",
+          id,
+          wizard: makeFreshWizard(),
+        });
+        setCloseConfirmId(null);
+        setInputVersion((v) => v + 1);
+        return id;
+      }, [dispatch]);
+
+      const closeTicket = useCallback(
+        (id: string) => {
+          dispatch({ type: "ticket-closed", id });
+          setCloseConfirmId(null);
+          setInputVersion((v) => v + 1);
+        },
+        [dispatch],
+      );
+
+      const requestCloseTicket = useCallback(
+        (id: string) => {
+          const ticket = getTicket(workspaces, id);
+          if (!ticket) return;
+          if (isTicketBusy(ticket.wizard.step)) {
+            setCloseConfirmId(id);
+            return;
+          }
+          closeTicket(id);
+        },
+        [workspaces, closeTicket],
+      );
+
+      const activateTicket = useCallback(
+        (id: string) => {
+          dispatch({ type: "ticket-activated", id });
+          setCloseConfirmId(null);
+          setInputVersion((v) => v + 1);
+        },
+        [dispatch],
+      );
+
+      // Expose open/close/activate to the imperative handle
+      useEffect(() => {
+        openTicketFn = openTicket;
+        closeTicketFn = closeTicket;
+        activateTicketFn = activateTicket;
+      }, [openTicket, closeTicket, activateTicket]);
+
+      const switchTicketByOffset = useCallback(
+        (offset: number) => {
+          if (workspaces.tickets.length === 0) return;
+          const currentIndex = workspaces.tickets.findIndex(
+            (t) => t.id === workspaces.activeTicketId,
+          );
+          const base = currentIndex < 0 ? 0 : currentIndex;
+          const next = (base + offset + workspaces.tickets.length) % workspaces.tickets.length;
+          const nextTicket = workspaces.tickets[next];
+          if (nextTicket) activateTicket(nextTicket.id);
+        },
+        [workspaces, activateTicket],
+      );
+
+      const patchActive = useCallback(
+        (patch: Partial<TicketWizardState>) => {
+          if (!activeTicket) return;
+          dispatch({ type: "wizard-patched", id: activeTicket.id, patch });
+        },
+        [activeTicket, dispatch],
+      );
+
+      // Global multi-ticket shortcuts (always active, including during text entry)
+      useInput((inputChar, key) => {
+        if (key.ctrl && inputChar === "c") {
+          exit();
+          return;
+        }
+
+        // Close confirmation dialog
+        if (closeConfirmId) {
+          if (inputChar.toLowerCase() === "y" || key.return) {
+            closeTicket(closeConfirmId);
+            return;
+          }
+          if (inputChar.toLowerCase() === "n" || key.escape) {
+            setCloseConfirmId(null);
+            return;
+          }
+          return;
+        }
+
+        // Ctrl+N — open new ticket
+        if (key.ctrl && inputChar === "n") {
+          openTicket();
+          return;
+        }
+
+        // Ctrl+W — close active ticket
+        if (key.ctrl && inputChar === "w") {
+          if (activeTicket) {
+            requestCloseTicket(activeTicket.id);
+          }
+          return;
+        }
+
+        // Ctrl+↑ / Ctrl+↓ — switch tickets
+        if (key.ctrl && key.upArrow) {
+          switchTicketByOffset(-1);
+          return;
+        }
+        if (key.ctrl && key.downArrow) {
+          switchTicketByOffset(1);
+          return;
+        }
+
+        // Ctrl+1..9 — select ticket by index
+        if (key.ctrl && inputChar >= "1" && inputChar <= "9") {
+          const index = parseInt(inputChar, 10) - 1;
+          const ticket = workspaces.tickets[index];
+          if (ticket) activateTicket(ticket.id);
+          return;
+        }
+
+        // Empty state: n opens first ticket (when no text entry captures it)
+        if (!activeTicket && (inputChar === "n" || inputChar === "N") && !key.ctrl) {
+          openTicket();
+        }
+      });
+
+      // Wizard key handling for the active ticket (non text-entry steps)
       useInput(
         (inputChar, key) => {
-          if (key.ctrl && inputChar === "c") {
-            exit();
+          if (closeConfirmId || !activeTicket || !activeWizard) return;
+
+          // Success screen - any key signals restart for this ticket
+          if (activeWizard.step === "success") {
+            emitAction({ type: "restart", ticketId: activeTicket.id });
             return;
           }
 
-          // Success screen - any key signals the orchestrator to start another task.
-          // State reset is owned by handle.restart() so we never flash the wizard
-          // before the create-another loop is ready to waitForCompletion again.
-          if (state.step === "success") {
-            if (restartPromiseResolve) {
-              const resolveRestart = restartPromiseResolve;
-              restartPromiseResolve = null;
-              restartPromiseReject = null;
-              resolveRestart();
-            }
-            return;
-          }
-
-          // Ctrl+P to navigate to project selection (only if projects are available)
+          // Ctrl+P to navigate to project selection (success already returned above)
           if (key.ctrl && inputChar === "p" && projects.length > 0) {
-            if (
-              state.step !== "generating" &&
-              state.step !== "regenerating" &&
-              state.step !== "done"
-            ) {
-              setState((prev) => ({ ...prev, step: "project" }));
-              resetInput();
+            if (!isTicketBusy(activeWizard.step)) {
+              patchActive({ step: "project", draftInput: "" });
+              setInputVersion((v) => v + 1);
               return;
             }
           }
 
-          // Ctrl+G to navigate to harness selection (only if harnesses are available).
-          // Ctrl+H was the original binding, but it collides with backspace (\b / 0x08)
-          // in many terminal emulators and line disciplines, so the keypress was
-          // swallowed before reaching Ink. Ctrl+G does not collide with common
-          // terminal control characters.
           if (key.ctrl && inputChar === "g" && hasHarnessStep) {
             if (
-              state.step !== "harness" &&
-              state.step !== "generating" &&
-              state.step !== "regenerating" &&
-              state.step !== "done"
+              activeWizard.step !== "harness" &&
+              activeWizard.step !== "generating" &&
+              activeWizard.step !== "regenerating" &&
+              activeWizard.step !== "done"
             ) {
-              stepBeforeHarness = state.step;
-              setState((prev) => ({ ...prev, step: "harness" }));
-              resetInput();
+              stepBeforeHarness.current.set(activeTicket.id, activeWizard.step);
+              patchActive({ step: "harness", draftInput: "" });
+              setInputVersion((v) => v + 1);
               return;
             }
           }
 
-          // Handle scrolling in preview mode
-          if (state.step === "preview") {
-            if (key.upArrow) {
+          // Scrolling in preview / edit-prompt
+          if (activeWizard.step === "preview" || activeWizard.step === "edit-prompt") {
+            if (key.upArrow && !key.ctrl) {
               scrollViewRef.current?.scrollBy(-1);
               return;
             }
-            if (key.downArrow) {
+            if (key.downArrow && !key.ctrl) {
               const ref = scrollViewRef.current;
               if (ref) {
                 const currentOffset = ref.getScrollOffset();
@@ -550,116 +729,109 @@ export async function runInteractiveMode(
           }
 
           if (!key.ctrl && !key.meta && inputChar) {
-            if (state.step === "source-type" && ["1", "2", "3"].includes(inputChar)) {
+            if (activeWizard.step === "source-type" && ["1", "2", "3"].includes(inputChar)) {
               const sourceType = inputChar === "1" ? "figma" : inputChar === "2" ? "log" : "prompt";
-              setState((prev) => ({ ...prev, sourceType, step: "source-input" }));
-              resetInput();
+              patchActive({ sourceType, step: "source-input", draftInput: "" });
+              setInputVersion((v) => v + 1);
               return;
             }
 
-            if (state.step === "issue-type") {
+            if (activeWizard.step === "issue-type") {
               const index = parseInt(inputChar) - 1;
               if (index >= 0 && index < orderedIssueTypes.length) {
                 const issueType = orderedIssueTypes[index];
                 if (issueType) {
-                  setState((prev) => ({ ...prev, issueType, step: "style" }));
-                  resetInput();
+                  patchActive({ issueType, step: "style", draftInput: "" });
+                  setInputVersion((v) => v + 1);
                   return;
                 }
               }
             }
 
-            if (state.step === "harness") {
+            if (activeWizard.step === "harness") {
               const index = parseInt(inputChar) - 1;
-              if (index >= 0 && index < orderedHarnesses.length) {
-                const harness = orderedHarnesses[index];
-                if (harness) {
-                  const target = stepBeforeHarness ?? "style";
-                  stepBeforeHarness = null;
-                  setState((prev) => ({ ...prev, harnessName: harness.name, step: target }));
-                  resetInput();
-                  return;
-                }
+              const harness = orderedHarnesses[index];
+              if (harness) {
+                const target = stepBeforeHarness.current.get(activeTicket.id) ?? "style";
+                stepBeforeHarness.current.delete(activeTicket.id);
+                patchActive({ harnessName: harness.name, step: target, draftInput: "" });
+                setInputVersion((v) => v + 1);
+                return;
               }
             }
 
-            if (state.step === "style" && ["1", "2"].includes(inputChar)) {
+            if (activeWizard.step === "style" && ["1", "2"].includes(inputChar)) {
               const promptStyle = inputChar === "1" ? "pm" : "technical";
-              setState((prev) => ({
-                ...prev,
+              patchActive({
                 promptStyle,
                 decompose: false,
                 step: "confirm",
-              }));
-              resetInput();
+                draftInput: "",
+              });
+              setInputVersion((v) => v + 1);
               return;
             }
 
-            if (state.step === "confirm" && ["y", "n"].includes(inputChar.toLowerCase())) {
+            if (activeWizard.step === "confirm" && ["y", "n"].includes(inputChar.toLowerCase())) {
               if (inputChar.toLowerCase() === "y") {
-                setState((prev) => ({ ...prev, step: "generating" }));
-                if (completePromiseResolve) {
-                  completed = true;
-                  completePromiseResolve(stateRef.current);
-                }
+                const config = { ...activeWizard, step: "generating" as const };
+                patchActive({ step: "generating" });
+                completed = true;
+                emitAction({ type: "generate", ticketId: activeTicket.id, config });
               } else {
-                setState((prev) => ({ ...prev, step: "source-type" }));
-                resetInput();
+                patchActive({ step: "source-type", draftInput: "" });
+                setInputVersion((v) => v + 1);
               }
               return;
             }
 
-            if (state.step === "preview") {
-              // Ignore action keys until preview content is available (avoids blank/stuck states).
-              if (!state.previewData) {
-                return;
-              }
+            if (activeWizard.step === "preview") {
+              if (!activeWizard.previewData) return;
               if (inputChar.toLowerCase() === "e") {
-                setState((prev) => ({ ...prev, step: "edit-prompt" }));
-                resetInput();
+                patchActive({ step: "edit-prompt", draftInput: "" });
+                setInputVersion((v) => v + 1);
                 return;
               }
               if (["y", "n"].includes(inputChar.toLowerCase())) {
                 if (inputChar.toLowerCase() === "y") {
-                  setState((prev) => ({ ...prev, step: "done" }));
-                  if (completePromiseResolve) {
-                    completed = true;
-                    completePromiseResolve(stateRef.current);
-                  }
+                  const config = { ...activeWizard, step: "done" as const };
+                  patchActive({ step: "done" });
+                  completed = true;
+                  emitAction({ type: "create", ticketId: activeTicket.id, config });
                 } else {
-                  setState((prev) => ({
-                    ...prev,
+                  patchActive({
                     step: "source-type",
                     previewData: undefined,
-                  }));
-                  resetInput();
+                    draftInput: "",
+                  });
+                  setInputVersion((v) => v + 1);
                 }
-                return;
               }
             }
           }
         },
-        { isActive: !TEXT_ENTRY_STEPS.has(state.step) },
+        {
+          isActive:
+            !closeConfirmId &&
+            Boolean(activeTicket) &&
+            activeWizard !== undefined &&
+            !TEXT_ENTRY_STEPS.has(activeWizard.step),
+        },
       );
 
-      /**
-       * Handles Enter submission from ink-text-input on text-entry wizard steps.
-       *
-       * @param submittedValue - Raw input value from the prompt field.
-       */
       const handleTextSubmit = (submittedValue: string) => {
+        if (!activeTicket || !activeWizard) return;
         const trimmedInput = submittedValue.trim();
-        setInput(submittedValue);
 
-        switch (state.step) {
+        switch (activeWizard.step) {
           case "project": {
             if (trimmedInput === "" && defaultProjectKey) {
-              setState((prev) => ({
-                ...prev,
+              patchActive({
                 projectKey: defaultProjectKey,
                 step: "source-type",
-              }));
-              resetInput();
+                draftInput: "",
+              });
+              setInputVersion((v) => v + 1);
               break;
             }
 
@@ -667,12 +839,12 @@ export async function runInteractiveMode(
             if (index >= 0 && index < projects.length) {
               const project = projects[index];
               if (project) {
-                setState((prev) => ({
-                  ...prev,
+                patchActive({
                   projectKey: project.key,
                   step: "source-type",
-                }));
-                resetInput();
+                  draftInput: "",
+                });
+                setInputVersion((v) => v + 1);
               }
             }
             break;
@@ -680,49 +852,50 @@ export async function runInteractiveMode(
 
           case "source-input":
             if (trimmedInput) {
-              setState((prev) => ({
-                ...prev,
+              patchActive({
                 sourceContent: trimmedInput,
                 step: "custom",
-              }));
-              resetInput();
+                draftInput: "",
+              });
+              setInputVersion((v) => v + 1);
             }
             break;
 
           case "custom":
-            setState((prev) => ({
-              ...prev,
+            patchActive({
               customInstructions: trimmedInput || undefined,
-              step: stepAfterCustom,
-            }));
-            resetInput();
+              step: stepAfterCustom as WizardStep,
+              draftInput: "",
+            });
+            setInputVersion((v) => v + 1);
             break;
 
           case "epic":
-            setState((prev) => ({
-              ...prev,
+            patchActive({
               epicKey: trimmedInput || undefined,
               step: hasIssueTypeStep ? "issue-type" : "style",
-            }));
-            resetInput();
+              draftInput: "",
+            });
+            setInputVersion((v) => v + 1);
             break;
 
           case "edit-prompt": {
-            const currentPreview = visiblePreviewDataRef;
-            if (trimmedInput) {
-              setState((prev) => ({
-                ...prev,
+            const currentPreview = activeWizard.previewData;
+            if (trimmedInput && currentPreview) {
+              patchActive({
                 editPrompt: trimmedInput,
                 step: "regenerating",
-              }));
-              if (editPromiseResolve && currentPreview) {
-                editPromiseResolve({
-                  editPrompt: trimmedInput,
-                  currentSummary: currentPreview.summary,
-                  currentDescription: currentPreview.description,
-                });
-              }
-              resetInput();
+                draftInput: "",
+              });
+              completed = true;
+              emitAction({
+                type: "edit",
+                ticketId: activeTicket.id,
+                editPrompt: trimmedInput,
+                currentSummary: currentPreview.summary,
+                currentDescription: currentPreview.description,
+              });
+              setInputVersion((v) => v + 1);
             }
             break;
           }
@@ -731,110 +904,88 @@ export async function runInteractiveMode(
 
       const navFlags: StepNavFlags = { hasEpicStep, hasIssueTypeStep };
 
-      /**
-       * Seed value for the text input when navigating back to a text-entry step.
-       * Keeps prior answers editable instead of clearing the field.
-       */
       const inputSeedForStep = (step: WizardStep): string => {
+        if (!activeWizard) return "";
         switch (step) {
           case "source-input":
-            return state.sourceContent || "";
+            return activeWizard.sourceContent || "";
           case "custom":
-            return state.customInstructions || "";
+            return activeWizard.customInstructions || "";
           case "epic":
-            return state.epicKey || "";
+            return activeWizard.epicKey || "";
           default:
             return "";
         }
       };
 
-      /**
-       * Navigates to the previous wizard step when the user presses Escape.
-       * Uses the shared back-edge map so skipped epic/issue-type steps are never entered.
-       * Does not clear previewData (including when leaving edit-prompt).
-       */
       const handleEscape = () => {
-        if (state.step === "harness") {
-          const target = stepBeforeHarness ?? "style";
-          stepBeforeHarness = null;
-          resetInput(inputSeedForStep(target));
-          setState((prev) => ({ ...prev, step: target }));
+        if (!activeTicket || !activeWizard) return;
+        if (activeWizard.step === "harness") {
+          const target = stepBeforeHarness.current.get(activeTicket.id) ?? "style";
+          stepBeforeHarness.current.delete(activeTicket.id);
+          patchActive({ step: target, draftInput: inputSeedForStep(target) });
+          setInputVersion((v) => v + 1);
           return;
         }
-        const previous = getPreviousStep(state.step, navFlags);
-        if (previous === null) {
-          return;
-        }
-        resetInput(inputSeedForStep(previous));
-        setState((prev) => ({ ...prev, step: previous }));
+        const previous = getPreviousStep(activeWizard.step, navFlags);
+        if (previous === null) return;
+        const seed = inputSeedForStep(previous);
+        patchActive({ step: previous, draftInput: seed });
+        setInputVersion((v) => v + 1);
       };
 
-      /**
-       * Handles Enter on selection / yes-no steps (non text-input steps).
-       * Agent and terminal steps ignore Enter so accidental keypresses never blank the UI.
-       */
       const handleEnter = () => {
-        // Do not act on Enter while the agent is running or the wizard is finished.
+        if (!activeTicket || !activeWizard) return;
         if (
-          state.step === "generating" ||
-          state.step === "regenerating" ||
-          state.step === "done" ||
-          state.step === "success"
+          activeWizard.step === "generating" ||
+          activeWizard.step === "regenerating" ||
+          activeWizard.step === "done" ||
+          activeWizard.step === "success"
         ) {
           return;
         }
 
-        const trimmedInput = input.trim();
+        const trimmedInput = (activeWizard.draftInput || "").trim();
 
-        switch (state.step) {
+        switch (activeWizard.step) {
+          case "harness": {
+            const target = stepBeforeHarness.current.get(activeTicket.id) ?? "style";
+            if (trimmedInput === "") {
+              stepBeforeHarness.current.delete(activeTicket.id);
+              patchActive({ step: target, draftInput: "" });
+              setInputVersion((v) => v + 1);
+              break;
+            }
+            const harness = orderedHarnesses[parseInt(trimmedInput) - 1];
+            if (harness) {
+              stepBeforeHarness.current.delete(activeTicket.id);
+              patchActive({ harnessName: harness.name, step: target, draftInput: "" });
+              setInputVersion((v) => v + 1);
+            }
+            break;
+          }
           case "source-type":
             if (["1", "2", "3"].includes(trimmedInput)) {
               const sourceType =
                 trimmedInput === "1" ? "figma" : trimmedInput === "2" ? "log" : "prompt";
-              setState((prev) => ({
-                ...prev,
-                sourceType,
-                step: "source-input",
-              }));
-              resetInput();
+              patchActive({ sourceType, step: "source-input", draftInput: "" });
+              setInputVersion((v) => v + 1);
             }
             break;
 
           case "issue-type": {
-            if (!hasIssueTypeStep) {
-              break;
-            }
+            if (!hasIssueTypeStep) break;
             if (trimmedInput === "") {
-              setState((prev) => ({ ...prev, step: "style" }));
-              resetInput();
+              patchActive({ step: "style", draftInput: "" });
+              setInputVersion((v) => v + 1);
               break;
             }
             const index = parseInt(trimmedInput) - 1;
             if (index >= 0 && index < orderedIssueTypes.length) {
               const issueType = orderedIssueTypes[index];
               if (issueType) {
-                setState((prev) => ({ ...prev, issueType, step: "style" }));
-                resetInput();
-              }
-            }
-            break;
-          }
-
-          case "harness": {
-            const target = stepBeforeHarness ?? "style";
-            if (trimmedInput === "") {
-              stepBeforeHarness = null;
-              setState((prev) => ({ ...prev, step: target }));
-              resetInput();
-              break;
-            }
-            const harnessIndex = parseInt(trimmedInput) - 1;
-            if (harnessIndex >= 0 && harnessIndex < orderedHarnesses.length) {
-              const harness = orderedHarnesses[harnessIndex];
-              if (harness) {
-                stepBeforeHarness = null;
-                setState((prev) => ({ ...prev, harnessName: harness.name, step: target }));
-                resetInput();
+                patchActive({ issueType, step: "style", draftInput: "" });
+                setInputVersion((v) => v + 1);
               }
             }
             break;
@@ -843,51 +994,45 @@ export async function runInteractiveMode(
           case "style":
             if (["1", "2"].includes(trimmedInput)) {
               const promptStyle = trimmedInput === "1" ? "pm" : "technical";
-              setState((prev) => ({
-                ...prev,
+              patchActive({
                 promptStyle,
                 decompose: false,
                 step: "confirm",
-              }));
-              resetInput();
+                draftInput: "",
+              });
+              setInputVersion((v) => v + 1);
             }
             break;
 
           case "confirm":
             if (["y", "n", ""].includes(trimmedInput.toLowerCase())) {
               if (trimmedInput.toLowerCase() === "y" || trimmedInput === "") {
-                setState((prev) => ({ ...prev, step: "generating" }));
-                if (completePromiseResolve) {
-                  completed = true;
-                  completePromiseResolve(stateRef.current);
-                }
+                const config = { ...activeWizard, step: "generating" as const };
+                patchActive({ step: "generating" });
+                completed = true;
+                emitAction({ type: "generate", ticketId: activeTicket.id, config });
               } else {
-                setState((prev) => ({ ...prev, step: "source-type" }));
-                resetInput();
+                patchActive({ step: "source-type", draftInput: "" });
+                setInputVersion((v) => v + 1);
               }
             }
             break;
 
           case "preview":
-            // Enter alone accepts the draft (same as Y). Only act when preview data exists
-            // so we never resolve completion while still showing "Waiting for task preview...".
-            if (!state.previewData) {
-              break;
-            }
+            if (!activeWizard.previewData) break;
             if (["y", "n", ""].includes(trimmedInput.toLowerCase())) {
               if (trimmedInput.toLowerCase() === "y" || trimmedInput === "") {
-                setState((prev) => ({ ...prev, step: "done" }));
-                if (completePromiseResolve) {
-                  completed = true;
-                  completePromiseResolve(stateRef.current);
-                }
+                const config = { ...activeWizard, step: "done" as const };
+                patchActive({ step: "done" });
+                completed = true;
+                emitAction({ type: "create", ticketId: activeTicket.id, config });
               } else {
-                setState((prev) => ({
-                  ...prev,
+                patchActive({
                   step: "source-type",
                   previewData: undefined,
-                }));
-                resetInput();
+                  draftInput: "",
+                });
+                setInputVersion((v) => v + 1);
               }
             }
             break;
@@ -899,14 +1044,25 @@ export async function runInteractiveMode(
         onExit: exit,
       };
 
-      /**
-       * Renders the UI for the current wizard step.
-       * Always returns a non-null layout so the body under the chrome is never blank.
-       *
-       * @returns Step-specific Ink layout (including skip/recovery placeholders).
-       */
       const renderStep = () => {
+        if (!activeTicket || !activeWizard) return null;
+        const state = activeWizard;
+        const input = state.draftInput || "";
+
         switch (state.step) {
+          case "harness":
+            return (
+              <Box flexDirection="column" paddingY={1}>
+                <Text bold>Select agent:</Text>
+                {orderedHarnesses.map((harness, index) => (
+                  <Text key={harness.name}>
+                    {index + 1}. {harness.displayName}
+                    {harness.name === state.harnessName ? " (current)" : ""}
+                  </Text>
+                ))}
+                <Text dimColor>Enter keeps the current agent; Esc returns.</Text>
+              </Box>
+            );
           case "project":
             return (
               <Box flexDirection="column" paddingY={1}>
@@ -923,7 +1079,7 @@ export async function runInteractiveMode(
                   </Text>
                 )}
                 <PromptInput
-                  key={`${state.step}-${inputVersion}`}
+                  key={`${activeTicket.id}-${state.step}-${inputVersion}`}
                   initialValue={input}
                   onSubmit={handleTextSubmit}
                   marginTop={1}
@@ -953,7 +1109,7 @@ export async function runInteractiveMode(
               <Box flexDirection="column" paddingY={1}>
                 <Text bold>{label}</Text>
                 <PromptInput
-                  key={`${state.step}-${inputVersion}`}
+                  key={`${activeTicket.id}-${state.step}-${inputVersion}`}
                   initialValue={input}
                   onSubmit={handleTextSubmit}
                   {...sharedPromptInputProps}
@@ -968,10 +1124,10 @@ export async function runInteractiveMode(
                 <Text bold>Custom instructions (optional, press Enter to skip):</Text>
                 <Text dimColor>Additional requirements or focus areas</Text>
                 <Text dimColor>
-                  {'Example: "Focus on accessibility" or "Prioritize performance"'}
+                  Example: &quot;Focus on accessibility&quot; or &quot;Prioritize performance&quot;
                 </Text>
                 <PromptInput
-                  key={`${state.step}-${inputVersion}`}
+                  key={`${activeTicket.id}-${state.step}-${inputVersion}`}
                   initialValue={input}
                   onSubmit={handleTextSubmit}
                   {...sharedPromptInputProps}
@@ -980,7 +1136,6 @@ export async function runInteractiveMode(
             );
 
           case "epic":
-            // Skipped steps are redirected by effect; show a non-null body while redirecting.
             if (!hasEpicStep) {
               return (
                 <Box flexDirection="column" paddingY={1}>
@@ -993,7 +1148,7 @@ export async function runInteractiveMode(
                 <Text bold>Epic key (optional, press Enter to skip):</Text>
                 <Text dimColor>Example: PROJ-123</Text>
                 <PromptInput
-                  key={`${state.step}-${inputVersion}`}
+                  key={`${activeTicket.id}-${state.step}-${inputVersion}`}
                   initialValue={input}
                   onSubmit={handleTextSubmit}
                   {...sharedPromptInputProps}
@@ -1001,7 +1156,7 @@ export async function runInteractiveMode(
               </Box>
             );
 
-          case "issue-type":
+          case "issue-type": {
             if (!hasIssueTypeStep) {
               return (
                 <Box flexDirection="column" paddingY={1}>
@@ -1014,6 +1169,7 @@ export async function runInteractiveMode(
               <Box flexDirection="column" paddingY={1}>
                 <Text bold>
                   Select issue type <Text dimColor>(Enter to accept default)</Text>:
+                  {isLoadingIssueTypes ? <Text dimColor> Loading…</Text> : null}
                 </Text>
                 {orderedIssueTypes.map((type, index) => (
                   <Text key={type}>
@@ -1023,6 +1179,7 @@ export async function runInteractiveMode(
                 ))}
               </Box>
             );
+          }
 
           case "style":
             return (
@@ -1033,22 +1190,6 @@ export async function runInteractiveMode(
               </Box>
             );
 
-          case "harness": {
-            return (
-              <Box flexDirection="column" paddingY={1}>
-                <Text bold>
-                  Select AI agent harness <Text dimColor>(Enter to accept current)</Text>:
-                </Text>
-                {orderedHarnesses.map((harness, index) => (
-                  <Text key={harness.name}>
-                    {index + 1}. {harness.displayName}
-                    {harness.name === state.harnessName ? " (current)" : ""}
-                  </Text>
-                ))}
-              </Box>
-            );
-          }
-
           case "confirm": {
             const sourceLabel =
               state.sourceType === "figma"
@@ -1056,7 +1197,6 @@ export async function runInteractiveMode(
                 : state.sourceType === "log"
                   ? "Error Log"
                   : "Requirements";
-            const selectedHarness = allHarnesses.find((h) => h.name === state.harnessName);
             return (
               <Box flexDirection="column" paddingY={1}>
                 <Text bold color="green">
@@ -1105,11 +1245,13 @@ export async function runInteractiveMode(
                     <Text bold>Prompt Style:</Text>
                     <Text color="cyan">{state.promptStyle}</Text>
                   </Box>
-
-                  {(selectedHarness || state.harnessName) && (
+                  {state.harnessName && (
                     <Box flexDirection="column" paddingTop={1}>
                       <Text bold>Agent:</Text>
-                      <Text color="cyan">{selectedHarness?.displayName || state.harnessName}</Text>
+                      <Text color="cyan">
+                        {allHarnesses.find((h) => h.name === state.harnessName)?.displayName ||
+                          state.harnessName}
+                      </Text>
                     </Box>
                   )}
                 </Box>
@@ -1127,7 +1269,9 @@ export async function runInteractiveMode(
                 <Text dimColor>
                   {state.statusMessage ?? "Running AI agent — this may take a few minutes"}
                 </Text>
-                <Text dimColor>Elapsed: {elapsedSeconds}s • Ctrl+C to cancel</Text>
+                <Text dimColor>
+                  Elapsed: {elapsedSeconds}s • Switch tickets anytime (Ctrl+↑/↓) • Ctrl+C to cancel
+                </Text>
               </Box>
             );
 
@@ -1160,7 +1304,7 @@ export async function runInteractiveMode(
                     paddingX={1}
                     paddingY={1}
                     flexDirection="column"
-                    height={25}
+                    height={Math.min(25, Math.max(10, (stdout?.rows ?? 40) - 18))}
                   >
                     <ScrollView ref={scrollViewRef}>
                       <MarkdownText>{state.previewData.description}</MarkdownText>
@@ -1209,10 +1353,11 @@ export async function runInteractiveMode(
                     What would you like to change?
                   </Text>
                   <Text dimColor>
-                    {'Example: "Add more details about error handling" or "Make it more concise"'}
+                    Example: &quot;Add more details about error handling&quot; or &quot;Make it more
+                    concise&quot;
                   </Text>
                   <PromptInput
-                    key={`${state.step}-${inputVersion}`}
+                    key={`${activeTicket.id}-${state.step}-${inputVersion}`}
                     initialValue={input}
                     onSubmit={handleTextSubmit}
                     marginTop={1}
@@ -1256,7 +1401,9 @@ export async function runInteractiveMode(
                 <Text dimColor>
                   {state.statusMessage ?? "Running AI agent — this may take a few minutes"}
                 </Text>
-                <Text dimColor>Elapsed: {elapsedSeconds}s • Ctrl+C to cancel</Text>
+                <Text dimColor>
+                  Elapsed: {elapsedSeconds}s • Switch tickets anytime (Ctrl+↑/↓) • Ctrl+C to cancel
+                </Text>
               </Box>
             );
 
@@ -1282,13 +1429,14 @@ export async function runInteractiveMode(
                   </Box>
                 </Box>
                 <Box paddingTop={1}>
-                  <Text dimColor>Press any key to create another task...</Text>
+                  <Text dimColor>
+                    Press any key to reset this ticket…{sym.sep}Ctrl+N: open another ticket
+                  </Text>
                 </Box>
               </Box>
             );
 
           default:
-            // Never render null for a reachable step — recovery path if step graph drifts.
             return (
               <Box flexDirection="column" paddingY={1}>
                 <Text bold color="yellow">
@@ -1300,59 +1448,119 @@ export async function runInteractiveMode(
         }
       };
 
-      // Get current project display as "Tracker/Project" or just project key/name
       const currentProjectDisplay = (() => {
-        const project = projects.find((p) => p.key === state.projectKey)?.name || state.projectKey;
+        if (!activeWizard) return "N/A";
+        const project =
+          projects.find((p) => p.key === activeWizard.projectKey)?.name || activeWizard.projectKey;
         if (!project) return "N/A";
         return options?.backendName ? `${options.backendName}/${project}` : project;
       })();
 
-      // Get current harness display name from state. Only show the
-      // displayName when the selected harness is still in the registry; if it
-      // was removed mid-run, fall back to the startup display name
-      // (options?.harnessDisplayName || "None") and never leaks the raw
-      // harnessName string.
-      const currentHarnessDisplay = (() => {
-        const harness = allHarnesses.find((h) => h.name === state.harnessName);
-        return harness?.displayName || options?.harnessDisplayName || "None";
-      })();
+      const showSidebar = terminalWidth >= 60;
+      const titleWidth = terminalWidth < 80 ? 12 : 18;
 
-      return (
-        <Box flexDirection="column">
+      const mainColumn = (
+        <Box flexDirection="column" flexGrow={1} minWidth={0}>
           <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
             <Text bold color="cyan">
               📋 @devintern/pm - Interactive Mode
             </Text>
-            <Box flexDirection="row" gap={1}>
-              <Text dimColor>Project: </Text>
-              <Text color="cyan">{currentProjectDisplay}</Text>
-              {projects.length > 0 && <Text dimColor>{sym.sep}Ctrl+P: Change Project</Text>}
+            {activeTicket ? (
+              <>
+                <Box flexDirection="row" gap={1}>
+                  <Text dimColor>Project: </Text>
+                  <Text color="cyan">{currentProjectDisplay}</Text>
+                  {projects.length > 0 && <Text dimColor>{sym.sep}Ctrl+P: Change Project</Text>}
+                </Box>
+                <Box flexDirection="row" gap={1}>
+                  <Text dimColor>Agent: </Text>
+                  <Text color="cyan">
+                    {allHarnesses.find((h) => h.name === activeWizard?.harnessName)?.displayName ||
+                      options?.harnessDisplayName ||
+                      "None"}
+                  </Text>
+                  {hasHarnessStep && <Text dimColor>{sym.sep}Ctrl+G: Change Agent</Text>}
+                  <Text dimColor>
+                    {sym.sep}
+                    {workspaces.tickets.length} ticket
+                    {workspaces.tickets.length === 1 ? "" : "s"} open
+                  </Text>
+                </Box>
+                <Text dimColor>
+                  {activeWizard && canNavigateBack(activeWizard.step, navFlags)
+                    ? `ESC: Back${sym.sep}`
+                    : ""}
+                  {activeWizard?.step === "success"
+                    ? `Any key: Reset ticket${sym.sep}Ctrl+N: New${sym.sep}Ctrl+C: Exit`
+                    : activeWizard?.step === "preview"
+                      ? `Y: Create${sym.sep}N: Discard${sym.sep}E: Edit${sym.sep}Ctrl+C: Exit`
+                      : activeWizard && isTicketBusy(activeWizard.step)
+                        ? `Ctrl+↑/↓: Switch${sym.sep}Ctrl+C: Cancel`
+                        : "Ctrl+N: New ticket • Ctrl+W: Close • Ctrl+C: Exit"}
+                </Text>
+              </>
+            ) : (
+              <Text dimColor>Ctrl+N: Open a ticket • Ctrl+C: Exit</Text>
+            )}
+          </Box>
+
+          {closeConfirmId ? (
+            <Box flexDirection="column" paddingY={1} borderStyle="round" borderColor="yellow">
+              <Text bold color="yellow">
+                Close ticket with work in progress?
+              </Text>
+              <Text dimColor>
+                An agent or tracker operation is still running on this ticket. Closing removes it
+                from the sidebar; in-flight work will no longer be shown here (it is not cancelled
+                on the agent side).
+              </Text>
+              <Text bold>Close? (Y/n)</Text>
             </Box>
-            <Box flexDirection="row" gap={1}>
-              <Text dimColor>Agent: </Text>
-              <Text color="cyan">{currentHarnessDisplay}</Text>
-              {hasHarnessStep && <Text dimColor>{sym.sep}Ctrl+G: Change Agent</Text>}
-            </Box>
+          ) : activeTicket ? (
+            renderStep()
+          ) : (
+            <NoTicketsEmptyState />
+          )}
+        </Box>
+      );
+
+      // Compact ticket strip for narrow terminals
+      const compactStrip =
+        !showSidebar && workspaces.tickets.length > 0 ? (
+          <Box marginBottom={1} flexDirection="column">
             <Text dimColor>
-              {canNavigateBack(state.step, navFlags) || state.step === "harness"
-                ? `ESC: Back${sym.sep}`
-                : ""}
-              {state.step === "success"
-                ? `Any key: New task${sym.sep}Ctrl+C: Exit`
-                : state.step === "preview"
-                  ? `Y: Create${sym.sep}N: Discard${sym.sep}E: Edit${sym.sep}Ctrl+C: Exit`
-                  : state.step === "generating" || state.step === "regenerating"
-                    ? "Ctrl+C: Cancel"
-                    : "Ctrl+C: Exit"}
+              Tickets:{" "}
+              {workspaces.tickets
+                .map((t, i) => {
+                  const active = t.id === workspaces.activeTicketId;
+                  const label = `${i + 1}${active ? "*" : ""}`;
+                  return label;
+                })
+                .join(" ")}{" "}
+              · Ctrl+N new · Ctrl+↑/↓ switch · Ctrl+W close
             </Text>
           </Box>
-          {renderStep()}
+        ) : null;
+
+      return (
+        <Box flexDirection="column">
+          {compactStrip}
+          <Box flexDirection="row">
+            {showSidebar ? (
+              <TicketSidebar
+                tickets={workspaces.tickets}
+                activeTicketId={workspaces.activeTicketId}
+                titleWidth={titleWidth}
+              />
+            ) : null}
+            {mainColumn}
+          </Box>
         </Box>
       );
     };
 
     const { waitUntilExit, unmount } = render(
-      <InteractiveFormWithPreview />,
+      <InteractiveShell />,
       options?.stdin !== undefined ? { stdin: options.stdin } : undefined,
     );
 
@@ -1363,18 +1571,31 @@ export async function runInteractiveMode(
       }
     });
 
-    /**
-     * Waits until the user confirms configuration or accepts a generated preview.
-     *
-     * @returns Resolved interactive state when the user proceeds to generation or creation.
-     */
+    const waitForAction = (): Promise<InteractiveTicketAction> => {
+      if (cancelled) {
+        return Promise.reject(cancelError());
+      }
+      if (actionQueue.length > 0) {
+        return Promise.resolve(actionQueue.shift()!);
+      }
+      return new Promise((resolveAction, rejectAction) => {
+        if (cancelled) {
+          rejectAction(cancelError());
+          return;
+        }
+        actionWaiter = (action) => {
+          actionWaiter = null;
+          resolveAction(action);
+        };
+      });
+    };
+
     const waitForCompletion = (): Promise<InteractiveState> => {
       if (cancelled) {
         return Promise.reject(cancelError());
       }
       return new Promise((resolveComplete, rejectComplete) => {
         completePromiseResolve = (config) => {
-          // Don't unmount - keep UI running for preview / create-another cycles
           completePromiseResolve = null;
           completePromiseReject = null;
           resolveComplete(config);
@@ -1383,145 +1604,205 @@ export async function runInteractiveMode(
       });
     };
 
-    /** Switches the wizard to the generating step while the agent runs. */
-    const setGenerating = () => {
-      if (updateState) {
-        updateState({
-          step: "generating",
-          statusMessage: "Starting AI agent...",
-        });
-      }
-    };
-
-    /** Updates the status line shown on the generating/regenerating screen. */
-    const setStatusMessage = (message: string) => {
-      if (updateState) {
-        updateState({ statusMessage: message });
-      }
-    };
-
     /**
-     * Populates the preview pane with generated task title and description.
-     *
-     * @param summary - Generated issue title.
-     * @param description - Generated issue body (markdown).
+     * Apply wizard updates to a ticket. When the ticket is on edit-prompt and
+     * the update would stay there, buffer previewData so mid-edit rewrites do
+     * not clobber the visible description (applied on leave via effect).
      */
-    const setPreviewData = (summary: string, description: string) => {
-      if (updateState) {
-        updateState({ previewData: { summary, description }, step: "preview" });
+    const applyTicketUpdate = (
+      ticketId: string,
+      updates: Partial<TicketWizardState>,
+      opts?: { bufferPreviewIfEditing?: boolean },
+    ) => {
+      const ticket = getTicket(workspacesRef, ticketId);
+      if (!ticket) return;
+
+      let patch = updates;
+      if (
+        opts?.bufferPreviewIfEditing &&
+        updates.previewData &&
+        ticket.wizard.step === "edit-prompt"
+      ) {
+        const nextStep = updates.step ?? ticket.wizard.step;
+        if (nextStep === "edit-prompt") {
+          previewBuffer.set(ticketId, updates.previewData);
+          const { previewData: _preview, ...rest } = updates;
+          if (Object.keys(rest).length === 0) return;
+          patch = rest;
+        } else {
+          // Leaving edit-prompt with new preview — apply atomically, drop buffer.
+          previewBuffer.delete(ticketId);
+        }
       }
+
+      const action = {
+        type: "wizard-patched" as const,
+        id: ticketId,
+        patch,
+      };
+
+      if (!dispatchRef) {
+        // Pre-mount: update snapshot now; flush into React on first effect.
+        workspacesRef = ticketWorkspacesReducer(workspacesRef, action);
+        pendingUpdates.push({ ticketId, updates: patch });
+        return;
+      }
+      dispatchRef(action);
     };
 
-    /**
-     * Updates preview data without changing the current step.
-     * Used by orchestrators to refresh preview content while the user
-     * is on the preview or edit-prompt screen.
-     *
-     * @param summary - Generated issue title.
-     * @param description - Generated issue body (markdown).
-     */
-    const updatePreviewData = (summary: string, description: string) => {
-      if (updateState) {
-        updateState({ previewData: { summary, description } });
-      }
-    };
-
-    /**
-     * Waits until the user submits an edit prompt on the preview screen.
-     *
-     * @returns Edit prompt text plus the current preview title and description.
-     */
-    const waitForEdit = (): Promise<{
-      editPrompt: string;
-      currentSummary: string;
-      currentDescription: string;
-    }> => {
-      if (cancelled) {
-        return Promise.reject(cancelError());
-      }
-      return new Promise((resolveEdit, rejectEdit) => {
-        editPromiseResolve = (data) => {
-          editPromiseResolve = null;
-          editPromiseReject = null;
-          resolveEdit(data);
-        };
-        editPromiseReject = rejectEdit;
+    const setGenerating = (ticketId?: string) => {
+      const id = resolveTicketId(ticketId);
+      if (!id) return;
+      applyTicketUpdate(id, {
+        step: "generating",
+        statusMessage: "Starting AI agent...",
       });
     };
 
-    /**
-     * Displays the success screen with a completion message.
-     *
-     * @param message - Success text shown after task creation.
-     */
-    const showSuccess = (message: string) => {
-      if (updateState) {
-        updateState({ successMessage: message, step: "success", statusMessage: undefined });
-      }
+    const setStatusMessage = (message: string, ticketId?: string) => {
+      const id = resolveTicketId(ticketId);
+      if (!id) return;
+      applyTicketUpdate(id, { statusMessage: message });
     };
 
-    /**
-     * Waits until the user presses any key on the success screen to start another task.
-     *
-     * @returns Resolves when the user requests a new wizard run.
-     * @throws If the user cancels with Ctrl+C / the Ink app unmounts.
-     */
-    const waitForRestart = (): Promise<void> => {
-      if (cancelled) {
-        return Promise.reject(cancelError());
-      }
-      return new Promise((resolveRestart, rejectRestart) => {
-        restartPromiseResolve = () => {
-          restartPromiseResolve = null;
-          restartPromiseReject = null;
-          resolveRestart();
-        };
-        restartPromiseReject = rejectRestart;
+    const setPreviewData = (summary: string, description: string, ticketId?: string) => {
+      const id = resolveTicketId(ticketId);
+      if (!id) return;
+      applyTicketUpdate(
+        id,
+        { previewData: { summary, description }, step: "preview" },
+        { bufferPreviewIfEditing: true },
+      );
+    };
+
+    const updatePreviewData = (summary: string, description: string, ticketId?: string) => {
+      const id = resolveTicketId(ticketId);
+      if (!id) return;
+      applyTicketUpdate(
+        id,
+        { previewData: { summary, description } },
+        { bufferPreviewIfEditing: true },
+      );
+    };
+
+    const showSuccess = (
+      message: string,
+      successOptions?: { ticketId?: string; createdKey?: string },
+    ) => {
+      const id = resolveTicketId(successOptions?.ticketId);
+      if (!id) return;
+      applyTicketUpdate(id, {
+        successMessage: message,
+        step: "success",
+        statusMessage: undefined,
+        createdKey: successOptions?.createdKey,
       });
     };
 
-    /**
-     * Resets wizard state to the first step without unmounting the Ink tree.
-     * Used after success/error so create-another reuses the same interactive session.
-     */
-    const restart = () => {
-      if (updateState) {
-        updateState({
-          step: "source-type",
-          projectKey: defaultProjectKey,
-          sourceType: undefined,
-          sourceContent: undefined,
-          customInstructions: undefined,
-          epicKey: undefined,
-          promptStyle: "pm",
-          issueType: getDefaultIssueType(defaultIssueTypes),
-          // Preserve the harness the user most recently selected mid-wizard.
-          harnessName: currentHarnessNameRef ?? currentHarnessName,
-          decompose: false,
-          tasks: [],
-          previewData: undefined,
-          successMessage: undefined,
-          statusMessage: undefined,
-          editPrompt: undefined,
-        });
-      }
+    const restart = (ticketId?: string) => {
+      const id = resolveTicketId(ticketId);
+      if (!id) return;
+      const fresh = makeFreshWizard();
+      previewBuffer.delete(id);
+      // Explicit undefined clears optional fields (wizard-patched uses `in` checks).
+      applyTicketUpdate(id, {
+        ...fresh,
+        projectKey: defaultProjectKey,
+        sourceType: undefined,
+        sourceContent: undefined,
+        customInstructions: undefined,
+        epicKey: undefined,
+        previewData: undefined,
+        editPrompt: undefined,
+        successMessage: undefined,
+        statusMessage: undefined,
+        createdKey: undefined,
+      });
     };
 
     resolve({
+      waitForAction,
+      waitForCompletion,
+      waitForEdit: () => {
+        if (cancelled) {
+          return Promise.reject(cancelError());
+        }
+        return new Promise((resolveEdit, rejectEdit) => {
+          editPromiseResolve = (data) => {
+            editPromiseResolve = null;
+            editPromiseReject = null;
+            resolveEdit(data);
+          };
+          editPromiseReject = rejectEdit;
+        });
+      },
+      waitForRestart: () => {
+        if (cancelled) {
+          return Promise.reject(cancelError());
+        }
+        return new Promise((resolveRestart, rejectRestart) => {
+          restartPromiseResolve = (data) => {
+            restartPromiseResolve = null;
+            restartPromiseReject = null;
+            resolveRestart(data);
+          };
+          restartPromiseReject = rejectRestart;
+        });
+      },
       setGenerating,
       setStatusMessage,
       setPreviewData,
       updatePreviewData,
-      waitForCompletion,
-      waitForEdit,
       showSuccess,
-      waitForRestart,
       restart,
-      getStep: () => currentStep,
-      getPreviewData: () => visiblePreviewDataRef ?? undefined,
-      getHarnessName: () => currentHarnessNameRef,
-      /** Unmounts the Ink interactive form and releases terminal control. */
+      // Published (post-commit) snapshot keeps getStep in lockstep with useInput.
+      getStep: () => getActiveTicket(publishedWorkspaces)?.wizard.step ?? "source-type",
+      getPreviewData: () => {
+        const active = getActiveTicket(publishedWorkspaces);
+        if (!active) return undefined;
+        const buffered = previewBuffer.get(active.id);
+        // Prefer live wizard data; buffer is only for mid-edit deferred updates
+        return active.wizard.previewData ?? buffered;
+      },
+      getHarnessName: () => getActiveTicket(publishedWorkspaces)?.wizard.harnessName,
+      getActiveTicketId: () => publishedWorkspaces.activeTicketId,
+      getWorkspaces: () => workspacesRef,
+      openTicket: () => {
+        if (openTicketFn) return openTicketFn();
+        // Pre-mount fallback
+        const id = nextTicketId();
+        const action = {
+          type: "ticket-opened" as const,
+          id,
+          wizard: makeFreshWizard(),
+        };
+        workspacesRef = ticketWorkspacesReducer(workspacesRef, action);
+        publishedWorkspaces = workspacesRef;
+        if (dispatchRef) dispatchRef(action);
+        return id;
+      },
+      closeTicket: (id: string) => {
+        if (closeTicketFn) {
+          closeTicketFn(id);
+          return;
+        }
+        const action = { type: "ticket-closed" as const, id };
+        workspacesRef = ticketWorkspacesReducer(workspacesRef, action);
+        publishedWorkspaces = workspacesRef;
+        if (dispatchRef) dispatchRef(action);
+      },
+      activateTicket: (id: string) => {
+        if (activateTicketFn) {
+          activateTicketFn(id);
+          return;
+        }
+        const action = { type: "ticket-activated" as const, id };
+        workspacesRef = ticketWorkspacesReducer(workspacesRef, action);
+        publishedWorkspaces = workspacesRef;
+        if (dispatchRef) dispatchRef(action);
+      },
       cleanup: () => {
+        rejectPendingWaiters();
         unmount();
       },
     });

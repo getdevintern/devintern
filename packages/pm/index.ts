@@ -13,6 +13,12 @@ import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "./lib/co
 import { createEngine, DEFAULT_ISSUE_TYPES, EngineError } from "./lib/engine";
 import type { PmEngine, SourceInput, StoryDraft } from "./lib/engine";
 import { runInteractiveMode } from "./lib/components/interactive";
+import type {
+  InteractiveModeHandle,
+  InteractiveState,
+  InteractiveTicketAction,
+} from "./lib/components/interactive";
+import { getTicket } from "./lib/ticket-workspaces";
 import { initializeProject } from "./lib/init";
 import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
 import { extractHarnessFlags, parseArgs, validateHarnessName } from "./lib/parse-args";
@@ -29,7 +35,6 @@ import { maybeOfferCliUpdate } from "@devintern/utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Version is injected at build time via --define; falls back to package.json for `bun run`.
 declare const __VERSION__: string;
 
 function readPackageVersion(): string {
@@ -54,25 +59,309 @@ function lastStderrLine(chunk: string): string | undefined {
 }
 
 /**
- * Show an interactive-mode error/success screen, wait for a key, then reset the wizard
- * in-place (no remount) so create-another never leaves a blank terminal.
+ * Show a success/error screen on a specific ticket. The user restarts that ticket
+ * via any-key (or opens another from the sidebar) — restart is handled by the
+ * multi-ticket action loop, not here.
  *
  * @param handle - Active interactive mode handle.
+ * @param ticketId - Workspace to update.
  * @param message - Error or status text shown on the success screen.
- * @throws If the user cancels with Ctrl+C while waiting.
+ * @param createdKey - Optional tracker key for sidebar identity.
  */
-async function showInteractiveMessageAndRestart(
-  handle: Awaited<ReturnType<typeof runInteractiveMode>>,
+function showTicketMessage(
+  handle: InteractiveModeHandle,
+  ticketId: string,
   message: string,
-): Promise<void> {
-  handle.showSuccess(message);
-  await handle.waitForRestart();
-  handle.restart();
+  createdKey?: string,
+): void {
+  // Only update if the ticket is still open (user may have closed it mid-run).
+  if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+  handle.showSuccess(message, { ticketId, createdKey });
 }
 
 /** True when an interactive waiter rejected because the user cancelled (Ctrl+C / unmount). */
 function isInteractiveCancelled(error: unknown): boolean {
   return error instanceof Error && error.message === "Interactive mode cancelled";
+}
+
+/**
+ * Per-ticket draft cache so background agent runs can complete create/edit
+ * after the user switches away.
+ */
+type TicketDraftMap = Map<string, StoryDraft>;
+type LoadedConfig = Awaited<ReturnType<typeof loadConfig>>;
+
+async function createTicketEngine(
+  config: LoadedConfig,
+  harnessName: string | undefined,
+): Promise<PmEngine> {
+  if (!harnessName || harnessName === config.agent.harness.name) {
+    return createEngine({ ...config, agent: config.agent });
+  }
+  validateHarnessName(harnessName);
+  const resolved = resolveHarness({ harnessName });
+  resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
+  return createEngine({ ...config, agent: resolved });
+}
+
+/**
+ * Run story generation for one ticket without blocking other tickets.
+ */
+async function runTicketGenerate(params: {
+  ticketId: string;
+  config: InteractiveState;
+  handle: InteractiveModeHandle;
+  appConfig: LoadedConfig;
+  drafts: TicketDraftMap;
+}): Promise<void> {
+  const { ticketId, config, handle, appConfig, drafts } = params;
+  if (!config.sourceType || !config.sourceContent) {
+    showTicketMessage(handle, ticketId, "Error: Incomplete ticket configuration");
+    return;
+  }
+
+  const source: SourceInput = {
+    type: config.sourceType,
+    content: config.sourceContent,
+  };
+  const sourceTypeLabel =
+    source.type === "figma"
+      ? "Figma design"
+      : source.type === "log"
+        ? "error log"
+        : "free-form prompt";
+
+  handle.setGenerating(ticketId);
+
+  try {
+    const ticketEngine = await createTicketEngine(appConfig, config.harnessName);
+    const storyData = await ticketEngine.generateStory(
+      {
+        source,
+        promptStyle: config.promptStyle,
+        epicKey: config.epicKey,
+        extraInstructions: config.customInstructions,
+      },
+      {
+        onAgentChunk: (chunk, stream) => {
+          if (stream !== "stderr") return;
+          if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+          const line = lastStderrLine(chunk);
+          if (line) handle.setStatusMessage(line, ticketId);
+        },
+      },
+    );
+
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+    drafts.set(ticketId, storyData);
+    handle.setPreviewData(storyData.summary, storyData.description, ticketId);
+  } catch (error) {
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+    if (error instanceof EngineError && error.code === "agent-failed") {
+      const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+      showTicketMessage(
+        handle,
+        ticketId,
+        `Error: Failed to analyze ${sourceTypeLabel}\n${error.detail}${dumpHint}`,
+      );
+      return;
+    }
+    if (error instanceof EngineError && error.code === "parse-failed") {
+      const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+      showTicketMessage(
+        handle,
+        ticketId,
+        `Error: Failed to parse story from agent output\n${error.message}${dumpHint}`,
+      );
+      return;
+    }
+    showTicketMessage(
+      handle,
+      ticketId,
+      `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
+  }
+}
+
+/**
+ * Run story edit for one ticket without blocking other tickets.
+ */
+async function runTicketEdit(params: {
+  ticketId: string;
+  editPrompt: string;
+  currentSummary: string;
+  currentDescription: string;
+  issueType: string;
+  handle: InteractiveModeHandle;
+  appConfig: LoadedConfig;
+  harnessName?: string;
+  drafts: TicketDraftMap;
+}): Promise<void> {
+  const {
+    ticketId,
+    editPrompt,
+    currentSummary,
+    currentDescription,
+    issueType,
+    handle,
+    appConfig,
+    harnessName,
+    drafts,
+  } = params;
+
+  handle.setStatusMessage("Updating task description...", ticketId);
+
+  try {
+    const ticketEngine = await createTicketEngine(appConfig, harnessName);
+    const storyData = await ticketEngine.editStory(
+      {
+        current: { summary: currentSummary, description: currentDescription },
+        editPrompt,
+        issueType,
+      },
+      {
+        onAgentChunk: (chunk, stream) => {
+          if (stream !== "stderr") return;
+          if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+          const line = lastStderrLine(chunk);
+          if (line) handle.setStatusMessage(line, ticketId);
+        },
+      },
+    );
+
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+    drafts.set(ticketId, storyData);
+    handle.setPreviewData(storyData.summary, storyData.description, ticketId);
+  } catch (error) {
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+    if (error instanceof EngineError && error.code === "agent-failed") {
+      handle.setStatusMessage(`Update failed: ${error.detail}`, ticketId);
+      // Return to preview so the user can retry edit or create
+      handle.setPreviewData(currentSummary, currentDescription, ticketId);
+      return;
+    }
+    const dump =
+      error instanceof EngineError && error.dumpFile
+        ? ` — full agent output: ${error.dumpFile}`
+        : "";
+    handle.setStatusMessage(`Update failed to parse${dump}`, ticketId);
+    handle.setPreviewData(currentSummary, currentDescription, ticketId);
+  }
+}
+
+/**
+ * Create the tracker task for one ticket from its cached draft.
+ */
+async function runTicketCreate(params: {
+  ticketId: string;
+  config: InteractiveState;
+  handle: InteractiveModeHandle;
+  engine: PmEngine;
+  drafts: TicketDraftMap;
+}): Promise<void> {
+  const { ticketId, config, handle, engine, drafts } = params;
+  const storyData = drafts.get(ticketId) ?? config.previewData;
+  if (!storyData) {
+    showTicketMessage(handle, ticketId, "Error: No draft available to create");
+    return;
+  }
+
+  const draft: StoryDraft = {
+    summary: storyData.summary,
+    description: storyData.description,
+  };
+
+  try {
+    const createResult = await engine.createTask(draft, {
+      issueType: config.issueType,
+      projectKey: config.projectKey,
+      epicKey: config.epicKey,
+    });
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+
+    let message = `Task created: ${createResult.task.url}`;
+    if (createResult.epicLinkError) {
+      message += `\nWarning: Failed to link to epic: ${createResult.epicLinkError}`;
+    }
+    showTicketMessage(handle, ticketId, message, createResult.task.key);
+    drafts.delete(ticketId);
+  } catch (error) {
+    if (!getTicket(handle.getWorkspaces(), ticketId)) return;
+    showTicketMessage(
+      handle,
+      ticketId,
+      `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
+  }
+}
+
+/**
+ * Multi-ticket interactive session: listen for per-ticket actions and run
+ * agent/tracker work concurrently so switching never cancels background runs.
+ */
+async function runInteractiveSession(params: {
+  handle: InteractiveModeHandle;
+  engine: PmEngine;
+  config: LoadedConfig;
+}): Promise<void> {
+  const { handle, engine, config } = params;
+  const drafts: TicketDraftMap = new Map();
+
+  while (true) {
+    let action: InteractiveTicketAction;
+    try {
+      action = await handle.waitForAction();
+    } catch (error) {
+      if (isInteractiveCancelled(error)) {
+        handle.cleanup();
+        console.log("\nBye!");
+        process.exit(0);
+      }
+      throw error;
+    }
+
+    switch (action.type) {
+      case "generate":
+        // Fire-and-forget so other tickets can still generate/edit/create.
+        void runTicketGenerate({
+          ticketId: action.ticketId,
+          config: action.config,
+          handle,
+          appConfig: config,
+          drafts,
+        });
+        break;
+      case "edit": {
+        const ticket = getTicket(handle.getWorkspaces(), action.ticketId);
+        const issueType = ticket?.wizard.issueType ?? "Task";
+        void runTicketEdit({
+          ticketId: action.ticketId,
+          editPrompt: action.editPrompt,
+          currentSummary: action.currentSummary,
+          currentDescription: action.currentDescription,
+          issueType,
+          handle,
+          appConfig: config,
+          harnessName: ticket?.wizard.harnessName,
+          drafts,
+        });
+        break;
+      }
+      case "create":
+        void runTicketCreate({
+          ticketId: action.ticketId,
+          config: action.config,
+          handle,
+          engine,
+          drafts,
+        });
+        break;
+      case "restart":
+        handle.restart(action.ticketId);
+        drafts.delete(action.ticketId);
+        break;
+    }
+  }
 }
 
 /**
@@ -98,19 +387,14 @@ async function main() {
     process.exit(0);
   }
 
-  // Extract harness flag up front so the harness can be validated once for
-  // both interactive and non-interactive modes.
   const harnessFlags = extractHarnessFlags(args);
 
   // Migrate legacy .claude-pm directory to .devintern-pm if needed
   await migrateLegacyConfigDir();
 
-  // Parse arguments - null means interactive mode, 'init' means run initialization.
-  // Help exits inside parseArgs before any update check.
+  // Parse arguments - null means interactive mode, 'init' means run initialization
   const parsedArgs = parseArgs(args);
 
-  // Check npm for a newer global `@getdevintern/pm` before real work.
-  // Non-interactive sessions skip install by default.
   await maybeOfferCliUpdate({
     packageName: "@getdevintern/pm",
     binName: "devpm",
@@ -179,9 +463,7 @@ async function main() {
     return;
   }
 
-  // Validate the harness name (if any) only for modes that actually use it.
   validateHarnessName(harnessFlags.harness);
-
   let source: SourceInput;
   let epicKey: string | undefined;
   let extraInstructions: string | undefined;
@@ -191,15 +473,13 @@ async function main() {
   let model: string | undefined;
   let issueType: string;
   let projectKey: string | undefined;
-  let interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null = null;
+  let interactiveHandle: InteractiveModeHandle | null = null;
   let configForInteractive: Awaited<ReturnType<typeof loadConfig>> | undefined;
 
   try {
     // Load config early for all operational modes. Interactive use is free
     // under FSL, so pm performs no license check.
-    configForInteractive = await loadConfig({
-      harnessName: harnessFlags.harness,
-    });
+    configForInteractive = await loadConfig({ harnessName: harnessFlags.harness });
 
     const engine: PmEngine = await createEngine(configForInteractive, {
       model: parsedArgs?.model,
@@ -253,15 +533,9 @@ async function main() {
         const installedHarnesses = listInstalledHarnesses({
           currentHarnessName: currentHarness.name,
         });
-        // loadConfig() already validated the active harness; keep it in the
-        // picker even if detection via PATH alone would miss a custom path.
         const harnessesForPicker = installedHarnesses.some((h) => h.name === currentHarness.name)
           ? installedHarnesses
           : [currentHarness, ...installedHarnesses];
-        const harnesses = harnessesForPicker.map((h) => ({
-          name: h.name,
-          displayName: h.displayName,
-        }));
         interactiveHandle = await runInteractiveMode({
           projects: projectsData,
           defaultProjectKey: engine.defaultProjectKey,
@@ -270,8 +544,11 @@ async function main() {
             ? (projectKey: string) => engine.listIssueTypes(projectKey)
             : undefined,
           backendName: engine.backendName,
-          harnesses,
-          currentHarnessName: configForInteractive.agent.harness.name,
+          harnesses: harnessesForPicker.map((h) => ({
+            name: h.name,
+            displayName: h.displayName,
+          })),
+          currentHarnessName: currentHarness.name,
           supportsEpicLinking: engine.supportsEpicLinking,
         });
       } catch (error) {
@@ -286,77 +563,13 @@ async function main() {
         process.exit(1);
       }
 
-      // Create-another loop: reuse the same Ink session. Remounting via main()
-      // previously left a blank screen (old instance not cleaned up + console.clear).
-      const config = configForInteractive;
-
-      while (true) {
-        let interactiveConfig;
-        try {
-          interactiveConfig = await interactiveHandle.waitForCompletion();
-        } catch (error) {
-          if (isInteractiveCancelled(error)) {
-            interactiveHandle.cleanup();
-            console.log("\nBye!");
-            process.exit(0);
-          }
-          throw error;
-        }
-
-        if (!interactiveConfig.sourceType || !interactiveConfig.sourceContent) {
-          console.error("❌ Interactive mode was cancelled or incomplete");
-          interactiveHandle.cleanup();
-          process.exit(1);
-        }
-
-        source = {
-          type: interactiveConfig.sourceType,
-          content: interactiveConfig.sourceContent,
-        };
-        epicKey = interactiveConfig.epicKey;
-        extraInstructions = interactiveConfig.customInstructions;
-        promptStyle = interactiveConfig.promptStyle;
-        decompose = interactiveConfig.decompose;
-        confirm = false; // Interactive mode handles confirmation differently
-        model = undefined;
-        issueType = interactiveConfig.issueType;
-        projectKey = interactiveConfig.projectKey;
-
-        // Re-resolve harness if user selected a different one in interactive mode.
-        // Engine reads config.agent at call time, so mutating config is enough.
-        if (
-          interactiveConfig.harnessName &&
-          interactiveConfig.harnessName !== config.agent.harness.name
-        ) {
-          validateHarnessName(interactiveConfig.harnessName);
-          const resolved = resolveHarness({
-            harnessName: interactiveConfig.harnessName,
-          });
-          resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
-          config.agent = resolved;
-        }
-
-        const shouldContinue = await runCreateFlow({
-          source,
-          epicKey,
-          extraInstructions,
-          promptStyle,
-          decompose,
-          confirm,
-          model,
-          issueType,
-          projectKey,
-          interactiveHandle,
-          config,
-          engine,
-        });
-
-        if (!shouldContinue) {
-          interactiveHandle.cleanup();
-          return;
-        }
-        // handle.restart() already ran inside runCreateFlow; loop for next task
-      }
+      // Multi-ticket session: concurrent per-ticket agent runs, sidebar switch/close.
+      await runInteractiveSession({
+        handle: interactiveHandle,
+        engine,
+        config: configForInteractive,
+      });
+      return;
     }
 
     // CLI mode (one-shot)
@@ -370,7 +583,6 @@ async function main() {
     model = cliArgs.model;
     issueType = cliArgs.issueType;
     projectKey = undefined; // CLI mode uses default project
-    const attachments = cliArgs.attachments;
 
     // Config already loaded and verified early
     const config = configForInteractive!;
@@ -385,14 +597,14 @@ async function main() {
       model,
       issueType,
       projectKey,
-      attachments,
-      interactiveHandle: null,
+      attachments: cliArgs.attachments,
       config,
       engine,
     });
   } catch (error) {
     if (isInteractiveCancelled(error)) {
-      interactiveHandle?.cleanup();
+      const handle = interactiveHandle as InteractiveModeHandle | null;
+      handle?.cleanup();
       console.log("\nBye!");
       process.exit(0);
     }
@@ -412,17 +624,14 @@ interface CreateFlowParams {
   issueType: string;
   projectKey?: string;
   attachments?: Array<{ path: string; name?: string }>;
-  interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null;
   config: Awaited<ReturnType<typeof loadConfig>>;
   engine: PmEngine;
 }
 
 /**
- * Runs agent generation + task creation for one CLI or interactive create cycle.
- *
- * @returns `true` when interactive mode should loop for another task; `false` when done.
+ * Runs agent generation + task creation for one non-interactive CLI create cycle.
  */
-async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
+async function runCreateFlow(params: CreateFlowParams): Promise<void> {
   const {
     source,
     epicKey,
@@ -434,7 +643,6 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     issueType,
     projectKey,
     attachments,
-    interactiveHandle,
     config,
     engine,
   } = params;
@@ -447,68 +655,45 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
         : source.type === "log"
           ? "error log"
           : "free-form prompt";
-    if (!interactiveHandle) {
-      console.log(`Step 1: Creating ${engine.backendName} story from ${sourceTypeLabel}\n`);
-      console.log(`Source type: ${source.type}`);
-      if (source.type === "figma") {
-        console.log(`Figma URL: ${source.content}`);
-      } else {
-        // Show first 100 chars of content
-        const preview =
-          source.content.length > 100 ? source.content.substring(0, 100) + "..." : source.content;
-        const label = source.type === "log" ? "Log preview" : "Prompt preview";
-        console.log(`${label}: ${preview}`);
-      }
-      console.log(`Prompt style: ${promptStyle}`);
-      console.log(`Issue type: ${issueType}`);
-      if (model) {
-        console.log(`Model: ${model}`);
-      }
-      if (epicKey) {
-        console.log(`Epic: ${epicKey}`);
-      }
-      if (extraInstructions) {
-        console.log(`Custom instructions: ${extraInstructions}`);
-      }
-      if (attachments?.length) {
-        console.log(`Attachments: ${attachments.map((a) => a.path).join(", ")}`);
-      }
+    console.log(`Step 1: Creating ${engine.backendName} story from ${sourceTypeLabel}\n`);
+    console.log(`Source type: ${source.type}`);
+    if (source.type === "figma") {
+      console.log(`Figma URL: ${source.content}`);
+    } else {
+      // Show first 100 chars of content
+      const preview =
+        source.content.length > 100 ? source.content.substring(0, 100) + "..." : source.content;
+      const label = source.type === "log" ? "Log preview" : "Prompt preview";
+      console.log(`${label}: ${preview}`);
+    }
+    console.log(`Prompt style: ${promptStyle}`);
+    console.log(`Issue type: ${issueType}`);
+    if (model) {
+      console.log(`Model: ${model}`);
+    }
+    if (epicKey) {
+      console.log(`Epic: ${epicKey}`);
+    }
+    if (extraInstructions) {
+      console.log(`Custom instructions: ${extraInstructions}`);
+    }
+    if (attachments?.length) {
+      console.log(`Attachments: ${attachments.map((attachment) => attachment.path).join(", ")}`);
     }
 
-    // In interactive mode, show generating state
-    const interactiveUi = interactiveHandle;
-    if (interactiveUi) {
-      interactiveUi.setGenerating();
-    } else {
-      console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
-    }
+    console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
 
     let storyData: StoryDraft;
     try {
-      storyData = await engine.generateStory(
-        { source, promptStyle, epicKey, extraInstructions, attachments },
-        {
-          onAgentChunk: interactiveUi
-            ? (chunk, stream) => {
-                if (stream !== "stderr") return;
-                const line = lastStderrLine(chunk);
-                if (line) {
-                  interactiveUi.setStatusMessage(line);
-                }
-              }
-            : undefined,
-        },
-      );
+      storyData = await engine.generateStory({
+        source,
+        promptStyle,
+        epicKey,
+        extraInstructions,
+        attachments,
+      });
     } catch (error) {
       if (error instanceof EngineError && error.code === "agent-failed") {
-        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
-        if (interactiveHandle) {
-          await showInteractiveMessageAndRestart(
-            interactiveHandle,
-            `Error: Failed to analyze ${sourceTypeLabel}\n${error.detail}${dumpHint}`,
-          );
-          return true; // continue create-another loop
-        }
         console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
         console.error(error.detail);
         if (error.dumpFile) {
@@ -517,14 +702,6 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
         process.exit(1);
       }
       if (error instanceof EngineError && error.code === "parse-failed") {
-        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
-        if (interactiveHandle) {
-          await showInteractiveMessageAndRestart(
-            interactiveHandle,
-            `Error: Failed to parse story from agent output\n${error.message}${dumpHint}`,
-          );
-          return true; // continue create-another loop
-        }
         console.error("\n❌ Failed to parse story requirements from Agent output");
         console.error("Error:", error.message);
         console.error("Output:", error.detail);
@@ -536,68 +713,8 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       throw error;
     }
 
-    // In interactive mode, show preview and wait for confirmation or edits
-    if (interactiveHandle) {
-      const ui = interactiveHandle;
-      ui.setPreviewData(storyData.summary, storyData.description);
-
-      // Edit loop - allow user to request edits multiple times
-      while (true) {
-        const editRequest = await Promise.race([
-          ui.waitForCompletion().then(() => null),
-          ui.waitForEdit(),
-        ]);
-
-        if (!editRequest) {
-          // User confirmed, break out of edit loop
-          break;
-        }
-
-        // User requested an edit
-        ui.setStatusMessage("Updating task description...");
-
-        try {
-          storyData = await engine.editStory(
-            {
-              current: {
-                summary: editRequest.currentSummary,
-                description: editRequest.currentDescription,
-              },
-              editPrompt: editRequest.editPrompt,
-              issueType,
-            },
-            {
-              onAgentChunk: (chunk, stream) => {
-                if (stream !== "stderr") return;
-                const line = lastStderrLine(chunk);
-                if (line) {
-                  ui.setStatusMessage(line);
-                }
-              },
-            },
-          );
-
-          // Show updated preview
-          ui.setPreviewData(storyData.summary, storyData.description);
-        } catch (error) {
-          if (error instanceof EngineError && error.code === "agent-failed") {
-            ui.setStatusMessage(`Update failed: ${error.detail}`);
-            continue;
-          }
-          console.error("❌ Failed to parse updated task from Agent");
-          console.error("Error:", error instanceof Error ? error.message : error);
-          if (error instanceof EngineError && error.dumpFile) {
-            ui.setStatusMessage(`Update failed to parse — full agent output: ${error.dumpFile}`);
-          }
-          // Loop will retry
-        }
-      }
-    }
-
-    if (!interactiveHandle) {
-      console.log(`\n📝 Creating ${engine.backendName} ${issueType.toLowerCase()}...`);
-      console.log(`   Title: ${storyData.summary}`);
-    }
+    console.log(`\n📝 Creating ${engine.backendName} ${issueType.toLowerCase()}...`);
+    console.log(`   Title: ${storyData.summary}`);
 
     // Create the task via backend (links to epic when supported by the tracker;
     // trackers without epic support skip linking silently so we never create a
@@ -610,58 +727,41 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     });
     const createdTask = createResult.task;
 
-    if (!interactiveHandle) {
-      console.log(
-        `\n✅ ${engine.backendName} ${issueType.toLowerCase()} created: ${createdTask.url}`,
-      );
-    }
+    console.log(
+      `\n✅ ${engine.backendName} ${issueType.toLowerCase()} created: ${createdTask.url}`,
+    );
 
-    if (createResult.epicLinked && !interactiveHandle) {
+    if (createResult.epicLinked) {
       console.log(`🔗 Linking story to epic ${epicKey}...`);
       console.log(`✅ Story linked to epic ${epicKey}`);
     }
     if (createResult.epicLinkError) {
       console.error(`⚠️  Warning: Failed to link to epic: ${createResult.epicLinkError}`);
-      if (!interactiveHandle) {
-        console.log("Continuing with task decomposition...");
-      }
+      console.log("Continuing with task decomposition...");
     }
     if (createResult.labelsApplyError) {
       console.error(`⚠️  Warning: Failed to apply labels: ${createResult.labelsApplyError}`);
     }
-    if (createResult.attachmentsUploaded > 0 && !interactiveHandle) {
+    if (createResult.attachmentsUploaded > 0) {
       console.log(`📎 Uploaded ${createResult.attachmentsUploaded} attachment(s)`);
     }
     if (createResult.attachmentErrors?.length) {
-      for (const err of createResult.attachmentErrors) {
-        console.error(`⚠️  Warning: Failed to upload attachment: ${err}`);
+      for (const error of createResult.attachmentErrors) {
+        console.error(`⚠️  Warning: Failed to upload attachment: ${error}`);
       }
     }
-    if (!interactiveHandle) {
-      console.log();
-    }
+    console.log();
 
     // Check if we should decompose into subtasks
     if (!decompose) {
-      if (!interactiveHandle) {
-        console.log(`✅ ${issueType} created successfully!\n`);
-        console.log("Summary:");
-        console.log(`  ${issueType}: ${createdTask.url}`);
-        if (epicKey) {
-          console.log(`  Epic: ${epicKey}`);
-        }
-        console.log("\n🎉 Done!");
+      console.log(`✅ ${issueType} created successfully!\n`);
+      console.log("Summary:");
+      console.log(`  ${issueType}: ${createdTask.url}`);
+      if (epicKey) {
+        console.log(`  Epic: ${epicKey}`);
       }
-
-      // In interactive mode, show success and wait for user to start another task
-      if (interactiveHandle) {
-        await showInteractiveMessageAndRestart(
-          interactiveHandle,
-          `Task created: ${createdTask.url}`,
-        );
-        return true; // continue create-another loop (same Ink session)
-      }
-      return false;
+      console.log("\n🎉 Done!");
+      return;
     }
 
     // Step 2: Run Agent to decompose the story into tasks
@@ -773,26 +873,11 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       console.log(`  Epic: ${epicKey}`);
     }
     console.log("\n🎉 Done!");
-
-    // In interactive mode, show success and wait for user to start another task
-    if (interactiveHandle) {
-      await showInteractiveMessageAndRestart(interactiveHandle, `Task created: ${createdTask.url}`);
-      return true; // continue create-another loop (same Ink session)
-    }
-    return false;
   } catch (error) {
     if (isInteractiveCancelled(error)) {
       throw error;
     }
     console.error("\n❌ Error:", error instanceof Error ? error.message : error);
-    // In interactive mode, show error and wait for user to restart in-place
-    if (interactiveHandle) {
-      await showInteractiveMessageAndRestart(
-        interactiveHandle,
-        `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
-      return true; // continue create-another loop
-    }
     process.exit(1);
   }
 }
