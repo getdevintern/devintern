@@ -106,7 +106,7 @@ Guardrails apply before the agent acts:
 - The worker never force-pushes; if a human pushed to the branch meanwhile, the push is rejected instead of overwriting.
 - Mentions posted before the worker first started are not dug up.
 
-Mention matching requires a resolvable bot identity, so this feature needs GitHub App auth (`GITHUB_APP_ID` plus a private key — the same requirement as webhook mention handling). A `GITHUB_TOKEN` alone is enough for review polling on the agent's own PRs, but not for `@mentions` on other people's PRs. See [Configuration](./configuration.md#github-authentication).
+Mention matching requires a resolvable bot identity, so this team/automation feature needs GitHub App auth (`GITHUB_APP_ID` plus a private key — the same requirement as webhook mention handling). A personal `GITHUB_TOKEN` is enough for review polling on the agent's own PRs, but not for `@mentions` on other people's PRs. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
 
 ## How events are handled
 

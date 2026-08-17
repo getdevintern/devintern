@@ -51,11 +51,15 @@ Configure status transitions in `.devintern-code/settings.json` using the board 
 
 ## Optional Environment Variables (GitHub / PR Integration)
 
-`GITHUB_TOKEN` (a personal access token) and GitHub App credentials (`GITHUB_APP_ID` plus a private key) are complementary. They are not drop-in replacements.
+**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). Enough for free CLI use from your terminal.
+
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). Needed for `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+
+The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
 
 | What you want | Need |
 | --- | --- |
-| Implement tickets and open PRs from the CLI | `GITHUB_TOKEN` **or** a GitHub App |
+| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` **or** a GitHub App |
 | Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
 | Worker review polling on the agent's own PRs | `GITHUB_TOKEN` **or** a GitHub App |
 | `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
@@ -87,7 +91,7 @@ BITBUCKET_TOKEN=your-bitbucket-token    # For Bitbucket PR creation
 
 ### GitHub Personal Access Token
 
-When creating a GitHub personal access token, you need the following permissions:
+For personal / interactive CLI use. When creating a GitHub personal access token, you need the following permissions:
 
 **Classic Personal Access Token:**
 
@@ -110,7 +114,7 @@ To create a GitHub token:
 
 ### GitHub App Authentication
 
-For organizations that want centralized control, or anyone running mention-driven worker/webhook automation, create a GitHub App.
+For team / unattended automation (mention-driven worker, webhook / `worker --listen`, `slug[bot]` attribution), create a GitHub App.
 
 **Required App permissions (PR creation):**
 

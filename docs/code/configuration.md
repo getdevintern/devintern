@@ -83,11 +83,15 @@ You can also pass file paths directly as arguments without setting `TASK_TRACKER
 
 ## GitHub authentication
 
-`GITHUB_TOKEN` (a personal access token) and GitHub App credentials (`GITHUB_APP_ID` plus a private key) are complementary. They are not drop-in replacements for each other.
+**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). That is enough for free CLI use from your terminal (`devintern TICKET-123`, `--create-pr`).
+
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+
+The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
 
 | What you want | Need |
 | --- | --- |
-| Implement tickets and open PRs from the CLI | `GITHUB_TOKEN` **or** a GitHub App |
+| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` **or** a GitHub App |
 | Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
 | Worker review polling on the agent's own PRs | `GITHUB_TOKEN` **or** a GitHub App |
 | `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
@@ -104,7 +108,7 @@ Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_
 
 ### GitHub Personal Access Token
 
-For individual users and for `TASK_TRACKER=github`:
+For personal / interactive CLI use, and for `TASK_TRACKER=github`:
 
 ```bash
 GITHUB_TOKEN=your-github-token
@@ -116,7 +120,7 @@ GITHUB_TOKEN=your-github-token
 
 ### GitHub App Authentication
 
-For organizations, and for anyone who wants `@mention` matching or `slug[bot]` commit attribution:
+For team / unattended automation (`@mention` matching, webhook / `worker --listen`, `slug[bot]` commit attribution):
 
 ```bash
 GITHUB_APP_ID=123456

@@ -54,9 +54,9 @@ JIRA_EMAIL=your-email@company.com
 JIRA_API_TOKEN=your-api-token-here
 # Optional: only set if the agent CLI is not on your PATH
 # AGENT_CLI_PATH=/custom/path/to/claude
-# Optional: GitHub auth (see ENV_SETUP.md — token and App are not interchangeable)
-# GITHUB_TOKEN is required for TASK_TRACKER=github; enough for CLI PRs.
-# GitHub App is required for @mentions / worker --listen (ID + private key).
+# Optional: GitHub auth (see ENV_SETUP.md)
+# Personal / interactive (free CLI): GITHUB_TOKEN
+# Team / unattended automation: GitHub App — https://devintern.com/pricing/
 GITHUB_TOKEN=your-github-token-here
 # GITHUB_APP_ID=123456
 # GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
@@ -501,7 +501,7 @@ The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in sing
 
 7. **"PR creation failed"**
    - Ensure you have the correct token configured:
-     - GitHub: `GITHUB_TOKEN` or GitHub App (`GITHUB_APP_ID` + private key). `TASK_TRACKER=github` requires the token; `@mention` matching requires the App
+     - GitHub: personal `GITHUB_TOKEN` or team/automation GitHub App (`GITHUB_APP_ID` + private key). `TASK_TRACKER=github` requires the token; `@mention` matching requires the App
      - Bitbucket: `BITBUCKET_TOKEN`
    - Check token/App permissions:
      - GitHub classic token: needs `repo` scope

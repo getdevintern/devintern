@@ -174,12 +174,15 @@ AGENT_HARNESS=claude-code
 
 # Optional: GitHub authentication (PRs, worker reviews, @mentions)
 #
-# GITHUB_TOKEN and GitHub App credentials are complementary, not alternatives.
+# Personal / interactive (free CLI): GITHUB_TOKEN
+# Team / unattended automation: GitHub App (GITHUB_APP_ID + private key)
+# See https://devintern.com/pricing/
+# Complementary, not alternatives. Unattended runs also need LICENSE_KEY.
 #
 #   GITHUB_TOKEN (personal access token)
-#     Required for TASK_TRACKER=github (Issues). App credentials cannot substitute.
-#     Enough for CLI task implementation, --create-pr, and worker review
-#     polling on the agent's own PRs.
+#     Personal / interactive CLI use, and required for TASK_TRACKER=github
+#     (Issues). App credentials cannot substitute.
+#     Enough for --create-pr and worker review polling on the agent's own PRs.
 #     Create at: https://github.com/settings/tokens
 #     Classic: 'repo' scope (or 'public_repo' for public repos only)
 #     Fine-grained: 'Pull requests: Read and write' + 'Contents: Read'
@@ -187,8 +190,9 @@ AGENT_HARNESS=claude-code
 # GITHUB_TOKEN=your-github-token-here
 #
 #   GitHub App (GITHUB_APP_ID + private key)
-#     Required for @mention matching on any PR (worker mention sweep and
-#     webhook / devintern worker --listen) and for slug[bot] commit attribution.
+#     Team / unattended automation: @mention matching on any PR (worker
+#     mention sweep and webhook / devintern worker --listen) and slug[bot]
+#     commit attribution.
 #     Also creates PRs when no GITHUB_TOKEN is set.
 #     Both GITHUB_APP_ID and a private key are required; ID alone is ignored.
 #     Create at: https://github.com/settings/apps (or your org's settings)

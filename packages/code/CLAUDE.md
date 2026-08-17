@@ -35,8 +35,8 @@ This file provides guidance to Claude Code when working with this repository.
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - JIRA credentials
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions
-- `GITHUB_TOKEN` - GitHub PAT (required for `TASK_TRACKER=github`; enough for CLI PRs and own-PR review polling)
-- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, worker `--listen` uses App first)
+- `GITHUB_TOKEN` - Personal / interactive GitHub PAT (required for `TASK_TRACKER=github`; enough for free CLI PRs and own-PR review polling)
+- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Team / unattended-automation GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, worker `--listen` uses App first). See https://devintern.com/pricing/
 - `BITBUCKET_TOKEN` - Bitbucket auth
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)
