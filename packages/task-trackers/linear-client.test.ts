@@ -43,8 +43,19 @@ const issueNode = {
 };
 
 describe("LinearClient.getIssueByIdentifier", () => {
+  test("looks up the issue by id instead of IssueFilter.identifier", async () => {
+    const calls = mockGraphQL(() => ({ issue: issueNode }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    await client.getIssueByIdentifier("ENG-42");
+
+    expect(calls[0]?.query).toMatch(/issue\(id:\s*\$id\)/);
+    expect(calls[0]?.query).not.toMatch(/filter:\s*\{\s*identifier/);
+    expect(calls[0]?.variables).toEqual({ id: "ENG-42" });
+  });
+
   test("returns normalized issue detail with flattened labels and attachments", async () => {
-    mockGraphQL(() => ({ issues: { nodes: [issueNode] } }));
+    mockGraphQL(() => ({ issue: issueNode }));
 
     const client = new LinearClient({ apiKey: "key" });
     const issue = await client.getIssueByIdentifier("ENG-42");
@@ -57,10 +68,43 @@ describe("LinearClient.getIssueByIdentifier", () => {
   });
 
   test("returns undefined when no issue matches", async () => {
-    mockGraphQL(() => ({ issues: { nodes: [] } }));
+    mockGraphQL(() => ({ issue: null }));
 
     const client = new LinearClient({ apiKey: "key" });
     expect(await client.getIssueByIdentifier("ENG-999")).toBeUndefined();
+  });
+
+  test("returns undefined when Linear reports the issue is missing", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ errors: [{ message: "Entity not found: Issue" }] }), {
+        status: 200,
+      })) as typeof fetch;
+
+    const client = new LinearClient({ apiKey: "key" });
+    expect(await client.getIssueByIdentifier("ENG-999")).toBeUndefined();
+  });
+});
+
+describe("LinearClient.getIssueIdByIdentifier", () => {
+  test("resolves a UUID via issue(id:) and caches the identifier", async () => {
+    const calls = mockGraphQL(() => ({
+      issue: { id: "uuid-1", identifier: "ENG-42" },
+    }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    expect(await client.getIssueIdByIdentifier("ENG-42")).toBe("uuid-1");
+    expect(await client.getIssueIdByIdentifier("ENG-42")).toBe("uuid-1");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.query).toMatch(/issue\(id:\s*\$id\)/);
+    expect(calls[0]?.variables).toEqual({ id: "ENG-42" });
+  });
+
+  test("returns undefined when the issue does not exist", async () => {
+    mockGraphQL(() => ({ issue: null }));
+
+    const client = new LinearClient({ apiKey: "key" });
+    expect(await client.getIssueIdByIdentifier("ENG-999")).toBeUndefined();
   });
 });
 

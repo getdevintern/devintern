@@ -89,6 +89,11 @@ const ISSUE_DETAIL_FIELDS = `
   attachments { nodes { id title url } }
 `;
 
+/** Linear returns this when `issue(id:)` cannot resolve a UUID or identifier. */
+function isLinearNotFoundError(error: unknown): boolean {
+  return error instanceof Error && /entity not found/i.test(error.message);
+}
+
 export class LinearClient {
   private apiKey: string;
   private baseUrl = "https://api.linear.app/graphql";
@@ -174,9 +179,39 @@ export class LinearClient {
   }
 
   /**
+   * Fetch a Linear issue by UUID or human-readable identifier (e.g. `ENG-42`).
+   *
+   * Linear's `issue(id:)` accepts both forms. `IssueFilter` has no `identifier`
+   * field, so lookups must not use `issues(filter: { identifier: ... })`.
+   *
+   * @returns The selected fields, or `undefined` if the issue does not exist.
+   * @throws When the GraphQL request fails for a reason other than not found.
+   */
+  private async fetchIssueById<T>(id: string, fields: string): Promise<T | undefined> {
+    try {
+      const data = await this.request<{ issue: T | null }>(
+        `
+        query IssueById($id: String!) {
+          issue(id: $id) {
+            ${fields}
+          }
+        }
+        `,
+        { id },
+      );
+      return data?.issue ?? undefined;
+    } catch (error) {
+      if (isLinearNotFoundError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Resolve a Linear issue UUID from its identifier string.
    *
-   * @param identifier - Human-readable issue ID (e.g. `ENG-42`).
+   * @param identifier - Human-readable issue ID (e.g. `ENG-42`) or UUID.
    * @returns Internal UUID, or `undefined` if not found.
    * @throws When the GraphQL request fails.
    */
@@ -186,29 +221,16 @@ export class LinearClient {
       return cached;
     }
 
-    const data = await this.request<{
-      issues: { nodes: Array<{ id: string; identifier: string }> };
-    }>(
-      `
-      query IssuesByIdentifier($identifier: String!) {
-        issues(filter: { identifier: { eq: $identifier } }) {
-          nodes {
-            id
-            identifier
-          }
-        }
-      }
-      `,
-      { identifier },
+    const issue = await this.fetchIssueById<{ id: string; identifier: string }>(
+      identifier,
+      "id identifier",
     );
-
-    const issue = data.issues.nodes[0];
-    if (issue) {
-      this.cacheIssueId(issue.identifier, issue.id);
-      return issue.id;
+    if (!issue) {
+      return undefined;
     }
 
-    return undefined;
+    this.cacheIssueId(issue.identifier, issue.id);
+    return issue.id;
   }
 
   /**
@@ -395,27 +417,15 @@ export class LinearClient {
   /**
    * Fetch a full issue by its human-readable identifier (e.g. `ENG-42`).
    *
-   * @param identifier - Human-readable issue ID.
+   * @param identifier - Human-readable issue ID or UUID.
    * @returns Full issue detail, or `undefined` if not found.
    * @throws When the GraphQL request fails.
    */
   async getIssueByIdentifier(identifier: string): Promise<LinearIssueDetail | undefined> {
-    const data = await this.request<{
-      issues: { nodes: Array<Record<string, unknown>> };
-    }>(
-      `
-      query IssueByIdentifier($identifier: String!) {
-        issues(filter: { identifier: { eq: $identifier } }, first: 1) {
-          nodes {
-            ${ISSUE_DETAIL_FIELDS}
-          }
-        }
-      }
-      `,
-      { identifier },
+    const node = await this.fetchIssueById<Record<string, unknown>>(
+      identifier,
+      ISSUE_DETAIL_FIELDS,
     );
-
-    const node = data.issues.nodes[0];
     if (!node) return undefined;
 
     const issue = this.normalizeIssueDetail(node);

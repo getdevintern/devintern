@@ -339,13 +339,11 @@ describe("LinearBackend", () => {
       (globalThis as any).fetch = async () => {
         callCount++;
         if (callCount === 1) {
-          // issues query for parent (getIssueIdByIdentifier)
+          // issue(id:) lookup for parent (getIssueIdByIdentifier)
           return new Response(
             JSON.stringify({
               data: {
-                issues: {
-                  nodes: [{ id: "parent-id", identifier: "ENG-1" }],
-                },
+                issue: { id: "parent-id", identifier: "ENG-1" },
               },
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },
@@ -393,9 +391,7 @@ describe("LinearBackend", () => {
           teams: {
             nodes: [{ id: "team-1", key: "ENG", name: "Engineering" }],
           },
-          issues: {
-            nodes: [],
-          },
+          issue: null,
         },
       });
 
@@ -411,26 +407,22 @@ describe("LinearBackend", () => {
       (globalThis as any).fetch = async () => {
         callCount++;
         if (callCount === 1) {
-          // issues query for story
+          // issue(id:) lookup for story
           return new Response(
             JSON.stringify({
               data: {
-                issues: {
-                  nodes: [{ id: "story-id", identifier: "ENG-1" }],
-                },
+                issue: { id: "story-id", identifier: "ENG-1" },
               },
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
         if (callCount === 2) {
-          // issues query for epic
+          // issue(id:) lookup for epic
           return new Response(
             JSON.stringify({
               data: {
-                issues: {
-                  nodes: [{ id: "epic-id", identifier: "ENG-0" }],
-                },
+                issue: { id: "epic-id", identifier: "ENG-0" },
               },
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },
@@ -532,10 +524,10 @@ describe("LinearBackend", () => {
           variables?: Record<string, unknown>;
         };
         calls.push(body);
-        if (body.query.includes("issues")) {
+        if (body.query.includes("issue(id:")) {
           return new Response(
             JSON.stringify({
-              data: { issues: { nodes: [{ id: "issue-uuid", identifier: "ENG-42" }] } },
+              data: { issue: { id: "issue-uuid", identifier: "ENG-42" } },
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
