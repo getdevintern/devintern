@@ -13,6 +13,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { getSandbox } from "./sandbox";
 import type {
   AutoReviewLoopOptions,
@@ -311,7 +312,7 @@ function parseReviewFeedback(agentOutput: string): ReviewFeedback {
 /**
  * Run the agent harness with a prompt and capture stdout.
  *
- * @param prompt - Prompt sent to the agent via stdin
+ * @param prompt - Prompt sent to the agent via argv (`-p` / positional)
  * @param workingDir - Git working directory
  * @param harness - Resolved agent harness configuration
  * @param executablePath - Path to the agent CLI executable
@@ -335,7 +336,7 @@ async function runAgentPrompt(
     (async () => {
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = harness.buildArgs({
+      const agentArgs = buildHeadlessAgentArgs(harness, prompt, {
         maxTurns: 500,
         skipPermissions: true,
         workingDir,
@@ -343,7 +344,7 @@ async function runAgentPrompt(
       const { child: agentProcess, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workingDir, stdio: ["pipe", "pipe", "pipe"] },
+        spawnOptions: { cwd: workingDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
       });
 
@@ -392,10 +393,6 @@ async function runAgentPrompt(
         clearTimeout(timeout);
         reject(new Error(`Failed to spawn ${harness.displayName}: ${error}`));
       });
-
-      // Send prompt to stdin
-      agentProcess.stdin?.write(prompt);
-      agentProcess.stdin?.end();
     })().catch(reject);
   });
 }

@@ -11,6 +11,7 @@ import {
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
@@ -107,7 +108,7 @@ async function getLatestChangesRequestedReview(
 /**
  * Run the configured agent harness to address review feedback.
  *
- * @param prompt - Full review prompt sent to the agent via stdin
+ * @param prompt - Full review prompt sent to the agent via argv (`-p` / positional)
  * @param workDir - Git working directory for the agent process
  * @param verbose - When true, log command and timeout details
  * @returns Whether the agent succeeded, its combined output, and max-turns flag
@@ -131,10 +132,11 @@ export async function runAgent(
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-      const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
+      const runOptions = { maxTurns, skipPermissions: true, workingDir: workDir };
+      const agentArgs = buildHeadlessAgentArgs(harness, prompt, runOptions);
 
       if (verbose) {
-        console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
+        console.log(`   Command: ${executablePath} ${harness.buildArgs(runOptions).join(" ")}`);
         console.log(`   Timeout: ${timeoutMinutes} minutes`);
       }
 
@@ -145,7 +147,7 @@ export async function runAgent(
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
+        spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
       });
 
@@ -202,12 +204,6 @@ export async function runAgent(
           maxTurnsReached,
         });
       });
-
-      // Send prompt to Agent via stdin
-      if (agent.stdin) {
-        agent.stdin.write(prompt);
-        agent.stdin.end();
-      }
     })().catch((error) => {
       resolve({
         success: false,
