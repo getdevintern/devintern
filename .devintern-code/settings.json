@@ -1,0 +1,20 @@
+{
+  "jira": {
+    "projects": {
+      "DEV": {
+        "inProgressStatus": "In Progress",
+        "todoStatus": "To Do",
+        "prStatus": "In Review"
+      }
+    }
+  },
+  "trello": {
+    "projects": {
+      "F0GZ2wJy": {
+        "inProgressStatus": "Doing",
+        "todoStatus": "To Do",
+        "prStatus": "Review"
+      }
+    }
+  }
+}
