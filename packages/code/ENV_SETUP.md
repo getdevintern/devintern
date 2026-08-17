@@ -59,9 +59,9 @@ The two credentials are complementary, not drop-in replacements. A team setup th
 
 | What you want | Need |
 | --- | --- |
-| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` **or** a GitHub App |
+| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
 | Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
-| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` **or** a GitHub App |
+| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` (solo) or GitHub App (if already configured) |
 | `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
 | Commits attributed to `slug[bot]` | GitHub App |
 

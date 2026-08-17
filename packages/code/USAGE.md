@@ -402,7 +402,7 @@ devintern MYAPP-456
 - Detects repository platform from git remote URL
 - PR title format: `[TASK-123] Task Summary`
 - PR body includes Claude's implementation details and links back to JIRA
-- GitHub: Requires `GITHUB_TOKEN` or GitHub App authentication for PR creation (see ENV_SETUP.md). `@mention` matching on any PR needs the App.
+- GitHub: Requires `GITHUB_TOKEN` for personal CLI PR creation (see ENV_SETUP.md). A team GitHub App can also create PRs; `@mention` matching on any PR needs the App.
 - Bitbucket: Requires `BITBUCKET_TOKEN` (`Repositories: Write`), workspace auto-detected from git remote
 - Can be enabled with `--create-pr` flag
 - Target branch can be specified with `--pr-target-branch` (defaults to 'main')
