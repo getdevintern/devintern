@@ -68,6 +68,7 @@ import {
 } from "./session.ts";
 import { listRecentProjectDirs, recordRecentProjectDir } from "./recent-projects.ts";
 import { readSettings, updateSettings } from "./settings.ts";
+import { validateRequiredTools } from "./validate-tools.ts";
 
 /** Reveal only known project dirs (bindings, recents, current session) — not arbitrary paths. */
 async function isAllowedRevealPath(resolved: string): Promise<boolean> {
@@ -222,6 +223,10 @@ export function registerIpcHandlers(): void {
   handle(IPC_CHANNELS.getLastProjectDir, async () => {
     const settings = await readSettings();
     return settings.lastProjectDir ?? null;
+  });
+
+  handle(IPC_CHANNELS.validateRequiredTools, async () => {
+    return validateRequiredTools();
   });
 
   handle(IPC_CHANNELS.getRecentProjectDirs, async () => {

@@ -11,6 +11,12 @@ bun run build        # compile only → out/
 bun run test
 ```
 
+## Required tools
+
+The app is not a self-contained agent runtime: **Git** and **at least one supported agent CLI** (Claude Code, OpenCode, Codex, Cursor, …) must already be installed on the machine. On launch the app probes the same PATH it uses to spawn agents, including common GUI-launch locations (`~/.local/bin`, `~/.bun/bin`, Homebrew, …) that a dock/launcher start would otherwise miss.
+
+If a required tool is missing, a blocking screen names it and how to install it. **Check again** (or switching back to the app after installing) re-runs the probe — there is no “everything is fine” step when the check passes. Optional extras such as sandbox CLIs are not required for core ticket workflows.
+
 ## App icon
 
 Installer + dock/taskbar icon: `build/icon.png` (1024×1024 RGBA, with transparent rounded corners
