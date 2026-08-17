@@ -2,6 +2,8 @@
  * Core types for the agent harness abstraction.
  */
 
+import type { MuseHarnessOptions } from "./harnesses/muse/types.js";
+
 /**
  * How the agent should run relative to workspace mutation.
  *
@@ -71,6 +73,8 @@ export interface AgentRunOptions {
   onStdout?: (chunk: string) => void;
   /** Called with each stderr chunk as the agent runs (for live status updates). */
   onStderr?: (chunk: string) => void;
+  /** Muse Code-specific options (only used when `AGENT_HARNESS=muse`). */
+  muse?: MuseHarnessOptions;
 }
 
 export interface AgentRunResult {

@@ -19,6 +19,7 @@ import { GooseHarness } from "../src/harnesses/goose.js";
 import { GrokHarness } from "../src/harnesses/grok.js";
 import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
+import { MuseHarness } from "../src/harnesses/muse.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
@@ -64,6 +65,7 @@ describe("mode helpers", () => {
     expect(support["kimi"]).toEqual([]);
     expect(support["pi"]).toEqual([]);
     expect(support["qwen"]).toEqual([]);
+    expect(support["muse"]).toEqual([]);
   });
 });
 
@@ -243,6 +245,7 @@ describe("unsupported harnesses fail closed", () => {
     new GooseHarness(),
     new KiloCodeHarness(),
     new KimiHarness(),
+    new MuseHarness(),
     new PiHarness(),
     new QwenCodeHarness(),
   ];

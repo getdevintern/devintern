@@ -77,6 +77,7 @@ export { GooseHarness } from "./harnesses/goose.js";
 export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
+export { MuseHarness, isMuseHarness } from "./harnesses/muse.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
@@ -84,6 +85,33 @@ export { QwenCodeHarness } from "./harnesses/qwen.js";
 // Runners
 export { runAgentBun } from "./runners/bun.js";
 export { runAgentNode, type NodeRunnerOptions } from "./runners/node.js";
+export { runAgentMuse, type MuseRunnerOptions } from "./runners/muse.js";
+
+// Muse Code harness helpers
+export type {
+  MuseHarnessOptions,
+  MuseReasoningEffort,
+  MuseExitState,
+  MuseJsonlEvent,
+  MuseRunResult,
+} from "./harnesses/muse/types.js";
+export { MuseConfigError, validateMuseRunOptions } from "./harnesses/muse/validation.js";
+export {
+  parseMuseJsonlLine,
+  feedMuseJsonlChunk,
+  createMuseJsonlParseState,
+} from "./harnesses/muse/jsonl.js";
+export { mapMuseExitState, describeMuseExitState } from "./harnesses/muse/exit-codes.js";
+export {
+  planMusePromptDelivery,
+  createMusePromptFile,
+  cleanupMusePromptFile,
+} from "./harnesses/muse/prompt-file.js";
+export {
+  assertMuseBinaryAvailable,
+  probeMuseCliVersion,
+  MuseBinaryError,
+} from "./harnesses/muse/binary.js";
 
 // Process-group reaper (prevents orphaned dev servers / watchers)
 export { spawnReapable, reapTree } from "./process-reaper.js";

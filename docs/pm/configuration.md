@@ -148,7 +148,7 @@ You can also override the harness for a single run with `--harness <name>` (CLI 
 2. Harness-specific env var (e.g. `OPENCODE_CLI_PATH` when `AGENT_HARNESS=opencode`)
 3. Harness default command, located on your `PATH` (e.g. `claude`)
 
-Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, or `qwen`).
+Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
 
 **Cursor note:** The Cursor harness uses Cursor's headless `cursor-agent` CLI (not a command named `cursor`). Cursor also installs an `agent` alias, but devpm looks for `cursor-agent` because other tools use the `agent` name too. Install Cursor and enable the CLI from Cursor's settings, then set `AGENT_HARNESS=cursor`.
 
@@ -157,6 +157,8 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 **DeepSeek note:** Harness id is `deepseek`; the CLI binary is `reasonix` (DeepSeek-Reasonix). Install with `npm i -g reasonix`, set `DEEPSEEK_API_KEY` (or run `reasonix setup`), then set `AGENT_HARNESS=deepseek`.
 
 **Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`.
+
+**Muse Code note:** Harness id is `muse`; the CLI binary is `muse`. Install and authenticate per [Muse Code authentication](https://dev.meta.ai/docs/muse-code/auth), then set `AGENT_HARNESS=muse`. devpm uses the same headless `muse exec --json` integration as devintern. Unattended runs default to `--disable-approval`; `--yolo` is opt-in only.
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 

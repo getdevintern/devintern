@@ -11,6 +11,7 @@ import { GooseHarness } from "../src/harnesses/goose.js";
 import { GrokHarness } from "../src/harnesses/grok.js";
 import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
+import { MuseHarness } from "../src/harnesses/muse.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
@@ -235,6 +236,31 @@ describe("KimiHarness", () => {
       "--yolo",
       "--model",
       "kimi-k2",
+    ]);
+  });
+});
+
+describe("MuseHarness", () => {
+  const h = new MuseHarness();
+
+  test("metadata", () => {
+    expect(h.name).toBe("muse");
+    expect(h.displayName).toBe("Muse Code");
+    expect(h.defaultPath).toBe("muse");
+    expect(h.promptFlag).toBeUndefined();
+  });
+
+  test("buildArgs empty without skipPermissions", () => {
+    expect(h.buildArgs({})).toEqual(["exec", "--json"]);
+  });
+
+  test("buildArgs with skipPermissions uses disable-approval not yolo", () => {
+    expect(h.buildArgs({ skipPermissions: true, model: "muse-spark-1.2" })).toEqual([
+      "exec",
+      "--json",
+      "--model",
+      "muse-spark-1.2",
+      "--disable-approval",
     ]);
   });
 });

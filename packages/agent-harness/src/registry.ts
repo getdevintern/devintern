@@ -15,6 +15,7 @@ import {
   GrokHarness,
   KiloCodeHarness,
   KimiHarness,
+  MuseHarness,
   OpencodeHarness,
   PiHarness,
   QwenCodeHarness,
@@ -94,6 +95,7 @@ registerHarness(new GooseHarness());
 registerHarness(new GrokHarness());
 registerHarness(new KiloCodeHarness());
 registerHarness(new KimiHarness());
+registerHarness(new MuseHarness());
 registerHarness(new OpencodeHarness());
 registerHarness(new PiHarness());
 registerHarness(new QwenCodeHarness());

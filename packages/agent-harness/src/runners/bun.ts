@@ -11,11 +11,13 @@
 
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { isMuseHarness } from "../harnesses/muse.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
+import { runAgentMuse } from "./muse.js";
 
 /**
  * Spawn an agent CLI subprocess using Bun and collect its output.
@@ -36,6 +38,10 @@ export async function runAgentBun(
   prompt: string,
   options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
+  if (isMuseHarness(harness)) {
+    return runAgentMuse(harness, executablePath, prompt, options);
+  }
+
   assertModeSupported(harness, options.mode);
 
   const inputMethod = options.inputMethod ?? "arg";
