@@ -3,7 +3,7 @@ title: "GitHub Integration"
 description: "Deploy the @devintern/code webhook server for automated PR review handling"
 section: "Server Automation"
 order: 4
-dateModified: 2026-07-03
+dateModified: 2026-08-17
 ---
 
 # GitHub Integration Guide
@@ -69,7 +69,7 @@ Inline review comments are processed _as a batch_ with their parent review — t
 
 ## Prerequisites
 
-1. **GitHub App** configured with webhook permissions
+1. **GitHub App** (`GITHUB_APP_ID` + private key) configured with webhook permissions — required for `@mention` matching and `slug[bot]` commit attribution. A `GITHUB_TOKEN` alone still lets the server call the API, but mention-gated triggers will not fire. See [Configuration](./configuration.md#github-authentication).
 2. **Webhook Secret** - a random string for request verification
 3. **Agent Harness CLI** installed and configured
 4. **Git credentials** with push access to target repositories

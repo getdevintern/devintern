@@ -48,8 +48,9 @@ default_branch = "main"
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 `;
 
-const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN, agent
-# settings. Per-repo overrides go in [repos.env] in workspace.toml.
+const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or
+# GitHub App (GITHUB_APP_ID + private key), agent settings.
+# Per-repo overrides go in [repos.env] in workspace.toml.
 `;
 
 /** Values that should never migrate into the shared workspace env. */

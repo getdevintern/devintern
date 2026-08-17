@@ -54,10 +54,10 @@ JIRA_EMAIL=your-email@company.com
 JIRA_API_TOKEN=your-api-token-here
 # Optional: only set if the agent CLI is not on your PATH
 # AGENT_CLI_PATH=/custom/path/to/claude
-# Optional: For automatic PR creation (see ENV_SETUP.md for details)
-# Option 1: Personal access token
+# Optional: GitHub auth (see ENV_SETUP.md — token and App are not interchangeable)
+# GITHUB_TOKEN is required for TASK_TRACKER=github; enough for CLI PRs.
+# GitHub App is required for @mentions / worker --listen (ID + private key).
 GITHUB_TOKEN=your-github-token-here
-# Option 2: GitHub App (for organizations)
 # GITHUB_APP_ID=123456
 # GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
 # Bitbucket
@@ -402,7 +402,7 @@ devintern MYAPP-456
 - Detects repository platform from git remote URL
 - PR title format: `[TASK-123] Task Summary`
 - PR body includes Claude's implementation details and links back to JIRA
-- GitHub: Requires `GITHUB_TOKEN` or GitHub App authentication (see ENV_SETUP.md)
+- GitHub: Requires `GITHUB_TOKEN` or GitHub App authentication for PR creation (see ENV_SETUP.md). `@mention` matching on any PR needs the App.
 - Bitbucket: Requires `BITBUCKET_TOKEN` (`Repositories: Write`), workspace auto-detected from git remote
 - Can be enabled with `--create-pr` flag
 - Target branch can be specified with `--pr-target-branch` (defaults to 'main')
@@ -501,7 +501,7 @@ The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in sing
 
 7. **"PR creation failed"**
    - Ensure you have the correct token configured:
-     - GitHub: `GITHUB_TOKEN` or GitHub App (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH`)
+     - GitHub: `GITHUB_TOKEN` or GitHub App (`GITHUB_APP_ID` + private key). `TASK_TRACKER=github` requires the token; `@mention` matching requires the App
      - Bitbucket: `BITBUCKET_TOKEN`
    - Check token/App permissions:
      - GitHub classic token: needs `repo` scope
