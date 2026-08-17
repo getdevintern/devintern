@@ -22,10 +22,9 @@ export class MuseBinaryError extends Error {
  * @throws {MuseBinaryError} when missing or non-executable.
  */
 export function assertMuseBinaryAvailable(command: string, cwd: string = process.cwd()): string {
+  let resolved: string;
   try {
-    const resolved = resolveExecutablePathStrict(command, "Muse Code", cwd);
-    accessSync(resolved, constants.X_OK);
-    return resolved;
+    resolved = resolveExecutablePathStrict(command, "Muse Code", cwd);
   } catch (error) {
     if (error instanceof Error && error.message.includes("Muse Code CLI not found")) {
       throw new MuseBinaryError(error.message);
@@ -35,6 +34,25 @@ export function assertMuseBinaryAvailable(command: string, cwd: string = process
         `Install Muse Code and ensure it is on your PATH, or set MUSE_CLI_PATH / AGENT_CLI_PATH.`,
     );
   }
+
+  try {
+    accessSync(resolved, constants.X_OK);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const errno =
+      error && typeof error === "object" && "code" in error
+        ? (error as NodeJS.ErrnoException).code
+        : undefined;
+    if (errno === "ENOENT") {
+      throw new MuseBinaryError(
+        `Muse Code CLI not found at: ${resolved}. ` +
+          `Install Muse Code and ensure it is on your PATH, or set MUSE_CLI_PATH / AGENT_CLI_PATH.`,
+      );
+    }
+    throw new MuseBinaryError(`Muse Code CLI is not executable: ${resolved} (${detail})`);
+  }
+
+  return resolved;
 }
 
 /**

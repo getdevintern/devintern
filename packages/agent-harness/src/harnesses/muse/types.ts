@@ -11,7 +11,10 @@ export interface MuseHarnessOptions {
   reasoningEffort?: MuseReasoningEffort;
   /** Sandbox network mode (`--sandbox-network`). */
   sandboxNetwork?: string;
-  /** Disable OS sandbox (`--disable-sandbox`). */
+  /**
+   * Disable OS sandbox (`--disable-sandbox`). Requires {@link yolo} — disabling
+   * the sandbox without explicit `--yolo` is not allowed.
+   */
   disableSandbox?: boolean;
   /**
    * Skip approval prompts while keeping sandbox (`--disable-approval`).
@@ -69,6 +72,7 @@ export interface MuseJsonlParseState {
 
 /** Extended result for Muse runs. */
 export interface MuseRunResult {
+  /** Human-readable text extracted from JSONL events (never raw JSONL). */
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -76,6 +80,8 @@ export interface MuseRunResult {
   exitState: MuseExitState;
   /** Extracted assistant text (same as stdout for downstream compatibility). */
   normalizedText: string;
+  /** Raw stdout from the Muse process (JSONL when `--json` is used). */
+  rawStdout: string;
   events: MuseJsonlEvent[];
   parseErrors: string[];
   warnings: string[];

@@ -245,12 +245,13 @@ export async function createEngine(
 
     const dumpContext = { harness: config.agent.harness.name, cliPath: config.agent.path };
 
-    if (result.exitCode !== 0) {
+    if (result.exitCode !== 0 || result.maxTurnsReached) {
       const dumpFile = await dumpAgentOutput(label, result, dumpContext);
       throw new EngineError(
         "agent-failed",
         failureMessage,
-        result.stderr.trim() || "Unknown agent error",
+        result.stderr.trim() ||
+          (result.maxTurnsReached ? "Agent hit max-turns limit" : "Unknown agent error"),
         dumpFile ?? undefined,
       );
     }

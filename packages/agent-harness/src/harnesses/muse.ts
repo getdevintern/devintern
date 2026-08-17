@@ -110,6 +110,12 @@ export class MuseHarness implements AgentHarness {
     const muse = options.muse as MuseHarnessOptions | undefined;
     const permissions = resolveMusePermissionFlags(options);
 
+    if (muse?.disableSandbox === true) {
+      warnings.push(
+        "Muse --disable-sandbox is enabled: OS sandbox is disabled. Use only in trusted CI environments.",
+      );
+    }
+
     if (permissions.yolo) {
       warnings.push(
         "Muse --yolo is enabled: approval prompts and OS sandbox are disabled, and the workspace is trusted.",

@@ -100,6 +100,12 @@ export function validateMuseRunOptions(harness: AgentHarness, options: AgentRunO
       "Muse option muse.allowWorkspaceSwitch requires muse.sessionId for session continuation.",
     );
   }
+
+  if (typed?.disableSandbox === true && typed?.yolo !== true) {
+    throw new MuseConfigError(
+      "muse.disableSandbox requires muse.yolo=true. Disabling the OS sandbox is only allowed with explicit --yolo.",
+    );
+  }
 }
 
 /**

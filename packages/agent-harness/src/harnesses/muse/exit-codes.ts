@@ -43,12 +43,16 @@ export function mapMuseExitState(
     cancelled?: boolean;
   } = {},
 ): MuseExitState {
-  if (options.stderr && detectMuseSandboxFailure(options.stderr)) {
-    return "sandbox_unavailable";
-  }
-
   if (options.timedOut || options.cancelled) {
     return "interrupted";
+  }
+
+  if (options.stepLimitReached) {
+    return "step_limit";
+  }
+
+  if (options.stderr && detectMuseSandboxFailure(options.stderr)) {
+    return "sandbox_unavailable";
   }
 
   if (exitCode === 0) {
@@ -64,9 +68,6 @@ export function mapMuseExitState(
   }
 
   if (exitCode === 1) {
-    if (options.stepLimitReached) {
-      return "step_limit";
-    }
     return "failed";
   }
 

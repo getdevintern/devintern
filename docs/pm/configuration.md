@@ -158,7 +158,11 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`.
 
-**Muse Code note:** Harness id is `muse`; the CLI binary is `muse`. Install and authenticate per [Muse Code authentication](https://dev.meta.ai/docs/muse-code/auth), then set `AGENT_HARNESS=muse`. devpm uses the same headless `muse exec --json` integration as devintern. Unattended runs default to `--disable-approval`; `--yolo` is opt-in only.
+**Muse Code note:** Harness id is `muse`; the CLI binary is `muse`. Install and authenticate per [Muse Code authentication](https://dev.meta.ai/docs/muse-code/auth), then set `AGENT_HARNESS=muse`. Map DevIntern `--max-turns` to Muse `--max-model-steps`. Muse has no native plan/readonly headless mode. On Linux CI, sandboxed runs need working Bubblewrap and a non-musl Muse build; see [Muse permissions](https://dev.meta.ai/docs/muse-code/permissions#sandbox). Optional path override: `MUSE_CLI_PATH`. Unattended runs default to `--disable-approval` (sandbox stays on). `--yolo` disables both approval and sandbox and must be enabled explicitly in harness options — never use it on untrusted PR/fork checkouts. Muse exit code `0` means the turn finished, not that your tests passed.
+
+### Muse integration status
+
+`@getdevintern/pm` and `@devintern/pm-desktop` run Muse via the dedicated `runAgentMuse` path (`runAgentNode` / `runAgentBun`, `muse exec --json`), which parses JSONL stdout incrementally, maps Muse-specific exit states, and auto-uses `--prompt-file` for large prompts (tune with `MUSE_PROMPT_FILE_THRESHOLD_BYTES`). **`devintern` (`@getdevintern/code`) still uses the generic agent spawn path today** — see [Code configuration](../code/configuration.md#muse-integration-status).
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 

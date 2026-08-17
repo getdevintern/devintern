@@ -28,6 +28,7 @@ describe("resolveHarness", () => {
     delete process.env.ANTIGRAVITY_CLI_PATH;
     delete process.env.AGY_CLI_PATH;
     delete process.env.GEMINI_CLI_PATH;
+    delete process.env.MUSE_CLI_PATH;
     warnings = [];
     console.warn = (msg?: unknown) => {
       warnings.push(String(msg));
@@ -172,6 +173,13 @@ describe("resolveHarness", () => {
     process.env.AGY_CLI_PATH = "/usr/local/bin/agy";
     const result = resolveHarness({ harnessName: "antigravity" });
     expect(result.path).toBe("/usr/local/bin/agy");
+  });
+
+  test("uses MUSE_CLI_PATH for muse harness", () => {
+    process.env.MUSE_CLI_PATH = "/opt/muse";
+    const result = resolveHarness({ harnessName: "muse" });
+    expect(result.harness.name).toBe("muse");
+    expect(result.path).toBe("/opt/muse");
   });
 
   test("ignores bare GEMINI_CLI_PATH=gemini and falls back to agy with warning", () => {

@@ -17,7 +17,9 @@ import {
 import { cleanupMusePromptFile, planMusePromptDelivery } from "../harnesses/muse/prompt-file.js";
 import { MuseConfigError } from "../harnesses/muse/validation.js";
 import type { MuseRunResult } from "../harnesses/muse/types.js";
+import { UnsupportedAgentModeError } from "../modes.js";
 import { reapTree, spawnReapable } from "../process-reaper.js";
+import { resolveExecutablePathWithRetry } from "../resolver.js";
 import type { AgentHarness, AgentRunOptions } from "../types.js";
 
 export interface MuseRunnerOptions extends AgentRunOptions {
@@ -54,9 +56,15 @@ export async function runAgentMuse(
     throw new Error("runAgentMuse requires the Muse harness");
   }
 
+  const spawnCwd = options.cwd ?? options.workingDir;
+
   let resolvedPath: string;
   try {
-    resolvedPath = assertMuseBinaryAvailable(executablePath, options.cwd);
+    resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
+      cwd: spawnCwd,
+      displayName: harness.displayName,
+    });
+    resolvedPath = assertMuseBinaryAvailable(resolvedPath, spawnCwd);
   } catch (error) {
     if (error instanceof Error) {
       return {
@@ -66,6 +74,7 @@ export async function runAgentMuse(
         maxTurnsReached: false,
         exitState: "binary_missing",
         normalizedText: "",
+        rawStdout: "",
         events: [],
         parseErrors: [],
         warnings: [],
@@ -96,7 +105,7 @@ export async function runAgentMuse(
   try {
     baseArgs = harness.buildArgs(options);
   } catch (error) {
-    if (error instanceof MuseConfigError) {
+    if (error instanceof MuseConfigError || error instanceof UnsupportedAgentModeError) {
       return {
         stdout: "",
         stderr: error.message,
@@ -104,6 +113,7 @@ export async function runAgentMuse(
         maxTurnsReached: false,
         exitState: "invalid_config",
         normalizedText: "",
+        rawStdout: "",
         events: [],
         parseErrors: [],
         warnings,
@@ -137,6 +147,7 @@ export async function runAgentMuse(
     let rawStdout = "";
     let stderr = "";
     let settled = false;
+    let lastStreamedTextLength = 0;
 
     const parseState = createMuseJsonlParseState();
     const lineBuffer = { partial: "" };
@@ -154,7 +165,7 @@ export async function runAgentMuse(
       });
 
       const normalizedText = museNormalizedText(parseState);
-      const code = exitCode ?? 1;
+      let code = exitCode ?? 1;
       const exitState = mapMuseExitState(code, {
         timedOut,
         cancelled,
@@ -162,17 +173,28 @@ export async function runAgentMuse(
         stderr,
       });
 
+      if ((parseState.stepLimitReached || exitState === "step_limit") && code === 0) {
+        code = 1;
+      }
+
       if (exitState !== "completed") {
         logMuse(describeMuseExitState(exitState), options);
       }
 
+      if (parseState.parseErrors.length > 0) {
+        for (const parseError of parseState.parseErrors) {
+          console.warn(`⚠️  Muse JSONL parse warning: ${parseError}`);
+        }
+      }
+
       resolve({
-        stdout: normalizedText || rawStdout,
+        stdout: normalizedText,
         stderr,
         exitCode: code,
         maxTurnsReached: parseState.stepLimitReached || exitState === "step_limit",
         exitState,
-        normalizedText: normalizedText || rawStdout,
+        normalizedText,
+        rawStdout,
         events: parseState.events,
         parseErrors: parseState.parseErrors,
         warnings,
@@ -181,7 +203,7 @@ export async function runAgentMuse(
     };
 
     const spawnOptions: SpawnOptions = {
-      cwd: options.cwd,
+      cwd: spawnCwd,
       stdio: ["ignore", "pipe", "pipe"],
     };
 
@@ -199,6 +221,7 @@ export async function runAgentMuse(
         maxTurnsReached: false,
         exitState: "binary_missing",
         normalizedText: "",
+        rawStdout: "",
         events: [],
         parseErrors: [],
         warnings,
@@ -231,21 +254,15 @@ export async function runAgentMuse(
         logMuse(`event: ${event.type ?? "unknown"}`, options);
       });
 
-      const textChunk = museNormalizedText(parseState);
-      if (options.displayRealtime && textChunk.length > rawStdout.length - chunk.length) {
-        // Stream newly extracted text when possible.
-        const prevLen = rawStdout.length - chunk.length;
-        const delta = textChunk.slice(Math.max(0, textChunk.length - chunk.length));
-        if (delta) {
+      const normalizedText = museNormalizedText(parseState);
+      if (normalizedText.length > lastStreamedTextLength) {
+        const delta = normalizedText.slice(lastStreamedTextLength);
+        lastStreamedTextLength = normalizedText.length;
+        if (options.displayRealtime) {
           process.stdout.write(delta);
-        } else if (prevLen === 0) {
-          process.stdout.write(chunk);
         }
-      } else if (options.displayRealtime) {
-        process.stdout.write(chunk);
+        options.onStdout?.(delta);
       }
-
-      options.onStdout?.(chunk);
     });
 
     proc.stderr?.on("data", (data: Buffer) => {
@@ -272,6 +289,7 @@ export async function runAgentMuse(
         maxTurnsReached: parseState.stepLimitReached,
         exitState,
         normalizedText: museNormalizedText(parseState),
+        rawStdout,
         events: parseState.events,
         parseErrors: parseState.parseErrors,
         warnings,

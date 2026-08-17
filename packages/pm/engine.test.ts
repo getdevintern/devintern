@@ -202,6 +202,56 @@ describe("createEngine", () => {
     expect((caught as EngineError).detail).toBe("boom");
   });
 
+  test("generateStory throws agent-failed when maxTurnsReached despite exit 0", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          exitCode: 0,
+          stderr: "Muse hit --max-model-steps limit",
+          maxTurnsReached: true,
+        }),
+      },
+    );
+
+    await expect(
+      engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "technical",
+      }),
+    ).rejects.toMatchObject({
+      code: "agent-failed",
+      detail: "Muse hit --max-model-steps limit",
+    });
+  });
+
+  test("generateStory throws agent-failed with step-limit detail when stderr is empty", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          exitCode: 1,
+          stderr: "",
+          maxTurnsReached: true,
+        }),
+      },
+    );
+
+    await expect(
+      engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "technical",
+      }),
+    ).rejects.toMatchObject({
+      code: "agent-failed",
+      detail: "Agent hit max-turns limit",
+    });
+  });
+
   test("generateStory streams agent chunks through events", async () => {
     const chunks: Array<[string, string]> = [];
     const engine = await createEngine(

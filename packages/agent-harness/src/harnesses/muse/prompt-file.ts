@@ -2,9 +2,9 @@
  * Secure prompt file handling for Muse Code headless runs.
  */
 
-import { chmodSync, mkdtempSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { DEFAULT_PROMPT_FILE_THRESHOLD_BYTES } from "./constants.js";
 
 /** Result of prompt delivery planning. */
@@ -39,6 +39,11 @@ export function musePromptFileThreshold(): number {
  */
 export function createMusePromptFile(prompt: string): string {
   const dir = mkdtempSync(join(tmpdir(), "devintern-muse-prompt-"));
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // Best-effort on platforms that ignore mode on create.
+  }
   const filePath = join(dir, "prompt.txt");
   writeFileSync(filePath, prompt, { encoding: "utf8", mode: 0o600 });
   try {
@@ -58,8 +63,9 @@ export function cleanupMusePromptFile(filePath: string | undefined): void {
   if (!filePath) {
     return;
   }
+  const dir = dirname(filePath);
   try {
-    unlinkSync(filePath);
+    rmSync(dir, { recursive: true, force: true });
   } catch {
     // Already removed or never created.
   }
