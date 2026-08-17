@@ -30,12 +30,13 @@ This file provides guidance to Claude Code when working with this repository.
 - `ASANA_API_TOKEN` - Asana personal access token (required when `TASK_TRACKER=asana`); optional `ASANA_DEFAULT_PROJECT_GID`, `ASANA_STORY_POINTS_FIELD`
 - `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT` - Azure DevOps credentials (required when `TASK_TRACKER=azure-devops`)
 - `LINEAR_API_KEY` - Linear personal API key (required when `TASK_TRACKER=linear`)
-- `GITHUB_REPO` - Target `owner/repo` for GitHub Issues (required when `TASK_TRACKER=github`; reuses `GITHUB_TOKEN`)
+- `GITHUB_REPO` - Target `owner/repo` for GitHub Issues (required when `TASK_TRACKER=github`; requires `GITHUB_TOKEN`, App credentials cannot substitute)
 - `GITHUB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitHub transitions
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - JIRA credentials
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions
-- `GITHUB_TOKEN` or `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` - GitHub auth
+- `GITHUB_TOKEN` - Personal / interactive GitHub PAT (required for `TASK_TRACKER=github`; enough for free CLI PRs and own-PR review polling)
+- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Team / unattended-automation GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, worker `--listen` uses App first). See https://devintern.com/pricing/
 - `BITBUCKET_TOKEN` - Bitbucket auth
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)

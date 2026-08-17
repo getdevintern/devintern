@@ -4,7 +4,7 @@ sidebarLabel: "GitHub Issues Integration"
 description: "Fetch GitHub issues, track status labels, implement with your coding agent, and open the PR in the same repository."
 section: "Code"
 order: 5
-dateModified: 2026-07-23
+dateModified: 2026-08-17
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
@@ -38,6 +38,8 @@ GITHUB_REPO=owner/repo
 ```
 
 The same `GITHUB_TOKEN` used for pull request creation works here. It needs the `repo` scope (classic token) or `Issues: Read and write` plus `Pull requests: Read and write` (fine-grained token). `GITHUB_REPO` is the repository whose issues you want to implement, in `owner/repo` form.
+
+GitHub App credentials (`GITHUB_APP_ID` + private key) cannot substitute for this tracker. The Issues client only accepts `GITHUB_TOKEN`. Use a token for personal / interactive CLI use; add the App for team / unattended automation (`@mention` matching, `slug[bot]` commits). See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
 
 ### 3. Configure status labels
 
@@ -111,7 +113,7 @@ GitHub Issues has no estimation field, so `--estimate` runs in comment-only mode
 
 **"Missing required GitHub environment variables"**
 
-Ensure `GITHUB_TOKEN` and `GITHUB_REPO` are set in `.devintern-code/.env`.
+Ensure `GITHUB_TOKEN` and `GITHUB_REPO` are set in `.devintern-code/.env`. A GitHub App ID and private key are not enough for this tracker.
 
 **"Label \"In Progress\" not found in the repository"**
 

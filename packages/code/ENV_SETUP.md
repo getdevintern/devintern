@@ -49,13 +49,36 @@ Configure status transitions in `.devintern-code/settings.json` using the board 
 }
 ```
 
-## Optional Environment Variables (PR Integration)
+## Optional Environment Variables (GitHub / PR Integration)
+
+**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). Enough for free CLI use from your terminal.
+
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). Needed for `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+
+The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
+
+| What you want | Need |
+| --- | --- |
+| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
+| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
+| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` (solo) or GitHub App (if already configured) |
+| `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
+| Commits attributed to `slug[bot]` | GitHub App |
+
+Set both when you run mention-driven automation and also use GitHub Issues as a tracker.
+
+**Precedence when both are set:**
+
+- CLI and PR creation use `GITHUB_TOKEN`
+- `devintern worker --listen` and the webhook server prefer the App so the bot identity resolves
+
+Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
 
 ```bash
-# Option 1: GitHub Personal Access Token (for individual users)
+# Personal access token (required for TASK_TRACKER=github)
 GITHUB_TOKEN=your-github-token-here
 
-# Option 2: GitHub App Authentication (for organizations)
+# GitHub App (required for @mentions / slug[bot] attribution)
 GITHUB_APP_ID=123456
 GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
 # Or base64-encoded: GITHUB_APP_PRIVATE_KEY_BASE64=LS0tLS1CRUdJTi4uLg==
@@ -66,9 +89,9 @@ BITBUCKET_TOKEN=your-bitbucket-token    # For Bitbucket PR creation
 
 **Note:** Task tracker status transitions are configured per-project in `settings.json`. The file supports tracker-specific sections (e.g., `jira`, `linear`, `trello`) based on the `TASK_TRACKER` environment variable.
 
-### Option 1: GitHub Personal Access Token
+### GitHub Personal Access Token
 
-When creating a GitHub personal access token, you need the following permissions:
+For personal / interactive CLI use. When creating a GitHub personal access token, you need the following permissions:
 
 **Classic Personal Access Token:**
 
@@ -79,6 +102,7 @@ When creating a GitHub personal access token, you need the following permissions
 
 - **Pull requests**: Read and write
 - **Contents**: Read (needed to read branch info for the PR)
+- **Issues**: Read and write (only when `TASK_TRACKER=github`)
 
 To create a GitHub token:
 
@@ -88,23 +112,25 @@ To create a GitHub token:
 4. Grant the permissions listed above
 5. Set the token as `GITHUB_TOKEN` in your `.env` file
 
-### Option 2: GitHub App Authentication
+### GitHub App Authentication
 
-For organizations that want centralized control, create a GitHub App instead of using individual tokens.
+For team / unattended automation (mention-driven worker, webhook / `worker --listen`, `slug[bot]` attribution), create a GitHub App.
 
-**Required App permissions:**
+**Required App permissions (PR creation):**
 
 - **Contents**: Read (to check branches)
 - **Pull requests**: Read and write (to create PRs)
+
+Mention matching and the webhook server also need **Pull request review comments** and **Issue comments**. See [GitHub Integration](https://devintern.com/docs/code/github-integration).
 
 **Setup steps:**
 
 1. Go to your organization's Settings → Developer settings → GitHub Apps → New GitHub App
 2. Set repository permissions: Contents (Read), Pull requests (Read and write)
-3. Disable webhooks (not needed)
+3. Disable webhooks unless you are running `devintern worker --listen`
 4. Generate a private key after creating the App
 5. Install the App on your repositories
-6. Configure in your `.env`:
+6. Configure **both** the ID and the key in your `.env`:
    ```bash
    GITHUB_APP_ID=123456
    GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
@@ -118,8 +144,6 @@ GITHUB_APP_PRIVATE_KEY_BASE64=LS0tLS1CRUdJTi4uLg==
 ```
 
 To encode: `base64 -i your-key.pem` (macOS) or `base64 -w 0 your-key.pem` (Linux)
-
-**Note:** If both `GITHUB_TOKEN` and GitHub App credentials are set, `GITHUB_TOKEN` takes precedence.
 
 ### Bitbucket Token Permissions
 

@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
 section: "Code"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-08-17
 ---
 
 # @devintern/code Configuration
@@ -81,37 +81,61 @@ MARKDOWN_TASKS_DIR=/path/to/tasks
 
 You can also pass file paths directly as arguments without setting `TASK_TRACKER=markdown` at all. In that mode no `.devintern-code/.env` is needed for tracker credentials. See the [Markdown File Tasks guide](./markdown-tasks.md) for details.
 
-## Optional PR Integration
+## GitHub authentication
 
-Choose one authentication method for pull request creation:
+**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). That is enough for free CLI use from your terminal (`devintern TICKET-123`, `--create-pr`).
+
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+
+The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
+
+| What you want | Need |
+| --- | --- |
+| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
+| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
+| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` (solo) or GitHub App (if already configured) |
+| `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
+| Commits attributed to `slug[bot]` | GitHub App |
+
+Set both when you run mention-driven automation and also use GitHub Issues as a tracker. See [GitHub Issues Integration](./github-issues-integration.md) and [GitHub Integration](./github-integration.md).
+
+**Precedence when both are set:**
+
+- CLI and PR creation use `GITHUB_TOKEN`
+- `devintern worker --listen` and the webhook server prefer the App so the bot identity (`slug[bot]`) resolves
+
+Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
 
 ### GitHub Personal Access Token
 
-For individual users:
+For personal / interactive CLI use, and for `TASK_TRACKER=github`:
 
 ```bash
 GITHUB_TOKEN=your-github-token
 ```
 
 - **Classic token**: Requires `repo` scope
-- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read` permissions
+- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
 ### GitHub App Authentication
 
-For organizations:
+For team / unattended automation (`@mention` matching, webhook / `worker --listen`, `slug[bot]` commit attribution):
 
 ```bash
 GITHUB_APP_ID=123456
 GITHUB_APP_PRIVATE_KEY_PATH=/secure/path/to/your-app.private-key.pem
 ```
 
+Both the ID and a private key are required.
+
 **Benefits:**
 
-- No individual tokens needed
+- Can create PRs without a personal token (team/automation setups)
 - Fine-grained permissions
 - Centralized control
 - Audit trail
+- Resolves the bot identity required for `@mention` matching
 
 **Setup steps:**
 
@@ -122,7 +146,7 @@ GITHUB_APP_PRIVATE_KEY_PATH=/secure/path/to/your-app.private-key.pem
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation and PR creation. If you also run the webhook server to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation and PR creation. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
