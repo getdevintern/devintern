@@ -22,6 +22,7 @@ describe("validateRequiredTools", () => {
         augmented = true;
       },
       findGit: () => "/usr/bin/git",
+      probeGit: () => true,
       listInstalled: () => [claude],
       listAll: () => [claude, opencode],
     });
@@ -32,6 +33,7 @@ describe("validateRequiredTools", () => {
     const result = validateRequiredTools({
       augmentPath: () => {},
       findGit: () => "/usr/bin/git",
+      probeGit: () => true,
       listInstalled: () => [claude, opencode],
       listAll: () => [claude, opencode],
     });
@@ -73,6 +75,7 @@ describe("validateRequiredTools", () => {
     const result = validateRequiredTools({
       augmentPath: () => {},
       findGit: () => "/usr/bin/git",
+      probeGit: () => true,
       listInstalled: () => [],
       listAll: () => [claude, opencode],
     });
@@ -88,6 +91,7 @@ describe("validateRequiredTools", () => {
     const result = validateRequiredTools({
       augmentPath: () => {},
       findGit: () => "/opt/homebrew/bin/git",
+      probeGit: () => true,
       listInstalled: () => [opencode],
       listAll: () => [claude, opencode],
     });
@@ -106,6 +110,82 @@ describe("validateRequiredTools", () => {
     } finally {
       process.env.PATH = original;
     }
+  });
+
+  test("fails when Git resolves on PATH but cannot be invoked", () => {
+    const result = validateRequiredTools({
+      augmentPath: () => {},
+      findGit: () => "/usr/bin/git",
+      probeGit: () => false,
+      listInstalled: () => [claude],
+      listAll: () => [claude],
+      platform: "darwin",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.tools.find((tool) => tool.id === "git")?.found).toBe(false);
+  });
+
+  test.each([
+    ["global", { AGENT_HARNESS: "opencode", AGENT_CLI_PATH: "/custom/global-agent" }],
+    ["harness-specific", { AGENT_HARNESS: "opencode", OPENCODE_CLI_PATH: "/custom/opencode" }],
+  ])("honors a process-level %s CLI override for the active harness", (_kind, env) => {
+    const previousHarness = process.env.AGENT_HARNESS;
+    const previousGlobalPath = process.env.AGENT_CLI_PATH;
+    const previousHarnessPath = process.env.OPENCODE_CLI_PATH;
+    delete process.env.AGENT_CLI_PATH;
+    delete process.env.OPENCODE_CLI_PATH;
+    Object.assign(process.env, env);
+    try {
+      const result = validateRequiredTools({
+        augmentPath: () => {},
+        findGit: () => "/usr/bin/git",
+        probeGit: () => true,
+        listInstalled: ({ currentHarnessName } = {}) =>
+          currentHarnessName === "opencode" &&
+          (process.env.AGENT_CLI_PATH || process.env.OPENCODE_CLI_PATH)
+            ? [opencode]
+            : [],
+        listAll: () => [claude, opencode],
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.installedHarnesses).toContainEqual({
+        name: "opencode",
+        displayName: "OpenCode",
+      });
+    } finally {
+      if (previousHarness === undefined) delete process.env.AGENT_HARNESS;
+      else process.env.AGENT_HARNESS = previousHarness;
+      if (previousGlobalPath === undefined) delete process.env.AGENT_CLI_PATH;
+      else process.env.AGENT_CLI_PATH = previousGlobalPath;
+      if (previousHarnessPath === undefined) delete process.env.OPENCODE_CLI_PATH;
+      else process.env.OPENCODE_CLI_PATH = previousHarnessPath;
+    }
+  });
+
+  test("honors project-local active harness and CLI path overrides", () => {
+    const originalHarness = process.env.AGENT_HARNESS;
+    const originalPath = process.env.AGENT_CLI_PATH;
+    const result = validateRequiredTools({
+      augmentPath: () => {},
+      findGit: () => "/usr/bin/git",
+      probeGit: () => true,
+      envOverrides: {
+        AGENT_HARNESS: "opencode",
+        AGENT_CLI_PATH: "/project/local-agent",
+      },
+      listInstalled: ({ currentHarnessName } = {}) =>
+        currentHarnessName === "opencode" && process.env.AGENT_CLI_PATH === "/project/local-agent"
+          ? [opencode]
+          : [],
+      listAll: () => [claude, opencode],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.installedHarnesses).toEqual([{ name: "opencode", displayName: "OpenCode" }]);
+    expect(process.env.AGENT_HARNESS).toBe(originalHarness);
+    expect(process.env.AGENT_CLI_PATH).toBe(originalPath);
   });
 
   test("reports both required tools missing without a stack trace", () => {

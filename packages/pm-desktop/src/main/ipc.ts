@@ -226,7 +226,22 @@ export function registerIpcHandlers(): void {
   });
 
   handle(IPC_CHANNELS.validateRequiredTools, async () => {
-    return validateRequiredTools();
+    const settings = await readSettings();
+    let agentEnv: Record<string, string> = {};
+    if (settings.lastProjectDir) {
+      try {
+        const { env } = await readProjectEnv(settings.lastProjectDir);
+        agentEnv = Object.fromEntries(
+          Object.entries(env).filter(
+            ([key]) =>
+              key === "AGENT_HARNESS" || key === "AGENT_CLI_PATH" || key.endsWith("_CLI_PATH"),
+          ),
+        );
+      } catch {
+        // A stale/unreadable remembered project must not hide process-level tools.
+      }
+    }
+    return validateRequiredTools({ envOverrides: agentEnv });
   });
 
   handle(IPC_CHANNELS.getRecentProjectDirs, async () => {

@@ -11,5 +11,6 @@ export function useToolValidation() {
   return useQuery({
     queryKey: qk.toolValidation,
     queryFn: async () => unwrap(await window.pm.validateRequiredTools()),
+    refetchOnWindowFocus: "always",
   });
 }

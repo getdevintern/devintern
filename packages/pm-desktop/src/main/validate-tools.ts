@@ -3,8 +3,14 @@
  * uses to spawn agents (including {@link augmentPath} GUI PATH fixes).
  */
 
-import { findInPath, listHarnesses, listInstalledHarnesses } from "@devintern/agent-harness";
-import type { AgentHarness } from "@devintern/agent-harness";
+import { spawnSync } from "node:child_process";
+import {
+  findInPath,
+  getHarness,
+  listHarnesses,
+  listInstalledHarnesses,
+} from "@devintern/agent-harness";
+import type { AgentHarness, ListInstalledHarnessesOptions } from "@devintern/agent-harness";
 import { GIT_DOWNLOAD_URL, gitInstallHint, harnessInstallHint } from "../shared/tool-validation.ts";
 import type { ToolCheck, ToolValidation } from "../shared/tool-validation.ts";
 import { augmentPath } from "./path-fix.ts";
@@ -12,9 +18,37 @@ import { augmentPath } from "./path-fix.ts";
 export interface ValidateToolsDeps {
   augmentPath?: () => void;
   findGit?: () => string | null;
-  listInstalled?: () => readonly AgentHarness[];
+  probeGit?: (path: string) => boolean;
+  listInstalled?: (options?: ListInstalledHarnessesOptions) => readonly AgentHarness[];
   listAll?: () => readonly AgentHarness[];
+  envOverrides?: Readonly<Record<string, string>>;
   platform?: NodeJS.Platform;
+}
+
+function probeGit(path: string): boolean {
+  const result = spawnSync(path, ["--version"], {
+    env: process.env,
+    stdio: "ignore",
+    timeout: 3_000,
+  });
+  return result.status === 0;
+}
+
+/** Apply project-local agent settings only for the duration of a synchronous probe. */
+function withEnvOverrides<T>(overrides: Readonly<Record<string, string>>, probe: () => T): T {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return probe();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 function toHintSource(harness: AgentHarness): {
@@ -38,8 +72,17 @@ function toHintSource(harness: AgentHarness): {
 export function validateRequiredTools(deps: ValidateToolsDeps = {}): ToolValidation {
   (deps.augmentPath ?? augmentPath)();
 
-  const gitPath = (deps.findGit ?? (() => findInPath("git")))();
-  const installed = [...(deps.listInstalled ?? (() => listInstalledHarnesses()))()];
+  const gitCandidate = (deps.findGit ?? (() => findInPath("git")))();
+  const gitPath = gitCandidate && (deps.probeGit ?? probeGit)(gitCandidate) ? gitCandidate : null;
+  const installed = withEnvOverrides(deps.envOverrides ?? {}, () => {
+    const configuredHarnessName = process.env.AGENT_HARNESS ?? "claude-code";
+    const currentHarnessName = getHarness(configuredHarnessName)?.name ?? configuredHarnessName;
+    return [
+      ...(deps.listInstalled ?? ((options) => listInstalledHarnesses(options)))({
+        currentHarnessName,
+      }),
+    ];
+  });
   const registry = [...(deps.listAll ?? (() => listHarnesses()))()];
   const platform = deps.platform ?? process.platform;
 
