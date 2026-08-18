@@ -5,8 +5,14 @@
 /** Product name shown in the About title and modal. */
 export const ABOUT_PRODUCT_NAME = "DevIntern";
 
-/** Window / menu product label (matches BrowserWindow title). */
+/** Base product label used by the window title and application menu. */
 export const APP_DISPLAY_NAME = "DevIntern PM";
+
+/** Build a native window title, omitting the suffix when no usable version is available. */
+export function formatAppWindowTitle(version: unknown): string {
+  const normalizedVersion = typeof version === "string" ? version.trim() : "";
+  return normalizedVersion ? `${APP_DISPLAY_NAME} v${normalizedVersion}` : APP_DISPLAY_NAME;
+}
 
 /**
  * Public homepage opened from About. UTM tags match other pm-desktop surfaces
