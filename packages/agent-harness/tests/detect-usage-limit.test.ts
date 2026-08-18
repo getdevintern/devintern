@@ -77,6 +77,10 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", "Error: 429 Too Many Requests").limited).toBe(true);
   });
 
+  test("detects an API error prefix on stderr", () => {
+    expect(detectUsageLimit("", "API Error: 429 Too Many Requests").limited).toBe(true);
+  });
+
   test("detects an HTTP 429 diagnostic on stdout", () => {
     expect(detectUsageLimit("HTTP 429: Too Many Requests", "").limited).toBe(true);
   });
@@ -104,6 +108,32 @@ describe("detectUsageLimit", () => {
     const source = "docs/troubleshooting.md:43:Claude usage limit reached; retry later.";
 
     expect(detectUsageLimit(source, "").limited).toBe(false);
+    expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores usage-limit phrases in source emitted by Codex tools", () => {
+    const source = [
+      '    super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);',
+      'throw new Error("Claude usage limit reached");',
+      '"usage limit reached"',
+      "The previous run reported Claude usage limit reached but recovered.",
+      "Agent usage limit reached. Stopping; will retry on the next scheduled run.",
+    ].join("\n");
+
+    expect(detectUsageLimit(source, "").limited).toBe(false);
+    // Codex writes its formatted tool transcript to stderr.
+    expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores compact diff additions without whitespace after the marker", () => {
+    const diff = '+throw new Error("Claude usage limit reached");';
+
+    expect(detectUsageLimit("", diff).limited).toBe(false);
+  });
+
+  test("ignores provider-like prose on stderr", () => {
+    const source = "The test expects Too Many Requests but received a socket error.";
+
     expect(detectUsageLimit("", source).limited).toBe(false);
   });
 

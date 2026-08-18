@@ -2938,6 +2938,9 @@ async function runEstimation(
 
         const usage = detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
+          if (usage.matchedLine) {
+            console.log(`   Matched output: ${usage.matchedLine}`);
+          }
           reject(new UsageLimitError(usage.resetsAt));
           return;
         }
@@ -3422,6 +3425,9 @@ async function runAgentHarness(
               usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""
             }`,
           );
+          if (usage.matchedLine) {
+            console.log(`   Matched output: ${usage.matchedLine}`);
+          }
           reject(new UsageLimitError(usage.resetsAt));
           return;
         }

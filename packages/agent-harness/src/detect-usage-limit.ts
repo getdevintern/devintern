@@ -38,14 +38,12 @@
  */
 
 const USAGE_LIMIT_PATTERNS = [
-  // "You've hit your <session|fast|weekly|monthly spend|5-hour|usage> limit"
-  /hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit/i,
-  // "You have reached your usage limit"
-  /reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit/i,
-  // "usage limit reached", "fast limit reached", "session limit reached"
-  /(?:usage|session|account|fast|usage credit) limit reached/i,
-  // generic Claude/Anthropic phrasing
-  /claude (?:ai )?usage limit/i,
+  // Keep subscription messages anchored to the whole line. Codex writes its
+  // tool transcript to stderr, so a substring match also sees source such as
+  // `super("Agent usage limit reached")` as though it were a CLI diagnostic.
+  /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:error:\s*)?you have reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:error:\s*)?(?:(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
 ] as const;
 
 // These are intentionally evaluated line-by-line and only when the line looks
@@ -63,12 +61,9 @@ const PROVIDER_LIMIT_PATTERNS = [
 
 const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
 
-type OutputStream = "stdout" | "stderr";
-
 interface OutputLine {
   raw: string;
   normalized: string;
-  stream: OutputStream;
 }
 
 const RESET_PATTERNS = [
@@ -115,13 +110,12 @@ function stripAnsi(text: string): string {
 }
 
 /**
- * Split one captured stream into matchable lines with their source stream.
+ * Split one captured stream into matchable lines.
  */
-function outputLines(text: string, stream: OutputStream): OutputLine[] {
+function outputLines(text: string): OutputLine[] {
   return text.split(/\r?\n/).map((raw) => ({
     raw,
     normalized: stripAnsi(raw),
-    stream,
   }));
 }
 
@@ -135,11 +129,13 @@ function isSourceOrDiffLine(line: string): boolean {
   const trimmed = line.trim();
   return (
     /^(?:diff --git|index\b|---\s|\+\+\+\s|@@\s)/i.test(trimmed) ||
-    /^[+-]{1,3}\s/.test(trimmed) ||
+    /^[+-](?![+-])/.test(trimmed) ||
     /^(?:\/\/|\/\*|\*|#|>|```|~~~)/.test(trimmed) ||
     // `rg -n`, grep, and compiler-style locations: path:line[:column]:content.
     /^(?:(?:\.?\.?\/|\/)?(?:[^:\s]+\/)+[^:\s]+|[^:\s]+\.[a-z\d]+):\d+(?::\d+)?:/i.test(trimmed) ||
     /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||
+    /^(?:super|throw\s+new\s+Error|[\w$.]+\.(?:error|warn|log))\s*\(/.test(trimmed) ||
+    /^(?:["'`]).*(?:["'`])[,;)]?$/.test(trimmed) ||
     /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
     /=>/.test(trimmed)
   );
@@ -156,19 +152,15 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
     return false;
   }
 
-  // Provider CLIs commonly write transport failures to stderr.
-  if (line.stream === "stderr") {
-    return true;
-  }
-
-  // Also accept structured or explicitly diagnostic stdout from SDK-backed
-  // harnesses (for example AI_RetryError and JSON error responses).
+  // Accept structured or explicitly diagnostic output from SDK-backed
+  // harnesses (for example AI_RetryError and JSON error responses). Do not
+  // inherently trust stderr: Codex uses it for its complete tool transcript.
   if (
-    /^(?:error|fatal|warning)\b/i.test(trimmed) ||
+    /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
     /^HTTP\s*429\b/i.test(trimmed) ||
     /^\s*[{"[].*(?:rate_limit|quota).*[}\]]\s*$/i.test(trimmed) ||
-    /\b(?:error|exception|failed|failure|last error|provider|response|returned|status|retry)\b/i.test(
+    /\b(?:last error|provider (?:error|response)|response status|returned (?:an? )?(?:error|status)|request failed|retrying)\b/i.test(
       trimmed,
     )
   ) {
@@ -189,7 +181,7 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
 function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefined {
   // Check stderr first because it is the conventional diagnostic channel, then
   // inspect stdout for explicit subscription-limit and structured SDK errors.
-  const lines = [...outputLines(stderr, "stderr"), ...outputLines(stdout, "stdout")];
+  const lines = [...outputLines(stderr), ...outputLines(stdout)];
 
   return lines.find((line) => {
     const normalized = line.normalized.trim();
