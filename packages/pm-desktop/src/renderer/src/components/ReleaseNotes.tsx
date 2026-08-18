@@ -73,6 +73,10 @@ const ALLOWED_TAGS = new Set([
   "u",
 ]);
 
+const MAX_RELEASE_NOTES_HTML_LENGTH = 20_000;
+const MAX_RELEASE_NOTES_DEPTH = 24;
+const MAX_RELEASE_NOTES_NODES = 1_000;
+
 /** Release-note links are external, so only absolute HTTP(S) URLs are usable. */
 export function isSafeReleaseNotesUrl(value: string): boolean {
   const trimmed = value.trim();
@@ -90,11 +94,34 @@ interface RenderResult {
   nodes: ReactNode[];
 }
 
-function renderNodes(nodes: NodeListOf<ChildNode>, keyPrefix: string): RenderResult {
+interface RenderBudget {
+  exceeded: boolean;
+  remainingNodes: number;
+}
+
+function renderNodes(
+  nodes: NodeListOf<ChildNode>,
+  keyPrefix: string,
+  depth: number,
+  budget: RenderBudget,
+): RenderResult {
   const output: ReactNode[] = [];
   let meaningful = false;
 
-  for (const [index, node] of Array.from(nodes).entries()) {
+  if (depth > MAX_RELEASE_NOTES_DEPTH) {
+    budget.exceeded = true;
+    return { meaningful, nodes: output };
+  }
+
+  for (let index = 0; index < nodes.length; index++) {
+    if (budget.remainingNodes === 0) {
+      budget.exceeded = true;
+      break;
+    }
+    budget.remainingNodes--;
+
+    const node = nodes[index];
+    if (!node) continue;
     const key = `${keyPrefix}-${index}`;
     if (node.nodeType === 3) {
       const text = node.textContent ?? "";
@@ -108,7 +135,8 @@ function renderNodes(nodes: NodeListOf<ChildNode>, keyPrefix: string): RenderRes
     const tag = element.localName.toLowerCase();
     if (DROPPED_TAGS.has(tag)) continue;
 
-    const children = renderNodes(element.childNodes, key);
+    const children = renderNodes(element.childNodes, key, depth + 1, budget);
+    if (budget.exceeded) break;
     if (!ALLOWED_TAGS.has(tag)) {
       output.push(...children.nodes);
       meaningful ||= children.meaningful;
@@ -166,13 +194,19 @@ function renderNodes(nodes: NodeListOf<ChildNode>, keyPrefix: string): RenderRes
 
 function renderReleaseNotes(html: string | null | undefined): RenderResult {
   if (!html?.trim()) return { meaningful: false, nodes: [] };
+  if (html.length > MAX_RELEASE_NOTES_HTML_LENGTH) return { meaningful: false, nodes: [] };
 
   try {
     // A template parses malformed HTML using the browser's normal recovery
     // rules, but its contents stay inert and are never mounted as raw HTML.
     const template = document.createElement("template");
     template.innerHTML = html;
-    return renderNodes(template.content.childNodes, "release-note");
+    const budget: RenderBudget = {
+      exceeded: false,
+      remainingNodes: MAX_RELEASE_NOTES_NODES,
+    };
+    const rendered = renderNodes(template.content.childNodes, "release-note", 0, budget);
+    return budget.exceeded ? { meaningful: false, nodes: [] } : rendered;
   } catch {
     return { meaningful: false, nodes: [] };
   }

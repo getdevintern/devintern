@@ -79,6 +79,7 @@ mock.module("@/components/ui/button", () => {
 
 const { formatDownloadLabel, shouldShowUpdateDialog, UpdateNotifier } =
   await import("./UpdateNotifier.tsx");
+const { ReleaseNotes } = await import("./ReleaseNotes.tsx");
 
 function ok<T>(value: T): IpcResult<T> {
   return { ok: true, value };
@@ -394,6 +395,32 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(
       domWindow.document.querySelector('[data-testid="update-notifier-later"]'),
     ).not.toBeNull();
+  });
+
+  test("bounds release-note input size, nesting depth, and rendered node count", async () => {
+    await act(async () => {
+      root.render(createElement(ReleaseNotes, { html: `<p>${"x".repeat(25_000)}</p>` }));
+      await flushMicrotasks();
+    });
+
+    const notes = domWindow.document.querySelector('[data-testid="update-notifier-notes"]');
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
+
+    await act(async () => {
+      root.render(
+        createElement(ReleaseNotes, {
+          html: `${"<div>".repeat(30)}Deep${"</div>".repeat(30)}`,
+        }),
+      );
+      await flushMicrotasks();
+    });
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
+
+    await act(async () => {
+      root.render(createElement(ReleaseNotes, { html: "<i>x</i>".repeat(600) }));
+      await flushMicrotasks();
+    });
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
   });
 
   test("retry on error calls downloadUpdate when a version is available", async () => {
