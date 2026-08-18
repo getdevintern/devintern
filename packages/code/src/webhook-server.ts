@@ -1336,6 +1336,9 @@ async function runAgentHarnessForReview(
             maxTurnsReached,
           });
         } else if (usage.limited) {
+          if (usage.matchedLine) {
+            console.log(`   Matched output: ${usage.matchedLine}`);
+          }
           // A usage/rate limit is account-global — surface it so the caller can
           // pause the queue until reset rather than treating it as a task failure.
           resolve({
