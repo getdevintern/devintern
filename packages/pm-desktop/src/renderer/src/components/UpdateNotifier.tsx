@@ -19,17 +19,11 @@ import {
 } from "@/components/ui/dialog";
 import { qk } from "../queries/keys.ts";
 import { useUpdateStatus } from "../queries/useUpdateStatus.ts";
+import { ReleaseNotes } from "./ReleaseNotes.tsx";
 
 export interface UpdateNotifierProps {
   /** True when any ticket has an agent/tracker operation in flight. */
   hasBusyWork: boolean;
-}
-
-function shortNotes(notes: string | null | undefined): string | null {
-  if (!notes) return null;
-  const trimmed = notes.replace(/\s+/g, " ").trim();
-  if (!trimmed) return null;
-  return trimmed.length > 180 ? `${trimmed.slice(0, 177)}…` : trimmed;
 }
 
 /** Whether the status should show the interruptive update dialog. */
@@ -69,7 +63,6 @@ export function UpdateNotifier({ hasBusyWork }: UpdateNotifierProps) {
     return null;
   }
 
-  const notes = shortNotes(status.releaseNotes);
   const versionLine =
     status.availableVersion != null
       ? formatUpdateAvailableMessage(status.availableVersion, status.currentVersion)
@@ -133,8 +126,8 @@ export function UpdateNotifier({ hasBusyWork }: UpdateNotifierProps) {
       >
         <Alert className="border-0 bg-transparent p-0 shadow-none">
           <AlertTitle data-testid="update-notifier-title">{title}</AlertTitle>
-          <AlertDescription className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
+          <AlertDescription className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 flex-1 space-y-1">
               {status.phase === "error" && status.errorMessage ? (
                 <p data-testid="update-notifier-error">{status.errorMessage}</p>
               ) : status.phase === "downloading" ? (
@@ -142,7 +135,7 @@ export function UpdateNotifier({ hasBusyWork }: UpdateNotifierProps) {
               ) : (
                 <>
                   {versionLine && <p data-testid="update-notifier-version">{versionLine}</p>}
-                  {notes && <p data-testid="update-notifier-notes">{notes}</p>}
+                  <ReleaseNotes html={status.releaseNotes} />
                   {status.phase === "downloaded" && (
                     <p>
                       Restart to apply the update. Your settings and project preference are kept.
