@@ -4,7 +4,7 @@ sidebarLabel: "Linear Integration"
 description: "Fetch Linear issues, move workflow states, implement with your coding agent, and open PRs with summaries posted back."
 section: "Code"
 order: 5
-dateModified: 2026-07-23
+dateModified: 2026-08-17
 tags: ["linear", "devintern/code", "integration"]
 ---
 
@@ -64,11 +64,14 @@ See [Configuration](./configuration.md) for all settings fields.
 
 ## Running an issue
 
-Pass an issue identifier or a full issue URL:
+Pass one or more issue identifiers or full issue URLs. Identifiers are case-insensitive (`dan-6` is the same as `DAN-6`). Multiple keys are processed in order:
 
 ```bash
 # Identifier
 devintern ENG-42 --create-pr
+
+# Several issues in one run
+devintern dan-6 dan-7 dan-8 --create-pr
 
 # Full issue URL
 devintern https://linear.app/acme/issue/ENG-42/fix-login-bug --create-pr

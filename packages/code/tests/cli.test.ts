@@ -72,6 +72,7 @@ describe("CLI Argument Handling", () => {
     expect(result.stdout).not.toContain("--claude-path");
     expect(result.stdout).not.toContain("--skip-jira-comments");
     expect(result.stdout).toContain("devintern PROJ-123 PROJ-456 PROJ-789 --create-pr");
+    expect(result.stdout).toContain("devintern ENG-42 ENG-43 ENG-44 --create-pr");
     expect(result.exitCode).toBe(0);
   });
 
@@ -99,6 +100,40 @@ describe("CLI Argument Handling", () => {
     expect(result.stdout).toContain("Processing 2 task");
     expect(result.stdout).toContain("TEST-123");
     expect(result.stdout).toContain("TEST-456");
+  });
+
+  test("should accept multiple Linear identifiers and uppercase them", () => {
+    const testDir = join(
+      tmpdir(),
+      `cli-linear-multi-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(testDir, { recursive: true });
+    try {
+      const result = spawnSync("bun", [CLI_PATH, "dan-6", "dan-7", "dan-8", "--no-git"], {
+        encoding: "utf8",
+        timeout: CLI_SPAWN_TIMEOUT_MS,
+        cwd: testDir,
+        env: {
+          ...process.env,
+          TASK_TRACKER: "linear",
+          LINEAR_API_KEY: "lin_api_test",
+          DEVINTERN_SKIP_LICENSE_CHECK: "1",
+          DEVINTERN_NO_UPDATE: "1",
+        },
+      });
+      const output = (result.stdout || "") + (result.stderr || "");
+      expect(output).not.toContain("Unsupported task tracker");
+      expect(output).toContain("Processing 3 task(s): DAN-6, DAN-7, DAN-8");
+      expect(output).toContain("[1/3] 🔍 Fetching task: DAN-6");
+      expect(output).toContain("[2/3] 🔍 Fetching task: DAN-7");
+      expect(output).toContain("[3/3] 🔍 Fetching task: DAN-8");
+    } finally {
+      try {
+        rmSync(testDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
   });
 
   test("should handle --query option", () => {

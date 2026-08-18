@@ -39,7 +39,7 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
-import { isMarkdownFilePath, parseTrelloCardReference } from "@devintern/task-trackers";
+import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { TaskFormatter } from "./lib/task-formatter";
@@ -61,10 +61,7 @@ import {
   trackersSupportingEstimate,
   trackersSupportingQuery,
 } from "./lib/tracker-capabilities";
-import { parseAsanaTaskReference } from "./lib/trackers/asana/asana-task-tracker-client";
-import { parseAzureDevOpsWorkItemReference } from "./lib/trackers/azure-devops/azure-devops-task-tracker-client";
-import { parseGitHubIssueReference } from "./lib/trackers/github/github-task-tracker-client";
-import { parseLinearIssueReference } from "./lib/trackers/linear/linear-task-tracker-client";
+import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
@@ -238,26 +235,6 @@ function loadProjectSettings(): ProjectSettings | null {
  */
 function getActiveTrackerType(): string {
   return (process.env.TASK_TRACKER || "jira").toLowerCase();
-}
-
-function normalizeTaskKeys(keys: string[]): string[] {
-  const trackerType = getActiveTrackerType();
-  if (trackerType === "trello") {
-    return keys.map(parseTrelloCardReference);
-  }
-  if (trackerType === "linear") {
-    return keys.map((key) => parseLinearIssueReference(key) ?? key);
-  }
-  if (trackerType === "github") {
-    return keys.map((key) => parseGitHubIssueReference(key) ?? key);
-  }
-  if (trackerType === "azure-devops") {
-    return keys.map((key) => parseAzureDevOpsWorkItemReference(key) ?? key);
-  }
-  if (trackerType === "asana") {
-    return keys.map((key) => parseAsanaTaskReference(key) ?? key);
-  }
-  return keys;
 }
 
 function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
@@ -1385,6 +1362,7 @@ Examples (Jira):
 
 Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
   devintern ENG-42 --create-pr
+  devintern ENG-42 ENG-43 ENG-44 --create-pr
   devintern https://linear.app/acme/issue/ENG-42/issue-slug --create-pr
   devintern --query '{"state":{"name":{"eq":"Todo"}}}' --create-pr
   devintern --query "login bug" --create-pr
@@ -2205,7 +2183,7 @@ async function main(): Promise<void> {
       // File-path arguments are kept as-is; PM task keys are normalised (e.g. Trello ref parsing).
       const pmArgs = taskKeys.filter((k) => !isMarkdownFilePath(k));
       const fileArgs = taskKeys.filter(isMarkdownFilePath);
-      tasksToProcess = [...normalizeTaskKeys(pmArgs), ...fileArgs];
+      tasksToProcess = [...normalizeTaskKeys(pmArgs, getActiveTrackerType()), ...fileArgs];
       console.log(`📋 Processing ${tasksToProcess.length} task(s): ${tasksToProcess.join(", ")}`);
     } else {
       // No tasks specified
