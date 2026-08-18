@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-08-18
+
 ### Fixed
 
+- **Linear issue lookup**: fetching a task like `DAN-6` no longer fails with `Field "identifier" is not defined by type "IssueFilter"`. Lookups now use Linear's `issue(id:)` query, which accepts both identifiers and UUIDs
+- **Multiple Linear issue keys in one CLI run**: `devintern dan-6 dan-7 dan-8` now normalizes each argument independently (uppercase, unwrap linear.app URLs) and fetches them in order
 - **Headless Grok / TUI harnesses during hook-fix and review**: hook fixer, `address-review`, auto-review, and the webhook review runner now pass the prompt on the command line (`grok -p`, `kimi --prompt`, positional for Codex/Opencode/Cursor) and ignore stdin. Those paths previously piped the prompt, so TUI-first CLIs opened an interactive session and died with `Device not configured (os error 6)` / ENXIO when no TTY was attached
 
 ## [2.3.1] - 2026-08-12
