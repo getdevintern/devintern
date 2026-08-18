@@ -13,6 +13,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
+import { parseAgentJsonObject } from "./agent-json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { getSandbox } from "./sandbox";
 import type {
@@ -77,9 +78,8 @@ ${prDiff}
    - **low**: Style inconsistencies, minor optimizations
    - **info**: Suggestions, alternatives, educational feedback
 
-4. Provide your feedback as JSON in the following format:
+4. Provide your feedback as one JSON object in the following format:
 
-\`\`\`json
 {
   "summary": "Brief overall assessment of the PR (2-3 sentences)",
   "items": [
@@ -87,20 +87,19 @@ ${prDiff}
       "priority": "critical|high|medium|low|info",
       "category": "code-quality|bug|performance|security|testing|documentation|style",
       "file": "path/to/file.ts",
-      "line": "42" or "42-45",
+      "line": "42-45",
       "issue": "Clear description of the issue",
       "suggestion": "Specific actionable fix or improvement"
     }
   ],
   "approved": false
 }
-\`\`\`
 
 5. Set "approved": true ONLY if all issues are low priority or informational
 6. Be constructive and specific in your feedback
 7. Focus on actionable improvements
 
-**IMPORTANT**: Your response must be valid JSON only. Do not include any explanatory text outside the JSON block.
+**IMPORTANT**: Return only the valid JSON object. Do not include Markdown fences or explanatory text.
 `;
 }
 
@@ -281,18 +280,8 @@ function getPRDiff(baseBranch: string, workingDir: string): string {
  * @throws When no JSON is found or the structure is invalid
  */
 function parseReviewFeedback(agentOutput: string): ReviewFeedback {
-  // Extract JSON from potential markdown code blocks
-  const jsonMatch =
-    agentOutput.match(/```json\s*([\s\S]*?)\s*```/) || agentOutput.match(/\{[\s\S]*\}/);
-
-  if (!jsonMatch) {
-    throw new Error("No JSON found in Agent output");
-  }
-
-  const jsonStr = jsonMatch[1] || jsonMatch[0];
-
   try {
-    const feedback = JSON.parse(jsonStr) as ReviewFeedback;
+    const feedback = parseAgentJsonObject(agentOutput, "approved");
 
     // Validate structure
     if (
@@ -303,7 +292,7 @@ function parseReviewFeedback(agentOutput: string): ReviewFeedback {
       throw new Error("Invalid feedback structure");
     }
 
-    return feedback;
+    return feedback as unknown as ReviewFeedback;
   } catch (error) {
     throw new Error(`Failed to parse review feedback JSON: ${error}`);
   }

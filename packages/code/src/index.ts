@@ -42,6 +42,7 @@ import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
+import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
@@ -2735,21 +2736,15 @@ async function runClarityCheck(
  * @throws When JSON is missing or required fields are invalid
  */
 function parseClarityResponse(output: string): ClarityAssessment {
-  // Extract JSON from Agent's response
-  const jsonMatch = output.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    // Provide more specific error based on output content
-    if (detectMaxTurnsReached(output, "")) {
-      throw new Error("warn: Agent reached max turns - no JSON assessment available");
-    }
-    if (output.trim().length === 0) {
-      throw new Error("warn: Empty response from Agent");
-    }
-    throw new Error("warn: No JSON found in Agent response");
+  if (detectMaxTurnsReached(output, "")) {
+    throw new Error("warn: Agent reached max turns - no JSON assessment available");
+  }
+  if (output.trim().length === 0) {
+    throw new Error("warn: Empty response from Agent");
   }
 
   try {
-    const assessment = JSON.parse(jsonMatch[1]);
+    const assessment = parseAgentJsonObject(output, "isImplementable");
 
     // Validate required fields
     if (
@@ -2762,7 +2757,7 @@ function parseClarityResponse(output: string): ClarityAssessment {
       throw new Error("warn: Invalid assessment structure - missing required fields");
     }
 
-    return assessment;
+    return assessment as unknown as ClarityAssessment;
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`warn: Malformed JSON in Agent response: ${error.message}`);
@@ -3053,52 +3048,20 @@ async function runEstimation(
  * @throws When JSON is invalid or values are out of range
  */
 function parseEstimationResponse(output: string): EstimationResult {
-  // Try to find JSON in the response — with or without code fences
-  let jsonStr: string | null = null;
-
-  const fencedMatch = output.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (fencedMatch) {
-    jsonStr = fencedMatch[1];
-  } else {
-    // Try to extract a raw JSON object containing "storyPoints".
-    // We find the last "storyPoints" in the output, then try { positions
-    // before it (nearest first) paired with the last } after it, letting
-    // JSON.parse decide validity. This avoids greedy-regex issues when
-    // the surrounding text contains stray braces (e.g. URL templates).
-    const spIdx = output.lastIndexOf('"storyPoints"');
-    if (spIdx !== -1) {
-      const endIdx = output.lastIndexOf("}");
-      if (endIdx > spIdx) {
-        for (let i = output.lastIndexOf("{", spIdx); i >= 0; i = output.lastIndexOf("{", i - 1)) {
-          const candidate = output.substring(i, endIdx + 1);
-          try {
-            JSON.parse(candidate);
-            jsonStr = candidate;
-            break;
-          } catch {
-            continue;
-          }
-        }
-      }
-    }
-  }
-
-  if (!jsonStr) {
-    throw new Error("No JSON found in estimation response");
-  }
-
-  const parsed = JSON.parse(jsonStr);
+  const parsed = parseAgentJsonObject(output, "storyPoints");
 
   // Validate required fields
   const validPoints = [1, 2, 3, 5, 8, 13, 21];
-  if (!validPoints.includes(parsed.storyPoints)) {
+  const storyPoints = parsed.storyPoints;
+  if (typeof storyPoints !== "number" || !validPoints.includes(storyPoints)) {
     throw new Error(
-      `Invalid story points value: ${parsed.storyPoints}. Must be one of: ${validPoints.join(", ")}`,
+      `Invalid story points value: ${storyPoints}. Must be one of: ${validPoints.join(", ")}`,
     );
   }
 
-  if (!["high", "medium", "low"].includes(parsed.confidence)) {
-    throw new Error(`Invalid confidence level: ${parsed.confidence}. Must be high, medium, or low`);
+  const confidence = parsed.confidence;
+  if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
+    throw new Error(`Invalid confidence level: ${confidence}. Must be high, medium, or low`);
   }
 
   // Clamp implementationConfidence to 0-10, default to 5 if missing
@@ -3107,13 +3070,13 @@ function parseEstimationResponse(output: string): EstimationResult {
   implConf = Math.max(0, Math.min(10, Math.round(implConf)));
 
   return {
-    storyPoints: parsed.storyPoints,
-    confidence: parsed.confidence,
+    storyPoints,
+    confidence,
     implementationConfidence: implConf,
-    reasoning: parsed.reasoning || "",
+    reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
     risks: Array.isArray(parsed.risks) ? parsed.risks : [],
     unclearAreas: Array.isArray(parsed.unclearAreas) ? parsed.unclearAreas : [],
-    summary: parsed.summary || "",
+    summary: typeof parsed.summary === "string" ? parsed.summary : "",
   };
 }
 

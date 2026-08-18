@@ -611,25 +611,20 @@ You are a senior software engineer reviewing a task before implementation. Your 
 
     prompt += `## Assessment Instructions
 
-Please assess this task for basic implementation feasibility. Respond with a JSON object containing:
+Please assess this task for basic implementation feasibility. Return only one valid JSON object with this shape (no Markdown fences or explanatory text):
 
-\`\`\`json
 {
-  "isImplementable": boolean,
-  "clarityScore": number, // 1-10 scale (10 = perfectly clear)
-  "issues": [
-    {
-      "category": "missing_requirements" | "unclear_scope" | "missing_context" | "ambiguous_description" | "critical_gaps",
-      "description": "Specific issue description",
-      "severity": "critical" | "major" | "minor"
-    }
-  ],
-  "recommendations": [
-    "Specific recommendation for improving clarity"
-  ],
+  "isImplementable": true,
+  "clarityScore": 8,
+  "issues": [],
+  "recommendations": [],
   "summary": "Brief summary of the assessment"
 }
-\`\`\`
+
+Each issue must contain:
+- "category": one of "missing_requirements", "unclear_scope", "missing_context", "ambiguous_description", or "critical_gaps"
+- "description": a specific issue description
+- "severity": one of "critical", "major", or "minor"
 
 ## Evaluation Criteria (Relaxed for Real-World Development)
 
