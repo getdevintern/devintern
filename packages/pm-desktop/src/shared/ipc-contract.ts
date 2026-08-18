@@ -20,6 +20,7 @@ import type { PmInitContext, PmTrackerInfo } from "@getdevintern/pm/init";
 import type { UpdateStatus } from "./auto-update.ts";
 import type { ProjectBindingInfo } from "./project-binding.ts";
 import type { ProjectGitSyncStatus } from "./project-git-sync.ts";
+import type { ToolValidation } from "./tool-validation.ts";
 
 export type {
   LabelListResult,
@@ -46,6 +47,19 @@ export {
   projectGitSyncLabel,
   shouldShowUpdateFromRemote,
 } from "./project-git-sync.ts";
+export type {
+  InstalledHarnessSummary,
+  RequiredToolId,
+  ToolCheck,
+  ToolValidation,
+} from "./tool-validation.ts";
+export {
+  EXAMPLE_HARNESS_IDS,
+  GIT_DOWNLOAD_URL,
+  gitInstallHint,
+  harnessInstallHint,
+  isToolValidationBlocking,
+} from "./tool-validation.ts";
 
 export interface IpcError {
   code: string;
@@ -283,6 +297,11 @@ export interface PmDesktopApi {
   getProjectStatus(dir: string): Promise<IpcResult<ProjectStatus>>;
   getLastProjectDir(): Promise<IpcResult<string | null>>;
   /**
+   * Probe Git + supported agent harness CLIs using the same PATH the app
+   * uses to spawn agents (including GUI PATH augmentation).
+   */
+  validateRequiredTools(): Promise<IpcResult<ToolValidation>>;
+  /**
    * Eligible recent project directories (most recent first). Omits missing paths
    * and folders that no longer have both `.git` and `.devintern-pm`.
    */
@@ -416,6 +435,7 @@ export const IPC_CHANNELS = {
   saveClipboardImage: "pm:save-clipboard-image",
   getProjectStatus: "pm:get-project-status",
   getLastProjectDir: "pm:get-last-project-dir",
+  validateRequiredTools: "pm:validate-required-tools",
   getRecentProjectDirs: "pm:get-recent-project-dirs",
   connectGitHubRepo: "pm:connect-github-repo",
   getGitHubAuthStatus: "pm:get-github-auth-status",

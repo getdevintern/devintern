@@ -8,6 +8,7 @@ import { ConnectGitHubDialog } from "./components/ConnectGitHubDialog.tsx";
 import { ProjectBar } from "./components/ProjectBar.tsx";
 import { ProjectSetupWizard } from "./components/ProjectSetupWizard.tsx";
 import { ProjectWorkspaceChrome } from "./components/ProjectWorkspaceChrome.tsx";
+import { RequiredToolsGate } from "./components/RequiredToolsGate.tsx";
 import { Welcome } from "./components/SetupEmptyState.tsx";
 import { TicketSidebar } from "./components/TicketSidebar.tsx";
 import { UpdateNotifier } from "./components/UpdateNotifier.tsx";
@@ -37,6 +38,7 @@ import { useCodeDiscoveryDismissed } from "./queries/useCodeDiscoveryDismissed.t
 import { useIssueTypes } from "./queries/useIssueTypes.ts";
 import { useLabels } from "./queries/useLabels.ts";
 import { useRecentProjects } from "./queries/useRecentProjects.ts";
+import { useToolValidation } from "./queries/useToolValidation.ts";
 import { isBusy } from "./state/app-store.ts";
 import { useProjectStore } from "./state/project-store.ts";
 import {
@@ -52,12 +54,26 @@ import {
 import { nextTicketId } from "./state/ticket-workspaces.ts";
 import type { IpcError, ProjectStatus } from "../../shared/ipc-contract.ts";
 import { shouldShowCodeDiscovery } from "../../shared/code-discovery.ts";
+import { isToolValidationBlocking } from "../../shared/tool-validation.ts";
 
 let requestCounter = 0;
 const nextRequestId = () => `req-${++requestCounter}`;
 
 function toError(error: IpcError | undefined): IpcError {
   return error ?? { code: "error", message: "Unknown error" };
+}
+
+function queryErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return "Unknown error";
 }
 
 function defaultComposerForProject(status: ProjectStatus, issueTypes: string[]): ComposerValues {
@@ -88,6 +104,11 @@ export function App() {
   const codeDiscoveryDismissed = codeDiscoveryQuery.data ?? null;
   const recentProjectsQuery = useRecentProjects();
   const recentProjects = recentProjectsQuery.data ?? null;
+  const toolsQuery = useToolValidation();
+  const toolsOk = toolsQuery.data?.ok === true;
+  const toolsBlocked = isToolValidationBlocking(toolsQuery.data);
+  const toolsProbeFailed = toolsQuery.isError && !toolsOk;
+  const toolsError = toolsProbeFailed ? queryErrorMessage(toolsQuery.error) : null;
 
   /** Pending close when the ticket still has an agent/operation in flight. */
   const [closeConfirmId, setCloseConfirmId] = useState<string | null>(null);
@@ -295,10 +316,16 @@ export function App() {
     }
   }, []);
 
-  // Restore last project on startup. The recent-projects query auto-fetches
-  // on mount; mutation paths invalidate it when the eligible list changes.
+  // Restore last project only after required tools are present, so a missing
+  // git/agent CLI surfaces on launch instead of as a later spawn error.
   useEffect(() => {
+    if (toolsBlocked || toolsProbeFailed) {
+      useProjectStore.getState().setLoadingProject(false);
+      return;
+    }
+    if (!toolsOk) return;
     let cancelled = false;
+    useProjectStore.getState().setLoadingProject(true);
     void (async () => {
       try {
         const last = await window.pm.getLastProjectDir();
@@ -315,7 +342,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadProject]);
+  }, [loadProject, toolsBlocked, toolsOk, toolsProbeFailed]);
 
   // Active-ticket derivations used by the metadata hooks + composer pruning.
   const activeTicketId = activeTicket?.id;
@@ -681,6 +708,32 @@ export function App() {
     }
   };
 
+  const aboutDialog = (
+    <AboutDialog
+      open={aboutOpen}
+      onOpenChange={setAboutOpen}
+      version={appVersion}
+      onOpenWebsite={(url) => void window.pm.openExternal(url)}
+    />
+  );
+
+  if (!toolsOk && (toolsQuery.isPending || toolsBlocked || toolsProbeFailed)) {
+    return (
+      <>
+        <RequiredToolsGate
+          result={toolsQuery.data ?? null}
+          checking={toolsQuery.isFetching}
+          errorMessage={toolsError}
+          onRecheck={() => {
+            void toolsQuery.refetch();
+          }}
+          onOpenDocs={(url) => void window.pm.openExternal(url)}
+        />
+        {aboutDialog}
+      </>
+    );
+  }
+
   if (!status) {
     return (
       <>
@@ -696,6 +749,7 @@ export function App() {
           onOpenChange={setConnectOpen}
           onConnected={(next) => void onGitHubConnected(next)}
         />
+        {aboutDialog}
       </>
     );
   }
@@ -826,12 +880,7 @@ export function App() {
         </DialogContent>
       </Dialog>
 
-      <AboutDialog
-        open={aboutOpen}
-        onOpenChange={setAboutOpen}
-        version={appVersion}
-        onOpenWebsite={(url) => void window.pm.openExternal(url)}
-      />
+      {aboutDialog}
     </div>
   );
 }

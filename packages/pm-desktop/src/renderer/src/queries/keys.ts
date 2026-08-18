@@ -14,6 +14,7 @@
 
 export const qk = {
   appVersion: ["appVersion"] as const,
+  toolValidation: ["toolValidation"] as const,
   codeDiscoveryDismissed: ["codeDiscoveryDismissed"] as const,
   recentProjects: ["recentProjects"] as const,
   projectStatus: (dir: string) => ["projectStatus", dir] as const,

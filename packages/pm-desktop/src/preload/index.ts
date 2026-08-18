@@ -41,6 +41,7 @@ const api: PmDesktopApi = {
   },
   getProjectStatus: (dir) => ipcRenderer.invoke(IPC_CHANNELS.getProjectStatus, dir),
   getLastProjectDir: () => ipcRenderer.invoke(IPC_CHANNELS.getLastProjectDir),
+  validateRequiredTools: () => ipcRenderer.invoke(IPC_CHANNELS.validateRequiredTools),
   getRecentProjectDirs: () => ipcRenderer.invoke(IPC_CHANNELS.getRecentProjectDirs),
   connectGitHubRepo: (input) => ipcRenderer.invoke(IPC_CHANNELS.connectGitHubRepo, input),
   getGitHubAuthStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getGitHubAuthStatus),

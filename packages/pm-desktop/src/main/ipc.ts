@@ -68,6 +68,7 @@ import {
 } from "./session.ts";
 import { listRecentProjectDirs, recordRecentProjectDir } from "./recent-projects.ts";
 import { readSettings, updateSettings } from "./settings.ts";
+import { validateRequiredTools } from "./validate-tools.ts";
 
 /** Reveal only known project dirs (bindings, recents, current session) — not arbitrary paths. */
 async function isAllowedRevealPath(resolved: string): Promise<boolean> {
@@ -222,6 +223,25 @@ export function registerIpcHandlers(): void {
   handle(IPC_CHANNELS.getLastProjectDir, async () => {
     const settings = await readSettings();
     return settings.lastProjectDir ?? null;
+  });
+
+  handle(IPC_CHANNELS.validateRequiredTools, async () => {
+    const settings = await readSettings();
+    let agentEnv: Record<string, string> = {};
+    if (settings.lastProjectDir) {
+      try {
+        const { env } = await readProjectEnv(settings.lastProjectDir);
+        agentEnv = Object.fromEntries(
+          Object.entries(env).filter(
+            ([key]) =>
+              key === "AGENT_HARNESS" || key === "AGENT_CLI_PATH" || key.endsWith("_CLI_PATH"),
+          ),
+        );
+      } catch {
+        // A stale/unreadable remembered project must not hide process-level tools.
+      }
+    }
+    return validateRequiredTools({ envOverrides: agentEnv });
   });
 
   handle(IPC_CHANNELS.getRecentProjectDirs, async () => {

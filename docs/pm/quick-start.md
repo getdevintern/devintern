@@ -4,7 +4,7 @@ sidebarLabel: "Quick Start"
 description: "Install @devintern/pm and create your first AI-drafted ticket in your tracker."
 section: "PM"
 order: 1
-dateModified: 2026-08-12
+dateModified: 2026-08-17
 tags: ["devintern/pm", "quick start", "jira", "linear", "cli"]
 ---
 
@@ -12,11 +12,12 @@ tags: ["devintern/pm", "quick start", "jira", "linear", "cli"]
 
 **@devintern/pm** automates story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues in seconds.
 
-For the primary visual workflow, [download DevIntern PM](https://devintern.com/pm-desktop/). Continue here if you prefer to work in the terminal.
+For the primary visual workflow, [download DevIntern PM](https://devintern.com/pm-desktop/). The desktop app checks on launch that **Git** and **at least one supported agent CLI** are on your PATH (including common GUI-launch locations). If something is missing, install it and choose **Check again**. Continue here if you prefer to work in the terminal.
 
 ## Prerequisites
 
 - **[Node.js](https://nodejs.org) 20 or newer**: Required to run @devintern/pm ([Bun](https://bun.sh) works too)
+- **Git**: Required for project folders, GitHub connect, and update-from-remote
 - AI agent CLI installed and configured (e.g., Claude Code, OpenCode, Codex, Cursor)
 - Account with at least one supported PM tool (Jira, Linear, Trello, Azure DevOps, Asana, or GitHub)
 - **For Figma functionality**: [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/) must be installed and configured in your AI agent (Claude Code only)
