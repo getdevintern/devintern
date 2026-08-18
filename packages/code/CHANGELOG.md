@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Headless Grok / TUI harnesses during hook-fix and review**: hook fixer, `address-review`, auto-review, and the webhook review runner now pass the prompt on the command line (`grok -p`, `kimi --prompt`, positional for Codex/Opencode/Cursor) and ignore stdin. Those paths previously piped the prompt, so TUI-first CLIs opened an interactive session and died with `Device not configured (os error 6)` / ENXIO when no TTY was attached
+
 ## [2.3.1] - 2026-08-12
 
 ### Fixed

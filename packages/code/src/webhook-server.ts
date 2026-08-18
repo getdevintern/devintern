@@ -7,7 +7,7 @@
  * review feedback using an AI agent.
  */
 
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import { join } from "path";
@@ -21,6 +21,7 @@ import {
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
 import { getSandbox } from "./lib/sandbox";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
@@ -1233,7 +1234,7 @@ async function prepareRepository(branch: string, verbose = false): Promise<strin
 /**
  * Spawn the agent harness to address review feedback from a prompt file.
  *
- * @param promptFile - Path to markdown prompt (read and sent via stdin)
+ * @param promptFile - Path to markdown prompt (read and passed via argv)
  * @param workDir - Git working directory
  */
 async function runAgentHarnessForReview(
@@ -1260,9 +1261,11 @@ async function runAgentHarnessForReview(
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-      const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir: workDir });
+      const promptContent = readFileSync(promptFile, "utf8");
+      const runOptions = { maxTurns, skipPermissions: true, workingDir: workDir };
+      const agentArgs = buildHeadlessAgentArgs(harness, promptContent, runOptions);
 
-      console.log(`   Command: ${resolvedPath} ${agentArgs.join(" ")}`);
+      console.log(`   Command: ${resolvedPath} ${harness.buildArgs(runOptions).join(" ")}`);
       console.log(`   Timeout: ${timeoutMinutes} minutes`);
 
       let stdoutOutput = "";
@@ -1272,7 +1275,7 @@ async function runAgentHarnessForReview(
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
+        spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
       });
 
@@ -1364,13 +1367,6 @@ async function runAgentHarnessForReview(
           });
         }
       });
-
-      // Send prompt content to Agent
-      if (agent.stdin) {
-        const promptContent = require("fs").readFileSync(promptFile, "utf8");
-        agent.stdin.write(promptContent);
-        agent.stdin.end();
-      }
     })().catch((error) => {
       resolve({
         success: false,

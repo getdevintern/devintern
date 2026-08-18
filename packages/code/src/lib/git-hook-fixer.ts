@@ -7,6 +7,7 @@
 import { existsSync } from "fs";
 import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { getSandbox } from "./sandbox";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";
@@ -159,14 +160,20 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       let stderrOutput = "";
       let timedOut = false;
 
-      const agentArgs = harness.buildArgs({ maxTurns, skipPermissions: true, workingDir });
+      const agentArgs = buildHeadlessAgentArgs(harness, fixPrompt, {
+        maxTurns,
+        skipPermissions: true,
+        workingDir,
+      });
 
       // Spawn agent process to fix the issues. The executable path was already
-      // resolved (and waited on through any auto-update swap) above.
+      // resolved (and waited on through any auto-update swap) above. Prompt
+      // goes on argv (`-p` / positional); stdin is ignored so TUI-first CLIs
+      // do not try to attach a terminal.
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { stdio: ["pipe", "pipe", "pipe"], cwd: workingDir },
+        spawnOptions: { stdio: HEADLESS_AGENT_STDIO, cwd: workingDir },
         sandbox: await getSandbox(harness.name),
       });
 
@@ -343,12 +350,6 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           resolve(false);
         }
       });
-
-      // Send the fix prompt to the agent
-      if (agent.stdin) {
-        agent.stdin.write(fixPrompt);
-        agent.stdin.end();
-      }
     })().catch((error) => {
       console.error(
         `❌ Failed to run ${harness.displayName} for git hook fix: ${error instanceof Error ? error.message : String(error)}`,
