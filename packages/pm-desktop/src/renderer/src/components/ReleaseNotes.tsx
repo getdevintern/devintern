@@ -1,5 +1,4 @@
-import { createElement } from "react";
-import type { MouseEvent, ReactNode } from "react";
+import React from "react";
 
 const DROPPED_TAGS = new Set([
   "applet",
@@ -91,7 +90,7 @@ export function isSafeReleaseNotesUrl(value: string): boolean {
 
 interface RenderResult {
   meaningful: boolean;
-  nodes: ReactNode[];
+  nodes: React.ReactNode[];
 }
 
 interface RenderBudget {
@@ -105,7 +104,7 @@ function renderNodes(
   depth: number,
   budget: RenderBudget,
 ): RenderResult {
-  const output: ReactNode[] = [];
+  const output: React.ReactNode[] = [];
   let meaningful = false;
 
   if (depth > MAX_RELEASE_NOTES_DEPTH) {
@@ -144,11 +143,11 @@ function renderNodes(
     }
 
     if (tag === "br") {
-      output.push(createElement("br", { key }));
+      output.push(React.createElement("br", { key }));
       continue;
     }
     if (tag === "hr") {
-      output.push(createElement("hr", { className: "my-2 border-border", key }));
+      output.push(React.createElement("hr", { className: "my-2 border-border", key }));
       meaningful = true;
       continue;
     }
@@ -159,21 +158,20 @@ function renderNodes(
         meaningful ||= children.meaningful;
         continue;
       }
-      const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
+      const onClick = (event: React.MouseEvent<HTMLButtonElement>) => {
         event.preventDefault();
         void window.pm.openExternal(href);
       };
       output.push(
-        createElement(
-          "a",
+        React.createElement(
+          "button",
           {
-            className: "text-primary underline underline-offset-2 hover:text-primary/80",
-            href,
+            className:
+              "cursor-pointer border-0 bg-transparent p-0 text-primary underline underline-offset-2 hover:text-primary/80",
             key,
             onClick,
-            rel: "noreferrer noopener",
-            target: "_blank",
             title: element.getAttribute("title") ?? undefined,
+            type: "button",
           },
           children.nodes,
         ),
@@ -184,7 +182,11 @@ function renderNodes(
 
     const normalizedTag = tag === "b" ? "strong" : tag === "i" ? "em" : tag;
     output.push(
-      createElement(normalizedTag, { className: TAG_CLASSES[normalizedTag], key }, children.nodes),
+      React.createElement(
+        normalizedTag,
+        { className: TAG_CLASSES[normalizedTag], key },
+        children.nodes,
+      ),
     );
     meaningful ||= children.meaningful;
   }

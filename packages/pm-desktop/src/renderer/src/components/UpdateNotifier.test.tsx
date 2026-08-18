@@ -307,7 +307,7 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(snoozeUpdate).toHaveBeenCalledTimes(1);
   });
 
-  test("renders formatted release notes, strips unsafe content, and opens safe links", async () => {
+  test("renders formatted release notes and opens safe links without native navigation", async () => {
     const notesStatus: UpdateStatus = {
       ...available,
       releaseNotes: `
@@ -342,12 +342,13 @@ describe("UpdateNotifier against fake window.pm", () => {
     expect(notes?.textContent).not.toContain("window.pwned");
     expect(notes?.textContent).not.toContain("embedded content");
 
-    const links = notes?.querySelectorAll("a");
+    const links = notes?.querySelectorAll("button");
     expect(links?.length).toBe(1);
+    expect(notes?.querySelector("a")).toBeNull();
     expect(notes?.textContent).toContain("Unsafe link");
     expect(links?.[0]?.getAttribute("onclick")).toBeNull();
     expect(links?.[0]?.getAttribute("onmouseover")).toBeNull();
-    expect(links?.[0]?.getAttribute("rel")).toBe("noreferrer noopener");
+    expect(links?.[0]?.getAttribute("type")).toBe("button");
 
     const safeLink = links?.[0];
     if (!safeLink) throw new Error("Expected a safe release-note link");
