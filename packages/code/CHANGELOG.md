@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **CLI argument tests no longer hang on a live Jira host**: parse-only CLI tests point tracker traffic at a closed local port and disable fetch retries (`DEVINTERN_FETCH_MAX_RETRIES=0`), so a slow `test.atlassian.net` lookup cannot burn the 30s bun timeout and fail pre-push
 - **Default branch detection**: repository automations now ask the remote for its authoritative default branch before checkout or fetch operations, avoiding failed `master` attempts for repositories whose default is `main` (and supporting custom default branch names). Cached `origin/HEAD` remains an offline fallback
 - **Structured agent responses**: feasibility checks now accept the valid bare JSON commonly returned by Codex instead of requiring a Markdown code fence. Feasibility, estimation, and auto-review share brace-aware extraction that also tolerates narration and ignores unrelated braces in prose
 

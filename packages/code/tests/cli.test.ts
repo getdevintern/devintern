@@ -10,12 +10,15 @@ setDefaultTimeout(30_000);
 
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
 const CLI_SPAWN_TIMEOUT_MS = 30_000;
+/** Closed local port: argument-parse tests must not hang on a live Jira host. */
+const CLI_UNREACHABLE_TRACKER_URL = "http://127.0.0.1:1";
 
 // Helper to run the CLI in an isolated directory to avoid lock conflicts
 function runCLI(args: string[]): {
   stdout: string;
   stderr: string;
   exitCode: number;
+  timedOut: boolean;
 } {
   // Create unique temp directory for this test run
   const testDir = join(
@@ -25,15 +28,18 @@ function runCLI(args: string[]): {
   mkdirSync(testDir, { recursive: true });
 
   try {
-    const result = spawnSync("bun", [CLI_PATH, ...args], {
+    // Skip git for argument-handling runs (init has its own gitignore checks).
+    const extraArgs = args[0] === "init" || args.includes("--no-git") ? [] : ["--no-git"];
+    const result = spawnSync("bun", [CLI_PATH, ...args, ...extraArgs], {
       encoding: "utf8",
       timeout: CLI_SPAWN_TIMEOUT_MS,
       cwd: testDir, // Run in isolated directory
       env: {
         ...process.env,
-        JIRA_BASE_URL: "https://test.atlassian.net",
+        JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
         JIRA_EMAIL: "test@example.com",
         JIRA_API_TOKEN: "test-token",
+        DEVINTERN_FETCH_MAX_RETRIES: "0",
         DEVINTERN_SKIP_LICENSE_CHECK: "1",
         DEVINTERN_NO_UPDATE: "1",
       },
@@ -43,6 +49,9 @@ function runCLI(args: string[]): {
       stdout: result.stdout || "",
       stderr: result.stderr || "",
       exitCode: result.status || 0,
+      timedOut:
+        (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
+        Boolean(result.signal),
     };
   } finally {
     // Clean up temp directory
@@ -282,7 +291,14 @@ describe("CLI Argument Handling", () => {
   });
 
   test("should handle task keys that look like options", () => {
+    // Hyphenated tracker keys must stay positional args, not Commander flags.
+    // Tracker I/O is aimed at a closed local port with retries disabled so
+    // this cannot hang on test.atlassian.net until bun's 30s timeout.
     const result = runCLI(["TEST-123"]);
+    const output = result.stdout + result.stderr;
+    expect(result.timedOut).toBe(false);
+    expect(output).not.toMatch(/unknown option/i);
+    expect(result.stdout).toContain("Processing");
     expect(result.stdout).toContain("TEST-123");
   });
 });
