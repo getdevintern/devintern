@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { delimiter, join } from "path";
 import { Utils } from "../src/lib/utils";
 
 describe("Default branch detection", () => {
@@ -99,6 +99,203 @@ describe("Default branch detection", () => {
     execSync("git symbolic-ref HEAD refs/heads/main", { cwd: remoteDir });
 
     await expect(Utils.getMainBranchName({ cwd: repoDir })).resolves.toBe("main");
+  });
+
+  test("fetches and switches to a newly selected remote default branch", async () => {
+    const remoteDir = configureOrigin("master");
+    const publisherDir = join(
+      tmpdir(),
+      `default-branch-publisher-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    remoteDirs.push(publisherDir);
+    execSync(`git clone "${remoteDir}" "${publisherDir}"`);
+    execSync("git config user.email 'test@test.com'", { cwd: publisherDir });
+    execSync("git config user.name 'Test User'", { cwd: publisherDir });
+    execSync("git checkout -b main", { cwd: publisherDir });
+    writeFileSync(join(publisherDir, "main.txt"), "main branch\n", "utf8");
+    execSync("git add main.txt && git commit -m 'Create main' && git push -u origin main", {
+      cwd: publisherDir,
+    });
+    execSync("git symbolic-ref HEAD refs/heads/main", { cwd: remoteDir });
+
+    expect(await Utils.gitRefExists("refs/remotes/origin/main", { cwd: repoDir })).toBe(false);
+
+    const branch = await Utils.getMainBranchName({ cwd: repoDir });
+    const result = await Utils.pullLatestChanges(branch, { cwd: repoDir });
+
+    expect(branch).toBe("main");
+    expect(result.success).toBe(true);
+    expect(await Utils.getCurrentBranch(repoDir)).toBe("main");
+    expect(await Utils.gitRefExists("refs/remotes/origin/main", { cwd: repoDir })).toBe(true);
+    expect(
+      execSync("git rev-parse --abbrev-ref --symbolic-full-name @{upstream}", {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("origin/main");
+  });
+
+  test("uses cached origin HEAD when the bounded noninteractive remote probe fails", async () => {
+    configureOrigin("master");
+    execSync("git remote set-head origin master", { cwd: repoDir });
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args.join(" ") === "ls-remote --symref origin HEAD") {
+        expect(options?.timeoutMs).toBe(5000);
+        expect(options?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+        expect(options?.env?.GCM_INTERACTIVE).toBe("Never");
+        expect(options?.env?.GIT_SSH_COMMAND).toBe(
+          process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
+        );
+        return Promise.resolve({ success: false, output: "", error: "authentication failed" });
+      }
+      return executeGitCommand(args, options);
+    });
+
+    try {
+      await expect(Utils.getMainBranchName({ cwd: repoDir })).resolves.toBe("master");
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("uses only local fallbacks when the bounded noninteractive remote probe fails", async () => {
+    execSync("git branch -M master", { cwd: repoDir });
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args.join(" ") === "ls-remote --symref origin HEAD") {
+        expect(options?.timeoutMs).toBe(5000);
+        expect(options?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+        expect(options?.env?.GCM_INTERACTIVE).toBe("Never");
+        expect(options?.env?.GIT_SSH_COMMAND).toBe(
+          process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
+        );
+        return Promise.resolve({ success: false, output: "", error: "authentication failed" });
+      }
+      return executeGitCommand(args, options);
+    });
+
+    try {
+      await expect(Utils.getMainBranchName({ cwd: repoDir })).resolves.toBe("master");
+      expect(gitCommands.mock.calls.map(([args]) => args.join(" "))).not.toContain(
+        "remote show origin",
+      );
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("preserves a custom GIT_SSH_COMMAND for the remote probe", async () => {
+    execSync("git branch -M master", { cwd: repoDir });
+    const originalSshCommand = process.env.GIT_SSH_COMMAND;
+    process.env.GIT_SSH_COMMAND = "custom-ssh-wrapper --nonstandard-option";
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args.join(" ") === "ls-remote --symref origin HEAD") {
+        expect(options?.env?.GIT_SSH_COMMAND).toBe("custom-ssh-wrapper --nonstandard-option");
+        return Promise.resolve({ success: false, output: "", error: "unreachable" });
+      }
+      return executeGitCommand(args, options);
+    });
+
+    try {
+      await expect(Utils.getMainBranchName({ cwd: repoDir })).resolves.toBe("master");
+    } finally {
+      gitCommands.mockRestore();
+      if (originalSshCommand === undefined) {
+        delete process.env.GIT_SSH_COMMAND;
+      } else {
+        process.env.GIT_SSH_COMMAND = originalSshCommand;
+      }
+    }
+  });
+
+  test("preserves core.sshCommand for the remote probe", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const remoteDir = configureOrigin("main");
+    execSync("git branch master", { cwd: repoDir });
+    execSync("git push origin master", { cwd: repoDir });
+    execSync("git remote set-head origin master", { cwd: repoDir });
+    const sshWrapper = join(repoDir, "ssh-wrapper");
+    const wrapperMarker = join(repoDir, "ssh-wrapper-invoked");
+    writeFileSync(
+      sshWrapper,
+      `#!/bin/sh\nprintf invoked > "${wrapperMarker}"\nif [ "$1" = "-G" ]; then\n  exit 0\nfi\nfor argument do\n  command="$argument"\ndone\nexec /bin/sh -c "$command"\n`,
+      "utf8",
+    );
+    chmodSync(sshWrapper, 0o755);
+    execSync(`git config core.sshCommand "${sshWrapper}"`, { cwd: repoDir });
+    execSync(`git remote set-url origin "ssh://required-wrapper${remoteDir}"`, { cwd: repoDir });
+
+    const originalSshCommand = process.env.GIT_SSH_COMMAND;
+    delete process.env.GIT_SSH_COMMAND;
+    try {
+      await expect(Utils.getMainBranchName({ cwd: repoDir })).resolves.toBe("main");
+      expect(readFileSync(wrapperMarker, "utf8")).toBe("invoked");
+    } finally {
+      if (originalSshCommand !== undefined) {
+        process.env.GIT_SSH_COMMAND = originalSshCommand;
+      }
+    }
+  });
+
+  test("terminates descendant processes before a timed-out git command resolves", async () => {
+    const shimDir = join(
+      tmpdir(),
+      `default-branch-git-shim-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    remoteDirs.push(shimDir);
+    mkdirSync(shimDir, { recursive: true });
+    const childPidFile = join(shimDir, "child.pid");
+    const gitShim = join(shimDir, process.platform === "win32" ? "git.cmd" : "git");
+    if (process.platform === "win32") {
+      const childScript = join(shimDir, "child.ts");
+      writeFileSync(
+        childScript,
+        "await Bun.write(process.argv[2]!, String(process.pid));\nawait Bun.sleep(30_000);\n",
+        "utf8",
+      );
+      writeFileSync(
+        gitShim,
+        '@echo off\r\n"%BUN_EXEC_PATH%" "%CHILD_SCRIPT%" "%CHILD_PID_FILE%"\r\n',
+        "utf8",
+      );
+    } else {
+      writeFileSync(
+        gitShim,
+        '#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf "%s\\n" "$child_pid" > "$CHILD_PID_FILE"\nwait "$child_pid"\n',
+        "utf8",
+      );
+      chmodSync(gitShim, 0o755);
+    }
+
+    const result = await Utils.executeGitCommand(["status"], {
+      cwd: repoDir,
+      timeoutMs: 250,
+      env: {
+        PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}`,
+        BUN_EXEC_PATH: process.execPath,
+        CHILD_SCRIPT: join(shimDir, "child.ts"),
+        CHILD_PID_FILE: childPidFile,
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Git command timed out after 250ms");
+    const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+    let childIsAlive = true;
+    for (let attempt = 0; attempt < 50 && childIsAlive; attempt++) {
+      try {
+        process.kill(childPid, 0);
+        await Bun.sleep(20);
+      } catch {
+        childIsAlive = false;
+      }
+    }
+    expect(childIsAlive).toBe(false);
   });
 
   test("should fall back to master when pullLatestChanges is asked for main", async () => {
