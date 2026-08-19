@@ -32,6 +32,7 @@ export class ClaudeCodeHarness implements AgentHarness {
   readonly defaultPath = "claude";
   readonly promptFlag = "-p";
   readonly supportedModes = ["plan", "readonly"] as const;
+  readonly supportsMaxTurns = true;
 
   /**
    * Build `claude` CLI flags for non-interactive (`-p`) execution.

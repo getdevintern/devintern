@@ -92,6 +92,6 @@ export async function runAgentBun(
     stdout,
     stderr,
     exitCode,
-    maxTurnsReached: detectMaxTurnsReached(stdout, stderr),
+    maxTurnsReached: detectMaxTurnsReached(stdout, stderr, harness.supportsMaxTurns === true),
   };
 }

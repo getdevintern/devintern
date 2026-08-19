@@ -27,6 +27,7 @@ import {
   buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
+  findMaxTurnsReachedLine,
   detectOpenQuestions,
   detectSandboxProviders,
   detectUsageLimit,
@@ -2678,9 +2679,15 @@ async function runClarityCheck(
             }
 
             // Check if Agent reached max turns or had other issues
-            if (detectMaxTurnsReached(stdoutOutput, stderrOutput)) {
+            if (
+              detectMaxTurnsReached(stdoutOutput, stderrOutput, harness.supportsMaxTurns === true)
+            ) {
               console.log("\n⚠️  Clarity assessment reached maximum conversation turns");
               console.log("   This may indicate task complexity or insufficient details");
+              const matchedLine = findMaxTurnsReachedLine(stdoutOutput, stderrOutput);
+              if (matchedLine) {
+                console.log(`   Matched output: ${matchedLine}`);
+              }
               if (!skipComments) {
                 console.log(
                   "   Will attempt to proceed with implementation but posting failure to task tracker...\n",
@@ -3395,7 +3402,11 @@ async function runAgentHarness(
           return;
         }
 
-        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+        const maxTurnsReached = detectMaxTurnsReached(
+          stdoutOutput,
+          stderrOutput,
+          harness.supportsMaxTurns === true,
+        );
 
         if (maxTurnsReached) {
           console.log("⚠️  Agent reached maximum turns limit without completing the task");
@@ -3403,6 +3414,10 @@ async function runAgentHarness(
           console.log(
             "   Consider breaking it into smaller tasks or increasing the max-turns limit",
           );
+          const matchedLine = findMaxTurnsReachedLine(stdoutOutput, stderrOutput);
+          if (matchedLine) {
+            console.log(`   Matched output: ${matchedLine}`);
+          }
 
           // Save incomplete implementation for analysis
           if (taskKey && stdoutOutput.trim()) {
