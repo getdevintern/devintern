@@ -35,6 +35,100 @@ export async function isCommitAlreadyComplete(cwd?: string): Promise<boolean> {
   return !(await Utils.hasUncommittedChanges(cwd));
 }
 
+/** Result of verifying a pre-push hook-fix attempt. */
+export type PushHookFixVerification = {
+  success: boolean;
+  alreadyOnRemote: boolean;
+  amended: boolean;
+  message: string;
+};
+
+/**
+ * Verify a pre-push hook-fix without assuming a failed dry-run means "didn't amend".
+ *
+ * If HEAD already matches `origin/<branch>`, skip `git push --dry-run`. That
+ * dry-run re-executes the full pre-push suite and can flake after the agent
+ * already published the branch, which previously aborted PR creation.
+ *
+ * @param options - Working directory and expected branch
+ */
+export async function verifyPushHookFix(options?: {
+  cwd?: string;
+  expectedBranch?: string;
+}): Promise<PushHookFixVerification> {
+  const cwd = options?.cwd;
+  const currentBranch = await Utils.getCurrentBranch(cwd);
+
+  if (options?.expectedBranch && currentBranch !== options.expectedBranch) {
+    return {
+      success: false,
+      alreadyOnRemote: false,
+      amended: false,
+      message: `worktree HEAD is on '${currentBranch || "unknown"}' but expected '${options.expectedBranch}'`,
+    };
+  }
+
+  const targetBranch = options?.expectedBranch ?? currentBranch ?? undefined;
+  let amended = false;
+
+  if (await Utils.hasUncommittedChanges(cwd)) {
+    const stageResult = await Utils.executeGitCommand(["add", "-A"], { cwd });
+    if (!stageResult.success) {
+      return {
+        success: false,
+        alreadyOnRemote: false,
+        amended: false,
+        message: `Failed to stage changes: ${stageResult.error}`,
+      };
+    }
+
+    const amendResult = await Utils.executeGitCommand(
+      ["commit", "--amend", "--no-edit", "--no-verify"],
+      { cwd },
+    );
+    if (!amendResult.success) {
+      return {
+        success: false,
+        alreadyOnRemote: false,
+        amended: false,
+        message: `Failed to amend commit: ${amendResult.error}`,
+      };
+    }
+    amended = true;
+  }
+
+  if (targetBranch && (await Utils.remoteTrackingRefMatchesHead(targetBranch, { cwd }))) {
+    return {
+      success: true,
+      alreadyOnRemote: true,
+      amended,
+      message: `HEAD already matches origin/${targetBranch}; skipping hook-rerunning dry-run`,
+    };
+  }
+
+  const pushDryRunArgs = targetBranch
+    ? ["push", "origin", `HEAD:refs/heads/${targetBranch}`, "--dry-run"]
+    : ["push", "origin", "HEAD", "--dry-run"];
+  const pushDryRun = await Utils.executeGitCommand(pushDryRunArgs, { cwd });
+
+  if (pushDryRun.success) {
+    return {
+      success: true,
+      alreadyOnRemote: false,
+      amended,
+      message: "changes are committed and ready to push",
+    };
+  }
+
+  const detail = [pushDryRun.error, pushDryRun.output].filter(Boolean).join("\n").trim();
+  return {
+    success: false,
+    alreadyOnRemote: false,
+    amended,
+    message: detail || "push dry-run failed",
+  };
+}
+
 /**
  * Run agent to fix git hook errors.
  *
@@ -275,68 +369,23 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                 }
               }
             } else {
-              // For push fix: verify changes are committed and ready to push.
-              // Target the expected branch explicitly (HEAD:refs/heads/<branch>)
-              // rather than a bare HEAD, so a stray HEAD can never validate a
-              // push to the wrong/new remote branch. This is a --dry-run, so it
-              // never publishes anything.
-              const pushDryRunArgs = expectedBranch
-                ? ["push", "origin", `HEAD:refs/heads/${expectedBranch}`, "--dry-run"]
-                : ["push", "origin", "HEAD", "--dry-run"];
-              const pushDryRun = await Utils.executeGitCommand(pushDryRunArgs, { cwd });
-
-              if (pushDryRun.success) {
-                console.log(
-                  "✅ Verification successful - changes are committed and ready to push!",
-                );
+              const verification = await verifyPushHookFix({ cwd, expectedBranch });
+              if (verification.success) {
+                if (verification.amended) {
+                  console.log("✅ Successfully amended commit manually!");
+                }
+                if (verification.alreadyOnRemote) {
+                  console.log(`✅ Verification successful - ${verification.message}`);
+                } else {
+                  console.log(
+                    "✅ Verification successful - changes are committed and ready to push!",
+                  );
+                }
                 resolve(true);
               } else {
-                console.log(
-                  `⚠️  ${harness.displayName} fixed the code but didn't amend - amending manually...`,
-                );
-
-                // Check if there are uncommitted changes to amend
-                const statusCheck = await Utils.executeGitCommand(["status", "--porcelain"], {
-                  cwd,
-                });
-                if (statusCheck.success && statusCheck.output.trim() !== "") {
-                  // Stage all changes (-A: whole tree, not cwd-limited)
-                  const stageResult = await Utils.executeGitCommand(["add", "-A"], { cwd });
-                  if (!stageResult.success) {
-                    console.log("❌ Failed to stage changes:");
-                    console.log(`   ${stageResult.error}`);
-                    resolve(false);
-                    return;
-                  }
-
-                  // Amend the commit
-                  const amendResult = await Utils.executeGitCommand(
-                    ["commit", "--amend", "--no-edit", "--no-verify"],
-                    { cwd },
-                  );
-                  if (amendResult.success) {
-                    console.log("✅ Successfully amended commit manually!");
-
-                    // Verify push would work now (explicit branch ref, dry-run)
-                    const retryPush = await Utils.executeGitCommand(pushDryRunArgs, { cwd });
-                    if (retryPush.success) {
-                      console.log("✅ Verification successful - ready to push!");
-                      resolve(true);
-                    } else {
-                      console.log("❌ Push would still fail after amend:");
-                      console.log(`   ${retryPush.error || retryPush.output}`);
-                      resolve(false);
-                    }
-                  } else {
-                    console.log("❌ Failed to amend commit:");
-                    console.log(`   ${amendResult.error}`);
-                    resolve(false);
-                  }
-                } else {
-                  console.log("❌ Push dry-run failed but no uncommitted changes to amend:");
-                  console.log(`   ${pushDryRun.error || pushDryRun.output}`);
-                  resolve(false);
-                }
+                console.log("❌ Push verification failed:");
+                console.log(`   ${verification.message}`);
+                resolve(false);
               }
             }
           } catch (verifyError) {

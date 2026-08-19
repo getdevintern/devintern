@@ -195,7 +195,11 @@ export async function runAgent(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
-        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+        const maxTurnsReached = detectMaxTurnsReached(
+          stdoutOutput,
+          stderrOutput,
+          harness.supportsMaxTurns === true,
+        );
         const output = stdoutOutput + stderrOutput;
 
         resolve({

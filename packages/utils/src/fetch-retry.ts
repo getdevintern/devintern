@@ -19,6 +19,23 @@ function isRetryableNetworkError(error: Error): boolean {
 }
 
 /**
+ * Default retry count. `DEVINTERN_FETCH_MAX_RETRIES=0` disables retries so
+ * tests can fail immediately instead of sleeping through backoff against a
+ * fake tracker host.
+ */
+function defaultMaxRetries(): number {
+  const raw = process.env.DEVINTERN_FETCH_MAX_RETRIES;
+  if (raw === undefined || raw === "") {
+    return 3;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 3;
+  }
+  return parsed;
+}
+
+/**
  * Fetch with exponential backoff retry for transient failures.
  * Automatically retries on network errors and retryable HTTP status codes.
  *
@@ -38,7 +55,7 @@ export async function fetchWithRetry(
     verbose?: boolean;
   },
 ): Promise<Response> {
-  const maxRetries = retryOptions?.maxRetries ?? 3;
+  const maxRetries = retryOptions?.maxRetries ?? defaultMaxRetries();
   const baseDelay = retryOptions?.baseDelay ?? 1000;
   const maxDelay = retryOptions?.maxDelay ?? 30000;
   const jitter = retryOptions?.jitter ?? true;

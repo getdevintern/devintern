@@ -3,7 +3,7 @@ title: "Automated Task Processing"
 description: "Drain your backlog continuously with the worker daemon, or schedule @devintern/code via systemd timers or cron"
 section: "Server Automation"
 order: 5
-dateModified: 2026-07-21
+dateModified: 2026-08-19
 ---
 
 # Automated Task Processing
@@ -28,7 +28,7 @@ Set `LICENSE_KEY` in your project's `.devintern-code/.env` (or as an `Environmen
 
 ## systemd timers
 
-A systemd job is a pair of unit files: a one-shot `.service` that runs `devintern`, and a `.timer` that triggers it on a schedule.
+A systemd job is a pair of unit files: a one-shot `.service` that runs `devintern`, and a `.timer` that triggers it on a schedule. Omit `--pr-target-branch` unless you intentionally want PRs against a non-default branch — the CLI detects `main`, `master`, or a custom default from the remote.
 
 ### Every 10 minutes: process Intern-labeled tasks
 
@@ -47,8 +47,7 @@ WorkingDirectory=/path/to/your/project
 ExecStart=/usr/local/bin/devintern \
   --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' \
   --max-turns 500 \
-  --create-pr \
-  --pr-target-branch master
+  --create-pr
 StandardOutput=journal
 StandardError=journal
 ```
@@ -131,7 +130,7 @@ If you're on a system without systemd, the same three jobs work as crontab entri
 
 ```bash
 # Process tasks labeled "Intern" in open sprints every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr --pr-target-branch master >> /tmp/devintern-cron.log 2>&1
+*/10 * * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 
 # Process AutoImpl-labeled tasks every hour
 0 * * * * cd /path/to/your/project && devintern --query 'status = "To Do" AND labels IN (AutoImpl)' --create-pr >> /tmp/devintern-cron.log 2>&1
@@ -196,13 +195,12 @@ For Linear (`TASK_TRACKER=linear`), swap JQL for a JSON `IssueFilter`. Wrap the 
 ExecStart=/usr/local/bin/devintern \
   --query '{"labels":{"name":{"eq":"intern"}}}' \
   --max-turns 500 \
-  --create-pr \
-  --pr-target-branch master
+  --create-pr
 ```
 
 ```bash
 # cron: process "intern"-labeled Linear issues every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr --pr-target-branch master >> /tmp/devintern-cron.log 2>&1
+*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 
 # cron: process high-priority issues assigned to me every hour
 0 * * * * cd /path/to/your/project && devintern --query '{"assignee":{"isMe":{"eq":true}},"priority":{"lte":2}}' --create-pr >> /tmp/devintern-cron.log 2>&1

@@ -405,7 +405,7 @@ devintern MYAPP-456
 - GitHub: Requires `GITHUB_TOKEN` for personal CLI PR creation (see ENV_SETUP.md). A team GitHub App can also create PRs; `@mention` matching on any PR needs the App.
 - Bitbucket: Requires `BITBUCKET_TOKEN` (`Repositories: Write`), workspace auto-detected from git remote
 - Can be enabled with `--create-pr` flag
-- Target branch can be specified with `--pr-target-branch` (defaults to 'main')
+- Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
 
 ### Git Requirements
 
@@ -435,7 +435,7 @@ You can set up automated task processing using cron jobs. This is useful for con
 ```bash
 # Example: Process tasks labeled "Intern" in open sprints every 10 minutes
 # Add to crontab (run: crontab -e)
-*/10 * * * * cd /path/to/your/project && devintern --jql 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr --pr-target-branch master >> /tmp/devintern-cron.log 2>&1
+*/10 * * * * cd /path/to/your/project && devintern --jql 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 
 # Example: Process assigned tasks every hour
 0 * * * * cd /path/to/your/project && devintern --jql 'assignee = currentUser() AND status = "To Do" AND labels IN (AutoImpl)' --create-pr >> /tmp/devintern-cron.log 2>&1
@@ -450,7 +450,7 @@ The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in sing
 
 ```bash
 # Example: Process "intern"-labeled Linear issues every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr --pr-target-branch master >> /tmp/devintern-cron.log 2>&1
+*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 
 # Example: Process high-priority Linear issues assigned to you every hour
 0 * * * * cd /path/to/your/project && devintern --query '{"assignee":{"isMe":{"eq":true}},"priority":{"lte":2}}' --create-pr >> /tmp/devintern-cron.log 2>&1

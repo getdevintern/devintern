@@ -146,6 +146,24 @@ The FSL grants no trademark rights: the DevIntern name and logo are trademarks o
 
 Website and control plane live elsewhere; this repo is the tool packages.
 
+## Development workflows
+
+Install dependencies with `bun install`, then use the root commands below. Turborepo runs package tasks in parallel where it is safe and orders workspace builds according to their package dependencies.
+
+| Command                | Purpose                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `bun run build`        | Build every workspace and its dependencies                                   |
+| `bun run test`         | Run all package test suites                                                   |
+| `bun run lint`         | Lint all packages                                                            |
+| `bun run typecheck`    | Type-check all packages                                                       |
+| `bun run format:check` | Check formatting without changing files                                      |
+| `bun run format`       | Format all packages; this write task is intentionally not cached              |
+| `bun run dev`          | Start the dashboard and desktop watch tasks; stop them with <kbd>Ctrl+C</kbd> |
+
+Package-level commands remain available, for example `bun run --filter @getdevintern/pm test`. To run a selected task and its dependency graph through Turborepo, use `bun run turbo run build --filter @getdevintern/code`.
+
+Turborepo uses the local `.turbo` directory for its cache; remote caching is not configured. Add `--force` to a Turbo command to ignore cached results, or remove `.turbo` to clear the local cache completely. If a result looks stale, first rerun it with `--force`; changes to the lockfile, package sources, shared lint configuration, or declared build environment variables automatically invalidate affected entries.
+
 ## Contributing
 
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Monorepo layout and Bun-only tooling: [AGENTS.md](AGENTS.md).

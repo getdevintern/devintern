@@ -244,7 +244,12 @@ export class Utils {
    */
   static async executeGitCommand(
     args: string[],
-    options?: { verbose?: boolean; cwd?: string },
+    options?: {
+      verbose?: boolean;
+      cwd?: string;
+      timeoutMs?: number;
+      env?: NodeJS.ProcessEnv;
+    },
   ): Promise<{ success: boolean; output: string; error?: string }> {
     const verbose = options?.verbose ?? false;
     const cwd = options?.cwd;
@@ -254,35 +259,34 @@ export class Utils {
     }
 
     return new Promise((resolve) => {
+      const useProcessGroup = Boolean(options?.timeoutMs) && process.platform !== "win32";
       const git = spawn("git", args, {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: cwd || process.cwd(),
+        env: options?.env ? { ...process.env, ...options.env } : process.env,
+        detached: useProcessGroup,
       });
 
       let output = "";
       let error = "";
+      let settled = false;
+      let timedOut = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
 
-      git.stdout.on("data", (data) => {
-        const text = data.toString();
-        output += text;
-        if (verbose) {
-          process.stdout.write(text);
+      const finish = (code: number | null, spawnError?: Error) => {
+        if (timeout) {
+          clearTimeout(timeout);
         }
-      });
-
-      git.stderr.on("data", (data) => {
-        const text = data.toString();
-        error += text;
-        if (verbose) {
-          process.stderr.write(text);
+        if (settled) {
+          return;
         }
-      });
-
-      git.on("close", (code) => {
+        settled = true;
         const result = {
-          success: code === 0,
+          success: !timedOut && !spawnError && code === 0,
           output: output.trim(),
-          error: error.trim(),
+          error: timedOut
+            ? `Git command timed out after ${options?.timeoutMs}ms`
+            : spawnError?.message || error.trim(),
         };
 
         if (verbose) {
@@ -300,7 +304,57 @@ export class Utils {
         }
 
         resolve(result);
+      };
+
+      git.stdout.on("data", (data) => {
+        const text = data.toString();
+        output += text;
+        if (verbose) {
+          process.stdout.write(text);
+        }
       });
+
+      git.stderr.on("data", (data) => {
+        const text = data.toString();
+        error += text;
+        if (verbose) {
+          process.stderr.write(text);
+        }
+      });
+
+      git.on("error", (spawnError) => finish(null, spawnError));
+      git.on("close", (code) => finish(code));
+
+      if (options?.timeoutMs) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          let killedProcessGroup = false;
+          if (useProcessGroup && git.pid) {
+            try {
+              process.kill(-git.pid, "SIGKILL");
+              killedProcessGroup = true;
+            } catch {
+              // The process may have exited between the timeout and termination.
+            }
+          }
+          if (process.platform === "win32" && git.pid) {
+            const taskkill = spawn("taskkill", ["/PID", String(git.pid), "/T", "/F"], {
+              stdio: "ignore",
+              windowsHide: true,
+            });
+            taskkill.on("error", () => git.kill("SIGKILL"));
+            taskkill.on("close", (code) => {
+              if (code !== 0) {
+                git.kill("SIGKILL");
+              }
+            });
+            return;
+          }
+          if (!killedProcessGroup) {
+            git.kill("SIGKILL");
+          }
+        }, options.timeoutMs);
+      }
     });
   }
 
@@ -545,6 +599,8 @@ export class Utils {
   /**
    * Pull latest commits for a branch from `origin`.
    *
+   * Resolves a missing preferred name to the repository default first so a
+   * stale `master`/`main` request does not `git fetch` a ref the remote lacks.
    * Fetches the branch from `origin` when it is not available locally before checkout.
    *
    * @param branch - Branch to update
@@ -578,6 +634,12 @@ export class Utils {
         };
       }
 
+      const requestedBranch = branch;
+      branch = await Utils.resolveDefaultBranch(requestedBranch, { cwd });
+      if (verbose && branch !== requestedBranch) {
+        console.log(`⚠️  Branch '${requestedBranch}' not found, trying '${branch}'...`);
+      }
+
       const currentBranch = await Utils.getCurrentBranch(cwd);
 
       // Switch to target branch if not already on it
@@ -586,9 +648,22 @@ export class Utils {
           console.log(`📥 Switching to branch '${branch}'...`);
         }
         let targetBranch = branch;
+        let fetchedTargetBeforeCheckout = false;
+
+        const targetExistsLocally =
+          (await Utils.gitRefExists(`refs/heads/${targetBranch}`, { cwd })) ||
+          (await Utils.gitRefExists(`refs/remotes/origin/${targetBranch}`, { cwd }));
+        if (!targetExistsLocally) {
+          if (verbose) {
+            console.log(`📥 Fetching '${targetBranch}' from origin...`);
+          }
+          await Utils.fetchRemoteBranch(targetBranch, { verbose, cwd });
+          fetchedTargetBeforeCheckout = true;
+        }
+
         let switchResult = await Utils.checkoutBranch(targetBranch, { verbose, cwd });
 
-        if (!switchResult.success) {
+        if (!switchResult.success && !fetchedTargetBeforeCheckout) {
           if (verbose) {
             console.log(`📥 Fetching '${targetBranch}' from origin...`);
           }
@@ -674,12 +749,22 @@ export class Utils {
    */
   static async remoteBranchExists(
     branch: string,
-    options?: { verbose?: boolean; cwd?: string },
+    options?: {
+      verbose?: boolean;
+      cwd?: string;
+      timeoutMs?: number;
+      env?: NodeJS.ProcessEnv;
+    },
   ): Promise<boolean> {
-    const result = await Utils.executeGitCommand(
-      ["ls-remote", "--heads", "origin", branch],
-      options,
-    );
+    const result = await Utils.executeGitCommand(["ls-remote", "--heads", "origin", branch], {
+      ...options,
+      timeoutMs: options?.timeoutMs ?? 5000,
+      env: {
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "Never",
+        ...options?.env,
+      },
+    });
     return result.success && result.output.trim().length > 0;
   }
 
@@ -716,6 +801,11 @@ export class Utils {
   /**
    * Resolve the repository default branch, honoring a preferred name when present.
    *
+   * The preferred name is kept when it exists locally or on `origin`. Otherwise
+   * this falls back to {@link getMainBranchName} so callers that pass a stale
+   * conventional default (`master` on a `main` repo, or the reverse) do not
+   * issue a doomed `git fetch` for a ref the remote does not have.
+   *
    * @param preferredBranch - Optional branch to prefer when it exists
    * @param options - Optional working directory
    */
@@ -730,35 +820,61 @@ export class Utils {
       ) {
         return preferredBranch;
       }
+
+      if (await Utils.remoteBranchExists(preferredBranch, { cwd: options?.cwd })) {
+        return preferredBranch;
+      }
     }
 
     return Utils.getMainBranchName(options);
   }
 
   /**
-   * Detect the repository default branch (`main`, `master`, or origin HEAD).
+   * Detect the repository default branch from remote metadata, with local
+   * conventional-branch fallbacks for repositories without a reachable origin.
    *
    * @param options - Optional working directory
    */
   static async getMainBranchName(options?: { cwd?: string }): Promise<string> {
     const gitOptions = options?.cwd ? { cwd: options.cwd } : undefined;
 
-    // Prefer the remote's default branch when origin is configured
-    const defaultBranch = await Utils.executeGitCommand(
-      ["symbolic-ref", "refs/remotes/origin/HEAD"],
-      gitOptions,
-    );
-    if (defaultBranch.success) {
-      const branchName = defaultBranch.output.replace("refs/remotes/origin/", "").trim();
+    let sshCommand = process.env.GIT_SSH_COMMAND;
+    if (sshCommand === undefined) {
+      const configuredSshCommand = await Utils.executeGitCommand(
+        ["config", "--get", "core.sshCommand"],
+        gitOptions,
+      );
+      if (!configuredSshCommand.success || !configuredSshCommand.output) {
+        sshCommand = "ssh -o BatchMode=yes";
+      }
+    }
+
+    // Ask the remote first. refs/remotes/origin/HEAD is only a local cache and can
+    // remain pointed at `master` after the repository changes its default to `main`.
+    const remoteHead = await Utils.executeGitCommand(["ls-remote", "--symref", "origin", "HEAD"], {
+      ...gitOptions,
+      timeoutMs: 5000,
+      env: {
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "Never",
+        ...(sshCommand === undefined ? {} : { GIT_SSH_COMMAND: sshCommand }),
+      },
+    });
+    if (remoteHead.success) {
+      const match = remoteHead.output.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/m);
+      const branchName = match?.[1]?.trim();
       if (branchName) {
         return branchName;
       }
     }
 
-    const remoteShow = await Utils.executeGitCommand(["remote", "show", "origin"], gitOptions);
-    if (remoteShow.success) {
-      const match = remoteShow.output.match(/HEAD branch:\s*(.+)/);
-      const branchName = match?.[1]?.trim();
+    // Fall back to the cached remote HEAD when origin is temporarily unreachable.
+    const cachedRemoteHead = await Utils.executeGitCommand(
+      ["symbolic-ref", "refs/remotes/origin/HEAD"],
+      gitOptions,
+    );
+    if (cachedRemoteHead.success) {
+      const branchName = cachedRemoteHead.output.replace("refs/remotes/origin/", "").trim();
       if (branchName) {
         return branchName;
       }
@@ -779,6 +895,35 @@ export class Utils {
     }
 
     return "main";
+  }
+
+  /**
+   * Whether local HEAD is already published at `origin/<branch>`.
+   *
+   * Uses the remote-tracking ref (no network). A successful `git push`
+   * updates that ref, so this is a reliable "already pushed" check that
+   * does not re-run pre-push hooks.
+   *
+   * @param branch - Remote branch name without `refs/heads/`
+   * @param options - Optional working directory
+   */
+  static async remoteTrackingRefMatchesHead(
+    branch: string,
+    options?: { cwd?: string },
+  ): Promise<boolean> {
+    const gitOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], gitOptions);
+    if (!head.success || !head.output.trim()) {
+      return false;
+    }
+    const remote = await Utils.executeGitCommand(
+      ["rev-parse", "--verify", `refs/remotes/origin/${branch}`],
+      gitOptions,
+    );
+    if (!remote.success || !remote.output.trim()) {
+      return false;
+    }
+    return head.output.trim() === remote.output.trim();
   }
 
   /**
@@ -827,6 +972,22 @@ export class Utils {
         return {
           success: false,
           message: `Cannot push protected branch '${currentBranch}'. This should not happen - please create a feature branch.`,
+        };
+      }
+
+      // If the agent (or a previous attempt) already published this exact
+      // commit, do not invoke `git push`. A no-op push still runs pre-push
+      // hooks, and a flaky hook (e.g. a 30s test timeout) would abort PR
+      // creation for a branch that is already on the remote.
+      if (await Utils.remoteTrackingRefMatchesHead(currentBranch, { cwd })) {
+        if (verbose) {
+          console.log(
+            `📤 Branch '${currentBranch}' already matches origin/${currentBranch}; skipping push`,
+          );
+        }
+        return {
+          success: true,
+          message: `Branch '${currentBranch}' is already on remote`,
         };
       }
 

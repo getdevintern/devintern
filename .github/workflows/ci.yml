@@ -12,6 +12,8 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,5 +41,5 @@ jobs:
           # CLI argument tests resolve the configured harness but fail before invoking it.
           AGENT_CLI_PATH: bun
 
-      - name: Build
+      - name: Build workspace graph
         run: bun run build

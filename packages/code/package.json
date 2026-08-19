@@ -68,6 +68,7 @@
   "devDependencies": {
     "@devintern/agent-harness": "workspace:*",
     "@devintern/auth": "workspace:*",
+    "@devintern/dashboard-ui": "workspace:*",
     "@devintern/license-check": "workspace:*",
     "@devintern/task-trackers": "workspace:*",
     "@devintern/utils": "workspace:*",

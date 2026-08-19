@@ -23,9 +23,18 @@ writeFileSync(distPath, content);
 // the published npm artifact without the monorepo.
 const uiPackageDir = join(import.meta.dir, "..", "dashboard-ui");
 const uiDist = join(uiPackageDir, "dist");
-const uiBuild = Bun.spawnSync(["bun", "run", "build"], { cwd: uiPackageDir });
-if (uiBuild.exitCode !== 0 || !existsSync(join(uiDist, "index.html"))) {
-  console.error(uiBuild.stderr.toString());
+
+// Turbo builds workspace dependencies first. Keep the package-level command
+// self-contained for contributors who run `bun run build` from this directory.
+if (!process.env.TURBO_HASH) {
+  const uiBuild = Bun.spawnSync(["bun", "run", "build"], { cwd: uiPackageDir });
+  if (uiBuild.exitCode !== 0) {
+    console.error(uiBuild.stderr.toString());
+    process.exit(1);
+  }
+}
+
+if (!existsSync(join(uiDist, "index.html"))) {
   console.error("dashboard-ui build failed; refusing to package without the dashboard UI.");
   process.exit(1);
 }

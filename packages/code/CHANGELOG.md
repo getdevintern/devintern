@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **Hook-fix verification after a successful push**: if HEAD already matches `origin/<branch>`, skip the pre-push `--dry-run` (and the follow-up no-op `git push`). Re-running the hook suite can flake — a 30s CLI test timeout previously aborted PR creation for a branch that was already on the remote, with a misleading "didn't amend" error
+- **CLI argument tests no longer hang on a live tracker host**: parse-only CLI tests point Jira, Linear, and Trello traffic at a closed local port and disable fetch retries (`DEVINTERN_FETCH_MAX_RETRIES=0`), so a slow remote lookup cannot burn the 30s bun timeout and fail pre-push
+- **Default branch detection**: repository automations now ask the remote for its authoritative default branch before checkout or fetch operations, avoiding failed `master` attempts for repositories whose default is `main` (and supporting custom default branch names). Cached `origin/HEAD` remains an offline fallback. An explicit `--pr-target-branch master` (or `main`) that is missing on the remote now falls back the same way, so copied cron examples no longer `git fetch` a doomed ref before switching to the real default
 - **Structured agent responses**: feasibility checks now accept the valid bare JSON commonly returned by Codex instead of requiring a Markdown code fence. Feasibility, estimation, and auto-review share brace-aware extraction that also tolerates narration and ignores unrelated braces in prose
 
 ## [2.3.2] - 2026-08-18

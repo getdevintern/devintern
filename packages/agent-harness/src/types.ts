@@ -97,6 +97,13 @@ export interface AgentHarness {
    */
   readonly supportedModes?: readonly Exclude<AgentRunMode, "default">[];
   /**
+   * Whether this harness accepts a CLI turn limit (`--max-turns` or
+   * equivalent) and can emit a max-turns diagnostic. Omitted / false means
+   * callers skip transcript scanning so tool output cannot be mistaken for a
+   * turn-limit error.
+   */
+  readonly supportsMaxTurns?: boolean;
+  /**
    * Whether this harness's constrained modes still allow unrestricted
    * network and MCP tool use (web search, web fetch, MCP servers).
    *

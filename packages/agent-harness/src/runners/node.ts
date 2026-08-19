@@ -179,7 +179,7 @@ export async function runAgentNode(
           stdout,
           stderr,
           exitCode: code ?? 1,
-          maxTurnsReached: detectMaxTurnsReached(stdout, stderr),
+          maxTurnsReached: detectMaxTurnsReached(stdout, stderr, harness.supportsMaxTurns === true),
         });
       }
     });
