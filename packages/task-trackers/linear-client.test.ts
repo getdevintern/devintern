@@ -85,6 +85,42 @@ describe("LinearClient.getIssueByIdentifier", () => {
   });
 });
 
+describe("LinearClient endpoint override", () => {
+  test("constructor baseUrl is used for GraphQL requests", async () => {
+    let requested: string | undefined;
+    globalThis.fetch = (async (url: unknown) => {
+      requested = String(url);
+      return new Response(JSON.stringify({ data: { issue: null } }), { status: 200 });
+    }) as typeof fetch;
+
+    const client = new LinearClient({ apiKey: "key", baseUrl: "http://127.0.0.1:1/graphql" });
+    await client.getIssueByIdentifier("ENG-1");
+    expect(requested).toBe("http://127.0.0.1:1/graphql");
+  });
+
+  test("LINEAR_API_URL overrides the default GraphQL endpoint", async () => {
+    const previous = process.env.LINEAR_API_URL;
+    process.env.LINEAR_API_URL = "http://127.0.0.1:1/graphql";
+    try {
+      let requested: string | undefined;
+      globalThis.fetch = (async (url: unknown) => {
+        requested = String(url);
+        return new Response(JSON.stringify({ data: { issue: null } }), { status: 200 });
+      }) as typeof fetch;
+
+      const client = new LinearClient({ apiKey: "key" });
+      await client.getIssueByIdentifier("ENG-1");
+      expect(requested).toBe("http://127.0.0.1:1/graphql");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LINEAR_API_URL;
+      } else {
+        process.env.LINEAR_API_URL = previous;
+      }
+    }
+  });
+});
+
 describe("LinearClient.getIssueIdByIdentifier", () => {
   test("resolves a UUID via issue(id:) and caches the identifier", async () => {
     const calls = mockGraphQL(() => ({

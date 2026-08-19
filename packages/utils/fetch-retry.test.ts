@@ -2,9 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { fetchWithRetry } from "./src/fetch-retry.ts";
 
 const originalFetch = globalThis.fetch;
+const originalMaxRetries = process.env.DEVINTERN_FETCH_MAX_RETRIES;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalMaxRetries === undefined) {
+    delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+  } else {
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = originalMaxRetries;
+  }
 });
 
 describe("fetchWithRetry", () => {
@@ -74,6 +80,18 @@ describe("fetchWithRetry", () => {
     };
 
     await expect(fetchWithRetry("https://example.com/fail")).rejects.toThrow("invalid url format");
+  });
+
+  test("DEVINTERN_FETCH_MAX_RETRIES=0 skips backoff retries", async () => {
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "0";
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts++;
+      throw new Error("ECONNREFUSED");
+    };
+
+    await expect(fetchWithRetry("http://127.0.0.1:1")).rejects.toThrow("ECONNREFUSED");
+    expect(attempts).toBe(1);
   });
 
   test("does not log retry messages when verbose is false", async () => {
