@@ -736,20 +736,35 @@ export class Utils {
   }
 
   /**
-   * Detect the repository default branch (`main`, `master`, or origin HEAD).
+   * Detect the repository default branch from remote metadata, with local
+   * conventional-branch fallbacks for repositories without a reachable origin.
    *
    * @param options - Optional working directory
    */
   static async getMainBranchName(options?: { cwd?: string }): Promise<string> {
     const gitOptions = options?.cwd ? { cwd: options.cwd } : undefined;
 
-    // Prefer the remote's default branch when origin is configured
-    const defaultBranch = await Utils.executeGitCommand(
+    // Ask the remote first. refs/remotes/origin/HEAD is only a local cache and can
+    // remain pointed at `master` after the repository changes its default to `main`.
+    const remoteHead = await Utils.executeGitCommand(
+      ["ls-remote", "--symref", "origin", "HEAD"],
+      gitOptions,
+    );
+    if (remoteHead.success) {
+      const match = remoteHead.output.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/m);
+      const branchName = match?.[1]?.trim();
+      if (branchName) {
+        return branchName;
+      }
+    }
+
+    // Fall back to the cached remote HEAD when origin is temporarily unreachable.
+    const cachedRemoteHead = await Utils.executeGitCommand(
       ["symbolic-ref", "refs/remotes/origin/HEAD"],
       gitOptions,
     );
-    if (defaultBranch.success) {
-      const branchName = defaultBranch.output.replace("refs/remotes/origin/", "").trim();
+    if (cachedRemoteHead.success) {
+      const branchName = cachedRemoteHead.output.replace("refs/remotes/origin/", "").trim();
       if (branchName) {
         return branchName;
       }
