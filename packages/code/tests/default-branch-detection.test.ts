@@ -79,6 +79,42 @@ describe("Default branch detection", () => {
     }
   });
 
+  test("does not fetch master when pullLatestChanges is asked for master on a main-only repo", async () => {
+    configureOrigin("main");
+    execSync("git checkout -b feature/test", { cwd: repoDir });
+
+    const gitCommands = spyOn(Utils, "executeGitCommand");
+    try {
+      const result = await Utils.pullLatestChanges("master", { cwd: repoDir, verbose: true });
+
+      expect(result.success).toBe(true);
+      expect(await Utils.getCurrentBranch(repoDir)).toBe("main");
+      const commands = gitCommands.mock.calls.map(([args]) => args.join(" "));
+      expect(
+        commands.some((command) => command.includes("fetch") && command.includes("master")),
+      ).toBe(false);
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("keeps a preferred branch that exists only on the remote", async () => {
+    configureOrigin("main");
+    execSync("git checkout -b develop", { cwd: repoDir });
+    execSync("git push origin develop", { cwd: repoDir });
+    execSync("git checkout main", { cwd: repoDir });
+    execSync("git branch -D develop", { cwd: repoDir });
+    execSync("git update-ref -d refs/remotes/origin/develop", { cwd: repoDir });
+
+    await expect(Utils.resolveDefaultBranch("develop", { cwd: repoDir })).resolves.toBe("develop");
+  });
+
+  test("falls back when an explicit preferred branch is missing on the remote", async () => {
+    configureOrigin("main");
+
+    await expect(Utils.resolveDefaultBranch("master", { cwd: repoDir })).resolves.toBe("main");
+  });
+
   test("uses master when remote metadata identifies master", async () => {
     configureOrigin("master");
 

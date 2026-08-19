@@ -599,6 +599,8 @@ export class Utils {
   /**
    * Pull latest commits for a branch from `origin`.
    *
+   * Resolves a missing preferred name to the repository default first so a
+   * stale `master`/`main` request does not `git fetch` a ref the remote lacks.
    * Fetches the branch from `origin` when it is not available locally before checkout.
    *
    * @param branch - Branch to update
@@ -630,6 +632,12 @@ export class Utils {
           message:
             "There are uncommitted changes — skipping the pull. They are backed up to a git stash when the feature branch is created.",
         };
+      }
+
+      const requestedBranch = branch;
+      branch = await Utils.resolveDefaultBranch(requestedBranch, { cwd });
+      if (verbose && branch !== requestedBranch) {
+        console.log(`⚠️  Branch '${requestedBranch}' not found, trying '${branch}'...`);
       }
 
       const currentBranch = await Utils.getCurrentBranch(cwd);
@@ -741,12 +749,22 @@ export class Utils {
    */
   static async remoteBranchExists(
     branch: string,
-    options?: { verbose?: boolean; cwd?: string },
+    options?: {
+      verbose?: boolean;
+      cwd?: string;
+      timeoutMs?: number;
+      env?: NodeJS.ProcessEnv;
+    },
   ): Promise<boolean> {
-    const result = await Utils.executeGitCommand(
-      ["ls-remote", "--heads", "origin", branch],
-      options,
-    );
+    const result = await Utils.executeGitCommand(["ls-remote", "--heads", "origin", branch], {
+      ...options,
+      timeoutMs: options?.timeoutMs ?? 5000,
+      env: {
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "Never",
+        ...options?.env,
+      },
+    });
     return result.success && result.output.trim().length > 0;
   }
 
@@ -783,6 +801,11 @@ export class Utils {
   /**
    * Resolve the repository default branch, honoring a preferred name when present.
    *
+   * The preferred name is kept when it exists locally or on `origin`. Otherwise
+   * this falls back to {@link getMainBranchName} so callers that pass a stale
+   * conventional default (`master` on a `main` repo, or the reverse) do not
+   * issue a doomed `git fetch` for a ref the remote does not have.
+   *
    * @param preferredBranch - Optional branch to prefer when it exists
    * @param options - Optional working directory
    */
@@ -795,6 +818,10 @@ export class Utils {
         (await Utils.gitRefExists(`refs/heads/${preferredBranch}`, options)) ||
         (await Utils.gitRefExists(`refs/remotes/origin/${preferredBranch}`, options))
       ) {
+        return preferredBranch;
+      }
+
+      if (await Utils.remoteBranchExists(preferredBranch, { cwd: options?.cwd })) {
         return preferredBranch;
       }
     }

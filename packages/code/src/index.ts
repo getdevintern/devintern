@@ -1334,7 +1334,11 @@ program
   .option("--no-auto-commit", "Skip automatic git commit after Agent completes")
   .option("--skip-clarity-check", "Skip running Agent for clarity assessment")
   .option("--create-pr", "Create pull request after implementation")
-  .option("--pr-target-branch <branch>", "Target branch for pull request", "main")
+  .option(
+    "--pr-target-branch <branch>",
+    "Target branch for pull request (omitting this uses the repository default branch)",
+    "main",
+  )
   .option("--auto-review", "Run automatic PR review loop after creating PR (requires --create-pr)")
   .option("--auto-review-iterations <number>", "Maximum iterations for auto-review loop", "5")
   .option("--skip-comments", "Skip posting comments to the task tracker (for testing)")
@@ -2144,6 +2148,14 @@ async function main(): Promise<void> {
       if (prTargetBranchSource === "default") {
         options.prTargetBranch = await Utils.getMainBranchName();
         console.log(`   Default branch detected as '${options.prTargetBranch}'`);
+      } else {
+        const requestedBranch = options.prTargetBranch;
+        options.prTargetBranch = await Utils.resolveDefaultBranch(requestedBranch);
+        if (options.prTargetBranch !== requestedBranch) {
+          console.log(
+            `⚠️  Target branch '${requestedBranch}' not found on remote, falling back to '${options.prTargetBranch}'`,
+          );
+        }
       }
 
       console.log("\n📥 Pulling latest changes from remote...");
