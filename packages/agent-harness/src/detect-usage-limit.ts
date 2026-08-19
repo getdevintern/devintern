@@ -37,6 +37,9 @@
  * attempting text-based detection of opencode plan limits.
  */
 
+import type { OutputLine } from "./output-lines.js";
+import { isSourceOrDiffLine, outputLines } from "./output-lines.js";
+
 const USAGE_LIMIT_PATTERNS = [
   // Keep subscription messages anchored to the whole line. Codex writes its
   // tool transcript to stderr, so a substring match also sees source such as
@@ -58,13 +61,6 @@ const PROVIDER_LIMIT_PATTERNS = [
   // Require an HTTP/status/error context below before accepting a 429.
   /\b429\b/,
 ] as const;
-
-const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
-
-interface OutputLine {
-  raw: string;
-  normalized: string;
-}
 
 const RESET_PATTERNS = [
   // "resets 7:20pm (Asia/Ho_Chi_Minh)", "resets at 9am", "resets in 2 hours"
@@ -99,46 +95,6 @@ function extractResetHint(text: string): string | undefined {
     }
   }
   return undefined;
-}
-
-/**
- * Strip terminal styling before matching, while retaining the original line
- * for diagnostics.
- */
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_ESCAPE_PATTERN, "");
-}
-
-/**
- * Split one captured stream into matchable lines.
- */
-function outputLines(text: string): OutputLine[] {
-  return text.split(/\r?\n/).map((raw) => ({
-    raw,
-    normalized: stripAnsi(raw),
-  }));
-}
-
-/**
- * Avoid treating source code, comments, quoted Markdown, search results, and
- * diff hunks as provider errors. Agent transcripts can include arbitrary file
- * content from tools such as `sed`, `rg`, and `git diff`, including literal
- * provider diagnostics such as "429 Too Many Requests".
- */
-function isSourceOrDiffLine(line: string): boolean {
-  const trimmed = line.trim();
-  return (
-    /^(?:diff --git|index\b|---\s|\+\+\+\s|@@\s)/i.test(trimmed) ||
-    /^[+-](?![+-])/.test(trimmed) ||
-    /^(?:\/\/|\/\*|\*|#|>|```|~~~)/.test(trimmed) ||
-    // `rg -n`, grep, and compiler-style locations: path:line[:column]:content.
-    /^(?:(?:\.?\.?\/|\/)?(?:[^:\s]+\/)+[^:\s]+|[^:\s]+\.[a-z\d]+):\d+(?::\d+)?:/i.test(trimmed) ||
-    /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||
-    /^(?:super|throw\s+new\s+Error|[\w$.]+\.(?:error|warn|log))\s*\(/.test(trimmed) ||
-    /^(?:["'`]).*(?:["'`])[,;)]?$/.test(trimmed) ||
-    /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
-    /=>/.test(trimmed)
-  );
 }
 
 /**

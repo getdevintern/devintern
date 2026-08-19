@@ -23,6 +23,7 @@ describe("ClaudeCodeHarness", () => {
     expect(h.displayName).toBe("Claude Code");
     expect(h.defaultPath).toBe("claude");
     expect(h.promptFlag).toBe("-p");
+    expect(h.supportsMaxTurns).toBe(true);
   });
 
   test("buildArgs empty", () => {
@@ -76,6 +77,7 @@ describe("CodexHarness", () => {
     expect(h.displayName).toBe("Codex");
     expect(h.defaultPath).toBe("codex");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsMaxTurns).toBeUndefined();
   });
 
   test("buildArgs empty", () => {

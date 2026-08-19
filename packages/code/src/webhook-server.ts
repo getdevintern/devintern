@@ -14,6 +14,7 @@ import { join } from "path";
 import PQueue from "p-queue";
 import {
   detectMaxTurnsReached,
+  findMaxTurnsReachedLine,
   detectUsageLimit,
   resetHintToMs,
   resolveHarness,
@@ -1324,7 +1325,11 @@ async function runAgentHarnessForReview(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
-        const maxTurnsReached = detectMaxTurnsReached(stdoutOutput, stderrOutput);
+        const maxTurnsReached = detectMaxTurnsReached(
+          stdoutOutput,
+          stderrOutput,
+          harness.supportsMaxTurns === true,
+        );
         const usage = detectUsageLimit(stdoutOutput, stderrOutput);
         const output = stdoutOutput + stderrOutput;
 
@@ -1349,6 +1354,10 @@ async function runAgentHarnessForReview(
             usageResetHint: usage.resetsAt,
           });
         } else if (maxTurnsReached) {
+          const matchedLine = findMaxTurnsReachedLine(stdoutOutput, stderrOutput);
+          if (matchedLine) {
+            console.log(`   Matched output: ${matchedLine}`);
+          }
           resolve({
             success: false,
             message: "Agent reached max turns limit",
