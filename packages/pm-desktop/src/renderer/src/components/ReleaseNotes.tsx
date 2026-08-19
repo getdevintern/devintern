@@ -1,6 +1,7 @@
 import React from "react";
+import DOMPurify from "dompurify";
 
-const DROPPED_TAGS = new Set([
+const DROPPED_TAGS = [
   "applet",
   "audio",
   "base",
@@ -30,7 +31,7 @@ const DROPPED_TAGS = new Set([
   "track",
   "video",
   "xmp",
-]);
+];
 
 const TAG_CLASSES: Record<string, string | undefined> = {
   article: "space-y-1.5",
@@ -57,7 +58,7 @@ const TAG_CLASSES: Record<string, string | undefined> = {
   ul: "my-1.5 list-disc space-y-0.5 pl-5",
 };
 
-const ALLOWED_TAGS = new Set([
+const ALLOWED_TAGS = [
   ...Object.keys(TAG_CLASSES),
   "a",
   "b",
@@ -70,7 +71,9 @@ const ALLOWED_TAGS = new Set([
   "thead",
   "tr",
   "u",
-]);
+];
+
+const ALLOWED_TAG_SET = new Set(ALLOWED_TAGS);
 
 const MAX_RELEASE_NOTES_HTML_LENGTH = 20_000;
 const MAX_RELEASE_NOTES_DEPTH = 24;
@@ -132,15 +135,12 @@ function renderNodes(
 
     const element = node as Element;
     const tag = element.localName.toLowerCase();
-    if (DROPPED_TAGS.has(tag)) continue;
+    // DOMPurify owns sanitization; ignore anything outside its configured
+    // output contract rather than attempting to render it.
+    if (!ALLOWED_TAG_SET.has(tag)) continue;
 
     const children = renderNodes(element.childNodes, key, depth + 1, budget);
     if (budget.exceeded) break;
-    if (!ALLOWED_TAGS.has(tag)) {
-      output.push(...children.nodes);
-      meaningful ||= children.meaningful;
-      continue;
-    }
 
     if (tag === "br") {
       output.push(React.createElement("br", { key }));
@@ -199,15 +199,20 @@ function renderReleaseNotes(html: string | null | undefined): RenderResult {
   if (html.length > MAX_RELEASE_NOTES_HTML_LENGTH) return { meaningful: false, nodes: [] };
 
   try {
-    // A template parses malformed HTML using the browser's normal recovery
-    // rules, but its contents stay inert and are never mounted as raw HTML.
-    const template = document.createElement("template");
-    template.innerHTML = html;
+    const sanitized = DOMPurify(window).sanitize(html, {
+      ALLOWED_ATTR: ["href", "title"],
+      ALLOWED_TAGS,
+      ALLOW_ARIA_ATTR: false,
+      ALLOW_DATA_ATTR: false,
+      FORBID_CONTENTS: DROPPED_TAGS,
+      FORBID_TAGS: DROPPED_TAGS,
+      RETURN_DOM_FRAGMENT: true,
+    });
     const budget: RenderBudget = {
       exceeded: false,
       remainingNodes: MAX_RELEASE_NOTES_NODES,
     };
-    const rendered = renderNodes(template.content.childNodes, "release-note", 0, budget);
+    const rendered = renderNodes(sanitized.childNodes, "release-note", 0, budget);
     return budget.exceeded ? { meaningful: false, nodes: [] } : rendered;
   } catch {
     return { meaningful: false, nodes: [] };
