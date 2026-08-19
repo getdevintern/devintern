@@ -10,8 +10,30 @@ setDefaultTimeout(30_000);
 
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
 const CLI_SPAWN_TIMEOUT_MS = 30_000;
-/** Closed local port: argument-parse tests must not hang on a live Jira host. */
+/** Closed local port: argument-parse tests must not hang on a live tracker host. */
 const CLI_UNREACHABLE_TRACKER_URL = "http://127.0.0.1:1";
+
+function cliTrackerTestEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
+    JIRA_EMAIL: "test@example.com",
+    JIRA_API_TOKEN: "test-token",
+    LINEAR_API_URL: `${CLI_UNREACHABLE_TRACKER_URL}/graphql`,
+    TRELLO_API_BASE_URL: `${CLI_UNREACHABLE_TRACKER_URL}/1`,
+    DEVINTERN_FETCH_MAX_RETRIES: "0",
+    DEVINTERN_SKIP_LICENSE_CHECK: "1",
+    DEVINTERN_NO_UPDATE: "1",
+    ...extra,
+  };
+}
+
+function spawnTimedOut(result: ReturnType<typeof spawnSync>): boolean {
+  return (
+    (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
+    Boolean(result.signal)
+  );
+}
 
 // Helper to run the CLI in an isolated directory to avoid lock conflicts
 function runCLI(args: string[]): {
@@ -34,24 +56,14 @@ function runCLI(args: string[]): {
       encoding: "utf8",
       timeout: CLI_SPAWN_TIMEOUT_MS,
       cwd: testDir, // Run in isolated directory
-      env: {
-        ...process.env,
-        JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
-        JIRA_EMAIL: "test@example.com",
-        JIRA_API_TOKEN: "test-token",
-        DEVINTERN_FETCH_MAX_RETRIES: "0",
-        DEVINTERN_SKIP_LICENSE_CHECK: "1",
-        DEVINTERN_NO_UPDATE: "1",
-      },
+      env: cliTrackerTestEnv(),
     });
 
     return {
       stdout: result.stdout || "",
       stderr: result.stderr || "",
       exitCode: result.status || 0,
-      timedOut:
-        (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
-        Boolean(result.signal),
+      timedOut: spawnTimedOut(result),
     };
   } finally {
     // Clean up temp directory
@@ -122,15 +134,13 @@ describe("CLI Argument Handling", () => {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
-        env: {
-          ...process.env,
+        env: cliTrackerTestEnv({
           TASK_TRACKER: "linear",
           LINEAR_API_KEY: "lin_api_test",
-          DEVINTERN_SKIP_LICENSE_CHECK: "1",
-          DEVINTERN_NO_UPDATE: "1",
-        },
+        }),
       });
       const output = (result.stdout || "") + (result.stderr || "");
+      expect(spawnTimedOut(result)).toBe(false);
       expect(output).not.toContain("Unsupported task tracker");
       expect(output).toContain("Processing 3 task(s): DAN-6, DAN-7, DAN-8");
       expect(output).toContain("[1/3] 🔍 Fetching task: DAN-6");
@@ -236,20 +246,18 @@ describe("CLI Argument Handling", () => {
     const testDir = require("os").tmpdir() + `/cli-trello-env-test-${Date.now()}`;
     require("fs").mkdirSync(testDir, { recursive: true });
     try {
-      const result = spawnSync("bun", [CLI_PATH, "4uWKPOTv"], {
+      const result = spawnSync("bun", [CLI_PATH, "4uWKPOTv", "--no-git"], {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
-        env: {
-          ...process.env,
+        env: cliTrackerTestEnv({
           TASK_TRACKER: "trello",
           TRELLO_API_KEY: "test-api-key",
           TRELLO_API_TOKEN: "test-api-token",
-          DEVINTERN_SKIP_LICENSE_CHECK: "1",
-          DEVINTERN_NO_UPDATE: "1",
-        },
+        }),
       });
       const output = (result.stdout || "") + (result.stderr || "");
+      expect(spawnTimedOut(result)).toBe(false);
       expect(output).not.toContain("Unsupported task tracker");
       expect(output).toContain("Fetching task");
     } finally {
@@ -265,20 +273,18 @@ describe("CLI Argument Handling", () => {
     const testDir = require("os").tmpdir() + `/cli-trello-test-${Date.now()}`;
     require("fs").mkdirSync(testDir, { recursive: true });
     try {
-      const result = spawnSync("bun", [CLI_PATH, "--query", 'list:"To Do" is:open'], {
+      const result = spawnSync("bun", [CLI_PATH, "--query", 'list:"To Do" is:open', "--no-git"], {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
         cwd: testDir,
-        env: {
-          ...process.env,
+        env: cliTrackerTestEnv({
           TASK_TRACKER: "trello",
           TRELLO_API_KEY: "test-api-key",
           TRELLO_API_TOKEN: "test-api-token",
-          DEVINTERN_SKIP_LICENSE_CHECK: "1",
-          DEVINTERN_NO_UPDATE: "1",
-        },
+        }),
       });
       const output = (result.stdout || "") + (result.stderr || "");
+      expect(spawnTimedOut(result)).toBe(false);
       expect(output).not.toContain("--query is not supported");
       expect(output).toContain("Searching task tracker with query");
     } finally {

@@ -16,6 +16,37 @@ function mockFetch(json: unknown): string[] {
   return urls;
 }
 
+describe("TrelloClient endpoint override", () => {
+  test("constructor baseUrl is used for REST requests", async () => {
+    const urls = mockFetch([]);
+    const client = new TrelloClient({
+      apiKey: "k",
+      apiToken: "t",
+      baseUrl: "http://127.0.0.1:1/1",
+    });
+    await client.getBoardLabels("board-1");
+    expect(new URL(urls[0]).origin).toBe("http://127.0.0.1:1");
+    expect(new URL(urls[0]).pathname).toBe("/1/boards/board-1/labels");
+  });
+
+  test("TRELLO_API_BASE_URL overrides the default REST endpoint", async () => {
+    const previous = process.env.TRELLO_API_BASE_URL;
+    process.env.TRELLO_API_BASE_URL = "http://127.0.0.1:1/1";
+    try {
+      const urls = mockFetch([]);
+      const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+      await client.getBoardLabels("board-1");
+      expect(new URL(urls[0]).origin).toBe("http://127.0.0.1:1");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.TRELLO_API_BASE_URL;
+      } else {
+        process.env.TRELLO_API_BASE_URL = previous;
+      }
+    }
+  });
+});
+
 describe("TrelloClient labels", () => {
   test("getBoardLabels hits the board labels endpoint", async () => {
     const urls = mockFetch([

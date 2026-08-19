@@ -109,11 +109,13 @@ export class TrelloClient {
   /**
    * Create a Trello REST API client.
    *
-   * @param config - Power-Up API key and user token.
+   * @param config - Power-Up API key and user token. `baseUrl` and
+   *   `TRELLO_API_BASE_URL` are for tests/proxies; production uses Trello's API.
    */
-  constructor(config: { apiKey: string; apiToken: string }) {
+  constructor(config: { apiKey: string; apiToken: string; baseUrl?: string }) {
     this.apiKey = config.apiKey;
     this.apiToken = config.apiToken;
+    this.baseUrl = config.baseUrl ?? process.env.TRELLO_API_BASE_URL ?? "https://api.trello.com/1";
   }
 
   /**

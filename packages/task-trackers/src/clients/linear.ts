@@ -104,10 +104,12 @@ export class LinearClient {
   /**
    * Create a Linear GraphQL API client.
    *
-   * @param config - Personal API key from Linear settings.
+   * @param config - Personal API key from Linear settings. `baseUrl` and
+   *   `LINEAR_API_URL` are for tests/proxies; production uses Linear's API.
    */
-  constructor(config: { apiKey: string }) {
+  constructor(config: { apiKey: string; baseUrl?: string }) {
     this.apiKey = config.apiKey;
+    this.baseUrl = config.baseUrl ?? process.env.LINEAR_API_URL ?? "https://api.linear.app/graphql";
   }
 
   /**
