@@ -79,6 +79,7 @@ mock.module("@/components/ui/button", () => {
 
 const { formatDownloadLabel, shouldShowUpdateDialog, UpdateNotifier } =
   await import("./UpdateNotifier.tsx");
+const { ReleaseNotes } = await import("./ReleaseNotes.tsx");
 
 function ok<T>(value: T): IpcResult<T> {
   return { ok: true, value };
@@ -192,6 +193,7 @@ describe("UpdateNotifier against fake window.pm", () => {
   let installUpdate: ReturnType<typeof mock>;
   let dismissUpdateError: ReturnType<typeof mock>;
   let checkForUpdates: ReturnType<typeof mock>;
+  let openExternal: ReturnType<typeof mock>;
 
   const available: UpdateStatus = {
     phase: "available",
@@ -213,6 +215,7 @@ describe("UpdateNotifier against fake window.pm", () => {
     installUpdate = mock(async () => ok({ ...available, phase: "downloaded" as const }));
     dismissUpdateError = mock(async () => ok(available));
     checkForUpdates = mock(async () => ok(available));
+    openExternal = mock(async () => ok(null));
     getUpdateStatus = mock(async () => ok(available));
 
     const pm = {
@@ -223,6 +226,7 @@ describe("UpdateNotifier against fake window.pm", () => {
       installUpdate,
       dismissUpdateError,
       checkForUpdates,
+      openExternal,
     } as unknown as PmDesktopApi;
     (domWindow as unknown as { pm: PmDesktopApi }).pm = pm;
     (globalThis.window as unknown as { pm: PmDesktopApi }).pm = pm;
@@ -301,6 +305,123 @@ describe("UpdateNotifier against fake window.pm", () => {
       await flushMicrotasks();
     });
     expect(snoozeUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test("renders formatted release notes and opens safe links without native navigation", async () => {
+    const notesStatus: UpdateStatus = {
+      ...available,
+      releaseNotes: `
+        <h2 onclick="alert('nope')">Highlights</h2>
+        <p>Fixed <strong>ticket sync</strong>.
+        <ul><li>Faster startup</li></ul>
+        <a href="https://example.com/releases/0.3.0" onmouseover="alert('nope')">Full notes</a>
+        <a href="javascript:alert('nope')">Unsafe link</a>
+        <script>window.pwned = true</script>
+        <img src="https://tracker.invalid/pixel" onerror="alert('nope')">
+        <iframe src="https://example.com">embedded content</iframe>
+      `,
+    };
+    getUpdateStatus.mockImplementation(async () => ok(notesStatus));
+    queryClient.setQueryData(qk.updateStatus, notesStatus);
+
+    await act(async () => {
+      root.render(
+        withQueryClient(createElement(UpdateNotifier, { hasBusyWork: false }), queryClient),
+      );
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    const notes = domWindow.document.querySelector('[data-testid="update-notifier-notes"]');
+    expect(notes?.querySelector("h2")?.textContent).toBe("Highlights");
+    expect(notes?.querySelector("strong")?.textContent).toBe("ticket sync");
+    expect(notes?.querySelector("li")?.textContent).toBe("Faster startup");
+    expect(notes?.querySelector("script, img, iframe")).toBeNull();
+    expect(notes?.textContent).not.toContain("window.pwned");
+    expect(notes?.textContent).not.toContain("embedded content");
+
+    const links = notes?.querySelectorAll("button");
+    expect(links?.length).toBe(1);
+    expect(notes?.querySelector("a")).toBeNull();
+    expect(notes?.textContent).toContain("Unsafe link");
+    expect(links?.[0]?.getAttribute("onclick")).toBeNull();
+    expect(links?.[0]?.getAttribute("onmouseover")).toBeNull();
+    expect(links?.[0]?.getAttribute("type")).toBe("button");
+
+    const safeLink = links?.[0];
+    if (!safeLink) throw new Error("Expected a safe release-note link");
+    await act(async () => {
+      safeLink.click();
+      await flushMicrotasks();
+    });
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/releases/0.3.0");
+  });
+
+  test("shows a fallback when release notes are missing or fully removed", async () => {
+    const missingNotesStatus: UpdateStatus = { ...available, releaseNotes: undefined };
+    getUpdateStatus.mockImplementation(async () => ok(missingNotesStatus));
+    queryClient.setQueryData(qk.updateStatus, missingNotesStatus);
+
+    await act(async () => {
+      root.render(
+        withQueryClient(createElement(UpdateNotifier, { hasBusyWork: false }), queryClient),
+      );
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(
+      domWindow.document.querySelector('[data-testid="update-notifier-notes"]')?.textContent,
+    ).toBe("Release notes are unavailable.");
+
+    const unsafeNotesStatus: UpdateStatus = {
+      ...available,
+      releaseNotes: "<script>alert('nope')</script><img src=x><iframe>hidden</iframe>",
+    };
+    await act(async () => {
+      queryClient.setQueryData(qk.updateStatus, unsafeNotesStatus);
+      await flushMicrotasks();
+    });
+
+    expect(
+      domWindow.document.querySelector('[data-testid="update-notifier-notes"]')?.textContent,
+    ).toBe("Release notes are unavailable.");
+    expect(
+      domWindow.document.querySelector('[data-testid="update-notifier-install"]'),
+    ).not.toBeNull();
+    expect(
+      domWindow.document.querySelector('[data-testid="update-notifier-later"]'),
+    ).not.toBeNull();
+  });
+
+  test("bounds release-note input size, nesting depth, and rendered node count", async () => {
+    await act(async () => {
+      root.render(createElement(ReleaseNotes, { html: `<p>${"x".repeat(25_000)}</p>` }));
+      await flushMicrotasks();
+    });
+
+    const notes = domWindow.document.querySelector('[data-testid="update-notifier-notes"]');
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
+
+    await act(async () => {
+      root.render(
+        createElement(ReleaseNotes, {
+          html: `${"<div>".repeat(30)}Deep${"</div>".repeat(30)}`,
+        }),
+      );
+      await flushMicrotasks();
+    });
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
+
+    await act(async () => {
+      root.render(createElement(ReleaseNotes, { html: "<i>x</i>".repeat(600) }));
+      await flushMicrotasks();
+    });
+    expect(notes?.textContent).toBe("Release notes are unavailable.");
   });
 
   test("retry on error calls downloadUpdate when a version is available", async () => {
