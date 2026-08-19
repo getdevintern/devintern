@@ -4,23 +4,26 @@
   "version": "0.0.0",
   "description": "Monorepo for @devintern/code and @devintern/pm.",
   "type": "module",
+  "packageManager": "bun@1.2.16",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --filter '*' build",
-    "format": "bun run --filter '*' format",
-    "format:check": "bun run --filter '*' format:check",
-    "lint": "bun run --filter '*' lint",
+    "build": "turbo run build",
+    "dev": "turbo run dev --filter=!@getdevintern/code",
+    "format": "turbo run format",
+    "format:check": "turbo run format:check",
+    "lint": "turbo run lint",
     "prepare": "lefthook install",
-    "typecheck": "bun run --filter '*' typecheck",
-    "test": "bun run --filter '*' test"
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "lefthook": "^2.1.5",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
+    "turbo": "^2.10.11",
     "typescript": "^5.3.0"
   },
   "dependencies": {

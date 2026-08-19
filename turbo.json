@@ -1,0 +1,52 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [".oxlintrc.json"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "env": ["GITHUB_OAUTH_CLIENT_ID", "POSTHOG_API_KEY", "POSTHOG_HOST"],
+      "outputs": ["dist/**", "out/**"]
+    },
+    "@devintern/agent-harness#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@devintern/auth#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@devintern/license-check#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@devintern/task-trackers#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@devintern/text-formatter#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@devintern/utils#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@getdevintern/license-policy#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "format": {
+      "cache": false
+    },
+    "format:check": {},
+    "lint": {},
+    "test": {
+      "env": ["AGENT_CLI_PATH"]
+    },
+    "typecheck": {}
+  }
+}
