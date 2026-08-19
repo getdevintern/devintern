@@ -23,13 +23,17 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 ## Developer Commands
 
 ```bash
-# Root: run across all packages
+# Root: Turborepo runs tasks across all packages
 bun install
 bun run build
+bun run dev
 bun run typecheck
 bun run test
 bun run format
 bun run lint
+
+# Bypass a cached result while troubleshooting
+bun run turbo run test --force
 
 # Single package
 bun run --filter @getdevintern/code test

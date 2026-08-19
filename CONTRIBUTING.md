@@ -13,7 +13,7 @@ This repository is the canonical home for DevIntern's product and tool source. C
 
 ## Ground rules
 
-- `bun install`, then `bun run format`, `bun run lint`, `bun run typecheck`, `bun run test` must pass. The lefthook pre-commit hook runs the first three automatically.
+- `bun install`, then `bun run format`, `bun run lint`, `bun run typecheck`, `bun run test` must pass. These root commands use Turborepo; the lefthook pre-commit hook runs the first three automatically.
 - Tests use isolated temp directories; do not share temp dirs across tests.
 - Keep changes scoped to the product packages and documentation in this repo. Website and docs-site implementation changes happen elsewhere.
 - Update the relevant guide under `docs/{code,pm}` when a change alters user-facing CLI behavior, flags, or environment variables.
