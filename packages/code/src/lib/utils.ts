@@ -871,6 +871,35 @@ export class Utils {
   }
 
   /**
+   * Whether local HEAD is already published at `origin/<branch>`.
+   *
+   * Uses the remote-tracking ref (no network). A successful `git push`
+   * updates that ref, so this is a reliable "already pushed" check that
+   * does not re-run pre-push hooks.
+   *
+   * @param branch - Remote branch name without `refs/heads/`
+   * @param options - Optional working directory
+   */
+  static async remoteTrackingRefMatchesHead(
+    branch: string,
+    options?: { cwd?: string },
+  ): Promise<boolean> {
+    const gitOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], gitOptions);
+    if (!head.success || !head.output.trim()) {
+      return false;
+    }
+    const remote = await Utils.executeGitCommand(
+      ["rev-parse", "--verify", `refs/remotes/origin/${branch}`],
+      gitOptions,
+    );
+    if (!remote.success || !remote.output.trim()) {
+      return false;
+    }
+    return head.output.trim() === remote.output.trim();
+  }
+
+  /**
    * Push the current branch to `origin`, setting upstream on first push.
    *
    * @param options - Verbose logging and working directory
@@ -916,6 +945,22 @@ export class Utils {
         return {
           success: false,
           message: `Cannot push protected branch '${currentBranch}'. This should not happen - please create a feature branch.`,
+        };
+      }
+
+      // If the agent (or a previous attempt) already published this exact
+      // commit, do not invoke `git push`. A no-op push still runs pre-push
+      // hooks, and a flaky hook (e.g. a 30s test timeout) would abort PR
+      // creation for a branch that is already on the remote.
+      if (await Utils.remoteTrackingRefMatchesHead(currentBranch, { cwd })) {
+        if (verbose) {
+          console.log(
+            `📤 Branch '${currentBranch}' already matches origin/${currentBranch}; skipping push`,
+          );
+        }
+        return {
+          success: true,
+          message: `Branch '${currentBranch}' is already on remote`,
         };
       }
 
