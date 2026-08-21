@@ -35,11 +35,14 @@ export interface ResolveConflictsOptions {
   ) => Promise<{ success: boolean; output: string }>;
   /** Injected PR fetch (tests). Defaults to the GitHub API. */
   fetchPr?: (owner: string, repo: string, prNumber: number) => Promise<PullRequestInfo>;
+  /** Abort safely if polling eligibility became stale before execution. */
+  expectedHeadSha?: string;
+  expectedBaseSha?: string;
 }
 
 export interface ResolveConflictsResult {
   /** `resolved` = merge pushed; `clean` = base merged without conflicts. */
-  outcome: "clean" | "resolved" | "skipped" | "failed";
+  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
   message: string;
 }
 
@@ -108,6 +111,12 @@ export async function resolveConflictsOnPr(
 
   if (pr.state !== "open") {
     return { outcome: "skipped", message: `PR is ${pr.state}` };
+  }
+  if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
+    return { outcome: "deferred", message: "PR head changed before execution" };
+  }
+  if (options.expectedBaseSha && pr.base.sha !== options.expectedBaseSha) {
+    return { outcome: "deferred", message: "PR base changed before execution" };
   }
   const baseRepo = `${owner}/${repo}`;
   if (pr.head.repo && pr.head.repo.full_name !== baseRepo) {

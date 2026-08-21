@@ -27,7 +27,7 @@ const STATUS_FILTERS: (RunStatus | "all")[] = [
   "deferred",
   "abandoned",
 ];
-const ORIGIN_FILTERS: (RunOrigin | "all")[] = ["all", "task", "pr_mention"];
+const ORIGIN_FILTERS: (RunOrigin | "all")[] = ["all", "task", "pr_mention", "conflict_resolution"];
 
 /** Paginated, filterable list of worker runs. */
 export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {

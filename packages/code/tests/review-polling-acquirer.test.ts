@@ -11,6 +11,7 @@ import type {
   PolledReview,
 } from "../src/lib/review-polling-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
+import { RunStore } from "../src/lib/run-recorder";
 import { WorkerState } from "../src/lib/worker-state";
 
 describe("ReviewPollingAcquirer", () => {
@@ -37,6 +38,7 @@ describe("ReviewPollingAcquirer", () => {
     mergeableState?: string;
     headSha?: string;
     baseSha?: string;
+    baseIncluded?: boolean | null;
     prEtagHit?: boolean;
     reviews: PolledReview[];
     reviewsEtagHit?: boolean;
@@ -46,7 +48,18 @@ describe("ReviewPollingAcquirer", () => {
     seenReviewsEtag?: string;
   }
 
-  function makeAcquirer(gh: FakeGitHubState) {
+  function makeAcquirer(
+    gh: FakeGitHubState,
+    options: {
+      resolveResults?: Array<{
+        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
+        message: string;
+      }>;
+      runStore?: RunStore;
+      quietPeriodSeconds?: number;
+      now?: () => number;
+    } = {},
+  ) {
     const addressed: string[] = [];
     const resolved: string[] = [];
     const acquirer = new ReviewPollingAcquirer({
@@ -63,8 +76,10 @@ describe("ReviewPollingAcquirer", () => {
             data: {
               state: gh.prState,
               mergeable_state: gh.mergeableState,
-              head: gh.headSha ? { sha: gh.headSha } : undefined,
-              base: gh.baseSha ? { sha: gh.baseSha } : undefined,
+              head: gh.headSha
+                ? { sha: gh.headSha, ref: "agent/task", repo: { full_name: "acme/widgets" } }
+                : undefined,
+              base: gh.baseSha ? { sha: gh.baseSha, ref: "main" } : undefined,
             },
             etag: 'W/"pr-1"',
             notModified: false,
@@ -81,6 +96,9 @@ describe("ReviewPollingAcquirer", () => {
           gh.seenSince = sinceIso;
           return gh.comments;
         },
+        async isBaseIncluded() {
+          return gh.baseIncluded ?? true;
+        },
       },
       addressPr: async (repo, n) => {
         addressed.push(`${repo}#${n}`);
@@ -88,8 +106,11 @@ describe("ReviewPollingAcquirer", () => {
       },
       resolveConflicts: async (repo, n) => {
         resolved.push(`${repo}#${n}`);
-        return true;
+        return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
       },
+      quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
+      runStore: options.runStore,
+      now: options.now,
     });
     return { acquirer, addressed, resolved };
   }
@@ -189,7 +210,7 @@ describe("ReviewPollingAcquirer", () => {
     gh.prEtagHit = true;
     gh.reviewsEtagHit = true;
     await acquirer.tick();
-    expect(gh.seenPrEtag).toBe('W/"pr-1"');
+    expect(gh.seenPrEtag).toBeUndefined();
     expect(gh.seenReviewsEtag).toBe('W/"rev-1"');
   });
 
@@ -245,13 +266,14 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#2"]);
   });
 
-  test("a conflicting PR triggers one conflict resolution, deduped per SHA pair", async () => {
+  test("a conflicting PR triggers one conflict resolution, deduped by base SHA", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
       prState: "open",
       mergeableState: "dirty",
       headSha: "head1",
       baseSha: "base1",
+      baseIncluded: false,
       reviews: [],
       comments: [],
     };
@@ -270,21 +292,241 @@ describe("ReviewPollingAcquirer", () => {
     expect(resolved).toHaveLength(2);
   });
 
-  test("clean and unknown merge states do not trigger conflict resolution", async () => {
+  test("a cleanly-behind PR triggers while unknown mergeability defers", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
       prState: "open",
       mergeableState: "clean",
       headSha: "head1",
       baseSha: "base1",
+      baseIncluded: false,
       reviews: [],
       comments: [],
     };
     const { acquirer, resolved } = makeAcquirer(gh);
     await acquirer.tick();
 
+    expect(resolved).toEqual(["acme/widgets#42"]);
+
+    gh.baseSha = "base2";
     gh.mergeableState = undefined;
     await acquirer.tick();
+    expect(resolved).toHaveLength(1);
+  });
+
+  test("a head that already contains the base does not trigger", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const { acquirer, resolved } = makeAcquirer({
+      prState: "open",
+      mergeableState: "clean",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: true,
+      reviews: [],
+      comments: [],
+    });
+    await acquirer.tick();
     expect(resolved).toEqual([]);
+  });
+
+  test("a fork PR is terminally skipped without invoking the resolver", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const resolved: string[] = [];
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      quietPeriodSeconds: 0,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          return {
+            data: {
+              state: "open",
+              mergeable_state: "dirty",
+              head: { sha: "head1", ref: "feature", repo: { full_name: "contrib/widgets" } },
+              base: { sha: "base1", ref: "main" },
+            },
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return { data: [], notModified: false };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+        async isBaseIncluded() {
+          return false;
+        },
+      },
+      addressPr: async () => true,
+      resolveConflicts: async (repo, n) => {
+        resolved.push(`${repo}#${n}`);
+        return { outcome: "clean", message: "merged" };
+      },
+    });
+    await acquirer.tick();
+    expect(resolved).toEqual([]);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
+  });
+
+  test("failed attempts persist across restart and stop at the configured limit", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    queue.close();
+    queue = new WebhookQueue({ dbPath, maxRetries: 2 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    const failures = [
+      { outcome: "failed" as const, message: "network" },
+      { outcome: "failed" as const, message: "agent" },
+      { outcome: "clean" as const, message: "must not run" },
+    ];
+    let made = makeAcquirer(gh, { resolveResults: failures });
+    await made.acquirer.tick();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(1);
+
+    // Reopening all stores models a worker restart; attempts must survive.
+    workerState.close();
+    queue.close();
+    workerState = new WorkerState(dbPath);
+    queue = new WebhookQueue({ dbPath, maxRetries: 2 });
+    made = makeAcquirer(gh, { resolveResults: failures });
+    await made.acquirer.tick();
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(2);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
+  });
+
+  test("recent and changing heads defer without consuming attempts", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 10_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "behind",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    const made = makeAcquirer(gh, { quietPeriodSeconds: 10, now: () => now });
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    now += 11_000;
+    gh.headSha = "head2";
+    await made.acquirer.tick();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
+    expect(made.resolved).toEqual([]);
+
+    now += 11_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+  });
+
+  test("resolver-detected concurrent movement defers without consuming an attempt", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(
+      {
+        prState: "open",
+        mergeableState: "behind",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      },
+      {
+        resolveResults: [{ outcome: "deferred", message: "PR head changed before execution" }],
+      },
+    );
+    await made.acquirer.tick();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(false);
+  });
+
+  test("a head race during pre-run revalidation stays pending without an attempt", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let fetches = 0;
+    const resolved: string[] = [];
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      quietPeriodSeconds: 0,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          fetches += 1;
+          return {
+            data: {
+              state: "open",
+              mergeable_state: "dirty",
+              head: {
+                sha: fetches === 1 ? "head1" : "head2",
+                ref: "agent/task",
+                repo: { full_name: "acme/widgets" },
+              },
+              base: { sha: "base1", ref: "main" },
+            },
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return { data: [], notModified: false };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+        async isBaseIncluded() {
+          return false;
+        },
+      },
+      addressPr: async () => true,
+      resolveConflicts: async (repo, n) => {
+        resolved.push(`${repo}#${n}`);
+        return { outcome: "clean", message: "merged" };
+      },
+    });
+    await acquirer.tick();
+    expect(resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
+  });
+
+  test("automatic attempts record origin, metadata, attempt, and terminal reason", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42, branch: "agent/task" });
+    const runStore = new RunStore(dbPath);
+    const made = makeAcquirer(
+      {
+        prState: "open",
+        mergeableState: "behind",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      },
+      { runStore },
+    );
+    await made.acquirer.tick();
+    const [run] = runStore.listRuns();
+    expect(run).toMatchObject({
+      origin: "conflict_resolution",
+      repo: "acme/widgets",
+      prNumber: 42,
+      branch: "agent/task",
+      attempt: 1,
+      status: "succeeded",
+      outcomeReason: "merged",
+    });
+    expect(run?.harness).toBeTruthy();
+    runStore.close();
   });
 });

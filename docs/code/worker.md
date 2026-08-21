@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-17
+dateModified: 2026-08-21
 ---
 
 # Worker Daemon
@@ -91,9 +91,9 @@ The polling is cheap: requests use ETags, and GitHub does not count `304 Not Mod
 
 ### Merge conflicts on the agent's PRs
 
-When a watched PR falls behind its base branch and GitHub reports merge conflicts, the worker catches the branch up automatically: it merges the base branch into the PR branch, and if the merge conflicts, the agent resolves the conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected and the merge is abandoned for them to handle. A comment on the PR reports what happened either way, and stacked PRs benefit the most, since merging one PR routinely conflicts the next one in the chain.
+When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. It verifies ancestry with GitHub's comparison API, merges the base branch into the PR branch, and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each conflict state is attempted once: a failed resolution is retried only after the branch or its base moves again. The same logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+This applies only to the agent's own PRs (the same watch list as review polling). Each base SHA is a durable event in `.devintern-code/queue.db`. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts; a newly advanced base creates a new event. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
 ## Mention the bot on any PR
 

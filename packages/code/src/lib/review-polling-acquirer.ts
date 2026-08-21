@@ -20,6 +20,7 @@
 
 import { spawn } from "child_process";
 
+import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
@@ -46,8 +47,13 @@ export interface PolledPr {
   state: string;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
-  head?: { sha: string };
-  base?: { sha: string };
+  head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
+  base?: { sha: string; ref?: string };
+}
+
+export interface AutomaticResolveResult {
+  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
+  message: string;
 }
 
 /** GitHub access used by the poller (injected for tests). */
@@ -63,6 +69,8 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
+  /** Whether the PR head contains the current base SHA; null means unavailable. */
+  isBaseIncluded?(repo: string, baseSha: string, headSha: string): Promise<boolean | null>;
 }
 
 export interface ReviewPollingAcquirerOptions {
@@ -76,12 +84,47 @@ export interface ReviewPollingAcquirerOptions {
    * Resolve merge conflicts on one of the agent's own PRs (injected for
    * tests). Omit to disable automatic conflict resolution.
    */
-  resolveConflicts?: (repo: string, prNumber: number) => Promise<boolean>;
+  resolveConflicts?: (
+    repo: string,
+    prNumber: number,
+    expected: { headSha: string; baseSha: string },
+  ) => Promise<AutomaticResolveResult>;
+  /** Stable-head window before execution (default 30 seconds). */
+  quietPeriodSeconds?: number;
+  /** Best-effort automatic-attempt run recorder. */
+  runStore?: Pick<RunStore, "createRun" | "finishRun">;
+  harness?: string;
+  now?: () => number;
   verbose?: boolean;
 }
 
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
+const BASE_SYNC_SOURCE = "github:base-sync";
+const prRunTails = new Map<string, Promise<void>>();
+
+/** Serialize automatic pipelines that target the same PR worktree. */
+async function serializePrRun<T>(
+  repo: string,
+  prNumber: number,
+  run: () => Promise<T>,
+): Promise<T> {
+  const key = `${repo.toLowerCase()}#${prNumber}`;
+  const previous = prRunTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = previous.then(() => tail);
+  prRunTails.set(key, chained);
+  await previous;
+  try {
+    return await run();
+  } finally {
+    release();
+    if (prRunTails.get(key) === chained) prRunTails.delete(key);
+  }
+}
 
 /**
  * Run `devintern address-review` for a PR as a CLI subprocess, reusing the
@@ -98,7 +141,9 @@ export function runAddressReviewViaCli(
   prNumber: number,
   opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
 ): Promise<boolean> {
-  return runSubcommandViaCli("address-review", repo, prNumber, opts);
+  return serializePrRun(repo, prNumber, () =>
+    runSubcommandViaCli("address-review", repo, prNumber, opts),
+  );
 }
 
 /**
@@ -111,9 +156,66 @@ export function runAddressReviewViaCli(
 export function runResolveConflictsViaCli(
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
-): Promise<boolean> {
-  return runSubcommandViaCli("resolve-conflicts", repo, prNumber, opts);
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    expectedHeadSha?: string;
+    expectedBaseSha?: string;
+  } = {},
+): Promise<AutomaticResolveResult> {
+  const args = [
+    ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
+    ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
+  ];
+  return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
+}
+
+function runResolveSubcommand(
+  repo: string,
+  prNumber: number,
+  extraArgs: string[],
+  opts: { cwd?: string; env?: Record<string, string | undefined> },
+): Promise<AutomaticResolveResult> {
+  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  return new Promise((resolve) => {
+    let marker: AutomaticResolveResult | null = null;
+    let stdout = "";
+    const child = spawn(
+      process.execPath,
+      [process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
+      {
+        stdio: ["inherit", "pipe", "inherit"],
+        cwd: opts.cwd,
+        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_MARKER: "1" },
+      },
+    );
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const output = chunk.toString();
+      stdout += output;
+      process.stdout.write(output);
+    });
+    child.on("close", (code) => {
+      const markerLine = stdout
+        .split("\n")
+        .find((line) => line.startsWith("DEVINTERN_RESOLVE_RESULT="));
+      if (markerLine) {
+        try {
+          marker = JSON.parse(markerLine.slice("DEVINTERN_RESOLVE_RESULT=".length));
+        } catch {
+          // Exit status fallback below.
+        }
+      }
+      resolve(
+        marker ?? {
+          outcome: code === 0 ? "skipped" : "failed",
+          message: code === 0 ? "resolver completed" : `resolver exited with code ${code}`,
+        },
+      );
+    });
+    child.on("error", (error) =>
+      resolve({ outcome: "failed", message: `failed to spawn resolver: ${error.message}` }),
+    );
+  });
 }
 
 function runSubcommandViaCli(
@@ -196,8 +298,9 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs.
     const prSource = `github:pr:${repo}#${prNumber}`;
-    const prCursor = workerState.getCursor(prSource);
-    const prResult = await github.fetchPr(repo, prNumber, prCursor?.etag);
+    // Deliberately unconditional: a stale PR-resource ETag must never hide a
+    // moved base ref. Reviews retain their independent conditional request.
+    const prResult = await github.fetchPr(repo, prNumber);
     if (!prResult.notModified) {
       if (prResult.etag) {
         workerState.setCursor(prSource, "state", prResult.etag);
@@ -208,25 +311,8 @@ export class ReviewPollingAcquirer implements Acquirer {
         return;
       }
 
-      // 1b. Merge conflicts with the base branch. Deduped per head+base SHA
-      // pair, so a failed resolution retries only after either side moves.
-      if (
-        resolveConflicts &&
-        prResult.data?.mergeable_state === "dirty" &&
-        prResult.data.head?.sha &&
-        prResult.data.base?.sha
-      ) {
-        const externalId = `conflict:${repo}#${prNumber}:${prResult.data.head.sha}:${prResult.data.base.sha}`;
-        if (!queue.hasProcessed(SOURCE, externalId)) {
-          queue.markProcessed(SOURCE, externalId);
-          console.log(`\n🔀 [${this.name}] ${repo}#${prNumber} has merge conflicts with its base`);
-          const ok = await resolveConflicts(repo, prNumber);
-          console.log(
-            ok
-              ? `✅ [${this.name}] ${repo}#${prNumber} conflicts handled`
-              : `⚠️  [${this.name}] ${repo}#${prNumber} conflict resolution did not complete`,
-          );
-        }
+      if (resolveConflicts && prResult.data) {
+        await this.maybeSyncBase(repo, prNumber, prResult.data);
       }
     }
 
@@ -291,5 +377,123 @@ export class ReviewPollingAcquirer implements Acquirer {
         ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
         : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
     );
+  }
+
+  private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
+    const { github, queue, resolveConflicts, runStore } = this.options;
+    if (!resolveConflicts || !github.isBaseIncluded) return;
+    if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
+    const externalId = `base-sync:${repo}#${prNumber}:${pr.base.sha}`;
+    if (pr.head.repo?.full_name && pr.head.repo.full_name.toLowerCase() !== repo.toLowerCase()) {
+      if (!queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) {
+        queue.observeBaseSyncEvent({
+          externalId,
+          repo,
+          prNumber,
+          baseSha: pr.base.sha,
+          headSha: pr.head.sha,
+        });
+        queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      }
+      return;
+    }
+    // GitHub reports unknown while recomputing mergeability after a push.
+    if (!pr.mergeable_state || pr.mergeable_state === "unknown") return;
+
+    const included = await github.isBaseIncluded(repo, pr.base.sha, pr.head.sha);
+    if (included === null || included) return;
+
+    if (queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) return;
+    const now = this.options.now?.() ?? Date.now();
+    const event = queue.observeBaseSyncEvent({
+      externalId,
+      repo,
+      prNumber,
+      baseSha: pr.base.sha,
+      headSha: pr.head.sha,
+      now,
+    });
+    if (event.status !== "pending") return;
+    const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
+    if (now - event.headObservedAt < quietMs) return;
+
+    // Re-fetch immediately before execution. Any movement leaves the event
+    // pending and consumes no retry; the next tick observes the new state.
+    const freshResult = await github.fetchPr(repo, prNumber);
+    const fresh = freshResult.data;
+    if (
+      !fresh ||
+      fresh.state !== "open" ||
+      fresh.head?.sha !== pr.head.sha ||
+      fresh.base?.sha !== pr.base.sha
+    ) {
+      if (fresh?.head?.sha && fresh.base?.sha === pr.base.sha) {
+        queue.observeBaseSyncEvent({
+          externalId,
+          repo,
+          prNumber,
+          baseSha: pr.base.sha,
+          headSha: fresh.head.sha,
+          now,
+        });
+      }
+      return;
+    }
+    const stillMissing = await github.isBaseIncluded(repo, fresh.base.sha, fresh.head.sha);
+    if (stillMissing === null || stillMissing) {
+      if (stillMissing) queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      return;
+    }
+
+    const attempt = queue.beginBaseSyncAttempt(externalId);
+    let runId: number | null = null;
+    try {
+      runId =
+        runStore?.createRun({
+          origin: "conflict_resolution",
+          repo,
+          prNumber,
+          branch: fresh.head.ref,
+          harness: this.options.harness ?? process.env.AGENT_HARNESS ?? "claude-code",
+          attempt,
+        }) ?? null;
+    } catch (error) {
+      console.warn(`⚠️  Run recording (base sync begin) failed: ${(error as Error).message}`);
+    }
+
+    console.log(`\n🔀 [${this.name}] syncing ${repo}#${prNumber} with its advanced base`);
+    let result: AutomaticResolveResult;
+    try {
+      result = await resolveConflicts(repo, prNumber, {
+        headSha: fresh.head.sha,
+        baseSha: fresh.base.sha,
+      });
+    } catch (error) {
+      result = { outcome: "failed", message: (error as Error).message };
+    }
+    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
+    if (terminal) {
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+    } else if (result.outcome === "deferred") {
+      queue.deferBaseSyncAttempt(externalId);
+    } else {
+      const exhausted = queue.failBaseSyncEvent(externalId, result.message);
+      if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+    }
+    if (runId !== null) {
+      try {
+        runStore?.finishRun(
+          runId,
+          result.outcome === "failed"
+            ? "failed"
+            : result.outcome === "deferred"
+              ? "deferred"
+              : "succeeded",
+          result.message,
+        );
+      } catch (error) {
+        console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
+      }
+    }
   }
 }

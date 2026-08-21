@@ -54,7 +54,10 @@ export interface WorkspaceState {
 export function openWorkspaceState(workspaceDir: string = resolveWorkspaceDir()): WorkspaceState {
   const dbPath = workspaceDbPath(workspaceDir);
   const workerState = new WorkerState(dbPath);
-  const queue = new WebhookQueue({ dbPath });
+  const queue = new WebhookQueue({
+    dbPath,
+    maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
+  });
   const skips = new RoutingSkipStore(dbPath);
   return {
     workerState,

@@ -40,7 +40,7 @@ describe("resolveConflictsOnPr", () => {
       body: null,
       state: "open",
       head: { ref: "feature/change", sha: "unused", repo: { full_name: "acme/widgets" } },
-      base: { ref: "main" },
+      base: { ref: "main", sha: "base-sha" },
       html_url: PR_URL,
       ...overrides,
     };
@@ -200,5 +200,28 @@ describe("resolveConflictsOnPr", () => {
     });
     expect(fork.outcome).toBe("skipped");
     expect(fork.message).toContain("fork");
+  });
+
+  test("defers before touching git when expected head or base changed", async () => {
+    const headChanged = await resolveConflictsOnPr(PR_URL, {
+      fetchPr: async () => prInfo(),
+      expectedHeadSha: "stale-head",
+      noComment: true,
+    });
+    expect(headChanged).toEqual({
+      outcome: "deferred",
+      message: "PR head changed before execution",
+    });
+
+    const baseChanged = await resolveConflictsOnPr(PR_URL, {
+      fetchPr: async () => prInfo(),
+      expectedHeadSha: "unused",
+      expectedBaseSha: "stale-base",
+      noComment: true,
+    });
+    expect(baseChanged).toEqual({
+      outcome: "deferred",
+      message: "PR base changed before execution",
+    });
   });
 });
