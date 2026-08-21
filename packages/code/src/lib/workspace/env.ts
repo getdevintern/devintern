@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import type { RepoConfig } from "./config";
+import type { RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 
 /**
@@ -95,5 +95,69 @@ export function buildRepoEnv(
     }
   }
 
+  return env;
+}
+
+/**
+ * Parse a team's credential layers only (`env_file`, then inline overrides),
+ * excluding the workspace `.env` so task-environment composition can apply
+ * them above the repo layers without re-spreading the workspace `.env`.
+ *
+ * @param team - Team whose credentials to parse.
+ * @param workspaceDir - Workspace home used to resolve relative env files.
+ */
+function teamLayerEnv(team: TeamConfig, workspaceDir: string): Record<string, string> {
+  const teamFileEnv = team.envFile
+    ? parseEnvFile(isAbsolute(team.envFile) ? team.envFile : join(workspaceDir, team.envFile))
+    : {};
+  return { ...teamFileEnv, ...team.env };
+}
+
+/**
+ * Compose a team's own credential environment: workspace `.env`, then the
+ * team's `env_file`, then inline team overrides.
+ *
+ * Used for building the team's tracker client/detector in the worker
+ * process; task subprocesses use {@link buildTeamTaskEnv} instead.
+ *
+ * @param team - Team whose credentials to layer.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildTeamEnv(
+  team: TeamConfig,
+  workspaceDir: string = resolveWorkspaceDir(),
+): Record<string, string> {
+  return {
+    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+    ...teamLayerEnv(team, workspaceDir),
+  };
+}
+
+/**
+ * Compose the environment for a fleet task subprocess acquired by one team.
+ *
+ * Identical layering to {@link buildRepoEnv}, with the acquiring team's
+ * credentials between the repo layers and the final pin:
+ *
+ * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
+ * team `env_file` < team inline < `TASK_TRACKER` pin.
+ *
+ * The team wins ties because its credentials describe the tracker that
+ * acquired the task (status transitions must hit that board, even if a stale
+ * single-repo config still carries another tracker's variables), and
+ * `TASK_TRACKER` is pinned last so nothing can re-route the child CLI.
+ *
+ * @param repo - Workspace repo the task routed to.
+ * @param team - Team that acquired the task.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildTeamTaskEnv(
+  repo: RepoConfig,
+  team: TeamConfig,
+  workspaceDir: string = resolveWorkspaceDir(),
+): Record<string, string | undefined> {
+  const env = buildRepoEnv(repo, workspaceDir);
+  Object.assign(env, teamLayerEnv(team, workspaceDir));
+  env.TASK_TRACKER = team.tracker;
   return env;
 }

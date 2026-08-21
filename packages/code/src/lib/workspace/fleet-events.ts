@@ -120,16 +120,18 @@ export function createFleetMentionHandler(
 }
 
 /**
- * Build the relay task evaluator: re-run the fleet query (detect-then-
- * evaluate, same as polling), and execute the task through the shared fleet
- * executor when it is ready.
+ * Build one source's relay task evaluator: re-run that source's query
+ * (detect-then-evaluate, same as polling), and execute the task through the
+ * source's fleet executor when it is ready.
+ *
+ * @returns Whether the task matched this source's query.
  */
 export function createFleetTaskEvaluator(options: {
   query: string;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
-}): (taskKey: string) => Promise<void> {
+}): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
     const { tasks } = await options.searchTasks(options.query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
@@ -137,7 +139,7 @@ export function createFleetTaskEvaluator(options: {
       if (options.verbose) {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
-      return;
+      return false;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(
@@ -148,5 +150,38 @@ export function createFleetTaskEvaluator(options: {
         components: task.components ?? [],
       }),
     );
+    return true;
+  };
+}
+
+/** One team's (or the defaults source's) relay evaluate step. */
+export interface FleetRelayTaskSource {
+  /** Human-readable scope for logs (team name). */
+  label?: string;
+  evaluate: (taskKey: string) => Promise<boolean>;
+}
+
+/**
+ * Dispatch a relayed `task.changed` across every configured tracker source:
+ * each source re-runs its own query against its own tracker, and the first
+ * one whose query matches executes the task with its own routing scope.
+ *
+ * A task matching several sources' queries is executed once (by the first
+ * matching source); a task matching none is ignored, like an envelope for a
+ * repo outside the workspace.
+ */
+export function createFleetRelayTaskDispatcher(options: {
+  sources: FleetRelayTaskSource[];
+  verbose?: boolean;
+}): (taskKey: string) => Promise<void> {
+  return async (taskKey) => {
+    for (const source of options.sources) {
+      if (await source.evaluate(taskKey)) {
+        return;
+      }
+    }
+    if (options.verbose) {
+      console.log(`   [fleet] relay task ${taskKey} matches no tracker source; ignoring.`);
+    }
   };
 }
