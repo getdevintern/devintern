@@ -30,6 +30,7 @@ import type { GitExec } from "./git-sync.ts";
 import {
   listConfiguredTrackersForProject,
   persistActiveHarness,
+  persistActiveModel,
   persistActiveProject,
   persistActiveTracker,
   readProjectEnv,
@@ -480,6 +481,8 @@ export async function loadProject(
       const engine = await createEngine(config, {
         promptsDir: resolvePromptsDir(),
         baseDir: projectDir,
+        // loadConfig() has loaded .devintern-pm/.env into process.env.
+        model: process.env.AGENT_MODEL?.trim() || undefined,
       });
       current = { projectDir, config, engine };
 
@@ -489,6 +492,7 @@ export async function loadProject(
       status.activeTrackerDisplayName = getTrackerDisplayName(config.backend.type);
       status.activeHarnessName = config.agent.harness.name;
       status.harnessDisplayName = config.agent.harness.displayName;
+      status.activeModel = process.env.AGENT_MODEL?.trim() || undefined;
       status.availableHarnesses = availableHarnessesForStatus(
         config.agent.harness.name,
         config.agent.harness.displayName,
@@ -582,5 +586,12 @@ export async function switchProjectKey(projectKey: string): Promise<ProjectStatu
 export async function switchHarness(harnessName: string): Promise<ProjectStatus> {
   return switchContext(async (projectDir) => {
     await persistActiveHarness(projectDir, harnessName);
+  });
+}
+
+/** Persist `AGENT_MODEL` and reload the session so the engine picks it up. */
+export async function switchModel(model: string): Promise<ProjectStatus> {
+  return switchContext(async (projectDir) => {
+    await persistActiveModel(projectDir, model);
   });
 }

@@ -183,6 +183,21 @@ export async function persistActiveHarness(
 }
 
 /**
+ * Persist `AGENT_MODEL` for the active harness.
+ *
+ * The model string is harness-specific (see the harness CLI docs); harnesses
+ * without a model flag ignore it. An empty value clears the override.
+ *
+ * @throws When there is no env file.
+ */
+export async function persistActiveModel(projectDir: string, model: string): Promise<string> {
+  // Empty value clears the override; upsertEnvVars keeps the key with an
+  // empty value, which is falsy for the engine.
+  await upsertProjectEnvVars(projectDir, { AGENT_MODEL: model.trim() });
+  return model.trim();
+}
+
+/**
  * Merge a tracker's credentials into the existing `.devintern-pm/.env` and
  * make it the active tracker — without overwriting unrelated settings or
  * other trackers' credentials.

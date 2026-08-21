@@ -11,6 +11,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -29,6 +30,14 @@ interface AnalyticsSettingsProps {
   agentRunning?: boolean;
   /** Disable Remove while update-from-remote is in flight. */
   updatingFromRemote?: boolean;
+  /** Active `AGENT_MODEL` override for the project, when set. */
+  activeModel?: string;
+  /**
+   * Persist `AGENT_MODEL` for the project and reload the session. Resolves
+   * with an error message on failure, or null on success. Omitted when no PM
+   * project is open (model is a per-project setting).
+   */
+  onSwitchModel?: (model: string) => Promise<string | null>;
 }
 
 export function AnalyticsSettings({
@@ -37,6 +46,8 @@ export function AnalyticsSettings({
   onProjectRemoved,
   agentRunning = false,
   updatingFromRemote = false,
+  activeModel,
+  onSwitchModel,
 }: AnalyticsSettingsProps = {}) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -49,6 +60,9 @@ export function AnalyticsSettings({
   const [clearingToken, setClearingToken] = useState(false);
   const [confirmClearToken, setConfirmClearToken] = useState(false);
   const [githubTokenError, setGithubTokenError] = useState<string | null>(null);
+  const [modelInput, setModelInput] = useState(activeModel ?? "");
+  const [savingModel, setSavingModel] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
 
   const analyticsQuery = useAnalyticsEnabled(open);
   const githubAuthQuery = useGitHubAuthStatus(open);
@@ -69,10 +83,12 @@ export function AnalyticsSettings({
     setError(null);
     setGithubTokenError(null);
     setConfirmClearToken(false);
+    setModelError(null);
+    setModelInput(activeModel ?? "");
     if (analyticsQuery.data !== undefined) {
       setEnabled(analyticsQuery.data);
     }
-  }, [open, analyticsQuery.data]);
+  }, [open, analyticsQuery.data, activeModel]);
 
   const onCheckedChange = (next: boolean) => {
     setLoading(true);
@@ -88,6 +104,17 @@ export function AnalyticsSettings({
       }
       // Keep the shared analytics cache in sync.
       queryClient.setQueryData(qk.analyticsEnabled, next);
+    });
+  };
+
+  const onSaveModel = () => {
+    if (!onSwitchModel) return;
+    if (modelInput.trim() === (activeModel ?? "")) return;
+    setSavingModel(true);
+    setModelError(null);
+    void onSwitchModel(modelInput).then((errorMessage) => {
+      setSavingModel(false);
+      if (errorMessage) setModelError(errorMessage);
     });
   };
 
@@ -185,6 +212,51 @@ export function AnalyticsSettings({
           />
         </div>
         {error && <p className="text-xs text-destructive">{error}</p>}
+
+        {onSwitchModel ? (
+          <>
+            <Separator />
+            <div className="space-y-3 py-1" data-testid="settings-agent-model">
+              <div className="space-y-1">
+                <Label htmlFor="agent-model" className="text-sm text-foreground">
+                  Agent model
+                </Label>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Model override for this project&apos;s agent harness, stored in
+                  .devintern-pm/.env. The string is harness-specific (e.g. &quot;sonnet&quot; for
+                  Claude Code); leave blank to use the harness default.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  id="agent-model"
+                  value={modelInput}
+                  placeholder="Harness default"
+                  disabled={savingModel}
+                  onChange={(event) => setModelInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") onSaveModel();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={savingModel || modelInput.trim() === (activeModel ?? "")}
+                  data-testid="settings-save-model"
+                  onClick={onSaveModel}
+                >
+                  {savingModel ? "Saving…" : "Save"}
+                </Button>
+              </div>
+              {modelError ? (
+                <p className="text-xs text-destructive" data-testid="settings-model-error">
+                  {modelError}
+                </p>
+              ) : null}
+            </div>
+          </>
+        ) : null}
 
         {githubConnected ? (
           <>
