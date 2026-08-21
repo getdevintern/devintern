@@ -13,15 +13,25 @@
 
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { listInstalledHarnesses, resolveHarness } from "@devintern/agent-harness";
+import {
+  createDefaultSupabaseAuthConfig,
+  getAuthenticatedUser,
+  login,
+  resolveLogin,
+} from "@devintern/auth";
+import type { SupabaseAuthConfig } from "@devintern/auth";
 import {
   defaultProbe,
   extractExistingTrackerConfig,
   isInteractive,
+  parseEnvContent,
   promptForTracker,
   promptReuseExistingConfig,
   promptSteps,
   validateConnection,
 } from "@devintern/task-trackers";
+import { resolveConfigDir } from "@devintern/utils";
 import {
   GITHUB_PR_DOCS,
   GITHUB_PR_TOKEN_STEP,
@@ -30,12 +40,18 @@ import {
   renderEnvFile,
   scaffoldProject,
 } from "./init-scaffold";
+import { collectReadinessChecks, renderReadinessReport } from "./readiness";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 
 export { isInteractive };
 
 type PromptFn = (question: string) => Promise<string>;
 type ProbeFn = (trackerId: string, env: Record<string, string>) => Promise<void>;
+
+export interface InitWizardUserLike {
+  id: string;
+  email: string | null;
+}
 
 export interface InitWizardDeps {
   /** Reads one line of user input; defaults to node:readline over stdin. */
@@ -45,6 +61,107 @@ export interface InitWizardDeps {
   /** Working directory; defaults to `process.cwd()`. */
   cwd?: string;
   log?: (message: string) => void;
+  /** Session lookup override; defaults to a real local Supabase session read. */
+  getUser?: () => Promise<InitWizardUserLike | null>;
+  /**
+   * Interactive sign-in override; defaults to the full `devintern login`
+   * flow (provider picker + browser callback).
+   */
+  signIn?: () => Promise<InitWizardUserLike | null>;
+  /** Installed agent CLIs; defaults to PATH probing of every harness. */
+  listInstalledAgents?: () => Array<{ name: string; displayName: string }>;
+}
+
+/** Supabase auth config matching what the CLI uses at runtime. */
+function wizardSupabaseConfig(cwd: string): SupabaseAuthConfig {
+  const configDir = resolveConfigDir({
+    configDirName: ".devintern-code",
+    startDir: cwd,
+  });
+  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
+}
+
+/**
+ * Post-scaffold onboarding: detect the agent CLI, offer inline sign-in, and
+ * finish with a readiness checklist so the first `devintern TASK-KEY` cannot
+ * fail on something init could have caught.
+ */
+async function runPostSetup(
+  cwd: string,
+  prompt: PromptFn,
+  log: (message: string) => void,
+  deps: InitWizardDeps,
+): Promise<void> {
+  // Agent CLI availability
+  const agents =
+    deps.listInstalledAgents?.() ??
+    listInstalledHarnesses().map((h) => ({ name: h.name, displayName: h.displayName }));
+  if (agents.length === 0) {
+    log("\n🤖 No AI agent CLI found on your PATH.");
+    log("   Install one (e.g. Claude Code), or set AGENT_CLI_PATH in .devintern-code/.env.");
+  } else {
+    const defaultAgent = resolveHarness({ warnDeprecated: false }).harness;
+    const names = agents.map((a) => a.displayName).join(", ");
+    log(
+      `\n🤖 Agent CLIs detected: ${names}. Default: ${defaultAgent.displayName} ` +
+        `(change with AGENT_HARNESS in .devintern-code/.env).`,
+    );
+  }
+
+  // Inline sign-in offer
+  const supabaseConfig = wizardSupabaseConfig(cwd);
+  const getUser = deps.getUser ?? (() => getAuthenticatedUser(supabaseConfig));
+  let user: InitWizardUserLike | null = null;
+  try {
+    user = await getUser();
+  } catch {
+    user = null;
+  }
+  if (!user) {
+    const answer = await prompt(
+      "\nSign in to DevIntern now? Enables worker connect and license entitlements. [Y/n] ",
+    );
+    if (answer.trim().toLowerCase() !== "n") {
+      const signIn =
+        deps.signIn ??
+        (async () => {
+          const resolved = await resolveLogin(process.argv);
+          return login(supabaseConfig, resolved);
+        });
+      try {
+        const signedIn = await signIn();
+        if (signedIn) {
+          log(`✅ Signed in as ${signedIn.email || signedIn.id}`);
+        } else {
+          log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
+        }
+      } catch (error) {
+        log(
+          `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
+            "   Run 'devintern login' before using worker connect or licensed features.",
+        );
+      }
+    }
+  } else {
+    log(`✅ Signed in as ${user.email || user.id}`);
+  }
+
+  // Readiness checklist over the freshly written configuration
+  try {
+    const envPath = join(cwd, ".devintern-code", ".env");
+    const envRecord = parseEnvContent(readFileSync(envPath, "utf8"));
+    const checks = await collectReadinessChecks({
+      env: { ...process.env, ...envRecord },
+      envPath,
+    });
+    const report = renderReadinessReport(checks);
+    log("\n📋 Readiness:");
+    for (const line of report.lines) {
+      log(`   ${line}`);
+    }
+  } catch {
+    // Summary is best-effort; never fail init over it.
+  }
 }
 
 /** Run the interactive init wizard end to end. */
@@ -141,6 +258,8 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
     if (!scaffoldProject({ cwd, envContent })) {
       return;
     }
+
+    await runPostSetup(cwd, prompt, log, deps);
 
     log("\n🎉 Project initialized successfully!");
     log("\n📝 Next steps:");
