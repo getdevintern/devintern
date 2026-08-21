@@ -542,6 +542,7 @@ if (process.argv[2] === "init") {
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
         console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
         console.log("events arrive in seconds without webhook setup; see connect --help.");
+        console.log("Multi-repo workspaces pair once instead: `devintern workspace connect`.");
         console.log("");
         console.log("Subcommands:");
         console.log("  init                Guided server-automation setup: ready-tasks query");
@@ -967,7 +968,7 @@ if (process.argv[2] === "init") {
     await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
   })();
 } else if (process.argv[2] === "workspace") {
-  // Workspace management: scaffold or grow the multi-repo fleet config.
+  // Workspace management: scaffold, grow, or pair the multi-repo fleet config.
   // No license gate here - enforcement lives on the worker's workspace mode.
   (async () => {
     const sub = process.argv[3];
@@ -979,6 +980,18 @@ if (process.argv[2] === "init") {
       const { runWorkspaceImport } = await import("./lib/workspace/init");
       process.exit(await runWorkspaceImport(process.cwd()));
     }
+    if (sub === "connect") {
+      loadedEnvPath = loadEnvironment();
+      const { runWorkspaceConnect } = await import("./lib/workspace/connect");
+      process.exit(
+        await runWorkspaceConnect(process.argv.slice(4), {
+          getAccessToken: async () => {
+            const user = await requireAuthenticatedUser(loadSupabaseConfig(), "devintern login");
+            return user.accessToken;
+          },
+        }),
+      );
+    }
     console.log("Usage: devintern workspace <command>");
     console.log("");
     console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
@@ -989,6 +1002,9 @@ if (process.argv[2] === "init") {
     console.log("  import    Add the current repo to the workspace (run inside the repo);");
     console.log("            merges its .devintern-code/.env into the workspace .env and");
     console.log("            keeps conflicting values repo-local in [repos.env]");
+    console.log("  connect   Pair the whole fleet with the relay and register its GitHub");
+    console.log("            repos / tracker sources (state: ~/.devintern/relay.json);");
+    console.log("            see `devintern workspace connect --help`");
     process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
   })();
 } else if (process.argv[2] === "dashboard") {

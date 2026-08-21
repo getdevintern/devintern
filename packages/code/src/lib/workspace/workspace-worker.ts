@@ -345,9 +345,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
  *
  * Runs are CLI subprocesses in each repo's base worktree; mention-driven
  * runs are permission-gated here (see `fleet-events.ts`). Relay in fleet
- * mode uses connect state under the workspace home (or `WORKER_RELAY_URL`
- * plus a stored `drt_…` token); per-repo `worker connect` state alone is
- * not enough for the fleet daemon.
+ * mode uses workspace-scoped pairing (`devintern workspace connect` →
+ * `~/.devintern/relay.json`, or a legacy checkout-local state file);
+ * per-repo `worker connect` state alone is not enough for the fleet daemon.
  */
 async function buildFleetEventAcquirers(options: {
   config: WorkspaceConfig;
@@ -490,17 +490,19 @@ async function buildFleetEventAcquirers(options: {
     }
 
     // Mode 2 relay: envelopes carry the repo slug; route through the same
-    // fleet handlers and the shared task executor. Connect state lives under
-    // the workspace home (not a git checkout).
-    const { loadRelayState } = await import("../relay-connect");
-    const relayState = loadRelayState(workspaceDir);
-    if (relayState || process.env.WORKER_RELAY_URL) {
-      const relayToken = relayState?.relayToken;
-      const relayUrl =
-        process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+    // fleet handlers and the shared task executor. The pairing lives under
+    // the workspace home (`~/.devintern/relay.json` — one `devintern
+    // workspace connect` for the whole fleet), not a git checkout; a legacy
+    // checkout-local state file still works as a fallback.
+    const { resolveFleetRelayCredentials } = await import("./connect");
+    const { relayToken, relayUrl: stateRelayUrl } = resolveFleetRelayCredentials({
+      workspaceDir,
+    });
+    if (relayToken || process.env.WORKER_RELAY_URL) {
+      const relayUrl = process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || stateRelayUrl || "";
       if (!relayToken) {
         console.warn(
-          "⚠️  Relay is configured but no relay token is stored — run `devintern worker connect` while signed in (`devintern login`). Mode 1 polling continues.",
+          "⚠️  Relay is configured but no relay token is stored — run `devintern workspace connect` while signed in (`devintern login`). Mode 1 polling continues.",
         );
       } else if (relayUrl) {
         const { RelayAcquirer } = await import("../relay-acquirer");

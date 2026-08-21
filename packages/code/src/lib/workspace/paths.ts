@@ -28,6 +28,11 @@ export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): 
   return join(workspaceDir, ".env");
 }
 
+/** Path of the workspace-scoped relay connect state (`relay.json`). */
+export function workspaceRelayPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "relay.json");
+}
+
 /** Path of the central workspace SQLite database. */
 export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "state", "queue.db");

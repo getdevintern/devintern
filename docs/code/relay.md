@@ -3,7 +3,7 @@ title: "Relay (Instant Events)"
 description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
 section: "Server Automation"
 order: 3
-dateModified: 2026-08-04
+dateModified: 2026-08-22
 ---
 
 # Relay (Instant Events)
@@ -72,6 +72,24 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.
 | `devintern worker connect status`                   | Show registrations, buffered events, and per-source freshness              |
 
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
+
+## Workspaces (fleet)
+
+Multi-repo workspaces skip per-repo connect entirely. One workspace-scoped pairing lives in `~/.devintern/relay.json` — outside every checkout — and registers all fleet sources at once:
+
+```bash
+devintern login
+devintern workspace connect              # pair the fleet; register every GitHub [[repos]] remote
+devintern workspace connect linear       # register a tracker source (asana, trello, azure-devops, jira too)
+devintern workspace connect status       # fleet-wide registrations and buffer freshness
+```
+
+- `connect` (github by default) registers every `workspace.toml` `[[repos]]` entry with a resolvable `owner/name` slug; non-GitHub remotes are skipped with a note.
+- Tracker targets read their credentials from the shared workspace `.env`, so what you register is exactly what the fleet worker runs with.
+- Re-running connect is idempotent; an existing relay token is never silently replaced — pass `--force` to re-mint it.
+- The fleet worker loads `~/.devintern/relay.json` automatically, so no repository needs its own `.devintern-code/relay.json`. A legacy per-checkout state file still works as a fallback.
+
+`LICENSE_KEY` keeps its usual role for unattended workers: a local license gate only. It is not a relay credential in any mode.
 
 ## Environment variables
 
