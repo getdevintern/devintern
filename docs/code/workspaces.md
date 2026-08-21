@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-17
+dateModified: 2026-08-22
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -111,6 +111,58 @@ User=devintern
 [Install]
 WantedBy=multi-user.target
 ```
+
+## Multi-team workspaces
+
+Larger organizations often run teams on completely different projects and trackers — Platform on Jira, Growth on Linear or a second Trello board. A `[[teams]]` section teaches one fleet worker to poll every board, with each team getting its own credentials, query, cursor, and routing scope. Repos, locks, the central database, and the execute path are shared.
+
+```toml
+[defaults]
+worker_task_args = "--create-pr"
+default_branch = "main"
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT AND labels = devintern"
+env_file = "env/platform.env"        # JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN
+
+[[teams]]
+name = "growth"
+tracker = "linear"
+task_query = "{\"team\":{\"key\":{\"eq\":\"GROW\"}}}"
+  [teams.env]                        # inline credentials also work
+  LINEAR_API_KEY = "lin_api_..."
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[routing.rules]]
+team = "platform"                    # rule only applies to platform's tasks
+repo = "api"
+project = "PLAT"
+
+[[routing.rules]]                    # unscoped rules apply to every team
+repo = "docs-site"
+labels = ["docs"]
+```
+
+How teams differ from the single-defaults setup:
+
+- **One acquirer per team.** Each team polls its own tracker with its own query and interval; a slow board never delays another team's pickup.
+- **Isolated credentials.** Team env layers over the workspace `.env` (`workspace .env` < `env_file` < inline `[teams.env]`); clients are built per team without touching shared process environment, so two boards of the same tracker type stay independent.
+- **Isolated cursors and dedupe.** Cursor sources are namespaced per team (`jira:platform`, `trello:growth`), so two boards of the same type never share a cursor or cross-dedupe tasks.
+- **Scoped routing ("never guess").** Tasks route only against the acquiring team's rules plus unscoped rules; rules naming another team never match. Ambiguous/unrouted skips record the team alongside the task.
+- **Team-aware task runs.** The subprocess that implements a task gets the team's credentials layered in and `TASK_TRACKER` pinned to the acquiring team's tracker, so status transitions hit the right board.
+- **Relay.** A relayed `task.changed` event is evaluated against each team's query in order; the first team whose query matches executes it.
+
+Rules of thumb:
+
+- Omitting `[[teams]]` entirely keeps today's single `[defaults]` behavior — no migration needed.
+- With teams present, `[defaults].tracker` and `[defaults].task_query` become optional fallbacks for teams that omit them.
+- `--query` / `WORKER_TASK_QUERY` only override the single-defaults fleet query; in multi-team mode every team uses its own `task_query`.
+- Team names must be unique and filesystem-safe (they namespace state). Each team needs a pollable tracker and a query.
 
 ## Reviews, mentions, and the relay
 

@@ -46,6 +46,33 @@ default_branch = "main"
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
+#
+# Multi-team workspaces: poll several trackers/boards with isolated
+# credentials, queries, and cursors. Each [[teams]] entry needs a name, a
+# tracker, and a task_query; credentials come from env_file (relative to
+# ~/.devintern) plus inline env. Omit [[teams]] entirely to keep the single
+# [defaults] fleet query above.
+#
+# [[teams]]
+# name = "platform"
+# tracker = "jira"
+# task_query = "project = PLAT AND labels = devintern"
+# env_file = "env/platform.env"
+#
+# [[teams]]
+# name = "growth"
+# tracker = "linear"
+# task_query = "{\\"team\\":{\\"key\\":{\\"eq\\":\\"GROW\\"}}}"
+#   [teams.env]
+#   LINEAR_API_KEY = "lin_api_..."
+#
+# Scope routing rules to a team so tasks only route within the team that
+# acquired them:
+#
+# [[routing.rules]]
+# team = "platform"
+# repo = "api"
+# project = "PLAT"
 `;
 
 const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or

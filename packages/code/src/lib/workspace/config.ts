@@ -21,6 +21,26 @@ export interface WorkspaceDefaults {
   defaultBranch?: string;
 }
 
+/**
+ * One team's tracker source from a `[[teams]]` entry.
+ *
+ * Teams let one fleet worker poll several boards/trackers (even several
+ * boards of the same tracker type), each with its own credentials, query,
+ * and cursor. Omitting `[[teams]]` keeps the single `[defaults]` behavior.
+ */
+export interface TeamConfig {
+  /** Unique team name; namespaces cursors, dedupe, and skips (`jira:platform`). */
+  name: string;
+  /** Tracker driving this team's query (must support polling). */
+  tracker: string;
+  /** Tracker query the worker polls with for this team. */
+  taskQuery?: string;
+  /** Optional env file with this team's credentials, relative to the workspace directory. */
+  envFile?: string;
+  /** Inline env overrides (highest precedence within the team). */
+  env: Record<string, string>;
+}
+
 /** One managed repository from a `[[repos]]` entry. */
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
@@ -39,6 +59,8 @@ export interface RepoConfig {
 export interface RoutingRule {
   /** Name of the repo tasks matching this rule route to. */
   repo: string;
+  /** Restrict the rule to tasks acquired by this team (multi-team workspaces). */
+  team?: string;
   /** Tracker project key (e.g. Jira key prefix, Linear team key). */
   project?: string;
   /** Task must carry at least one of these components. */
@@ -51,6 +73,8 @@ export interface RoutingRule {
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   defaults: WorkspaceDefaults;
+  /** Team tracker sources; empty means the single `[defaults]` fleet query. */
+  teams: TeamConfig[];
   repos: RepoConfig[];
   routing: RoutingRule[];
 }
@@ -179,6 +203,45 @@ export function parseWorkspaceConfig(
 
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
+
+  const teams: TeamConfig[] = [];
+  const teamNames = new Set<string>();
+  for (const [index, table] of asTableArray(document.teams, "[[teams]]", errors).entries()) {
+    const label = `[[teams]][${index}]`;
+    const name = readString(table, "name", label, errors);
+    if (!name) {
+      errors.push(`${label}.name is required.`);
+    } else if (!REPO_NAME_PATTERN.test(name)) {
+      errors.push(
+        `${label}.name "${name}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (teamNames.has(name)) {
+      errors.push(`Duplicate team name "${name}". Team names must be unique.`);
+    } else {
+      teamNames.add(name);
+    }
+    const teamTracker = readString(table, "tracker", label, errors);
+    if (teamTracker && !supportsPolling(teamTracker)) {
+      errors.push(
+        `${label}.tracker "${teamTracker}" does not support polling. ` +
+          `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+      );
+    }
+    teams.push({
+      name: name ?? "",
+      tracker: teamTracker ?? "",
+      taskQuery: readString(table, "task_query", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
+  // brings its own (a [defaults].tracker alongside teams is still honored
+  // for any team that omits one).
+  if (!tracker && teams.length === 0) {
+    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+  }
   if (tracker && !supportsPolling(tracker)) {
     errors.push(
       `[defaults].tracker "${tracker}" does not support polling. ` +
@@ -191,8 +254,24 @@ export function parseWorkspaceConfig(
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
   };
-  if (!tracker) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+
+  for (const team of teams) {
+    if (!team.tracker) {
+      team.tracker = defaults.tracker;
+    }
+    if (!team.tracker && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a tracker: set its own tracker or [defaults].tracker.`,
+      );
+    }
+    if (!team.taskQuery) {
+      team.taskQuery = defaults.taskQuery;
+    }
+    if (!team.taskQuery && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a task_query: set its own or [defaults].task_query.`,
+      );
+    }
   }
 
   const repos: RepoConfig[] = [];
@@ -243,8 +322,17 @@ export function parseWorkspaceConfig(
     if (!repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
+    const team = readString(table, "team", label, errors);
+    if (team && !teamNames.has(team)) {
+      errors.push(
+        teamNames.size > 0
+          ? `${label}.team "${team}" does not match any [[teams]] name.`
+          : `${label}.team "${team}" is set but no [[teams]] are configured.`,
+      );
+    }
     const rule: RoutingRule = {
       repo,
+      team,
       project: readString(table, "project", label, errors),
       components: readStringList(table, "components", label, errors),
       labels: readStringList(table, "labels", label, errors),
@@ -259,7 +347,7 @@ export function parseWorkspaceConfig(
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
-  return { workspace: { worktreesTtlDays }, defaults, repos, routing };
+  return { workspace: { worktreesTtlDays }, defaults, teams, repos, routing };
 }
 
 /**
@@ -289,4 +377,13 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
  */
 export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | undefined {
   return config.repos.find((repo) => repo.name === name);
+}
+
+/**
+ * Look up a team by name.
+ *
+ * @returns The matching {@link TeamConfig}, or undefined.
+ */
+export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
+  return config.teams.find((team) => team.name === name);
 }

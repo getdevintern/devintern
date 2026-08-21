@@ -41,9 +41,12 @@ export interface ChangeDetector {
  *
  * @param tasksDir - Directory containing `.md` task files
  */
-export function createMarkdownChangeDetector(tasksDir: string): ChangeDetector {
+export function createMarkdownChangeDetector(
+  tasksDir: string,
+  options: ChangeDetectorOptions = {},
+): ChangeDetector {
   return {
-    source: "markdown",
+    source: options.source ?? "markdown",
     async changesSince(cursor: string | null): Promise<DetectionResult> {
       let maxMtime = 0;
       let changed = false;
@@ -83,6 +86,22 @@ export function createMarkdownChangeDetector(tasksDir: string): ChangeDetector {
 export type SearchTasksFn = (query: string) => Promise<{ tasks: Array<{ key: string }> }>;
 
 /**
+ * Options shared by detector factories: an explicit env map (so several
+ * detectors can run side by side with isolated credentials, e.g. one per
+ * workspace team) and an optional cursor-source override.
+ */
+export interface ChangeDetectorOptions {
+  /** Env providing tracker credentials; defaults to `process.env`. */
+  env?: Record<string, string | undefined>;
+  /**
+   * Cursor/dedupe source key; defaults to the tracker name. Multi-team
+   * workspaces namespace it per team (`jira:platform`) so two boards of the
+   * same tracker never share a cursor or dedupe bucket.
+   */
+  source?: string;
+}
+
+/**
  * Build a detector that runs one cheap tracker query per tick asking "did
  * anything change since the cursor?". The cursor is the detection start time
  * (epoch ms); the query window always overlaps the previous one, and the
@@ -119,23 +138,32 @@ function createQueryChangeDetector(
 }
 
 /** Jira: relative JQL window (`updated >= "-Nm"`) avoids timezone pitfalls. */
-export function createJiraChangeDetector(searchTasks: SearchTasksFn): ChangeDetector {
-  return createQueryChangeDetector("jira", searchTasks, (since) => {
+export function createJiraChangeDetector(
+  searchTasks: SearchTasksFn,
+  options: ChangeDetectorOptions = {},
+): ChangeDetector {
+  return createQueryChangeDetector(options.source ?? "jira", searchTasks, (since) => {
     const minutes = Math.max(1, Math.ceil((Date.now() - since) / 60_000) + 1);
     return `updated >= "-${minutes}m"`;
   });
 }
 
 /** Linear: `IssueFilter` on `updatedAt` (UTC ISO). */
-export function createLinearChangeDetector(searchTasks: SearchTasksFn): ChangeDetector {
-  return createQueryChangeDetector("linear", searchTasks, (since) =>
+export function createLinearChangeDetector(
+  searchTasks: SearchTasksFn,
+  options: ChangeDetectorOptions = {},
+): ChangeDetector {
+  return createQueryChangeDetector(options.source ?? "linear", searchTasks, (since) =>
     JSON.stringify({ updatedAt: { gt: new Date(since).toISOString() } }),
   );
 }
 
 /** GitHub Issues: `updated:>=` search qualifier (auto-scoped to the repo). */
-export function createGitHubChangeDetector(searchTasks: SearchTasksFn): ChangeDetector {
-  return createQueryChangeDetector("github", searchTasks, (since) => {
+export function createGitHubChangeDetector(
+  searchTasks: SearchTasksFn,
+  options: ChangeDetectorOptions = {},
+): ChangeDetector {
+  return createQueryChangeDetector(options.source ?? "github", searchTasks, (since) => {
     const iso = new Date(since).toISOString().replace(/\.\d{3}Z$/, "Z");
     return `updated:>=${iso}`;
   });
@@ -147,8 +175,11 @@ export function createGitHubChangeDetector(searchTasks: SearchTasksFn): ChangeDe
  * within an active day this over-reports changes, which only costs an extra
  * evaluate query — dedupe keeps execution exactly-once.
  */
-export function createAzureDevOpsChangeDetector(searchTasks: SearchTasksFn): ChangeDetector {
-  return createQueryChangeDetector("azure-devops", searchTasks, (since) => {
+export function createAzureDevOpsChangeDetector(
+  searchTasks: SearchTasksFn,
+  options: ChangeDetectorOptions = {},
+): ChangeDetector {
+  return createQueryChangeDetector(options.source ?? "azure-devops", searchTasks, (since) => {
     const day = new Date(since).toISOString().slice(0, 10);
     return `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '${day}'`;
   });
@@ -163,9 +194,10 @@ export function createAzureDevOpsChangeDetector(searchTasks: SearchTasksFn): Cha
  */
 export function createTrelloChangeDetector(
   getBoardActions: (since?: string) => Promise<Array<{ id: string }>>,
+  options: ChangeDetectorOptions = {},
 ): ChangeDetector {
   return {
-    source: "trello",
+    source: options.source ?? "trello",
     async changesSince(cursor: string | null): Promise<DetectionResult> {
       const actions = await getBoardActions(cursor ?? undefined);
       const newestActionId = actions[0]?.id ?? null;
@@ -190,9 +222,10 @@ export function createAsanaChangeDetector(
   getEvents: (
     syncToken?: string,
   ) => Promise<{ events: unknown[]; sync: string; fullSync: boolean }>,
+  options: ChangeDetectorOptions = {},
 ): ChangeDetector {
   return {
-    source: "asana",
+    source: options.source ?? "asana",
     async changesSince(cursor: string | null): Promise<DetectionResult> {
       const page = await getEvents(cursor ?? undefined);
       const nextCursor = page.sync || cursor;
@@ -211,42 +244,48 @@ export function createAsanaChangeDetector(
  *
  * @param trackerType - `TASK_TRACKER` value (e.g. `markdown`, `jira`)
  * @param searchTasks - The tracker's `searchTasks` (required by query-based detectors)
+ * @param options - Explicit env map and/or namespaced source; defaults to
+ *                  `process.env` and the bare tracker name.
  */
 export function createChangeDetector(
   trackerType: string,
   searchTasks?: SearchTasksFn,
+  options: ChangeDetectorOptions = {},
 ): ChangeDetector | null {
-  switch (trackerType) {
+  const env = options.env ?? process.env;
+  switch (trackerType.toLowerCase()) {
     case "markdown": {
-      const tasksDir = process.env.MARKDOWN_TASKS_DIR;
-      return tasksDir ? createMarkdownChangeDetector(tasksDir) : null;
+      const tasksDir = env.MARKDOWN_TASKS_DIR;
+      return tasksDir ? createMarkdownChangeDetector(tasksDir, options) : null;
     }
     case "jira":
-      return searchTasks ? createJiraChangeDetector(searchTasks) : null;
+      return searchTasks ? createJiraChangeDetector(searchTasks, options) : null;
     case "linear":
-      return searchTasks ? createLinearChangeDetector(searchTasks) : null;
+      return searchTasks ? createLinearChangeDetector(searchTasks, options) : null;
     case "github":
-      return searchTasks ? createGitHubChangeDetector(searchTasks) : null;
+      return searchTasks ? createGitHubChangeDetector(searchTasks, options) : null;
     case "azure-devops":
-      return searchTasks ? createAzureDevOpsChangeDetector(searchTasks) : null;
+      return searchTasks ? createAzureDevOpsChangeDetector(searchTasks, options) : null;
     case "trello": {
-      const apiKey = process.env.TRELLO_API_KEY;
-      const apiToken = process.env.TRELLO_API_TOKEN;
-      const boardId = process.env.TRELLO_DEFAULT_BOARD_ID;
+      const apiKey = env.TRELLO_API_KEY;
+      const apiToken = env.TRELLO_API_TOKEN;
+      const boardId = env.TRELLO_DEFAULT_BOARD_ID;
       if (!apiKey || !apiToken || !boardId) {
         return null; // board actions require TRELLO_DEFAULT_BOARD_ID
       }
       const client = new TrelloClient({ apiKey, apiToken });
-      return createTrelloChangeDetector((since) => client.getBoardActions(boardId, { since }));
+      return createTrelloChangeDetector((since) => client.getBoardActions(boardId, { since }), {
+        source: options.source ?? "trello",
+      });
     }
     case "asana": {
-      const apiToken = process.env.ASANA_API_TOKEN;
-      const projectGid = process.env.ASANA_DEFAULT_PROJECT_GID;
+      const apiToken = env.ASANA_API_TOKEN;
+      const projectGid = env.ASANA_DEFAULT_PROJECT_GID;
       if (!apiToken || !projectGid) {
         return null; // events feed requires ASANA_DEFAULT_PROJECT_GID
       }
       const client = new AsanaClient({ apiToken });
-      return createAsanaChangeDetector((sync) => client.getEvents(projectGid, sync));
+      return createAsanaChangeDetector((sync) => client.getEvents(projectGid, sync), options);
     }
     default:
       return null;
