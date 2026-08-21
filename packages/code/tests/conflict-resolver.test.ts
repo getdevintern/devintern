@@ -31,6 +31,7 @@ describe("resolveConflictsOnPr", () => {
   let testDir: string;
   let originDir: string;
   let repoDir: string;
+  let seedDir: string;
   const savedWorktreeBase = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
 
   function prInfo(overrides: Partial<PullRequestInfo> = {}): PullRequestInfo {
@@ -40,7 +41,7 @@ describe("resolveConflictsOnPr", () => {
       body: null,
       state: "open",
       head: { ref: "feature/change", sha: "unused", repo: { full_name: "acme/widgets" } },
-      base: { ref: "main" },
+      base: { ref: "main", sha: "base-sha" },
       html_url: PR_URL,
       ...overrides,
     };
@@ -54,7 +55,7 @@ describe("resolveConflictsOnPr", () => {
     originDir = join(testDir, "origin.git");
     execSync(`git init --bare ${originDir}`);
 
-    const seedDir = join(testDir, "seed");
+    seedDir = join(testDir, "seed");
     execSync(`git clone ${originDir} ${seedDir}`, { stdio: "ignore" });
     git(seedDir, "config user.email test@test.com");
     git(seedDir, "config user.name Test");
@@ -200,5 +201,164 @@ describe("resolveConflictsOnPr", () => {
     });
     expect(fork.outcome).toBe("skipped");
     expect(fork.message).toContain("fork");
+  });
+
+  test("defers before touching git when expected head or base changed", async () => {
+    const headChanged = await resolveConflictsOnPr(PR_URL, {
+      fetchPr: async () => prInfo(),
+      expectedHeadSha: "stale-head",
+      noComment: true,
+    });
+    expect(headChanged).toEqual({
+      outcome: "deferred",
+      message: "PR head changed before execution",
+    });
+
+    const baseChanged = await resolveConflictsOnPr(PR_URL, {
+      fetchPr: async () => prInfo(),
+      expectedHeadSha: "unused",
+      expectedBaseSha: "stale-base",
+      noComment: true,
+    });
+    expect(baseChanged).toEqual({
+      outcome: "deferred",
+      message: "PR base changed before execution",
+    });
+  });
+
+  test("defers when the remote head changes during worktree preparation", async () => {
+    const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
+    const expectedBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      expectedHeadSha,
+      expectedBaseSha,
+      fetchPr: async () => {
+        git(seedDir, "checkout feature/change");
+        writeFileSync(join(seedDir, "head-race.txt"), "moved\n");
+        git(seedDir, "add .");
+        git(seedDir, 'commit -m "concurrent head push"');
+        git(seedDir, "push origin feature/change");
+        return prInfo({
+          head: {
+            ref: "feature/change",
+            sha: expectedHeadSha,
+            repo: { full_name: "acme/widgets" },
+          },
+          base: { ref: "main", sha: expectedBaseSha },
+        });
+      },
+    });
+
+    expect(result).toEqual({
+      outcome: "deferred",
+      message: "PR head changed during worktree preparation",
+    });
+  });
+
+  test("defers when the remote base changes during worktree preparation", async () => {
+    const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
+    const expectedBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      expectedHeadSha,
+      expectedBaseSha,
+      fetchPr: async () => {
+        git(seedDir, "checkout main");
+        writeFileSync(join(seedDir, "base-race.txt"), "moved\n");
+        git(seedDir, "add .");
+        git(seedDir, 'commit -m "concurrent base push"');
+        git(seedDir, "push origin main");
+        return prInfo({
+          head: {
+            ref: "feature/change",
+            sha: expectedHeadSha,
+            repo: { full_name: "acme/widgets" },
+          },
+          base: { ref: "main", sha: expectedBaseSha },
+        });
+      },
+    });
+
+    expect(result).toEqual({
+      outcome: "deferred",
+      message: "PR base changed during worktree preparation",
+    });
+  });
+
+  test("defers when the remote head changes after preparation but before push", async () => {
+    const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
+    const expectedBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      expectedHeadSha,
+      expectedBaseSha,
+      fetchPr: async () =>
+        prInfo({
+          head: {
+            ref: "feature/change",
+            sha: expectedHeadSha,
+            repo: { full_name: "acme/widgets" },
+          },
+          base: { ref: "main", sha: expectedBaseSha },
+        }),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved locally\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+
+        git(seedDir, "checkout feature/change");
+        writeFileSync(join(seedDir, "concurrent.txt"), "human push\n");
+        git(seedDir, "add .");
+        git(seedDir, 'commit -m "concurrent push during resolution"');
+        git(seedDir, "push origin feature/change");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result).toEqual({ outcome: "deferred", message: "PR head changed before push" });
+    expect(git(seedDir, "rev-parse origin/feature/change").trim()).not.toBe(expectedHeadSha);
+  });
+
+  test("defers when the remote head resets after the final fetch but before push", async () => {
+    const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
+    const expectedBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    const ancestorSha = git(seedDir, `rev-parse ${expectedHeadSha}^`).trim();
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\ngit --git-dir="${originDir}" update-ref refs/heads/feature/change "${ancestorSha}"\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      expectedHeadSha,
+      expectedBaseSha,
+      fetchPr: async () =>
+        prInfo({
+          head: {
+            ref: "feature/change",
+            sha: expectedHeadSha,
+            repo: { full_name: "acme/widgets" },
+          },
+          base: { ref: "main", sha: expectedBaseSha },
+        }),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved locally\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result).toEqual({ outcome: "deferred", message: "PR head changed during push" });
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      ancestorSha,
+    );
   });
 });
