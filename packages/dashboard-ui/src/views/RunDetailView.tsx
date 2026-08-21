@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
 
+import { RunResult } from "@/components/RunResult";
 import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
 import { StageDetailFields } from "@/components/StageDetailFields";
 import { Button } from "@/components/ui/button";
@@ -150,24 +151,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                   )
                 }
               />
-              <MetaItem
-                label="Result"
-                value={
-                  data.run.prUrl || data.run.ticketUrl ? (
-                    <a
-                      href={data.run.prUrl ?? data.run.ticketUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-primary hover:underline"
-                    >
-                      {data.run.ticketKey ?? `#${data.run.prNumber ?? "PR"}`}
-                      <ExternalLink className="size-3" />
-                    </a>
-                  ) : (
-                    "–"
-                  )
-                }
-              />
+              <MetaItem label="Result" value={<RunResult run={data.run} />} />
               <MetaItem
                 label="Duration"
                 value={

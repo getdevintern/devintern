@@ -19,6 +19,14 @@ import type { AutomationAction } from "./automation-config";
 import { endRun, beginRun, recordRunStage, recordRunTicket } from "./run-recorder";
 import { getSandbox } from "./sandbox";
 
+export const MAX_AGENT_OUTPUT_CHARS = 64_000;
+
+/** Retain only the diagnostic tail needed by scheduled-run output detectors. */
+export function appendOutputTail(current: string, chunk: string): string {
+  if (chunk.length >= MAX_AGENT_OUTPUT_CHARS) return chunk.slice(-MAX_AGENT_OUTPUT_CHARS);
+  return `${current.slice(chunk.length - MAX_AGENT_OUTPUT_CHARS)}${chunk}`;
+}
+
 export interface ScheduledExecution {
   automationId: string;
   action: AutomationAction;
@@ -56,13 +64,13 @@ async function runHeadlessAgent(
   let stderr = "";
   child.stdout?.on("data", (chunk) => {
     const text = chunk.toString();
-    stdout += text;
+    stdout = appendOutputTail(stdout, text);
     process.stdout.write(text);
     options.onStdout?.(text);
   });
   child.stderr?.on("data", (chunk) => {
     const text = chunk.toString();
-    stderr += text;
+    stderr = appendOutputTail(stderr, text);
     process.stderr.write(text);
     options.onStderr?.(text);
   });
@@ -105,9 +113,9 @@ export async function executeScheduledAutomation(input: ScheduledExecution): Pro
   });
 
   try {
-    const resolved = resolveHarness();
-    resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
     if (input.action === "headless") {
+      const resolved = resolveHarness();
+      resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
       const result = await runHeadlessAgent(
         resolved.harness,
         resolved.path,

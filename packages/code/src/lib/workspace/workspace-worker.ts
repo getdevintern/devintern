@@ -28,7 +28,8 @@ import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./st
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
 import { AutomationAcquirer } from "../automation-acquirer";
-import { configuredTrackerProject } from "../automation-config";
+import { resolvePmTrackerConfig, validateAutomationProjects } from "../automation-config";
+import type { AutomationConfig } from "../automation-config";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -70,6 +71,44 @@ export interface WorkspaceTaskAcquirerDeps {
   repoLock?: (repoName: string) => LockManager;
 }
 
+interface RepoRunLockLike {
+  acquire(): { success: boolean; message: string; pid?: number };
+  release(): void;
+}
+
+/** Resolve a scheduled run context while holding the repo lock during preparation. */
+export async function resolveWorkspaceAutomationContext(
+  automation: AutomationConfig,
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  repoManager: RepoManagerLike,
+  repoLock: (repoName: string) => RepoRunLockLike = (name) => createRepoRunLock(name, workspaceDir),
+) {
+  const repo = automation.repo
+    ? findRepo(config, automation.repo)
+    : config.repos.length === 1
+      ? config.repos[0]
+      : undefined;
+  if (!repo) return { cwd: workspaceDir, env: { ...process.env }, release() {} };
+
+  const lock = repoLock(repo.name);
+  if (!lock.acquire().success) return null;
+  try {
+    await repoManager.ensureBareClone(repo);
+    await repoManager.fetch(repo.name);
+    const cwd = await repoManager.ensureBaseWorktree(repo);
+    return {
+      cwd,
+      env: buildRepoEnv(repo, workspaceDir),
+      repo: repo.name,
+      release: () => lock.release(),
+    };
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
+}
+
 /** Per-task CLI args: workspace defaults win, then the usual env/default. */
 export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   const raw = config.defaults.workerTaskArgs;
@@ -77,6 +116,37 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
     return raw.trim().split(/\s+/);
   }
   return workerTaskArgs();
+}
+
+/** Validate ticket automations against the PM configuration in their execution worktree. */
+export async function validateWorkspaceAutomationProjects(
+  automations: AutomationConfig[],
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  repoManager: RepoManagerLike,
+  repoLock?: (repoName: string) => RepoRunLockLike,
+): Promise<void> {
+  for (const automation of automations) {
+    if (automation.action !== "create_ticket" || automation.trackerProject) continue;
+    const context = await resolveWorkspaceAutomationContext(
+      automation,
+      config,
+      workspaceDir,
+      repoManager,
+      repoLock,
+    );
+    if (!context) {
+      throw new Error(`Cannot validate automation "${automation.id}": repository is busy.`);
+    }
+    try {
+      validateAutomationProjects(
+        [automation],
+        await resolvePmTrackerConfig(context.cwd, context.env),
+      );
+    } finally {
+      await context.release();
+    }
+  }
 }
 
 /**
@@ -291,47 +361,23 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
           `Automation "${automation.id}" must set repo when the workspace has multiple repositories.`,
         );
       }
-      const repo = automation.repo ? findRepo(config, automation.repo) : undefined;
-      const env = repo ? buildRepoEnv(repo, workspaceDir) : process.env;
-      if (
-        automation.action === "create_ticket" &&
-        !automation.trackerProject &&
-        !configuredTrackerProject(env as NodeJS.ProcessEnv)
-      ) {
-        semanticErrors.push(
-          `Automation "${automation.id}" uses create_ticket but has no tracker_project and the tracker has no default project.`,
-        );
-      }
     }
     if (semanticErrors.length > 0) {
       throw new Error(`Invalid ${configPath}:\n- ${semanticErrors.join("\n- ")}`);
     }
+    await validateWorkspaceAutomationProjects(
+      config.automations,
+      config,
+      workspaceDir,
+      repoManager,
+    );
 
     acquirers.push(
       new AutomationAcquirer({
         automations: config.automations,
         dbPath: state.dbPath,
-        resolveContext: async (automation) => {
-          const repo = automation.repo
-            ? findRepo(config, automation.repo)
-            : config.repos.length === 1
-              ? config.repos[0]
-              : undefined;
-          if (!repo) {
-            return { cwd: workspaceDir, env: { ...process.env }, release() {} };
-          }
-          await repoManager.ensureBareClone(repo);
-          await repoManager.fetch(repo.name);
-          const cwd = await repoManager.ensureBaseWorktree(repo);
-          const lock = createRepoRunLock(repo.name, workspaceDir);
-          if (!lock.acquire().success) return null;
-          return {
-            cwd,
-            env: buildRepoEnv(repo, workspaceDir),
-            repo: repo.name,
-            release: () => lock.release(),
-          };
-        },
+        resolveContext: (automation) =>
+          resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
       }),
     );
   }

@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
+import { getProjectKeyEnvVar, loadTrackerConfig } from "@devintern/task-trackers";
+import type { TrackerConfig } from "@devintern/task-trackers";
 
 import { parseToml } from "./workspace/toml";
 
@@ -22,15 +24,21 @@ export interface AutomationConfig {
 export const SINGLE_REPO_AUTOMATIONS_PATH = ".devintern-code/automations.toml";
 const AUTOMATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DURATION_PATTERN = /^(\d+)([mhd])$/;
+const MAX_DATE_MS = 8_640_000_000_000_000;
 
 /** Parse a documented interval (`15m`, `6h`, or `1d`) into milliseconds. */
-export function parseAutomationInterval(value: string): number | null {
+export function parseAutomationInterval(value: string, nowMs = Date.now()): number | null {
   const match = value.match(DURATION_PATTERN);
   if (!match) return null;
   const amount = Number(match[1]);
   if (!Number.isSafeInteger(amount) || amount < 1) return null;
   const unitMs = match[2] === "m" ? 60_000 : match[2] === "h" ? 3_600_000 : 86_400_000;
-  return amount * unitMs;
+  const intervalMs = amount * unitMs;
+  const dueAt = nowMs + intervalMs;
+  if (!Number.isSafeInteger(intervalMs) || !Number.isSafeInteger(dueAt) || dueAt > MAX_DATE_MS) {
+    return null;
+  }
+  return intervalMs;
 }
 
 /** Validate and normalize `[[automations]]` tables, collecting every error. */
@@ -151,29 +159,67 @@ export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationCo
   return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
 }
 
-/** Default tracker project/team/board/repository from the layered environment. */
-export function configuredTrackerProject(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return (
-    env.JIRA_DEFAULT_PROJECT_KEY ||
-    env.LINEAR_DEFAULT_TEAM_KEY ||
-    env.TRELLO_DEFAULT_BOARD_ID ||
-    env.AZURE_DEVOPS_PROJECT ||
-    env.ASANA_DEFAULT_PROJECT_GID ||
-    env.GITHUB_REPO
-  );
+/** Default project/team/board/repository for the selected tracker. */
+export function configuredTrackerProject(
+  tracker: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): string | undefined {
+  const key = getProjectKeyEnvVar(tracker.toLowerCase());
+  return key ? env[key] : undefined;
 }
 
-/** Startup-only semantic validation that needs the loaded environment. */
+/** Resolve PM's tracker config using the run environment without changing the worker process. */
+export async function resolvePmTrackerConfig(
+  baseDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): Promise<TrackerConfig> {
+  const originalEnv = { ...process.env };
+  const resolutionEnv = Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  try {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, resolutionEnv);
+    return await loadTrackerConfig(".devintern-pm", baseDir);
+  } finally {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+  }
+}
+
+/** Default project from the exact tracker configuration PM will use at execution time. */
+function resolvedTrackerProject(config: TrackerConfig): string | undefined {
+  switch (config.backend.type) {
+    case "jira":
+      return config.jira?.defaultProjectKey;
+    case "linear":
+      return config.linear?.defaultTeamKey;
+    case "trello":
+      return config.trello?.defaultBoardId;
+    case "azure-devops":
+      return config.azureDevOps?.defaultProject;
+    case "asana":
+      return config.asana?.defaultProjectGid;
+    case "github":
+      return config.github?.repository;
+    case "markdown":
+      return undefined;
+  }
+}
+
+/** Startup-only semantic validation against PM's resolved tracker configuration. */
 export function validateAutomationProjects(
   automations: AutomationConfig[],
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+  trackerConfig: TrackerConfig,
 ): void {
   const errors = automations
     .filter(
       (automation) =>
         automation.action === "create_ticket" &&
         !automation.trackerProject &&
-        !configuredTrackerProject(env as NodeJS.ProcessEnv),
+        !resolvedTrackerProject(trackerConfig),
     )
     .map(
       (automation) =>

@@ -3,7 +3,13 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { AutomationAcquirer, nextAutomationDue } from "../src/lib/automation-acquirer";
+import {
+  AutomationAcquirer,
+  MAX_TIMER_DELAY_MS,
+  automationInvocation,
+  nextAutomationDue,
+  spawnAutomationProcess,
+} from "../src/lib/automation-acquirer";
 import { AutomationStateStore } from "../src/lib/automation-state";
 import type { AutomationConfig } from "../src/lib/automation-config";
 
@@ -34,6 +40,92 @@ describe("AutomationAcquirer", () => {
     };
     expect(nextAutomationDue(interval, after)).toBe(after + 900_000);
     expect(nextAutomationDue(cron, after)).toBeGreaterThan(after);
+  });
+
+  test.each([
+    {
+      label: "interval",
+      now: 0,
+      schedule: { interval: "30d", intervalMs: 30 * 86_400_000 },
+    },
+    {
+      label: "cron",
+      now: new Date(2026, 0, 2).getTime(),
+      schedule: { cron: "0 0 1 1 *" },
+    },
+  ])("caps long $label timer delays to the runtime maximum", async ({ now, schedule }) => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    const delays: number[] = [];
+    const setTimer = (_callback: () => void, delay: number) => {
+      delays.push(delay);
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    };
+    const acquirer = new AutomationAcquirer({
+      automations: [
+        {
+          id: `long-${schedule.cron ? "cron" : "interval"}`,
+          enabled: true,
+          prompt: "p",
+          action: "headless",
+          ...schedule,
+        },
+      ],
+      dbPath,
+      resolveContext: async () => null,
+      now: () => now,
+      setTimer,
+      clearTimer: () => {},
+    });
+
+    await acquirer.start();
+    expect(delays.at(-1)).toBe(MAX_TIMER_DELAY_MS);
+    await acquirer.stop();
+  });
+
+  test("passes large invocation prompts through stdin payload instead of argv", () => {
+    const prompt = "x".repeat(3 * 1024 * 1024);
+    const invocation = automationInvocation(
+      {
+        id: "large-prompt",
+        enabled: true,
+        prompt,
+        action: "headless",
+        interval: "1d",
+        intervalMs: 86_400_000,
+      },
+      { cwd: "/tmp", env: {}, repo: "api", release() {} },
+    );
+
+    expect(invocation.args).toEqual([process.argv[1], "__automation-run"]);
+    expect(invocation.args.join(" ")).not.toContain(prompt);
+    expect(JSON.parse(invocation.payload)).toMatchObject({ prompt, repo: "api" });
+  });
+
+  test("handles stdin EPIPE when a child exits without reading its payload", async () => {
+    const run = spawnAutomationProcess(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      "x".repeat(3 * 1024 * 1024),
+      { cwd: process.cwd(), env: process.env },
+    );
+
+    expect(await run.completion).toBe(true);
+  });
+
+  test("escalates to SIGKILL when an automation ignores SIGTERM", async () => {
+    const run = spawnAutomationProcess(
+      process.execPath,
+      ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
+      "{}",
+      { cwd: process.cwd(), env: process.env, terminationGraceMs: 50 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const startedAt = Date.now();
+    run.terminate();
+
+    expect(await run.completion).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   test("disabled entries never receive schedule state", async () => {
@@ -93,5 +185,221 @@ describe("AutomationAcquirer", () => {
     resolveRun(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
     await acquirer.stop();
+  });
+
+  test("heartbeats a claim while context resolution exceeds the lease", async () => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let preparationStarted!: () => void;
+    const started = new Promise<void>((resolve) => (preparationStarted = resolve));
+    let firstRuns = 0;
+    let secondContexts = 0;
+    const automation: AutomationConfig = {
+      id: "slow-context",
+      enabled: true,
+      prompt: "p",
+      action: "headless",
+      interval: "10ms",
+      intervalMs: 10,
+    };
+    const first = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      leaseMs: 40,
+      heartbeatMs: 10,
+      resolveContext: async () => {
+        preparationStarted();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return { cwd: "/tmp", env: {}, release() {} };
+      },
+      spawnRun: () => {
+        firstRuns += 1;
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+    });
+    const second = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      leaseMs: 40,
+      heartbeatMs: 10,
+      resolveContext: async () => {
+        secondContexts += 1;
+        return { cwd: "/tmp", env: {}, release() {} };
+      },
+      spawnRun: () => ({ completion: Promise.resolve(true), terminate() {} }),
+    });
+
+    await first.start();
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    await second.start();
+    expect(secondContexts).toBe(0);
+    await second.stop();
+
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(firstRuns).toBe(1);
+    await first.stop();
+  });
+
+  test("uses the actual claim time for later automations after slow preparation", async () => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    const finishRuns: Array<(ok: boolean) => void> = [];
+    const automations: AutomationConfig[] = ["first", "second"].map((id) => ({
+      id,
+      enabled: true,
+      prompt: "p",
+      action: "headless",
+      interval: "10ms",
+      intervalMs: 10,
+    }));
+    const acquirer = new AutomationAcquirer({
+      automations,
+      dbPath,
+      now: () => now,
+      leaseMs: 40,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+      resolveContext: async (automation) => {
+        if (automation.id === "first") now = 100;
+        return { cwd: "/tmp", env: {}, release() {} };
+      },
+      spawnRun: () => {
+        let finish!: (ok: boolean) => void;
+        const completion = new Promise<boolean>((resolve) => (finish = resolve));
+        finishRuns.push(finish);
+        return { completion, terminate: () => finish(false) };
+      },
+    });
+
+    await acquirer.start();
+    now = 10;
+    await acquirer.tick();
+
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("second")?.heartbeatAt).toBe(100);
+    expect(store.get("second")?.leaseExpiresAt).toBe(140);
+    store.close();
+    for (const finish of finishRuns) finish(true);
+    await acquirer.stop();
+  });
+
+  test("terminates and cleans up an active run after lease ownership changes", async () => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let finishFirst!: (ok: boolean) => void;
+    let finishSecond!: (ok: boolean) => void;
+    let terminated = false;
+    let released = false;
+    const automation: AutomationConfig = {
+      id: "lost-lease",
+      enabled: true,
+      prompt: "p",
+      action: "headless",
+      interval: "10ms",
+      intervalMs: 10,
+    };
+    const timerOptions = {
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+    };
+    const first = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      now: () => now,
+      leaseMs: 40,
+      ...timerOptions,
+      resolveContext: async () => ({
+        cwd: "/tmp",
+        env: {},
+        release: () => {
+          released = true;
+        },
+      }),
+      spawnRun: () => ({
+        completion: new Promise((resolve) => (finishFirst = resolve)),
+        terminate: () => {
+          terminated = true;
+          finishFirst(false);
+        },
+      }),
+    });
+    const second = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      now: () => now,
+      leaseMs: 40,
+      ...timerOptions,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => ({
+        completion: new Promise((resolve) => (finishSecond = resolve)),
+        terminate: () => finishSecond(false),
+      }),
+    });
+
+    await first.start();
+    now = 10;
+    await first.tick();
+    now = 100;
+    await second.start();
+    await first.tick();
+
+    expect(terminated).toBe(true);
+    expect(released).toBe(true);
+    await first.stop();
+    await second.stop();
+  });
+
+  test("stop waits for active run cleanup before closing state", async () => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let resolveRun!: (ok: boolean) => void;
+    let finishRelease!: () => void;
+    let releaseStarted = false;
+    let stopFinished = false;
+    const acquirer = new AutomationAcquirer({
+      automations: [
+        {
+          id: "shutdown",
+          enabled: true,
+          prompt: "p",
+          action: "headless",
+          interval: "1m",
+          intervalMs: 60_000,
+        },
+      ],
+      dbPath,
+      now: () => now,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+      resolveContext: async () => ({
+        cwd: "/tmp",
+        env: {},
+        release: async () => {
+          releaseStarted = true;
+          await new Promise<void>((resolve) => (finishRelease = resolve));
+        },
+      }),
+      spawnRun: () => ({
+        completion: new Promise((resolve) => (resolveRun = resolve)),
+        terminate: () => resolveRun(false),
+      }),
+    });
+    await acquirer.start();
+    now = 60_000;
+    await acquirer.tick();
+
+    const stopping = acquirer.stop().then(() => {
+      stopFinished = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(releaseStarted).toBe(true);
+    expect(stopFinished).toBe(false);
+    finishRelease();
+    await stopping;
+    expect(stopFinished).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
+import { RunResult } from "@/components/RunResult";
 import { EmptyState, FilterGroup, StatusBadge } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -114,20 +115,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                     {run.harness ?? "–"}
                   </TableCell>
                   <TableCell className="px-4 py-2.5">
-                    {run.prUrl || run.ticketUrl ? (
-                      <a
-                        href={run.prUrl ?? run.ticketUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(event) => event.stopPropagation()}
-                        className="inline-flex items-center gap-1 text-primary hover:underline"
-                      >
-                        {run.ticketKey ?? `#${run.prNumber ?? "PR"}`}
-                        <ExternalLink className="size-3" />
-                      </a>
-                    ) : (
-                      <span className="text-muted-foreground">–</span>
-                    )}
+                    <RunResult run={run} />
                   </TableCell>
                   <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
                     {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}

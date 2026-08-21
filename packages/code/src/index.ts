@@ -433,24 +433,35 @@ await checkForCliUpdate();
 if (process.argv[2] === "__automation-run") {
   (async () => {
     loadEnvironment();
-    const valueAfter = (flag: string): string | undefined => {
-      const index = process.argv.indexOf(flag);
-      return index >= 0 ? process.argv[index + 1] : undefined;
-    };
-    const id = valueAfter("--id");
-    const action = valueAfter("--action");
-    const prompt = valueAfter("--prompt");
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk.toString();
+    let invocation: Record<string, unknown> = {};
+    try {
+      invocation = JSON.parse(input) as Record<string, unknown>;
+    } catch {
+      // The validation below reports one consistent internal-command error.
+    }
+    const id = typeof invocation.id === "string" ? invocation.id : undefined;
+    const action = invocation.action;
+    const prompt = typeof invocation.prompt === "string" ? invocation.prompt : undefined;
     if (!id || !prompt || (action !== "headless" && action !== "create_ticket")) {
       console.error("❌ Invalid internal automation invocation");
       process.exit(1);
     }
+    const licenseResult = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: loadSupabaseConfig(),
+      requireAutomation: true,
+    });
+    requireLicense(licenseResult);
     const { executeScheduledAutomation } = await import("./lib/scheduled-executor");
     const ok = await executeScheduledAutomation({
       automationId: id,
       action,
       prompt,
-      trackerProject: valueAfter("--tracker-project"),
-      repo: valueAfter("--repo"),
+      trackerProject:
+        typeof invocation.trackerProject === "string" ? invocation.trackerProject : undefined,
+      repo: typeof invocation.repo === "string" ? invocation.repo : undefined,
       cwd: process.cwd(),
     });
     process.exit(ok ? 0 : 1);
@@ -651,10 +662,12 @@ if (process.argv[2] === "__automation-run") {
     const dbPath = resolveQueueDbPath();
     const acquirers = [];
 
-    const { loadSingleRepoAutomations, validateAutomationProjects } =
+    const { loadSingleRepoAutomations, resolvePmTrackerConfig, validateAutomationProjects } =
       await import("./lib/automation-config");
     const automations = loadSingleRepoAutomations();
-    validateAutomationProjects(automations);
+    if (automations.some((automation) => automation.action === "create_ticket")) {
+      validateAutomationProjects(automations, await resolvePmTrackerConfig(process.cwd()));
+    }
     if (automations.length > 0) {
       const { AutomationAcquirer } = await import("./lib/automation-acquirer");
       acquirers.push(
