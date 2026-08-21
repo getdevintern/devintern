@@ -38,9 +38,9 @@ export class AntigravityHarness implements AgentHarness {
   /**
    * Build `agy` CLI flags for headless (`-p`) execution.
    *
-   * @param options - Supports `skipPermissions` (`--dangerously-skip-permissions`).
-   *   Model and max-turns are not exposed as stable CLI flags (model is chosen
-   *   via `/model` or settings; no `--max-turns` equivalent documented).
+   * @param options - Supports `skipPermissions` (`--dangerously-skip-permissions`)
+   *   and `model` (`--model`, added upstream in v1.0.5; takes a model slug as
+   *   listed by `agy models`). Max-turns has no `--max-turns` equivalent.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -53,9 +53,10 @@ export class AntigravityHarness implements AgentHarness {
       args.push("--dangerously-skip-permissions");
     }
 
-    // Antigravity does not currently document a stable `--model` flag for headless
-    // runs (models are selected via `/model` or settings). Ignore options.model.
-    //
+    if (options.model) {
+      args.push("--model", options.model);
+    }
+
     // Antigravity does not currently support --max-turns.
     // If it adds support in the future, uncomment:
     // if (options.maxTurns !== undefined) {
