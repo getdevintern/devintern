@@ -135,6 +135,13 @@ export async function resolveConflictsOnPr(
   }
   const workDir = worktree.path;
 
+  if (options.expectedHeadSha) {
+    const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
+    if (!preparedHead.success || preparedHead.output.trim() !== options.expectedHeadSha) {
+      return { outcome: "deferred", message: "PR head changed during worktree preparation" };
+    }
+  }
+
   // Commit attribution for the merge commit (matches address-review).
   if (!process.env.GITHUB_TOKEN) {
     const appAuth = GitHubAppAuth.fromEnvironment();
@@ -158,9 +165,21 @@ export async function resolveConflictsOnPr(
   if (shallow.output.trim() === "true") {
     await Utils.executeGitCommand(["fetch", "--unshallow", "origin"], { cwd: workDir, verbose });
   }
-  await Utils.executeGitCommand(["fetch", "origin", baseRef], { cwd: workDir, verbose });
+  const baseFetch = await Utils.fetchRemoteBranch(baseRef, { cwd: workDir, verbose });
+  if (!baseFetch.success) {
+    return { outcome: "failed", message: `base fetch failed: ${baseFetch.error}` };
+  }
+  if (options.expectedBaseSha) {
+    const fetchedBase = await Utils.executeGitCommand(["rev-parse", `origin/${baseRef}`], {
+      cwd: workDir,
+    });
+    if (!fetchedBase.success || fetchedBase.output.trim() !== options.expectedBaseSha) {
+      return { outcome: "deferred", message: "PR base changed during worktree preparation" };
+    }
+  }
 
-  const merge = await Utils.executeGitCommand(["merge", `origin/${baseRef}`, "--no-edit"], {
+  const mergeTarget = options.expectedBaseSha ?? `origin/${baseRef}`;
+  const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
     cwd: workDir,
     verbose,
   });
@@ -235,9 +254,43 @@ export async function resolveConflictsOnPr(
     return { outcome, message: "merge committed (push skipped)" };
   }
 
-  // Never force: a rejected push means a human moved the branch — theirs wins.
-  const push = await Utils.pushCurrentBranch({ cwd: workDir, expectedBranch: branch, verbose });
+  if (options.expectedHeadSha) {
+    const headFetch = await Utils.executeGitCommand(
+      ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      { cwd: workDir, verbose },
+    );
+    if (!headFetch.success) {
+      return { outcome: "failed", message: `head fetch before push failed: ${headFetch.error}` };
+    }
+    const remoteHead = await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], {
+      cwd: workDir,
+    });
+    if (!remoteHead.success || remoteHead.output.trim() !== options.expectedHeadSha) {
+      return { outcome: "deferred", message: "PR head changed before push" };
+    }
+  }
+
+  // The exact lease makes the head check above atomic with the push. The push
+  // helper also verifies that HEAD descends from the leased commit.
+  const push = await Utils.pushCurrentBranch({
+    cwd: workDir,
+    expectedBranch: branch,
+    expectedRemoteSha: options.expectedHeadSha,
+    verbose,
+  });
   if (!push.success) {
+    if (options.expectedHeadSha) {
+      const refreshed = await Utils.executeGitCommand(
+        ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+        { cwd: workDir, verbose },
+      );
+      const remoteHead = refreshed.success
+        ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
+        : null;
+      if (remoteHead?.success && remoteHead.output.trim() !== options.expectedHeadSha) {
+        return { outcome: "deferred", message: "PR head changed during push" };
+      }
+    }
     return { outcome: "failed", message: `push rejected: ${push.message}` };
   }
 

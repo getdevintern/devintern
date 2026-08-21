@@ -341,7 +341,11 @@ export class WebhookQueue {
     return this.maxRetries;
   }
 
-  /** Create or observe a deterministic base-sync event. Head changes reset only its quiet timer. */
+  /**
+   * Create or observe a deterministic base-sync event. Head changes reset only
+   * its quiet timer; a new base atomically supersedes older pending work for
+   * the same PR.
+   */
   observeBaseSyncEvent(input: {
     externalId: string;
     repo: string;
@@ -351,20 +355,27 @@ export class WebhookQueue {
     now?: number;
   }): BaseSyncEvent {
     const now = input.now ?? Date.now();
-    this.db.run(
-      `INSERT INTO base_sync_events
-         (external_id, repo, pr_number, base_sha, head_sha, head_observed_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(external_id) DO UPDATE SET
-         head_sha = excluded.head_sha,
-         head_observed_at = CASE
-           WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.head_observed_at
-           ELSE base_sync_events.head_observed_at
-         END,
-         updated_at = excluded.updated_at`,
-      [input.externalId, input.repo, input.prNumber, input.baseSha, input.headSha, now, now],
-    );
-    return this.getBaseSyncEvent(input.externalId)!;
+    return this.db.transaction(() => {
+      this.db.run(
+        `DELETE FROM base_sync_events
+         WHERE repo = ? AND pr_number = ? AND status = 'pending' AND external_id <> ?`,
+        [input.repo, input.prNumber, input.externalId],
+      );
+      this.db.run(
+        `INSERT INTO base_sync_events
+           (external_id, repo, pr_number, base_sha, head_sha, head_observed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(external_id) DO UPDATE SET
+           head_sha = excluded.head_sha,
+           head_observed_at = CASE
+             WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.head_observed_at
+             ELSE base_sync_events.head_observed_at
+           END,
+           updated_at = excluded.updated_at`,
+        [input.externalId, input.repo, input.prNumber, input.baseSha, input.headSha, now, now],
+      );
+      return this.getBaseSyncEvent(input.externalId)!;
+    })();
   }
 
   /** Load durable retry and head-stability state for a base-sync event. */
@@ -456,15 +467,23 @@ export class WebhookQueue {
   }
 
   /**
-   * Delete processed-event ids older than the retention window.
+   * Delete expired processed ids and their terminal base-sync event rows.
+   * Pending base-sync work is retained regardless of age.
    *
    * @param maxAgeMs - Maximum age before deletion (default 90 days)
    * @returns Number of rows deleted
    */
   cleanupProcessedEvents(maxAgeMs = PROCESSED_EVENTS_MAX_AGE_MS): number {
     const cutoff = Date.now() - maxAgeMs;
-    const result = this.db.run(`DELETE FROM processed_events WHERE processed_at < ?`, [cutoff]);
-    return result.changes;
+    return this.db.transaction(() => {
+      const result = this.db.run(`DELETE FROM processed_events WHERE processed_at < ?`, [cutoff]);
+      this.db.run(
+        `DELETE FROM base_sync_events
+         WHERE status IN ('completed', 'failed') AND updated_at < ?`,
+        [cutoff],
+      );
+      return result.changes;
+    })();
   }
 
   /** Generate a unique event id (`timestamp-random`). */

@@ -3,7 +3,7 @@
  *
  * Each tick, for every open PR in the `agent_prs` registry:
  * 1. Conditional GET on the PR itself — closed/merged PRs leave the watch
- *    list; 304s (rate-limit-free) skip all further work for the PR.
+ *    list; 304s (rate-limit-free) reuse cached metadata for base-sync checks.
  * 2. Conditional GET on the review list — a new `changes_requested` review
  *    by a human is implicitly addressed to the agent (its own PR), no
  *    @mention required.
@@ -161,6 +161,9 @@ export function runResolveConflictsViaCli(
     env?: Record<string, string | undefined>;
     expectedHeadSha?: string;
     expectedBaseSha?: string;
+    /** Override the CLI entrypoint and output handling (subprocess tests). */
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
   } = {},
 ): Promise<AutomaticResolveResult> {
   const args = [
@@ -174,41 +177,64 @@ function runResolveSubcommand(
   repo: string,
   prNumber: number,
   extraArgs: string[],
-  opts: { cwd?: string; env?: Record<string, string | undefined> },
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
+  },
 ): Promise<AutomaticResolveResult> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
-    let marker: AutomaticResolveResult | null = null;
-    let stdout = "";
+    let result: AutomaticResolveResult | null = null;
+    let resultOutput = "";
+    let resultOverflow = false;
+    const maxResultBytes = 64 * 1024;
     const child = spawn(
       process.execPath,
-      [process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
+      [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
       {
-        stdio: ["inherit", "pipe", "inherit"],
+        stdio: ["inherit", opts.outputStdio ?? "inherit", opts.outputStdio ?? "inherit", "pipe"],
         cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_MARKER: "1" },
+        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
       },
     );
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const output = chunk.toString();
-      stdout += output;
-      process.stdout.write(output);
+    child.stdio[3]?.on("data", (chunk: Buffer) => {
+      if (resultOverflow) return;
+      if (Buffer.byteLength(resultOutput) + chunk.byteLength > maxResultBytes) {
+        resultOutput = "";
+        resultOverflow = true;
+        return;
+      }
+      resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
-      const markerLine = stdout
-        .split("\n")
-        .find((line) => line.startsWith("DEVINTERN_RESOLVE_RESULT="));
-      if (markerLine) {
-        try {
-          marker = JSON.parse(markerLine.slice("DEVINTERN_RESOLVE_RESULT=".length));
-        } catch {
-          // Exit status fallback below.
+      if (!resultOverflow) {
+        for (const line of resultOutput.trimEnd().split("\n")) {
+          try {
+            const candidate = JSON.parse(line) as Partial<AutomaticResolveResult>;
+            if (
+              typeof candidate.message === "string" &&
+              ["clean", "resolved", "skipped", "failed", "deferred"].includes(
+                candidate.outcome ?? "",
+              )
+            ) {
+              result = candidate as AutomaticResolveResult;
+            }
+          } catch {
+            // Ignore malformed records and use the exit-status fallback.
+          }
         }
       }
       resolve(
-        marker ?? {
-          outcome: code === 0 ? "skipped" : "failed",
-          message: code === 0 ? "resolver completed" : `resolver exited with code ${code}`,
+        result ?? {
+          outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
+          message:
+            code === 0
+              ? "resolver completed"
+              : code === 2
+                ? "resolver deferred"
+                : `resolver exited with code ${code}`,
         },
       );
     });
@@ -247,6 +273,11 @@ export class ReviewPollingAcquirer implements Acquirer {
   private options: ReviewPollingAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  private comparisonCache = new Map<
+    string,
+    { baseSha: string; headSha: string; included: boolean }
+  >();
+  private prCache = new Map<string, PolledPr>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -278,7 +309,12 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      for (const pr of this.options.workerState.listOpenAgentPrs()) {
+      const watchedPrs = this.options.workerState.listOpenAgentPrs();
+      const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
+      for (const key of this.prCache.keys()) {
+        if (!watchedKeys.has(key)) this.clearPrCache(key);
+      }
+      for (const pr of watchedPrs) {
         try {
           await this.pollPr(pr.repo, pr.prNumber, pr.createdAt);
         } catch (error) {
@@ -298,9 +334,15 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs.
     const prSource = `github:pr:${repo}#${prNumber}`;
-    // Deliberately unconditional: a stale PR-resource ETag must never hide a
-    // moved base ref. Reviews retain their independent conditional request.
-    const prResult = await github.fetchPr(repo, prNumber);
+    const prCursor = workerState.getCursor(prSource);
+    const prKey = this.prKey(repo, prNumber);
+    // Hydrate once per process even when an ETag survived a restart, then use
+    // conditional requests on normal polling ticks.
+    const prResult = await github.fetchPr(
+      repo,
+      prNumber,
+      this.prCache.has(prKey) ? prCursor?.etag : undefined,
+    );
     if (!prResult.notModified) {
       if (prResult.etag) {
         workerState.setCursor(prSource, "state", prResult.etag);
@@ -308,12 +350,18 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (prResult.data && prResult.data.state !== "open") {
         console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${prResult.data.state}; unwatching`);
         workerState.markAgentPrClosed(repo, prNumber);
+        this.clearPrCache(prKey);
         return;
       }
+
+      if (prResult.data) this.prCache.set(prKey, prResult.data);
 
       if (resolveConflicts && prResult.data) {
         await this.maybeSyncBase(repo, prNumber, prResult.data);
       }
+    } else if (resolveConflicts) {
+      const cachedPr = this.prCache.get(prKey);
+      if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr);
     }
 
     let actionable = false;
@@ -400,7 +448,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     // GitHub reports unknown while recomputing mergeability after a push.
     if (!pr.mergeable_state || pr.mergeable_state === "unknown") return;
 
-    const included = await github.isBaseIncluded(repo, pr.base.sha, pr.head.sha);
+    const included = await this.isBaseIncluded(repo, prNumber, pr.base.sha, pr.head.sha);
     if (included === null || included) return;
 
     if (queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) return;
@@ -417,8 +465,8 @@ export class ReviewPollingAcquirer implements Acquirer {
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 
-    // Re-fetch immediately before execution. Any movement leaves the event
-    // pending and consumes no retry; the next tick observes the new state.
+    // Re-fetch immediately before execution. Any movement leaves the current
+    // event pending and consumes no retry; a new base supersedes it immediately.
     const freshResult = await github.fetchPr(repo, prNumber);
     const fresh = freshResult.data;
     if (
@@ -427,19 +475,19 @@ export class ReviewPollingAcquirer implements Acquirer {
       fresh.head?.sha !== pr.head.sha ||
       fresh.base?.sha !== pr.base.sha
     ) {
-      if (fresh?.head?.sha && fresh.base?.sha === pr.base.sha) {
+      if (fresh?.state === "open" && fresh.head?.sha && fresh.base?.sha) {
         queue.observeBaseSyncEvent({
-          externalId,
+          externalId: `base-sync:${repo}#${prNumber}:${fresh.base.sha}`,
           repo,
           prNumber,
-          baseSha: pr.base.sha,
+          baseSha: fresh.base.sha,
           headSha: fresh.head.sha,
           now,
         });
       }
       return;
     }
-    const stillMissing = await github.isBaseIncluded(repo, fresh.base.sha, fresh.head.sha);
+    const stillMissing = await this.isBaseIncluded(repo, prNumber, fresh.base.sha, fresh.head.sha);
     if (stillMissing === null || stillMissing) {
       if (stillMissing) queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return;
@@ -495,5 +543,40 @@ export class ReviewPollingAcquirer implements Acquirer {
         console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
       }
     }
+  }
+
+  private async isBaseIncluded(
+    repo: string,
+    prNumber: number,
+    baseSha: string,
+    headSha: string,
+  ): Promise<boolean | null> {
+    const compare = this.options.github.isBaseIncluded;
+    if (!compare) return null;
+    const key = this.prKey(repo, prNumber);
+    const cached = this.comparisonCache.get(key);
+    if (cached?.baseSha === baseSha && cached.headSha === headSha) return cached.included;
+    let included: boolean | null;
+    try {
+      included = await compare(repo, baseSha, headSha);
+    } catch (error) {
+      if (this.options.verbose) {
+        console.warn(
+          `   [${this.name}] ${repo}#${prNumber}: base comparison unavailable: ${(error as Error).message}`,
+        );
+      }
+      return null;
+    }
+    if (included !== null) this.comparisonCache.set(key, { baseSha, headSha, included });
+    return included;
+  }
+
+  private prKey(repo: string, prNumber: number): string {
+    return `${repo.toLowerCase()}#${prNumber}`;
+  }
+
+  private clearPrCache(key: string): void {
+    this.prCache.delete(key);
+    this.comparisonCache.delete(key);
   }
 }

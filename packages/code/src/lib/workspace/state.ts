@@ -19,6 +19,7 @@ import { existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 
 import { LockManager } from "../lock-manager";
+import { parseEnvInteger } from "../env-integer";
 import { WebhookQueue } from "../webhook-queue";
 import { WorkerState } from "../worker-state";
 import { locksDir, resolveWorkspaceDir, workspaceDbPath } from "./paths";
@@ -56,7 +57,7 @@ export function openWorkspaceState(workspaceDir: string = resolveWorkspaceDir())
   const workerState = new WorkerState(dbPath);
   const queue = new WebhookQueue({
     dbPath,
-    maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
+    maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
   });
   const skips = new RoutingSkipStore(dbPath);
   return {

@@ -9,6 +9,7 @@
  */
 
 import { LockManager } from "../lock-manager";
+import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
@@ -433,7 +434,7 @@ async function buildFleetEventAcquirers(options: {
         },
         addressPr,
         resolveConflicts,
-        quietPeriodSeconds: parseInt(process.env.WORKER_BASE_SYNC_QUIET_SECONDS || "30", 10),
+        quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore: new RunStore(state.dbPath),
         verbose,
       }),

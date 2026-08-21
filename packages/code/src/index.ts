@@ -74,6 +74,7 @@ import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
+import { parseEnvInteger } from "./lib/env-integer";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
@@ -695,7 +696,7 @@ if (process.argv[2] === "init") {
           queue: new WebhookQueue({
             dbPath,
             legacyDbPath: LEGACY_DB_PATH,
-            maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
+            maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
           }),
           github: {
             fetchPr: (repo, n, etag) =>
@@ -733,7 +734,7 @@ if (process.argv[2] === "init") {
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
             }),
-          quietPeriodSeconds: parseInt(process.env.WORKER_BASE_SYNC_QUIET_SECONDS || "30", 10),
+          quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
           runStore: new RunStore(dbPath),
           verbose,
         }),
@@ -1259,16 +1260,18 @@ if (process.argv[2] === "init") {
         expectedHeadSha,
         expectedBaseSha,
       });
-      if (process.env.DEVINTERN_RESULT_MARKER === "1") {
-        console.log(`DEVINTERN_RESOLVE_RESULT=${JSON.stringify(result)}`);
+      const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
+      if (Number.isInteger(resultFd) && resultFd >= 3) {
+        const { writeSync } = await import("fs");
+        writeSync(resultFd, `${JSON.stringify(result)}\n`);
       }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
       }
-      process.exit(result.outcome === "failed" ? 1 : 0);
+      process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
       console.error(`❌ Error: ${(error as Error).message}`);
-      process.exit(1);
+      process.exitCode = 1;
     }
   })();
 } else if (process.argv[2] === "login") {

@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { ReviewPollingAcquirer } from "../src/lib/review-polling-acquirer";
+import {
+  ReviewPollingAcquirer,
+  runResolveConflictsViaCli,
+} from "../src/lib/review-polling-acquirer";
 import type {
   ConditionalResult,
   PolledComment,
@@ -46,6 +49,7 @@ describe("ReviewPollingAcquirer", () => {
     seenSince?: string;
     seenPrEtag?: string;
     seenReviewsEtag?: string;
+    comparisonCalls?: number;
   }
 
   function makeAcquirer(
@@ -97,6 +101,7 @@ describe("ReviewPollingAcquirer", () => {
           return gh.comments;
         },
         async isBaseIncluded() {
+          gh.comparisonCalls = (gh.comparisonCalls ?? 0) + 1;
           return gh.baseIncluded ?? true;
         },
       },
@@ -210,8 +215,57 @@ describe("ReviewPollingAcquirer", () => {
     gh.prEtagHit = true;
     gh.reviewsEtagHit = true;
     await acquirer.tick();
-    expect(gh.seenPrEtag).toBeUndefined();
+    expect(gh.seenPrEtag).toBe('W/"pr-1"');
     expect(gh.seenReviewsEtag).toBe('W/"rev-1"');
+  });
+
+  test("removes PR and comparison caches when a watched PR closes", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "clean",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: true,
+      reviews: [],
+      comments: [],
+    };
+    const { acquirer } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    expect(gh.comparisonCalls).toBe(1);
+
+    gh.prState = "closed";
+    await acquirer.tick();
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    gh.prState = "open";
+    gh.seenPrEtag = "not-fetched";
+    await acquirer.tick();
+
+    expect(gh.seenPrEtag).toBeUndefined();
+    expect(gh.comparisonCalls).toBe(2);
+  });
+
+  test("retains only the current comparison pair for each PR", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "clean",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: true,
+      reviews: [],
+      comments: [],
+    };
+    const { acquirer } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    gh.baseSha = "base2";
+    await acquirer.tick();
+    gh.baseSha = "base1";
+    await acquirer.tick();
+
+    expect(gh.comparisonCalls).toBe(3);
   });
 
   test("multiple new signals on one PR trigger a single address run per tick", async () => {
@@ -281,10 +335,12 @@ describe("ReviewPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(resolved).toEqual(["acme/widgets#42"]);
+    expect(gh.comparisonCalls).toBe(1);
 
     // Same SHAs on the next tick: no second attempt.
     await acquirer.tick();
     expect(resolved).toHaveLength(1);
+    expect(gh.comparisonCalls).toBe(1);
 
     // Base moved again while still conflicting: retry.
     gh.baseSha = "base2";
@@ -327,6 +383,54 @@ describe("ReviewPollingAcquirer", () => {
     });
     await acquirer.tick();
     expect(resolved).toEqual([]);
+  });
+
+  test("a failed base comparison does not prevent addressing new review feedback", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const addressed: string[] = [];
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          return {
+            data: {
+              state: "open",
+              mergeable_state: "dirty",
+              head: {
+                sha: "head1",
+                ref: "agent/task",
+                repo: { full_name: "acme/widgets" },
+              },
+              base: { sha: "base1", ref: "main" },
+            },
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return {
+            data: [{ id: 1, state: "changes_requested", user: human }],
+            notModified: false,
+          };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+        async isBaseIncluded() {
+          throw new Error("compare unavailable");
+        },
+      },
+      addressPr: async (repo, n) => {
+        addressed.push(`${repo}#${n}`);
+        return true;
+      },
+      resolveConflicts: async () => ({ outcome: "clean", message: "merged" }),
+    });
+
+    await acquirer.tick();
+
+    expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
   test("a fork PR is terminally skipped without invoking the resolver", async () => {
@@ -432,7 +536,32 @@ describe("ReviewPollingAcquirer", () => {
     expect(made.resolved).toEqual(["acme/widgets#42"]);
   });
 
-  test("resolver-detected concurrent movement defers without consuming an attempt", async () => {
+  test("a base advancing during the quiet period supersedes the old pending event", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 10_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "behind",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    const made = makeAcquirer(gh, { quietPeriodSeconds: 10, now: () => now });
+    await made.acquirer.tick();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.status).toBe("pending");
+
+    now += 5_000;
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")).toBeNull();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base2")?.status).toBe("pending");
+    expect(made.resolved).toEqual([]);
+  });
+
+  test("resolver-detected movement before push defers without consuming an attempt", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const made = makeAcquirer(
       {
@@ -445,7 +574,7 @@ describe("ReviewPollingAcquirer", () => {
         comments: [],
       },
       {
-        resolveResults: [{ outcome: "deferred", message: "PR head changed before execution" }],
+        resolveResults: [{ outcome: "deferred", message: "PR head changed before push" }],
       },
     );
     await made.acquirer.tick();
@@ -528,5 +657,50 @@ describe("ReviewPollingAcquirer", () => {
     });
     expect(run?.harness).toBeTruthy();
     runStore.close();
+  });
+});
+
+describe("runResolveConflictsViaCli", () => {
+  test("uses a bounded dedicated result channel", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "devintern-resolve-result-"));
+    const fixture = join(testDir, "resolver-fixture.ts");
+    writeFileSync(
+      fixture,
+      `import { writeSync } from "fs";
+const behavior = process.env.RESULT_BEHAVIOR;
+const fd = Number(process.env.DEVINTERN_RESULT_FD);
+if (behavior === "large") process.stdout.write("x".repeat(2 * 1024 * 1024));
+if (behavior === "spoof") console.log('DEVINTERN_RESOLVE_RESULT={"outcome":"failed","message":"spoof"}');
+if (behavior === "malformed") writeSync(fd, "not-json\\n");
+if (behavior !== "malformed" && behavior !== "deferred-fallback") {
+  const outcome = behavior === "deferred" ? "deferred" : "clean";
+  writeSync(fd, JSON.stringify({ outcome, message: behavior }) + "\\n");
+}
+process.exitCode = behavior === "deferred" || behavior === "deferred-fallback" ? 2 : behavior === "malformed" ? 1 : 0;
+`,
+    );
+
+    const run = (behavior: string, prNumber: number) =>
+      runResolveConflictsViaCli("acme/widgets", prNumber, {
+        entrypoint: fixture,
+        outputStdio: "ignore",
+        env: { ...process.env, RESULT_BEHAVIOR: behavior },
+      });
+
+    try {
+      expect(await run("deferred", 1)).toEqual({ outcome: "deferred", message: "deferred" });
+      expect(await run("deferred-fallback", 2)).toEqual({
+        outcome: "deferred",
+        message: "resolver deferred",
+      });
+      expect((await run("large", 3)).outcome).toBe("clean");
+      expect((await run("spoof", 4)).outcome).toBe("clean");
+      expect(await run("malformed", 5)).toEqual({
+        outcome: "failed",
+        message: "resolver exited with code 1",
+      });
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });

@@ -87,7 +87,7 @@ Unattended automation is exactly where sandboxing the agent matters most: set `A
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own.
 
-The polling is cheap: requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
+The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
 
 ### Merge conflicts on the agent's PRs
 

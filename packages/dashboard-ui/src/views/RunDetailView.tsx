@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Markdown } from "@/lib/markdown";
 import { usePoll } from "@/lib/api";
 import type { RunDetailResponse, RunStageRecord } from "@/lib/api";
+import { formatRunOrigin } from "@/lib/run-origin";
 import { parseStageDetail } from "@/lib/stage-detail";
 import { formatDuration, formatTime } from "@/lib/utils";
 
@@ -127,10 +128,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               ) : null}
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-              <MetaItem
-                label="Origin"
-                value={data.run.origin === "task" ? "tracker task" : "PR mention"}
-              />
+              <MetaItem label="Origin" value={formatRunOrigin(data.run.origin)} />
               <MetaItem label="Tracker" value={data.run.tracker ?? "–"} />
               <MetaItem label="Harness" value={data.run.harness ?? "–"} />
               <MetaItem
