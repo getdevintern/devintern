@@ -430,7 +430,32 @@ await checkForCliUpdate();
 
 // Check if running subcommands before parsing
 // This needs to happen early to avoid Commander treating them as task keys
-if (process.argv[2] === "init") {
+if (process.argv[2] === "__automation-run") {
+  (async () => {
+    loadEnvironment();
+    const valueAfter = (flag: string): string | undefined => {
+      const index = process.argv.indexOf(flag);
+      return index >= 0 ? process.argv[index + 1] : undefined;
+    };
+    const id = valueAfter("--id");
+    const action = valueAfter("--action");
+    const prompt = valueAfter("--prompt");
+    if (!id || !prompt || (action !== "headless" && action !== "create_ticket")) {
+      console.error("❌ Invalid internal automation invocation");
+      process.exit(1);
+    }
+    const { executeScheduledAutomation } = await import("./lib/scheduled-executor");
+    const ok = await executeScheduledAutomation({
+      automationId: id,
+      action,
+      prompt,
+      trackerProject: valueAfter("--tracker-project"),
+      repo: valueAfter("--repo"),
+      cwd: process.cwd(),
+    });
+    process.exit(ok ? 0 : 1);
+  })();
+} else if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
       await runInitWizard();
@@ -625,6 +650,29 @@ if (process.argv[2] === "init") {
       await import("./lib/webhook-queue");
     const dbPath = resolveQueueDbPath();
     const acquirers = [];
+
+    const { loadSingleRepoAutomations, validateAutomationProjects } =
+      await import("./lib/automation-config");
+    const automations = loadSingleRepoAutomations();
+    validateAutomationProjects(automations);
+    if (automations.length > 0) {
+      const { AutomationAcquirer } = await import("./lib/automation-acquirer");
+      acquirers.push(
+        new AutomationAcquirer({
+          automations,
+          dbPath,
+          resolveContext: async () => {
+            const runLock = new LockManager(process.cwd());
+            if (!runLock.acquire().success) return null;
+            return {
+              cwd: process.cwd(),
+              env: { ...process.env },
+              release: () => runLock.release(),
+            };
+          },
+        }),
+      );
+    }
 
     if (workerQuery) {
       const trackerType = process.env.TASK_TRACKER || "jira";

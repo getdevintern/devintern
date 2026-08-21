@@ -41,4 +41,11 @@ if (!existsSync(join(uiDist, "index.html"))) {
 rmSync("dist/dashboard-ui", { recursive: true, force: true });
 cpSync(uiDist, "dist/dashboard-ui", { recursive: true });
 
+// Scheduled create_ticket automations reuse the source-only PM engine. Its
+// prompt templates are runtime assets, so copy them beside this bundle where
+// the engine's bundled-layout resolver expects them.
+const pmPrompts = join(import.meta.dir, "..", "pm", "prompts");
+rmSync("dist/prompts", { recursive: true, force: true });
+cpSync(pmPrompts, "dist/prompts", { recursive: true });
+
 console.log(`Built devintern v${pkg.version} (with dashboard UI)`);

@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-17
+dateModified: 2026-08-21
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -52,11 +52,29 @@ project = "BACK"
 repo = "frontend"
 project = "WEB"
 labels = ["frontend"]
+
+[[automations]]
+id = "backend-maintenance"
+enabled = true
+action = "headless"
+interval = "6h"
+repo = "backend"
+prompt = "Inspect the backend and implement one safe maintenance improvement."
+
+[[automations]]
+id = "weekly-web-planning"
+enabled = true
+action = "create_ticket"
+cron = "0 9 * * 1"
+repo = "frontend"
+tracker_project = "WEB"
+prompt = "Draft the highest-value frontend maintenance story."
 ```
 
 - `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. A headless entry must name `repo` when the workspace has more than one repository. Ticket entries may omit it when they only need the shared workspace environment. `tracker_project` overrides the layered repo/default tracker project.
 
 ## Creating a workspace
 
@@ -94,7 +112,9 @@ devintern worker --workspace /path/to/workspace.toml
 devintern worker --no-workspace   # force single-repo mode in the current repo
 ```
 
-The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode.
+The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode. Workspace and automation configuration is loaded at startup; restart the worker after editing it.
+
+Scheduled repository work uses the persistent base worktree and the same shared `.env` → repo `env_file` → `[repos.env]` layering as review work. It also takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run. Schedule state and leases live in the central workspace database.
 
 One systemd unit runs the whole fleet:
 

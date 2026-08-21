@@ -118,6 +118,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-semibold">
                   {data.run.taskKey ??
+                    data.run.automationId ??
                     (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)}
                 </h2>
                 <StatusBadge status={data.run.status} />
@@ -129,7 +130,13 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
               <MetaItem
                 label="Origin"
-                value={data.run.origin === "task" ? "tracker task" : "PR mention"}
+                value={
+                  data.run.origin === "task"
+                    ? "tracker task"
+                    : data.run.origin === "scheduled"
+                      ? "scheduled automation"
+                      : "PR mention"
+                }
               />
               <MetaItem label="Tracker" value={data.run.tracker ?? "–"} />
               <MetaItem label="Harness" value={data.run.harness ?? "–"} />
@@ -144,16 +151,16 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                 }
               />
               <MetaItem
-                label="PR"
+                label="Result"
                 value={
-                  data.run.prUrl ? (
+                  data.run.prUrl || data.run.ticketUrl ? (
                     <a
-                      href={data.run.prUrl}
+                      href={data.run.prUrl ?? data.run.ticketUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1 text-primary hover:underline"
                     >
-                      #{data.run.prNumber ?? "PR"}
+                      {data.run.ticketKey ?? `#${data.run.prNumber ?? "PR"}`}
                       <ExternalLink className="size-3" />
                     </a>
                   ) : (

@@ -445,6 +445,7 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     ".devintern-code/*",
     "!.devintern-code/settings.json",
     "!.devintern-code/.env.example",
+    "!.devintern-code/automations.toml",
   ];
 
   try {
