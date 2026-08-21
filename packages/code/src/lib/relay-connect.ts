@@ -6,9 +6,10 @@
  * Supabase session, the control plane confirms automation entitlement, and
  * (for GitHub / tracker sources) registers the callback. Pairing metadata and
  * the minted relay token persist in `.devintern-code/relay.json` (gitignored
- * with the rest of that directory). The worker then long-polls with that
- * durable relay token; `LICENSE_KEY` remains the local unattended license
- * gate for `devintern worker`.
+ * with the rest of that directory) — or, for multi-repo workspaces, under the
+ * workspace home via `devintern workspace connect` (see workspace/connect.ts).
+ * The worker then long-polls with that durable relay token; `LICENSE_KEY`
+ * remains the local unattended license gate for `devintern worker`.
  */
 
 import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devintern/auth";
@@ -45,6 +46,10 @@ function relayStatePath(workingDir: string): string {
   return join(resolve(workingDir, ".devintern-code"), "relay.json");
 }
 
+function resolveStatePath(deps: { workingDir?: string; statePath?: string }): string {
+  return deps.statePath ?? relayStatePath(deps.workingDir ?? process.cwd());
+}
+
 function authSessionPath(workingDir: string): string {
   return join(resolve(workingDir, ".devintern-code"), ".auth-session.json");
 }
@@ -55,7 +60,15 @@ function authSessionPath(workingDir: string): string {
  * @param workingDir - Project root (defaults to cwd)
  */
 export function loadRelayState(workingDir: string = process.cwd()): RelayConnectState | null {
-  const path = relayStatePath(workingDir);
+  return loadRelayStateFrom(relayStatePath(workingDir));
+}
+
+/**
+ * Load persisted connect state from an explicit file path.
+ *
+ * @param path - Absolute path of a `relay.json` state file
+ */
+export function loadRelayStateFrom(path: string): RelayConnectState | null {
   if (!existsSync(path)) {
     return null;
   }
@@ -69,7 +82,11 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
 
 /** Persist connect state to `.devintern-code/relay.json`. */
 export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
-  const path = relayStatePath(workingDir);
+  saveRelayStateTo(state, relayStatePath(workingDir));
+}
+
+/** Persist connect state to an explicit file path. */
+export function saveRelayStateTo(state: RelayConnectState, path: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n", "utf8");
 }
@@ -83,13 +100,26 @@ interface ConnectResponse {
 export interface RelayConnectDeps {
   /** Absolute project root (defaults to cwd). */
   workingDir?: string;
+  /**
+   * Explicit state file location, overriding the default
+   * `<workingDir>/.devintern-code/relay.json`. Workspace-scoped connect uses
+   * this to store pairing under the workspace home (`~/.devintern/relay.json`)
+   * so a fleet daemon never depends on a checkout.
+   */
+  statePath?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to the on-disk Supabase session. */
   getAccessToken?: () => Promise<string>;
 }
 
-async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> {
+/**
+ * Default access-token resolution: the on-disk Supabase session for the
+ * project at `workingDir`.
+ *
+ * @param deps - Optional project root override
+ */
+export async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> {
   if (deps.getAccessToken) {
     return deps.getAccessToken();
   }
@@ -144,16 +174,16 @@ export async function issueRelayToken(
 }
 
 /**
- * Ensure `.devintern-code/relay.json` holds a usable relay token, minting one
- * when missing (or when `force` is set).
+ * Ensure a usable relay token is stored, minting one when missing (or when
+ * `force` is set). An existing token is never silently overwritten.
  */
 export async function ensureRelayToken(
   accessToken: string,
   deps: RelayConnectDeps & { force?: boolean } = {},
 ): Promise<{ relayToken: string; state: RelayConnectState }> {
-  const workingDir = deps.workingDir ?? process.cwd();
   const relayUrl = (deps.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
-  const existing = loadRelayState(workingDir);
+  const statePath = resolveStatePath(deps);
+  const existing = loadRelayStateFrom(statePath);
   if (existing?.relayToken && !deps.force) {
     return { relayToken: existing.relayToken, state: existing };
   }
@@ -166,17 +196,18 @@ export async function ensureRelayToken(
     registrations: existing?.registrations ?? [],
     relayToken: minted.relayToken,
   };
-  saveRelayState(state, workingDir);
+  saveRelayStateTo(state, statePath);
   return { relayToken: minted.relayToken, state };
 }
 
 function mergeConnectState(
-  workingDir: string,
+  deps: RelayConnectDeps,
   relayUrl: string,
   data: ConnectResponse,
   relayToken: string | undefined,
 ): RelayConnectState {
-  const previous = loadRelayState(workingDir);
+  const statePath = resolveStatePath(deps);
+  const previous = loadRelayStateFrom(statePath);
   const state: RelayConnectState = {
     relayUrl,
     customerId: data.customerId,
@@ -184,12 +215,13 @@ function mergeConnectState(
     registrations: data.registrations,
     relayToken: relayToken ?? previous?.relayToken,
   };
-  saveRelayState(state, workingDir);
+  saveRelayStateTo(state, statePath);
   return state;
 }
 
 /**
- * Register a GitHub repo with the relay and persist the connect state.
+ * Register a GitHub repo with the relay and persist the connect state,
+ * minting a relay token first when needed.
  *
  * @param options - Repo slug plus signed-in access token
  */
@@ -197,17 +229,45 @@ export async function connectGitHubRepo(options: {
   repo: string;
   accessToken: string;
   workingDir?: string;
+  statePath?: string;
+  force?: boolean;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<RelayConnectState> {
+  const deps: RelayConnectDeps & { force?: boolean } = {
+    workingDir: options.workingDir,
+    statePath: options.statePath,
+    force: options.force,
+    relayUrl: options.relayUrl,
+    fetchImpl: options.fetchImpl,
+  };
+  const { relayToken } = await ensureRelayToken(options.accessToken, deps);
+  return registerGitHubRepo({ ...options, relayToken });
+}
+
+/**
+ * Register a GitHub repo using an already-minted relay token. Batch flows
+ * (workspace connect) call this per repo after one {@link ensureRelayToken},
+ * so N repos cost exactly one minted token.
+ *
+ * @param options - Repo slug plus access and relay tokens
+ */
+export async function registerGitHubRepo(options: {
+  repo: string;
+  accessToken: string;
+  relayToken: string;
+  workingDir?: string;
+  statePath?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
 }): Promise<RelayConnectState> {
   const deps: RelayConnectDeps = {
     workingDir: options.workingDir,
+    statePath: options.statePath,
     relayUrl: options.relayUrl,
     fetchImpl: options.fetchImpl,
   };
-  const { relayToken } = await ensureRelayToken(options.accessToken, deps);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
-  const workingDir = options.workingDir ?? process.cwd();
 
   const response = await connectRequest(
     options.accessToken,
@@ -220,7 +280,7 @@ export async function connectGitHubRepo(options: {
   }
 
   const data = (await response.json()) as ConnectResponse;
-  return mergeConnectState(workingDir, relayUrl, data, relayToken);
+  return mergeConnectState(deps, relayUrl, data, options.relayToken);
 }
 
 /**
@@ -233,17 +293,20 @@ export async function registerRelaySource(options: {
   accessToken: string;
   secret?: string;
   workingDir?: string;
+  statePath?: string;
+  force?: boolean;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
 }): Promise<{ ingestUrl: string; state: RelayConnectState }> {
-  const deps: RelayConnectDeps = {
+  const deps: RelayConnectDeps & { force?: boolean } = {
     workingDir: options.workingDir,
+    statePath: options.statePath,
+    force: options.force,
     relayUrl: options.relayUrl,
     fetchImpl: options.fetchImpl,
   };
   const { relayToken } = await ensureRelayToken(options.accessToken, deps);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
-  const workingDir = options.workingDir ?? process.cwd();
 
   const response = await connectRequest(
     options.accessToken,
@@ -260,7 +323,7 @@ export async function registerRelaySource(options: {
   }
 
   const data = (await response.json()) as ConnectResponse & { ingestUrl: string };
-  const state = mergeConnectState(workingDir, relayUrl, data, relayToken);
+  const state = mergeConnectState(deps, relayUrl, data, relayToken);
   return { ingestUrl: data.ingestUrl, state };
 }
 
@@ -271,116 +334,42 @@ function generateWebhookSecret(): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-const CONNECT_HELP = `Usage: devintern worker connect [target] [options]
+const TRACKER_TARGETS = ["linear", "asana", "trello", "azure-devops", "jira"] as const;
 
-Pair this project's worker with the DevIntern relay (Mode 2): source webhooks
-reach DevIntern's ingest, are stripped to reference envelopes (never code,
-comments, or credentials), and your worker picks them up instantly instead of
-waiting for the next poll.
+export type TrackerConnectTarget = (typeof TRACKER_TARGETS)[number];
 
-Sign in first (\`devintern login\`). Connect verifies your session and
-automation entitlement, then mints a durable relay token for worker polling.
-LICENSE_KEY is still required for the local unattended license gate when you
-run \`devintern worker\`.
-
-Targets:
-  github (default)   Register this repo for GitHub App webhook delivery
-  linear             Self-register a Linear webhook (uses LINEAR_API_KEY)
-  asana              Self-register an Asana webhook (uses ASANA_API_TOKEN and
-                     ASANA_DEFAULT_PROJECT_GID)
-  trello             Self-register a Trello webhook (uses TRELLO_API_KEY,
-                     TRELLO_API_TOKEN, TRELLO_DEFAULT_BOARD_ID)
-  azure-devops       Self-register work item service hooks (uses
-                     AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, AZURE_DEVOPS_PROJECT)
-  jira               Print manual admin webhook setup with your ingest URL
-  status             Show relay registrations and event freshness
-
-Options:
-  --repo <owner/name>  GitHub repo to register (default: auto-detected)
-  -h, --help           Display this help message
-
-Environment variables:
-  LICENSE_KEY              Required for unattended \`devintern worker\` runs
-  WORKER_RELAY_URL         Relay base URL (default: ${DEFAULT_RELAY_URL})
-  LINEAR_API_KEY           Required for \`connect linear\`
-  ASANA_API_TOKEN          Required for \`connect asana\`
-  ASANA_DEFAULT_PROJECT_GID  Required for \`connect asana\`
-  TRELLO_API_KEY           Required for \`connect trello\`
-  TRELLO_API_TOKEN         Required for \`connect trello\`
-  TRELLO_DEFAULT_BOARD_ID  Required for \`connect trello\`
-  AZURE_DEVOPS_ORG         Required for \`connect azure-devops\`
-  AZURE_DEVOPS_PAT         Required for \`connect azure-devops\`
-  AZURE_DEVOPS_PROJECT     Required for \`connect azure-devops\``;
-
-function formatTimestamp(epochMs: number | null): string {
-  return epochMs === null ? "never" : new Date(epochMs).toLocaleString();
+export function isTrackerConnectTarget(target: string): target is TrackerConnectTarget {
+  return (TRACKER_TARGETS as readonly string[]).includes(target);
 }
 
 /**
- * CLI flow for `devintern worker connect ...`.
+ * Register one tracker source and wire its webhook/service hooks, reusing the
+ * same flow as single-repo `devintern worker connect <tracker>`.
  *
- * @param args - Argv after "connect"
- * @param detectRepo - Returns the current repo's `owner/name` slug (GitHub only)
- * @param deps - Optional injectables for tests
+ * Credentials come from the process environment (single-repo `.env` or,
+ * for fleet mode, the workspace `.env`). Prints its own success/error output.
+ *
+ * @param target - Tracker source to register
+ * @param deps - Signed-in access token plus state location and injectables
  * @returns Process exit code
  */
-export async function runWorkerConnect(
-  args: string[],
-  detectRepo: () => Promise<string | null>,
-  deps: RelayConnectDeps = {},
+export async function connectTrackerSource(
+  target: TrackerConnectTarget,
+  deps: {
+    accessToken: string;
+    workingDir?: string;
+    statePath?: string;
+    relayUrl?: string;
+    fetchImpl?: typeof fetch;
+  },
 ): Promise<number> {
-  let target = "github";
-  let repoFlag: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--help" || arg === "-h") {
-      console.log(CONNECT_HELP);
-      return 0;
-    } else if (arg === "--repo" && args[i + 1]) {
-      repoFlag = args[i + 1];
-      i++;
-    } else if (arg && !arg.startsWith("-")) {
-      target = arg;
-    }
-  }
-
-  let accessToken: string;
-  try {
-    accessToken = await resolveAccessToken(deps);
-  } catch (error) {
-    console.error(`❌ ${(error as Error).message}`);
-    return 1;
-  }
-
   const connectOpts = {
-    accessToken,
+    accessToken: deps.accessToken,
     workingDir: deps.workingDir,
+    statePath: deps.statePath,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
   };
-
-  if (target === "status") {
-    try {
-      const { relayToken } = await ensureRelayToken(accessToken, deps);
-      const status = await fetchRelayStatus({ relayToken, ...deps });
-      console.log(`📡 Relay: ${resolveRelayUrl()}`);
-      console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
-      console.log(`   Buffered envelopes: ${status.buffered}`);
-      if (status.registrations.length === 0) {
-        console.log("   No registrations yet. Run: devintern worker connect");
-      }
-      for (const reg of status.registrations) {
-        console.log(
-          `   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`,
-        );
-      }
-      return 0;
-    } catch (error) {
-      console.error(`❌ Relay status failed: ${(error as Error).message}`);
-      return 1;
-    }
-  }
 
   if (target === "linear") {
     const apiKey = process.env.LINEAR_API_KEY;
@@ -490,22 +479,140 @@ export async function runWorkerConnect(
     }
   }
 
-  if (target === "jira") {
+  try {
+    const { ingestUrl } = await registerRelaySource({ source: "jira", ...connectOpts });
+    console.log("✅ Jira ingest URL registered. Jira webhooks need one-time admin setup:");
+    console.log("");
+    console.log("   1. Open Jira: Settings (gear) > System > WebHooks > Create a WebHook");
+    console.log(`   2. URL: ${ingestUrl}`);
+    console.log("   3. Events: Issue - created, updated (optionally scope with a JQL filter)");
+    console.log("   4. Save. Issue events now relay instantly.");
+    console.log("");
+    console.log("   Keep the URL secret; it authenticates deliveries for your account.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Jira connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+const CONNECT_HELP = `Usage: devintern worker connect [target] [options]
+
+Pair this project's worker with the DevIntern relay (Mode 2): source webhooks
+reach DevIntern's ingest, are stripped to reference envelopes (never code,
+comments, or credentials), and your worker picks them up instantly instead of
+waiting for the next poll.
+
+Sign in first (\`devintern login\`). Connect verifies your session and
+automation entitlement, then mints a durable relay token for worker polling.
+LICENSE_KEY is still required for the local unattended license gate when you
+run \`devintern worker\`.
+
+Targets:
+  github (default)   Register this repo for GitHub App webhook delivery
+  linear             Self-register a Linear webhook (uses LINEAR_API_KEY)
+  asana              Self-register an Asana webhook (uses ASANA_API_TOKEN and
+                     ASANA_DEFAULT_PROJECT_GID)
+  trello             Self-register a Trello webhook (uses TRELLO_API_KEY,
+                     TRELLO_API_TOKEN, TRELLO_DEFAULT_BOARD_ID)
+  azure-devops       Self-register work item service hooks (uses
+                     AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, AZURE_DEVOPS_PROJECT)
+  jira               Print manual admin webhook setup with your ingest URL
+  status             Show relay registrations and event freshness
+
+For multi-repo workspaces, prefer \`devintern workspace connect\`, which pairs
+the whole fleet at once and stores state in ~/.devintern/relay.json.
+
+Options:
+  --repo <owner/name>  GitHub repo to register (default: auto-detected)
+  -h, --help           Display this help message
+
+Environment variables:
+  LICENSE_KEY              Required for unattended \`devintern worker\` runs
+  WORKER_RELAY_URL         Relay base URL (default: ${DEFAULT_RELAY_URL})
+  LINEAR_API_KEY           Required for \`connect linear\`
+  ASANA_API_TOKEN          Required for \`connect asana\`
+  ASANA_DEFAULT_PROJECT_GID  Required for \`connect asana\`
+  TRELLO_API_KEY           Required for \`connect trello\`
+  TRELLO_API_TOKEN         Required for \`connect trello\`
+  TRELLO_DEFAULT_BOARD_ID  Required for \`connect trello\`
+  AZURE_DEVOPS_ORG         Required for \`connect azure-devops\`
+  AZURE_DEVOPS_PAT         Required for \`connect azure-devops\`
+  AZURE_DEVOPS_PROJECT     Required for \`connect azure-devops\``;
+
+function formatTimestamp(epochMs: number | null): string {
+  return epochMs === null ? "never" : new Date(epochMs).toLocaleString();
+}
+
+/**
+ * CLI flow for `devintern worker connect ...`.
+ *
+ * @param args - Argv after "connect"
+ * @param detectRepo - Returns the current repo's `owner/name` slug (GitHub only)
+ * @param deps - Optional injectables for tests
+ * @returns Process exit code
+ */
+export async function runWorkerConnect(
+  args: string[],
+  detectRepo: () => Promise<string | null>,
+  deps: RelayConnectDeps = {},
+): Promise<number> {
+  let target = "github";
+  let repoFlag: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") {
+      console.log(CONNECT_HELP);
+      return 0;
+    } else if (arg === "--repo" && args[i + 1]) {
+      repoFlag = args[i + 1];
+      i++;
+    } else if (arg && !arg.startsWith("-")) {
+      target = arg;
+    }
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = await resolveAccessToken(deps);
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    return 1;
+  }
+
+  const connectOpts = {
+    accessToken,
+    workingDir: deps.workingDir,
+    statePath: deps.statePath,
+    relayUrl: deps.relayUrl,
+    fetchImpl: deps.fetchImpl,
+  };
+
+  if (target === "status") {
     try {
-      const { ingestUrl } = await registerRelaySource({ source: "jira", ...connectOpts });
-      console.log("✅ Jira ingest URL registered. Jira webhooks need one-time admin setup:");
-      console.log("");
-      console.log("   1. Open Jira: Settings (gear) > System > WebHooks > Create a WebHook");
-      console.log(`   2. URL: ${ingestUrl}`);
-      console.log("   3. Events: Issue - created, updated (optionally scope with a JQL filter)");
-      console.log("   4. Save. Issue events now relay instantly.");
-      console.log("");
-      console.log("   Keep the URL secret; it authenticates deliveries for your account.");
+      const { relayToken } = await ensureRelayToken(accessToken, deps);
+      const status = await fetchRelayStatus({ relayToken, ...deps });
+      console.log(`📡 Relay: ${resolveRelayUrl()}`);
+      console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
+      console.log(`   Buffered envelopes: ${status.buffered}`);
+      if (status.registrations.length === 0) {
+        console.log("   No registrations yet. Run: devintern worker connect");
+      }
+      for (const reg of status.registrations) {
+        console.log(
+          `   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`,
+        );
+      }
       return 0;
     } catch (error) {
-      console.error(`❌ Jira connect failed: ${(error as Error).message}`);
+      console.error(`❌ Relay status failed: ${(error as Error).message}`);
       return 1;
     }
+  }
+
+  if (isTrackerConnectTarget(target)) {
+    return connectTrackerSource(target, connectOpts);
   }
 
   if (target !== "github") {

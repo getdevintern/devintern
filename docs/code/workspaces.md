@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-17
+dateModified: 2026-08-22
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -118,9 +118,28 @@ With GitHub credentials in the workspace `.env`, the fleet worker also reacts to
 
 - **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed.
-- **Relay (instant events)**: set `WORKER_RELAY_URL` and `LICENSE_KEY` in the workspace `.env`. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Events for repositories not in the workspace are ignored.
+- **Relay (instant events)**: pair the whole fleet once with `devintern workspace connect` (see below). Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Events for repositories not in the workspace are ignored.
 
 Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
+
+## Connecting the fleet to the relay
+
+Single-repo `devintern worker connect` pairs one checkout at a time and stores its pairing inside that repository. Workspace mode has no ambient checkout, so it uses a workspace-scoped connect instead: one pairing for the whole fleet, stored in `~/.devintern/relay.json` — outside every repo.
+
+```bash
+devintern login
+devintern workspace connect              # mint/store ~/.devintern/relay.json;
+                                         # register every GitHub [[repos]] remote
+devintern workspace connect linear       # register a tracker source for the fleet
+devintern workspace connect status       # fleet-wide registrations + buffer freshness
+```
+
+- The connect step signs in with your existing session, verifies automation entitlement, and mints a durable relay token (`drt_…`). Re-running is idempotent; pass `--force` to re-mint the token.
+- `connect github` (the default) registers every `[[repos]]` entry with a resolvable `owner/name` slug. Non-GitHub remotes are skipped with a note.
+- Tracker targets (`linear`, `asana`, `trello`, `azure-devops`, `jira`) read their credentials from the shared workspace `.env` — the same file the fleet worker runs with — so what you register is what the daemon uses.
+- The fleet worker picks up `~/.devintern/relay.json` automatically and starts its relay connection without any per-repo connect. No per-repo `.devintern-code/relay.json` needed.
+
+`LICENSE_KEY` remains only the local unattended license gate for `devintern worker`; it is never a relay credential. See [Relay](/docs/code/relay) for how authentication works.
 
 ## Skipped tasks
 
