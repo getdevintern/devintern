@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, rmSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 
 import {
@@ -65,6 +66,41 @@ describe("workspace state", () => {
       expect(latest?.reason).toBe("ambiguous");
       expect(latest?.candidates).toEqual(["a", "b"]);
       expect(state.skips.latestFor("T-9")).toBeNull();
+    } finally {
+      state.close();
+    }
+  });
+
+  test("routing skips store migrates a legacy DB missing the team column", () => {
+    const dbPath = join(workspaceDir, "state", "queue.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const legacy = new Database(dbPath);
+    legacy.run(`
+      CREATE TABLE routing_skips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_key TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        candidates TEXT NOT NULL DEFAULT '[]',
+        task_updated TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    legacy.close();
+
+    const state = openWorkspaceState(workspaceDir);
+    try {
+      // Legacy rows survive with team defaulted; new rows carry their team.
+      state.skips.record({ taskKey: "T-1", reason: "unrouted", candidates: [] });
+      state.skips.record({
+        taskKey: "T-2",
+        reason: "ambiguous",
+        candidates: ["x"],
+        team: "platform",
+      });
+      const skips = state.skips.list();
+      expect(skips).toHaveLength(2);
+      expect(skips.find((skip) => skip.taskKey === "T-1")?.team).toBeUndefined();
+      expect(skips.find((skip) => skip.taskKey === "T-2")?.team).toBe("platform");
     } finally {
       state.close();
     }

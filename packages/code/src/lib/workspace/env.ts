@@ -99,11 +99,26 @@ export function buildRepoEnv(
 }
 
 /**
+ * Parse a team's credential layers only (`env_file`, then inline overrides),
+ * excluding the workspace `.env` so task-environment composition can apply
+ * them above the repo layers without re-spreading the workspace `.env`.
+ *
+ * @param team - Team whose credentials to parse.
+ * @param workspaceDir - Workspace home used to resolve relative env files.
+ */
+function teamLayerEnv(team: TeamConfig, workspaceDir: string): Record<string, string> {
+  const teamFileEnv = team.envFile
+    ? parseEnvFile(isAbsolute(team.envFile) ? team.envFile : join(workspaceDir, team.envFile))
+    : {};
+  return { ...teamFileEnv, ...team.env };
+}
+
+/**
  * Compose a team's own credential environment: workspace `.env`, then the
  * team's `env_file`, then inline team overrides.
  *
- * Used both for building the team's tracker client/detector in the worker
- * process and as a layer inside {@link buildTeamTaskEnv}.
+ * Used for building the team's tracker client/detector in the worker
+ * process; task subprocesses use {@link buildTeamTaskEnv} instead.
  *
  * @param team - Team whose credentials to layer.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -112,13 +127,9 @@ export function buildTeamEnv(
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
 ): Record<string, string> {
-  const teamFileEnv = team.envFile
-    ? parseEnvFile(isAbsolute(team.envFile) ? team.envFile : join(workspaceDir, team.envFile))
-    : {};
   return {
     ...parseEnvFile(workspaceEnvPath(workspaceDir)),
-    ...teamFileEnv,
-    ...team.env,
+    ...teamLayerEnv(team, workspaceDir),
   };
 }
 
@@ -146,7 +157,7 @@ export function buildTeamTaskEnv(
   workspaceDir: string = resolveWorkspaceDir(),
 ): Record<string, string | undefined> {
   const env = buildRepoEnv(repo, workspaceDir);
-  Object.assign(env, buildTeamEnv(team, workspaceDir));
+  Object.assign(env, teamLayerEnv(team, workspaceDir));
   env.TASK_TRACKER = team.tracker;
   return env;
 }

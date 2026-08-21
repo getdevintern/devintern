@@ -125,10 +125,11 @@ export class RoutingSkipStore {
       )
     `);
     // Workspaces created before multi-team support lack the team column.
-    try {
+    const columns = this.db.query("PRAGMA table_info(routing_skips)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "team")) {
       this.db.run("ALTER TABLE routing_skips ADD COLUMN team TEXT NOT NULL DEFAULT ''");
-    } catch {
-      // Column already exists.
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_routing_skips_task ON routing_skips(task_key)");
   }
