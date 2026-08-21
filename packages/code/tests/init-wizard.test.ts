@@ -9,7 +9,7 @@ import {
   renderEnvFile,
   scaffoldProject,
 } from "../src/lib/init-scaffold";
-import { isInteractive, runInitWizard } from "../src/lib/init-wizard";
+import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init-wizard";
 
 let tempDir: string;
 
@@ -381,6 +381,112 @@ describe("runInitWizard", () => {
     scaffoldProject({ cwd: tempDir });
     const { prompt, asked } = promptQueue([]);
     await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    expect(asked).toHaveLength(0);
+  });
+});
+
+describe("runInitUpgrade", () => {
+  /** Scaffold an existing linear config to upgrade from. */
+  function seedExistingConfig(extra = ""): void {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      [
+        "# @devintern/code Environment Configuration",
+        "TASK_TRACKER=linear",
+        "LINEAR_API_KEY=lin_old_key",
+        "# LINEAR_DEFAULT_TEAM_KEY=",
+        "CUSTOM_VAR=keep-me",
+        extra,
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  test("update credentials: Enter keeps current values, new values replace", async () => {
+    seedExistingConfig();
+    const { prompt } = promptQueue([
+      "1", // update credentials
+      "", // keep LINEAR_API_KEY
+      "ENG", // set team key (was skipped)
+      "ghp_new_pr", // PR token (none stored yet)
+    ]);
+    let probed: Record<string, string> | undefined;
+    await runInitUpgrade({
+      prompt,
+      probe: (_, env) => {
+        probed = env;
+        return Promise.resolve();
+      },
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("LINEAR_API_KEY=lin_old_key");
+    expect(env).toContain("LINEAR_DEFAULT_TEAM_KEY=ENG");
+    expect(env).toContain("CUSTOM_VAR=keep-me");
+    expect(env).toContain("GITHUB_TOKEN=ghp_new_pr");
+    // Probe validated with the merged values (stored + new)
+    expect(probed?.LINEAR_API_KEY).toBe("lin_old_key");
+  });
+
+  test("update credentials: rotated key replaces the stored one", async () => {
+    seedExistingConfig();
+    const { prompt } = promptQueue([
+      "1",
+      "lin_rotated", // new API key
+      "", // skip team key
+      "ghp_rotated",
+    ]);
+    await runInitUpgrade({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("LINEAR_API_KEY=lin_rotated");
+    expect(env).toContain("ghp_rotated");
+    expect(env).not.toContain("lin_old_key");
+  });
+
+  test("switch tracker: writes TASK_TRACKER and carries the GitHub token over", async () => {
+    seedExistingConfig("GITHUB_TOKEN=ghp_shared\n");
+    const { prompt } = promptQueue([
+      "2", // switch
+      "jira", // target tracker
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "jira-token",
+      "PROJ", // default project key
+    ]);
+    await runInitUpgrade({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toMatch(/TASK_TRACKER=jira/);
+    expect(env).not.toMatch(/TASK_TRACKER=linear/);
+    expect(env).toContain("JIRA_API_TOKEN=jira-token");
+    expect(env).toContain("GITHUB_TOKEN=ghp_shared");
+    expect(env).toContain("LINEAR_API_KEY=lin_old_key");
+  });
+
+  test("exit option leaves the file untouched", async () => {
+    seedExistingConfig();
+    const before = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const { prompt } = promptQueue(["3"]);
+    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).toBe(before);
+  });
+
+  test("missing .env falls back to scaffold guidance without prompting", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    const { prompt, asked } = promptQueue([]);
+    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
     expect(asked).toHaveLength(0);
   });
 });
