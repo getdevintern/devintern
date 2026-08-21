@@ -1,7 +1,7 @@
 ---
 title: "Workspaces (Multi-Repo Fleet)"
 sidebarLabel: "Multiple Repositories"
-description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
+description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
 section: "Automation"
 order: 2
 dateModified: 2026-09-03
@@ -9,7 +9,7 @@ dateModified: 2026-09-03
 
 # Workspaces (Multi-Repo Fleet)
 
-Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe your repos once in `~/.devintern/workspace.toml`, point the worker at one tracker query, and route each ready task to the right repository with explicit rules when there is more than one repo.
+Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe repositories once in `~/.devintern/workspace.toml`, then use either one default tracker query or several isolated team tracker sources.
 
 The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (add + `[defaults].task_query`) and you add more repos later with `devintern worker add-repo`.
 
@@ -17,8 +17,8 @@ Workspace mode runs under the same automation license as the rest of the worker:
 
 ## How it works
 
-- The worker polls your tracker with one fleet-wide query (a detect-then-evaluate loop with one cursor).
-- Each ready task is matched against your routing rules. A task runs only when the rules agree on exactly one repository. The worker never guesses: tasks that match no rule, or rules for different repositories, are skipped and recorded, and are retried only after the task changes again. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
+- Without `[[teams]]`, the worker polls `[defaults].task_query`. With teams, it creates one isolated tracker client, query, cursor, and dedupe scope per team.
+- A team can set `repo` for a fixed destination. A team spanning repositories omits `repo` and uses routing rules. A task runs only when its applicable rules agree on one repository; unmatched or ambiguous work is recorded rather than guessed. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
 - Runs are serialized: one task at a time, with a per-repository lock. One systemd unit (or one terminal) drives the whole fleet.
@@ -87,13 +87,84 @@ repo = "frontend"
 prompt = "Review the frontend and clean up one source of recurring noise."
 ```
 
-- `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
+- `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+
+### Multiple teams and tracker boards
+
+Use `[[teams]]` when one worker must poll separate boards, tracker accounts, or tracker products. Each team has a stable name, tracker, query, and optional credential layers:
+
+```toml
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT AND labels = devintern"
+repo = "api"
+env_file = "env/platform.env"
+
+[[teams]]
+name = "growth"
+tracker = "linear"
+task_query = '{"team":{"key":{"eq":"GROW"}}}'
+repo = "web"
+  [teams.env]
+  LINEAR_API_KEY = "lin_api_..."
+```
+
+`repo` is a fixed mapping: every task acquired from that team runs in that repository, regardless of task labels or key shape. This is the simplest and safest setup when a tracker board belongs to one codebase. The named repository must exist in `[[repos]]`. A fixed team cannot also have team-scoped routing rules, because two competing routing models would make precedence unclear.
+
+When one team owns several repositories, omit `repo` and add rules scoped to the team:
+
+```toml
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project in (PLAT, SRE) AND labels = devintern"
+env_file = "env/platform.env"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "infra"
+remote = "git@github.com:acme/infra.git"
+
+[[routing.rules]]
+team = "platform"
+repo = "api"
+project = "PLAT"
+
+[[routing.rules]]
+team = "platform"
+repo = "infra"
+project = "SRE"
+
+[[routing.rules]]
+repo = "infra"
+labels = ["infrastructure"] # unscoped: available to every non-fixed team
+```
+
+Team routing follows these rules:
+
+- Rules naming another team are invisible. Rules naming the acquiring team and rules without `team` are applicable.
+- Set criteria are ANDed; lists are any-of. If applicable matches disagree on the repository, the task is recorded as ambiguous and not run.
+- An unfixed team in a multi-repo workspace must have at least one applicable rule. Tasks that match none are recorded as unrouted.
+- Fixed teams ignore unscoped routing rules and always use their configured `repo`.
+- In a one-repo workspace, omitting both `team.repo` and routing rules still selects the only repository.
+
+Credentials layer as workspace `.env` < team `env_file` < inline `[teams.env]` for tracker clients. Task subprocesses retain repository settings and then apply the acquiring team's credential layers, with `TASK_TRACKER` pinned to that team's tracker so comments and transitions go back to the correct board. Team cursor keys use `tracker:team` (for example `jira:platform`), so separate boards of the same tracker never share polling cursors or dedupe records.
+
+`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations still use `[defaults].tracker`; configure it explicitly when using `[[estimations]]`.
+
+Team `task_query` and `repo` changes live-reload along with routing rules. Team names, tracker types, `env_file`, and inline credentials are startup-only because changing them requires rebuilding tracker clients and detectors; restart the worker after changing those fields.
+
+Tracker relay envelopes currently identify the tracker type, not an individual team registration. Instant tracker relay is therefore enabled only when one workspace team uses that tracker type. If two teams use Jira (or any same tracker), polling remains fully isolated and supported, but `worker connect jira` refuses the ambiguous relay registration and task envelopes for that tracker fail closed to polling. GitHub repository relay remains unaffected.
 
 ### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
 
@@ -158,7 +229,7 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The fleet query comes from `[defaults].task_query`. A workspace with automations or estimations can omit the query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus the task-polling timestamp used for missed-window catch-up, live in the central workspace database.
+The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations or estimations can omit the defaults query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus the task-polling timestamp used for missed-window catch-up, live in the central workspace database.
 
 While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 
@@ -166,7 +237,8 @@ While the daemon is running you can request one immediate drain (for example whi
 
 The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
 
-- **Routing rules, repos, `task_query`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
 - **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
 - **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.
@@ -193,9 +265,9 @@ With GitHub credentials in the workspace `.env`, the fleet worker also reacts to
 
 - **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
-- **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Tracker relay events work even when GitHub polling credentials are not configured. Events for repositories not in the workspace are ignored.
+- **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. GitHub envelopes carry the repository and route directly. Tracker events re-run the applicable defaults/team query and then use the same fixed mapping or routing rules as polling. A tracker type used by several teams stays polling-only because current relay envelopes do not identify the team registration; the worker fails closed instead of guessing. Events for repositories not in the workspace are ignored.
 
-To reconnect after adding repositories, run `devintern worker connect`. The command walks every GitHub repository in `workspace.toml`, skips already verified App pairings, and guides you through verification for the rest. `devintern worker connect status` also reports workspace repositories that still need verification. Tracker targets such as `devintern worker connect linear` reuse credentials from the shared workspace `.env`.
+To reconnect after adding repositories, run `devintern worker connect`. The command walks every GitHub repository in `workspace.toml`, skips already verified App pairings, and guides you through verification for the rest. `devintern worker connect status` also reports workspace repositories that still need verification. Tracker targets such as `devintern worker connect linear --team growth` compose the selected team's credentials on top of the shared workspace `.env`.
 
 Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
 

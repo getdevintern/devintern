@@ -136,6 +136,82 @@ GITHUB_REPO = "acme/api"
     expect(observedKey).toBe("shell-key");
   });
 
+  test("tracker connect loads the selected team's credential layers", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[[teams]]
+name = "growth"
+tracker = "linear"
+task_query = "{}"
+repo = "web"
+env_file = "growth.env"
+  [teams.env]
+  TEAM_MARKER = "inline"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`,
+    );
+    writeFileSync(join(workspaceDir, "growth.env"), "LINEAR_API_KEY=team-key\n", "utf8");
+    let observed: Record<string, string | undefined> | undefined;
+
+    const result = await runWorkerConnectCommand(["linear", "--team", "growth"], {
+      workspaceDir,
+      runConnect: async (_target, deps) => {
+        observed = deps.env;
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(observed?.LINEAR_API_KEY).toBe("team-key");
+    expect(observed?.TEAM_MARKER).toBe("inline");
+    expect(logs.join("\n")).toContain("team 'growth'");
+  });
+
+  test("same-tracker teams remain polling-only because relay lacks team identity", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[[teams]]
+name = "platform"
+tracker = "linear"
+task_query = "{}"
+repo = "api"
+
+[[teams]]
+name = "growth"
+tracker = "linear"
+task_query = "{}"
+repo = "web"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`,
+    );
+    let called = false;
+    const result = await runWorkerConnectCommand(["linear", "--team", "growth"], {
+      workspaceDir,
+      runConnect: async () => {
+        called = true;
+        return 0;
+      },
+    });
+
+    expect(result).toBe(1);
+    expect(called).toBe(false);
+    expect(errors.join("\n")).toContain("polling-only");
+  });
+
   test("requires a workspace instead of writing repository-local relay state", async () => {
     rmSync(join(workspaceDir, "workspace.toml"));
 

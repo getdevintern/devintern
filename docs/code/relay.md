@@ -88,7 +88,7 @@ devintern worker
 
 The worker detects the workspace pairing and starts the relay connection automatically alongside its normal polling. Both `worker init` and `worker connect` store relay state under the workspace home.
 
-For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` first, then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
+For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` or a team's `env_file` / inline `[teams.env]`, then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
 
 ## Commands
 
@@ -102,9 +102,13 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in th
 | `devintern worker connect jira`         | Print the one-time Jira admin webhook setup with your private ingest URL  |
 | `devintern worker connect status`       | Show relay status and workspace repositories still awaiting verification |
 
+In a multi-team workspace, `devintern worker connect linear --team growth` selects that team's credential layers. If exactly one team uses the requested tracker, `--team` is optional and the CLI selects it automatically. The flag is invalid for GitHub and status because those targets are workspace-wide.
+
+Current tracker envelopes identify their tracker type but not an individual team registration. When more than one team uses the same tracker type—for example, two separate Jira sites—`worker connect jira` refuses registration and those teams continue using their isolated polling loops. The worker also ignores an ambiguous same-tracker task envelope rather than assigning it to the first matching team. GitHub repository events and teams using distinct tracker types are unaffected.
+
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
 
-`worker connect` stores the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file.
+`worker connect` stores the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified and continues through the remaining repositories if one pairing fails. Tracker connect uses the selected team's credential layers when applicable; otherwise it reads the workspace `.env` with explicit shell variables taking precedence.
 
 ## Environment variables
 
@@ -118,7 +122,7 @@ Linear deliveries are verified with a signing secret generated on your machine. 
 
 ### Per `worker connect` target
 
-These are the same credentials you already use for that tracker. Set them in the workspace `.env`. GitHub connect uses every unpaired GitHub repository in `workspace.toml`. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
+These are the same credentials you already use for that tracker. Set them in the workspace `.env`, or use `--team <name>` to compose that team's `env_file` and inline env. GitHub connect uses every unpaired GitHub repository in `workspace.toml`. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
 
 | Target         | Required env vars                                               | Notes                                                           |
 | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |

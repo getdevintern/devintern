@@ -194,6 +194,8 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   workingDir: string;
   /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
   repo?: string;
+  /** Explicit tracker credentials for a selected workspace team. */
+  env?: Record<string, string | undefined>;
 }
 
 const RELAY_CONNECT_TARGETS = new Set<RelayConnectTarget>([
@@ -474,6 +476,7 @@ export async function connectRelayTarget(
     return 1;
   }
   const repo = target === "github" ? deps.repo : undefined;
+  const env = deps.env ?? process.env;
   const workingDir = deps.workingDir;
   const resolvedDeps: RelayConnectDeps = { ...deps, workingDir };
 
@@ -515,7 +518,7 @@ export async function connectRelayTarget(
   }
 
   if (target === "linear") {
-    const apiKey = process.env.LINEAR_API_KEY;
+    const apiKey = env.LINEAR_API_KEY;
     if (!apiKey) {
       console.error("❌ LINEAR_API_KEY is required to register a Linear webhook.");
       return 1;
@@ -541,8 +544,8 @@ export async function connectRelayTarget(
   }
 
   if (target === "asana") {
-    const apiToken = process.env.ASANA_API_TOKEN;
-    const projectGid = process.env.ASANA_DEFAULT_PROJECT_GID;
+    const apiToken = env.ASANA_API_TOKEN;
+    const projectGid = env.ASANA_DEFAULT_PROJECT_GID;
     if (!apiToken || !projectGid) {
       console.error(
         "❌ ASANA_API_TOKEN and ASANA_DEFAULT_PROJECT_GID are required to register an Asana webhook.",
@@ -566,9 +569,9 @@ export async function connectRelayTarget(
   }
 
   if (target === "trello") {
-    const apiKey = process.env.TRELLO_API_KEY;
-    const apiToken = process.env.TRELLO_API_TOKEN;
-    const boardId = process.env.TRELLO_DEFAULT_BOARD_ID;
+    const apiKey = env.TRELLO_API_KEY;
+    const apiToken = env.TRELLO_API_TOKEN;
+    const boardId = env.TRELLO_DEFAULT_BOARD_ID;
     if (!apiKey || !apiToken || !boardId) {
       console.error(
         "❌ TRELLO_API_KEY, TRELLO_API_TOKEN, and TRELLO_DEFAULT_BOARD_ID are required to register a Trello webhook.",
@@ -594,9 +597,9 @@ export async function connectRelayTarget(
   }
 
   if (target === "azure-devops") {
-    const organization = process.env.AZURE_DEVOPS_ORG;
-    const pat = process.env.AZURE_DEVOPS_PAT;
-    const project = process.env.AZURE_DEVOPS_PROJECT;
+    const organization = env.AZURE_DEVOPS_ORG;
+    const pat = env.AZURE_DEVOPS_PAT;
+    const project = env.AZURE_DEVOPS_PROJECT;
     if (!organization || !pat || !project) {
       console.error(
         "❌ AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT are required to register Azure DevOps service hooks.",

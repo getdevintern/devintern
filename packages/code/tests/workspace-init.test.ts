@@ -167,9 +167,11 @@ describe("worker scaffold/add-repo", () => {
       taskQuery: "project = PROJ AND status = 'To Do'",
     });
     expect(updated).toContain('tracker = "markdown"');
-    expect(updated).not.toContain('tracker = "jira"');
+    expect(updated).not.toMatch(/^tracker = "jira"$/m);
     expect(updated).toContain(`task_query = "project = PROJ AND status = 'To Do'"`);
-    expect(updated).not.toMatch(/^\s*#\s*task_query/m);
+    expect(updated).not.toContain(
+      '# task_query = "sprint in openSprints() AND labels = devintern"',
+    );
     expect(updated).toContain("# Days before a leftover");
   });
 
