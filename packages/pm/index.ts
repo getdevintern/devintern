@@ -202,7 +202,10 @@ async function main() {
     });
 
     const engine: PmEngine = await createEngine(configForInteractive, {
-      model: parsedArgs?.model,
+      // loadConfig() has already loaded .devintern-pm/.env into process.env,
+      // so AGENT_MODEL from the project config is visible here. The --model
+      // flag wins over the environment.
+      model: parsedArgs?.model ?? process.env.AGENT_MODEL,
     });
 
     if (parsedArgs === null) {
