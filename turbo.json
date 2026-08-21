@@ -4,7 +4,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "env": ["GITHUB_OAUTH_CLIENT_ID", "POSTHOG_API_KEY", "POSTHOG_HOST"],
+      "env": ["GITHUB_OAUTH_CLIENT_ID", "POSTHOG_API_KEY", "POSTHOG_HOST", "SENTRY_DSN"],
       "outputs": ["dist/**", "out/**"]
     },
     "@devintern/agent-harness#build": {

@@ -241,7 +241,21 @@ To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` e
 DEVINTERN_VERBOSE=1
 ```
 
-This logs every API request, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+
+## Error Reporting
+
+The CLI can report crashes and unhandled errors to Sentry. Set `SENTRY_DSN` in your `.devintern-code/.env` (or shell environment) to enable it:
+
+```bash
+SENTRY_DSN=https://<key>@<org>.ingest.sentry.io/<project>
+```
+
+Without a DSN nothing is ever sent. To explicitly disable reporting even when a DSN is present:
+
+```bash
+SENTRY_DISABLED=1
+```
 
 ## Output Directory
 

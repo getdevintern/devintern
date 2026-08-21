@@ -196,6 +196,20 @@ When set to `1` or `true`, every API request, response status, and retry attempt
 
 Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
 
+## Error Reporting
+
+The CLI can report crashes and unhandled errors to Sentry. Set `SENTRY_DSN` in your `.devintern-pm/.env` (or shell environment) to enable it:
+
+```bash
+SENTRY_DSN=https://<key>@<org>.ingest.sentry.io/<project>
+```
+
+Without a DSN nothing is ever sent. To explicitly disable reporting even when a DSN is present:
+
+```bash
+SENTRY_DISABLED=1
+```
+
 ## CLI Updates
 
 On startup, a globally installed `devpm` checks the npm registry (at most once per day) for a newer `@getdevintern/pm` version.

@@ -14,17 +14,21 @@ export default defineConfig(({ mode }) => {
     process.env.POSTHOG_HOST ?? fileEnv.POSTHOG_HOST ?? "https://us.i.posthog.com";
   const githubOauthClientId =
     process.env.GITHUB_OAUTH_CLIENT_ID ?? fileEnv.GITHUB_OAUTH_CLIENT_ID ?? "";
+  const sentryDsn = process.env.SENTRY_DSN ?? fileEnv.SENTRY_DSN ?? "";
 
   return {
     main: {
-      // Bake PostHog credentials and the GitHub OAuth App Client ID into release
-      // builds (set via .env, shell, or CI). Absent PostHog key → analytics no-ops.
-      // The GitHub Client ID is public (device flow needs no secret); absent ID →
-      // the "Sign in with GitHub" button is hidden and PAT remains available.
+      // Bake PostHog credentials, the GitHub OAuth App Client ID, and the
+      // Sentry DSN into release builds (set via .env, shell, or CI). Absent
+      // PostHog key → analytics no-ops. Absent Sentry DSN → error tracking
+      // no-ops. The GitHub Client ID is public (device flow needs no secret);
+      // absent ID → the "Sign in with GitHub" button is hidden and PAT remains
+      // available.
       define: {
         "process.env.POSTHOG_API_KEY": JSON.stringify(posthogApiKey),
         "process.env.POSTHOG_HOST": JSON.stringify(posthogHost),
         "process.env.GITHUB_OAUTH_CLIENT_ID": JSON.stringify(githubOauthClientId),
+        "process.env.SENTRY_DSN": JSON.stringify(sentryDsn),
       },
       // Bundle workspace TS packages (they ship raw .ts sources); keep real
       // node_modules external. electron-vite 5 externalizes deps by default.
