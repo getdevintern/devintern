@@ -461,7 +461,12 @@ await checkForCliUpdate();
 if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
-      await runInitWizard();
+      if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
+        const { runInitUpgrade } = await import("./lib/init-wizard");
+        await runInitUpgrade();
+      } else {
+        await runInitWizard();
+      }
     } else {
       await initializeProject();
     }

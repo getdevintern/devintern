@@ -59,6 +59,10 @@ For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prom
 devintern init --yes
 ```
 
+### Re-running init on an existing setup
+
+Running `devintern init` in an already-configured project no longer refuses — it offers a short menu: **update** your current tracker's credentials (stored values become Enter-to-keep defaults), **switch** to a different tracker (your GitHub PR token carries over), or exit without changes. Updates are merged into `.env`, so comments, custom variables, and previously-skipped optionals are preserved.
+
 ## Connect Your Task Tracker
 
 The wizard handles credentials for you. If you skip `init`, running a task in an unconfigured project from an interactive terminal offers to launch the guided setup inline before failing. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
