@@ -10,10 +10,12 @@
 
 import type {
   AttachmentRef,
+  ProjectStatus,
   PromptStyle,
   QuickCaptureEvent,
   SourceType,
 } from "../../../shared/ipc-contract.ts";
+import { getDefaultIssueType, resolveIssueTypes } from "../lib/issue-types.ts";
 
 export interface ComposerValues {
   sourceType: SourceType;
@@ -54,5 +56,19 @@ export function composerForCapture(base: ComposerValues, event: QuickCaptureEven
     ...base,
     sourceType: event.sourceType,
     sourceContent: { ...base.sourceContent, [event.sourceType]: event.text },
+  };
+}
+
+/** Fresh composer defaults for a loaded project (default key + issue type). */
+export function defaultComposerForProject(
+  status: ProjectStatus,
+  issueTypes: string[],
+): ComposerValues {
+  const types = resolveIssueTypes(issueTypes);
+  return {
+    ...initialComposerValues,
+    sourceContent: { ...initialComposerValues.sourceContent },
+    projectKey: status.defaultProjectKey ?? "",
+    issueType: getDefaultIssueType(types),
   };
 }

@@ -210,8 +210,11 @@ function safeReadClipboardText(ports: QuickCapturePorts): string | null {
   }
 }
 
-/** Tracks webContents that already have a deferred delivery listener. */
-const pendingDeferredDeliveries = new WeakSet<object>();
+/** Latest capture payload waiting on page load, keyed by webContents. */
+const pendingDeferredDeliveries = new WeakMap<
+  QuickCaptureWindow["webContents"],
+  QuickCaptureEvent
+>();
 
 function deliverNow(
   webContents: QuickCaptureWindow["webContents"],
@@ -252,12 +255,14 @@ export function deliverQuickCapture(
 
   const { webContents } = window;
   const settle = () => {
-    if (!pendingDeferredDeliveries.has(webContents)) return;
-    deliverNow(webContents, window!, payload);
+    // Deliver whatever capture is most recent — later invocations overwrite
+    // the pending payload instead of being dropped mid-load.
+    const latest = pendingDeferredDeliveries.get(webContents);
+    if (!latest) return;
+    deliverNow(webContents, window!, latest);
   };
   if (webContents.isLoading()) {
-    if (pendingDeferredDeliveries.has(webContents)) return;
-    pendingDeferredDeliveries.add(webContents);
+    pendingDeferredDeliveries.set(webContents, payload);
     webContents.once("did-finish-load", settle);
     webContents.once("did-fail-load", settle);
     // TOCTOU: load may finish between isLoading() and listener registration.

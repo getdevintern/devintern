@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ABOUT_VERSION_UNAVAILABLE, AboutDialog } from "./components/AboutDialog.tsx";
-import { ComposerForm, initialComposerValues } from "./components/ComposerForm.tsx";
-import type { ComposerValues } from "./components/ComposerForm.tsx";
+import { ComposerForm } from "./components/ComposerForm.tsx";
 import { NoTicketsEmptyState } from "./components/NoTicketsEmptyState.tsx";
 import { OutputPanel } from "./components/OutputPanel.tsx";
 import { ConnectGitHubDialog } from "./components/ConnectGitHubDialog.tsx";
@@ -24,7 +23,6 @@ import {
 } from "@/components/ui/dialog";
 import {
   DEFAULT_ISSUE_TYPES,
-  getDefaultIssueType,
   issueTypeIfNeedsReset,
   resolveIssueTypes,
 } from "./lib/issue-types.ts";
@@ -40,8 +38,9 @@ import { useLabels } from "./queries/useLabels.ts";
 import { useRecentProjects } from "./queries/useRecentProjects.ts";
 import { useToolValidation } from "./queries/useToolValidation.ts";
 import { isBusy } from "./state/app-store.ts";
-import { composerForCapture } from "./state/composer-values.ts";
+import { defaultComposerForProject } from "./state/composer-values.ts";
 import { useProjectStore } from "./state/project-store.ts";
+import { handleQuickCaptureEvent } from "./state/quick-capture-handler.ts";
 import {
   useActiveTicket,
   useAnyTicketBusy,
@@ -53,7 +52,7 @@ import {
   useTicketWorkspacesStore,
 } from "./state/ticket-workspaces-store.ts";
 import { nextTicketId } from "./state/ticket-workspaces.ts";
-import type { IpcError, ProjectStatus, QuickCaptureEvent } from "../../shared/ipc-contract.ts";
+import type { IpcError, ProjectStatus } from "../../shared/ipc-contract.ts";
 import { shouldShowCodeDiscovery } from "../../shared/code-discovery.ts";
 import { isToolValidationBlocking } from "../../shared/tool-validation.ts";
 
@@ -75,16 +74,6 @@ function queryErrorMessage(error: unknown): string {
     return error.message;
   }
   return "Unknown error";
-}
-
-function defaultComposerForProject(status: ProjectStatus, issueTypes: string[]): ComposerValues {
-  const types = resolveIssueTypes(issueTypes);
-  return {
-    ...initialComposerValues,
-    sourceContent: { ...initialComposerValues.sourceContent },
-    projectKey: status.defaultProjectKey ?? "",
-    issueType: getDefaultIssueType(types),
-  };
 }
 
 export function App() {
@@ -144,28 +133,14 @@ export function App() {
 
   // Quick Capture: OS global shortcut → focus app + open a fresh ticket
   // workspace prefilled from the clipboard. Existing tickets and running
-  // streams are untouched (a new tab is opened; nothing is closed).
+  // streams are untouched (a new tab is opened; nothing is closed). The
+  // wiring itself lives in state/quick-capture-handler.ts (unit-tested).
   useEffect(() => {
-    return window.pm.onQuickCapture((event: QuickCaptureEvent) => {
-      const current = useProjectStore.getState().status;
-      // No project ready yet: the window is already focused by main, and the
-      // Welcome screen / setup wizard is the visible path (never fail silently
-      // into a broken composer).
-      if (!current?.isGitRepository || !current.configured) return;
-
-      // Issue types for the new ticket's default project key; seeded on load,
-      // falls back to defaults until fetched (corrected by the reset effect).
-      const cachedTypes =
-        queryClient.getQueryData<string[]>(
-          qk.issueTypes(current.projectDir, current.defaultProjectKey ?? ""),
-        ) ?? DEFAULT_ISSUE_TYPES;
-      const composer = defaultComposerForProject(current, resolveIssueTypes(cachedTypes));
-      // Useful clipboard text prefills the inferred source tab; empty keeps
-      // the Prompt tab ready to type (focus moves there via the signal).
-      useTicketWorkspacesStore
-        .getState()
-        .openTicket(nextTicketId(), composerForCapture(composer, event));
-      setComposerFocusToken((token) => token + 1);
+    return window.pm.onQuickCapture((event) => {
+      if (handleQuickCaptureEvent(event)) {
+        // The fresh workspace landed ready-to-type: focus its source editor.
+        setComposerFocusToken((token) => token + 1);
+      }
     });
   }, []);
 

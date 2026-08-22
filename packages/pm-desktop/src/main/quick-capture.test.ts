@@ -33,17 +33,20 @@ class FakeWindow implements QuickCaptureWindow {
   private loadListeners: Array<() => void> = [];
   shown = 0;
   focused = 0;
+  // Stable per-window surface (mirrors Electron's webContents identity) so
+  // concurrent deliveries target the same pending-delivery slot.
+  private readonly webContentsApi = {
+    isLoading: () => this.loading,
+    send: (channel: string, ...args: unknown[]) => {
+      this.sent.push({ channel, args });
+    },
+    once: (_event: "did-finish-load" | "did-fail-load", listener: () => void) => {
+      this.loadListeners.push(listener);
+    },
+  };
 
   get webContents() {
-    return {
-      isLoading: () => this.loading,
-      send: (channel: string, ...args: unknown[]) => {
-        this.sent.push({ channel, args });
-      },
-      once: (_event: "did-finish-load" | "did-fail-load", listener: () => void) => {
-        this.loadListeners.push(listener);
-      },
-    };
+    return this.webContentsApi;
   }
 
   isDestroyed(): boolean {
@@ -231,6 +234,21 @@ describe("quick capture invocation + delivery", () => {
     expect(payload.sourceType).toBe("prompt");
   });
 
+  test("rapid captures during launch deliver only the newest clipboard snapshot", () => {
+    // Same window, still loading: both hotkey presses race the page load.
+    harness.window!.loading = true;
+    harness.clipboardText = "stale capture";
+    invokeQuickCapture();
+    harness.clipboardText = "fresh capture";
+    invokeQuickCapture();
+    const window = harness.window!;
+    expect(window.sent).toHaveLength(0);
+    window.finishLoad();
+    expect(window.sent).toHaveLength(1);
+    const payload = window.sent[0]!.args[0] as QuickCaptureEvent;
+    expect(payload.text).toBe("fresh capture");
+  });
+
   test("minimized window is restored, shown, focused", () => {
     harness.window!.minimized = true;
     invokeQuickCapture();
@@ -263,6 +281,27 @@ describe("deliverQuickCapture", () => {
     expect(window.sent).toHaveLength(0);
     window.finishLoad();
     expect(window.sent).toHaveLength(1);
+  });
+
+  test("a second capture while loading overwrites the pending payload", () => {
+    const window = new FakeWindow();
+    window.loading = true;
+    deliverQuickCapture({ text: "first", sourceType: "prompt" }, deps(window));
+    deliverQuickCapture({ text: "second", sourceType: "log" }, deps(window));
+    window.finishLoad();
+    // Only the most recent snapshot is delivered — none are dropped silently.
+    expect(window.sent).toHaveLength(1);
+    expect(window.sent[0]!.args[0]).toEqual({ text: "second", sourceType: "log" });
+  });
+
+  test("captures arriving after load finishes are delivered immediately", () => {
+    const window = new FakeWindow();
+    window.loading = true;
+    deliverQuickCapture({ text: "early", sourceType: "prompt" }, deps(window));
+    window.finishLoad();
+    deliverQuickCapture({ text: "late", sourceType: "prompt" }, deps(window));
+    const texts = window.sent.map((delivery) => (delivery.args[0] as QuickCaptureEvent).text);
+    expect(texts).toEqual(["early", "late"]);
   });
 
   test("does nothing without any window", () => {
