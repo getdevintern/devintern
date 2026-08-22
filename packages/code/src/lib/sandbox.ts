@@ -14,7 +14,7 @@ import { resolveSandbox } from "@devintern/agent-harness";
 import type { DetectedSandboxProvider, ResolvedSandbox } from "@devintern/agent-harness";
 
 let cliOverride: string | undefined;
-let cached: Promise<ResolvedSandbox | null> | null = null;
+const cachedByHarness = new Map<string, Promise<ResolvedSandbox | null>>();
 
 /**
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
@@ -24,25 +24,33 @@ let cached: Promise<ResolvedSandbox | null> | null = null;
  */
 export function setSandboxOverride(name: string | undefined): void {
   cliOverride = name;
-  cached = null;
+  cachedByHarness.clear();
 }
 
 /**
- * Resolve the sandbox for agent spawns, memoized per process.
+ * Resolve the sandbox for agent spawns, memoized per harness.
+ *
+ * Harness fallback chains may switch harnesses mid-run; each candidate must
+ * re-resolve compatibility (an explicit provider that cannot wrap the new
+ * harness throws instead of silently weakening isolation).
  *
  * @param harnessName - The harness being wrapped, for compatibility filtering.
  * @returns The resolved sandbox, or `null` to spawn the agent directly.
  */
 export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null> {
-  if (!cached) {
-    cached = resolveSandbox({ sandboxName: cliOverride, harnessName }).then((resolved) => {
-      if (resolved) {
-        console.log(`🔒 Agent sandbox: ${resolved.provider.displayName}`);
-      }
-      return resolved;
-    });
+  const cached = cachedByHarness.get(harnessName);
+  if (cached) {
+    return cached;
   }
-  return cached;
+  const resolved = (async () => {
+    const result = await resolveSandbox({ sandboxName: cliOverride, harnessName });
+    if (result) {
+      console.log(`🔒 Agent sandbox: ${result.provider.displayName}`);
+    }
+    return result;
+  })();
+  cachedByHarness.set(harnessName, resolved);
+  return resolved;
 }
 
 /**

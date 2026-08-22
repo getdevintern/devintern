@@ -57,6 +57,18 @@ describe("resolveHarness", () => {
     expect(result.harness.name).toBe("codex");
   });
 
+  test("tolerates a comma-separated fallback chain by resolving the primary", () => {
+    process.env.AGENT_HARNESS = "codex, opencode";
+    const result = resolveHarness();
+    expect(result.harness.name).toBe("codex");
+  });
+
+  test("explicit harnessName overrides a chain value", () => {
+    process.env.AGENT_HARNESS = "codex, opencode";
+    const result = resolveHarness({ harnessName: "opencode" });
+    expect(result.harness.name).toBe("opencode");
+  });
+
   test("defaults to claude-code when no hint is given", () => {
     const result = resolveHarness();
     expect(result.harness.name).toBe("claude-code");

@@ -71,6 +71,18 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
     harnessName = "claude-code";
   }
 
+  // Fallback chains ("a,b,c"): resolve the primary candidate exactly like a
+  // single value. Ordered per-candidate fallback is a caller concern (see
+  // @getdevintern/code), but every consumer of this resolver must tolerate
+  // the list syntax without treating the whole value as an unknown harness.
+  if (!explicitHarnessName && harnessName.includes(",")) {
+    harnessName =
+      harnessName
+        .split(",")
+        .map((entry) => entry.trim())
+        .find((entry) => entry.length > 0) ?? "";
+  }
+
   const alias = HARNESS_ALIASES[harnessName];
   if (alias?.deprecated && alias.warning && options?.warnDeprecated !== false) {
     console.warn(`⚠️  ${alias.warning}`);

@@ -294,6 +294,20 @@ export class RunStore {
   }
 
   /**
+   * Best-effort harness attribution update.
+   *
+   * With fallback chains the configured primary may not be the harness that
+   * actually ran; callers update this once a fallback is selected so per-
+   * harness dashboard statistics stay accurate.
+   *
+   * @param runId - Run id
+   * @param harness - Canonical harness name that performed (or is performing) the run
+   */
+  setRunHarness(runId: number, harness: string): void {
+    this.db.run(`UPDATE runs SET harness = ? WHERE id = ?`, [harness, runId]);
+  }
+
+  /**
    * Mark a run terminal and record an `outcome` stage row.
    *
    * @param runId - Run id
@@ -576,6 +590,24 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Update the current run's harness attribution (best-effort, no-op when no
+ * run is active). Used by the fallback coordinator so `runs.harness` reflects
+ * the harness that actually performed the run.
+ *
+ * @param harness - Canonical harness name
+ */
+export function recordRunHarness(harness: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunHarness(currentRunId, harness);
+  } catch (error) {
+    warnOnce("harness", error);
   }
 }
 

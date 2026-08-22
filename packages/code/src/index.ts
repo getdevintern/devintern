@@ -43,6 +43,19 @@ import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
+import {
+  parseHarnessChain,
+  resolveHarnessCandidates,
+  warnDeprecatedChainAliases,
+} from "./lib/harness-chain";
+import type { HarnessCandidate } from "./lib/harness-chain";
+import { HarnessFallbackCoordinator } from "./lib/harness-fallback";
+import {
+  AgentLaunchError,
+  classifyExitFailure,
+  executableMissingError,
+  spawnFailedError,
+} from "./lib/harness-launch";
 import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
@@ -67,7 +80,14 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunHarness,
+  recordRunPr,
+  recordRunStage,
+} from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
@@ -1469,10 +1489,63 @@ if (options.envFile) {
   }
 }
 
-// Resolve the final agent harness
-const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
+// Resolve the agent harness configuration.
+//
+// A single AGENT_HARNESS value (or unset → claude-code) keeps the historical
+// strict startup path. An ordered comma-separated chain additionally resolves
+// fallback candidates; a missing primary binary must surface at spawn time as
+// a fallback-eligible failure, so multi-candidate chains skip the strict
+// startup check.
+const fallbackCandidates: HarnessCandidate[] = (() => {
+  try {
+    const entries = parseHarnessChain(process.env.AGENT_HARNESS, { warnDeprecated: false });
+    if (entries.length <= 1) {
+      return [];
+    }
+    warnDeprecatedChainAliases(entries);
+    const candidates = resolveHarnessCandidates(entries, {
+      cliPath: options.agentPath || options.claudePath,
+    });
+    console.log(
+      `🔗 Agent harness fallback chain: ${candidates.map((c) => c.entry.canonical).join(" → ")}`,
+    );
+    return candidates;
+  } catch (error) {
+    // Invalid AGENT_HARNESS fails before task execution with an actionable message.
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
+})();
+
+const resolvedAgent =
+  fallbackCandidates.length > 0
+    ? fallbackCandidates[0].resolved
+    : resolveAgentHarness(options.agentPath || options.claudePath);
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);
+}
+
+/**
+ * Create a task-run-level fallback coordinator.
+ *
+ * Returns a single-candidate coordinator for single-value configuration
+ * (identical outcomes, no extra messaging) or one holding every configured
+ * candidate otherwise. Fresh per task attempt: each attempt starts from the
+ * configured primary.
+ */
+function createHarnessFallbackCoordinator(): HarnessFallbackCoordinator {
+  return new HarnessFallbackCoordinator(
+    fallbackCandidates.length > 0
+      ? fallbackCandidates
+      : [
+          {
+            entry: { raw: resolvedAgent.harness.name, canonical: resolvedAgent.harness.name },
+            position: 0,
+            isPrimary: true,
+            resolved: resolvedAgent,
+          },
+        ],
+  );
 }
 
 /**
@@ -1522,6 +1595,24 @@ let activeTaskContext: {
   projectKey: string;
   movedToInProgress: boolean;
 } | null = null;
+
+/**
+ * Provenance note for the harness fallback active during implementation, set
+ * just before `runAgentHarness` and cleared after. Appended to generated
+ * implementation / incomplete-implementation tracker comments so readers know
+ * the configured primary was replaced. Task processing is sequential, so a
+ * single module-level slot is safe.
+ */
+let activeFallbackProvenance: string | null = null;
+
+/**
+ * Append the active fallback provenance note to comment output when present.
+ *
+ * @param agentOutput - Agent stdout destined for a tracker comment.
+ */
+function withFallbackProvenance(agentOutput: string): string {
+  return activeFallbackProvenance ? `${agentOutput}\n\n${activeFallbackProvenance}` : agentOutput;
+}
 
 /**
  * Best-effort failure feedback: post a comment explaining why no pull request
@@ -1655,7 +1746,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: "task",
       taskKey: workflowKey,
       tracker: process.env.TASK_TRACKER || "jira",
+      harness: resolvedAgent.harness.name,
     });
+
+    // Task-run-level fallback coordination: once a fallback candidate becomes
+    // active, every later stage in this attempt reuses it.
+    const harnessCoordinator = createHarnessFallbackCoordinator();
 
     if (!isMarkdownTaskTracker(tracker)) {
       console.log("🔗 Extracting linked resources...");
@@ -1930,22 +2026,32 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       );
 
       try {
-        const assessment = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
-          runClarityCheck(
-            clarityInputFile,
-            resolvedAgent.harness,
-            resolvedAgent.path,
-            workflowKey,
-            tracker,
-            options.skipComments,
-            runOptions,
+        const assessment = await harnessCoordinator.run("feasibility", ({ resolved }) =>
+          runAnalysisWithFallback(resolved.harness, 10, (runOptions) =>
+            runClarityCheck(
+              clarityInputFile,
+              resolved.harness,
+              resolved.path,
+              workflowKey,
+              tracker,
+              options.skipComments,
+              runOptions,
+            ),
           ),
         );
+        if (harnessCoordinator.switched) {
+          recordRunHarness(harnessCoordinator.activeHarnessName);
+        }
 
         recordRunStage("feasibility", {
           status: assessment ? (assessment.isImplementable ? "succeeded" : "failed") : "skipped",
           summary: assessment?.summary,
-          detail: assessment ?? undefined,
+          detail: {
+            ...(assessment ?? {}),
+            ...(harnessCoordinator.switched
+              ? { harnessFallback: harnessCoordinator.stageDetail() }
+              : {}),
+          },
         });
 
         if (assessment && !assessment.isImplementable) {
@@ -1968,9 +2074,15 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           /* ignore */
         }
       } catch (clarityError) {
+        if (harnessCoordinator.switched) {
+          recordRunHarness(harnessCoordinator.activeHarnessName);
+        }
         recordRunStage("feasibility", {
           status: "failed",
           summary: `assessment errored: ${(clarityError as Error).message}`,
+          ...(harnessCoordinator.switched
+            ? { detail: { harnessFallback: harnessCoordinator.stageDetail() } }
+            : {}),
         });
         console.warn("⚠️  Feasibility check failed, continuing with implementation:", clarityError);
         console.log("   You can skip feasibility checks with --skip-clarity-check");
@@ -2043,27 +2155,39 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       }
     }
 
-    console.log(`\n🤖 Running ${resolvedAgent.harness.displayName} with task details...`);
+    const activeImplementation = harnessCoordinator.active.resolved;
+    console.log(`\n🤖 Running ${activeImplementation.harness.displayName} with task details...`);
     const implementationStartedAt = Date.now();
-    await runAgentHarness(
-      outputFile,
-      resolvedAgent.harness,
-      resolvedAgent.path,
-      Number.parseInt(options.maxTurns),
-      workflowKey,
-      taskDetails.summary,
-      options.git && options.autoCommit,
-      task,
-      options.createPr,
-      effectiveTargetBranch,
-      tracker,
-      options.skipComments,
-      Number.parseInt(options.hookRetries),
-      projectSettings,
-      gitAuthor,
-      options.autoReview,
-      Number.parseInt(options.autoReviewIterations),
-    );
+    // Surface fallback provenance in tracker comments posted by this run.
+    activeFallbackProvenance = harnessCoordinator.provenanceNote();
+    try {
+      await harnessCoordinator.run("implementation", ({ resolved }) =>
+        runAgentHarness(
+          outputFile,
+          resolved.harness,
+          resolved.path,
+          Number.parseInt(options.maxTurns),
+          workflowKey,
+          taskDetails.summary,
+          options.git && options.autoCommit,
+          task,
+          options.createPr,
+          effectiveTargetBranch,
+          tracker,
+          options.skipComments,
+          Number.parseInt(options.hookRetries),
+          projectSettings,
+          gitAuthor,
+          options.autoReview,
+          Number.parseInt(options.autoReviewIterations),
+        ),
+      );
+    } finally {
+      activeFallbackProvenance = null;
+      if (harnessCoordinator.switched) {
+        recordRunHarness(harnessCoordinator.activeHarnessName);
+      }
+    }
 
     // An incomplete-summary file written during this run means the agent
     // stopped short and handed back to a human (mtime check guards against
@@ -2089,14 +2213,18 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       /* best-effort: recording must never fail a run */
     }
 
+    const activeResolved = harnessCoordinator.active.resolved;
     recordRunStage("implementation", {
       status: implementationIncomplete ? "failed" : "succeeded",
       summary: implementationIncomplete
-        ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
-        : `implemented with ${resolvedAgent.harness.displayName}`,
+        ? `incomplete implementation with ${activeResolved.harness.displayName}`
+        : `implemented with ${activeResolved.harness.displayName}`,
       detail: {
-        harness: resolvedAgent.harness.displayName,
+        harness: activeResolved.harness.displayName,
         durationMs: Date.now() - implementationStartedAt,
+        ...(harnessCoordinator.switched
+          ? { harnessFallback: harnessCoordinator.stageDetail() }
+          : {}),
         ...(implementationReport === undefined ? {} : { report: implementationReport }),
       },
     });
@@ -2367,19 +2495,25 @@ async function main(): Promise<void> {
           );
 
           // Run estimation
-          const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
-            runEstimation(
-              estimationFile,
-              resolvedAgent.harness,
-              resolvedAgent.path,
-              taskKey,
-              tracker,
-              projectSettings,
-              options.skipComments,
-              existingCommentId,
-              runOptions,
+          const estimateCoordinator = createHarnessFallbackCoordinator();
+          const result = await estimateCoordinator.run("estimation", ({ resolved }) =>
+            runAnalysisWithFallback(resolved.harness, 10, (runOptions) =>
+              runEstimation(
+                estimationFile,
+                resolved.harness,
+                resolved.path,
+                taskKey,
+                tracker,
+                projectSettings,
+                options.skipComments,
+                existingCommentId,
+                runOptions,
+              ),
             ),
           );
+          if (estimateCoordinator.switched) {
+            recordRunHarness(estimateCoordinator.activeHarnessName);
+          }
 
           // Clean up temp file
           try {
@@ -2622,12 +2756,17 @@ async function runClarityCheck(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            executableMissingError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
             ),
           );
         } else {
-          reject(new Error(`Failed to run ${harness.displayName} clarity check: ${error.message}`));
+          reject(
+            spawnFailedError(
+              `Failed to run ${harness.displayName} clarity check: ${error.message}`,
+              error.message,
+            ),
+          );
         }
       });
 
@@ -2814,7 +2953,19 @@ async function runClarityCheck(
             resolve(null); // Continue with implementation if parsing fails
           }
         } else {
-          reject(new Error(`Agent clarity check exited with code ${code}`));
+          // Classify pre-work exits so the fallback coordinator can advance
+          // to the next configured harness when the failure is safe.
+          const classification = classifyExitFailure(stdoutOutput, stderrOutput);
+          reject(
+            classification
+              ? new AgentLaunchError(`Agent clarity check exited with code ${code}`, {
+                  classification,
+                  stdout: stdoutOutput,
+                  stderr: stderrOutput,
+                  exitCode: code,
+                })
+              : new Error(`Agent clarity check exited with code ${code}`),
+          );
         }
       });
     })().catch(reject);
@@ -2873,7 +3024,11 @@ async function postImplementationComment(
   taskSummary?: string,
 ): Promise<void> {
   try {
-    await tracker.postImplementationComment(taskKey, agentOutput, taskSummary);
+    await tracker.postImplementationComment(
+      taskKey,
+      withFallbackProvenance(agentOutput),
+      taskSummary,
+    );
     console.log(`✅ Implementation summary posted to ${taskKey}`);
   } catch (error) {
     throw new Error(`Failed to post implementation comment: ${error}`);
@@ -3005,12 +3160,17 @@ async function runEstimation(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            executableMissingError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
             ),
           );
         } else {
-          reject(new Error(`Failed to run ${harness.displayName} estimation: ${error.message}`));
+          reject(
+            spawnFailedError(
+              `Failed to run ${harness.displayName} estimation: ${error.message}`,
+              error.message,
+            ),
+          );
         }
       });
 
@@ -3033,7 +3193,17 @@ async function runEstimation(
         }
 
         if (code !== 0) {
-          reject(new Error(`Agent estimation exited with code ${code}`));
+          const classification = classifyExitFailure(stdoutOutput, stderrOutput);
+          reject(
+            classification
+              ? new AgentLaunchError(`Agent estimation exited with code ${code}`, {
+                  classification,
+                  stdout: stdoutOutput,
+                  stderr: stderrOutput,
+                  exitCode: code,
+                })
+              : new Error(`Agent estimation exited with code ${code}`),
+          );
           return;
         }
 
@@ -3451,12 +3621,17 @@ async function runAgentHarness(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            executableMissingError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
             ),
           );
         } else {
-          reject(new Error(`Failed to run ${harness.displayName}: ${error.message}`));
+          reject(
+            spawnFailedError(
+              `Failed to run ${harness.displayName}: ${error.message}`,
+              error.message,
+            ),
+          );
         }
       });
 
@@ -3521,7 +3696,7 @@ async function runAgentHarness(
                 try {
                   await tracker.postIncompleteImplementationComment(
                     taskKey,
-                    stdoutOutput,
+                    withFallbackProvenance(stdoutOutput),
                     taskSummary,
                   );
                   recordIncompleteAttempt(
@@ -3606,7 +3781,7 @@ async function runAgentHarness(
               try {
                 await tracker.postIncompleteImplementationComment(
                   taskKey,
-                  stdoutOutput,
+                  withFallbackProvenance(stdoutOutput),
                   taskSummary,
                 );
                 recordIncompleteAttempt(
@@ -4244,7 +4419,19 @@ async function runAgentHarness(
         } else {
           console.log(`❌ Agent exited with non-zero code ${code}`);
           console.log("   No JIRA comment will be posted due to execution failure");
-          reject(new Error(`Agent exited with code ${code}`));
+          // Classify pre-work exits so the fallback coordinator can advance
+          // to the next configured harness when the failure is safe.
+          const classification = classifyExitFailure(stdoutOutput, stderrOutput);
+          reject(
+            classification
+              ? new AgentLaunchError(`Agent exited with code ${code}`, {
+                  classification,
+                  stdout: stdoutOutput,
+                  stderr: stderrOutput,
+                  exitCode: code,
+                })
+              : new Error(`Agent exited with code ${code}`),
+          );
         }
       });
     })().catch(reject);
