@@ -58,6 +58,7 @@ import { resolveOutputDir } from "./lib/output-dir";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
+import { ensureTrackerEnvConfigured } from "./lib/first-run";
 import { TaskTrackerManager } from "./lib/task-tracker-manager";
 import type { TaskTrackerClient } from "./lib/task-tracker-client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
@@ -2253,10 +2254,20 @@ async function main(): Promise<void> {
     }
 
     // Validate environment — skip when every argument is a local markdown file path
-    // (those tasks need no PM credentials)
+    // (those tasks need no PM credentials). With missing credentials in an
+    // interactive terminal, offer the setup wizard inline before failing.
     const needsTrackerEnv = options.query || taskKeys.some((k) => !isMarkdownFilePath(k));
     if (needsTrackerEnv) {
-      validateEnvironment();
+      const firstRun = await ensureTrackerEnvConfigured({
+        automated: isAutomatedEnvironment(),
+        runWizard: () => runInitWizard(),
+        reloadEnv: () => {
+          loadedEnvPath = loadEnvironment(options.envFile);
+        },
+      });
+      if (firstRun === "failed") {
+        validateEnvironment();
+      }
     }
 
     // License check — interactive use is free under FSL; only unattended

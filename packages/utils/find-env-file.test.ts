@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findConfigDir, findEnvFile } from "./src/find-env-file.ts";
+import { findConfigDir, findEnvFile, findProjectRoot } from "./src/find-env-file.ts";
 
 describe("findEnvFile", () => {
   let tempRoot: string;
@@ -187,5 +187,46 @@ describe("findConfigDir", () => {
   test("returns null when config dir is not found", () => {
     const result = findConfigDir({ startDir: tempRoot, configDirName: ".devintern-test" });
     expect(result).toBeNull();
+  });
+});
+
+describe("findProjectRoot", () => {
+  let tempRoot: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), "find-project-root-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempRoot;
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  test("finds the nearest .git directory walking up from a subdirectory", () => {
+    const projectDir = join(tempRoot, "project");
+    const childDir = join(projectDir, "packages", "app");
+    mkdirSync(childDir, { recursive: true });
+    mkdirSync(join(projectDir, ".git"), { recursive: true });
+
+    const result = findProjectRoot({ startDir: childDir });
+    expect(result).toBe(projectDir);
+  });
+
+  test("treats a .git file (worktree/submodule) as a repo root", () => {
+    const projectDir = join(tempRoot, "project");
+    const childDir = join(projectDir, "src");
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(join(projectDir, ".git"), "gitdir: elsewhere\n");
+
+    const result = findProjectRoot({ startDir: childDir });
+    expect(result).toBe(projectDir);
+  });
+
+  test("falls back to the start directory outside a repository", () => {
+    const result = findProjectRoot({ startDir: tempRoot });
+    expect(result).toBe(tempRoot);
   });
 });

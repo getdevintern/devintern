@@ -118,6 +118,27 @@ describe("scaffoldProject", () => {
       "OVERWRITTEN",
     );
   });
+
+  test("scaffolds at the repository root when run from a subdirectory", () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+
+    expect(scaffoldProject({ cwd: subDir })).toBe(true);
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
+  });
+
+  test("completes an existing config dir that has no .env, keeping other files", () => {
+    const configDir = join(tempDir, ".devintern-code");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "settings.json"), '{"custom":true}', "utf8");
+
+    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
+    expect(readFileSync(join(configDir, ".env"), "utf8")).toContain("TASK_TRACKER=jira");
+    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe('{"custom":true}');
+  });
 });
 
 describe("runInitWizard", () => {
@@ -178,6 +199,30 @@ describe("runInitWizard", () => {
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
+  });
+
+  test("writes config at the repository root when run from a subdirectory", async () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: subDir,
+      log: silentLog,
+    });
+
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
   });
 
   test("failed probe: retry then success", async () => {
@@ -433,6 +478,29 @@ describe("runInitWizard", () => {
     const { prompt, asked } = promptQueue([]);
     await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
     expect(asked).toHaveLength(0);
+  });
+
+  test("keeps guiding when the config folder exists but .env is missing", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("TASK_TRACKER=linear");
+    expect(env).toContain("LINEAR_API_KEY=lin_api_123");
   });
 
   test("post-setup: offers sign-in and reports success", async () => {

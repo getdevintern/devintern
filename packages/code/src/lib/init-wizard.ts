@@ -31,7 +31,7 @@ import {
   promptSteps,
   validateConnection,
 } from "@devintern/task-trackers";
-import { resolveConfigDir } from "@devintern/utils";
+import { findProjectRoot, resolveConfigDir } from "@devintern/utils";
 import {
   GITHUB_PR_DOCS,
   GITHUB_PR_TOKEN_STEP,
@@ -148,7 +148,7 @@ async function runPostSetup(
 
   // Readiness checklist over the freshly written configuration
   try {
-    const envPath = join(cwd, ".devintern-code", ".env");
+    const envPath = join(findProjectRoot({ startDir: cwd }), ".devintern-code", ".env");
     const envRecord = parseEnvContent(readFileSync(envPath, "utf8"));
     const checks = await collectReadinessChecks({
       env: { ...process.env, ...envRecord },
@@ -172,8 +172,11 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   log("🚀 Initializing @devintern/code for this project...");
 
-  const configDir = resolve(cwd, ".devintern-code");
-  if (existsSync(configDir)) {
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const configDir = resolve(projectRoot, ".devintern-code");
+  // A config folder without .env is an incomplete setup: keep guiding. Only
+  // refuse when credentials already exist (the scaffold never overwrites).
+  if (existsSync(join(configDir, ".env"))) {
     // Delegate to the scaffold's refusal message (it never overwrites).
     scaffoldProject({ cwd });
     return;
@@ -193,7 +196,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
     // Fast track: reuse tracker credentials from an existing @devintern/pm
     // config in the same project (env var names are shared).
-    const pmEnvPath = resolve(cwd, ".devintern-pm", ".env");
+    const pmEnvPath = resolve(projectRoot, ".devintern-pm", ".env");
     if (existsSync(pmEnvPath)) {
       const existing = extractExistingTrackerConfig(readFileSync(pmEnvPath, "utf8"), TRACKER_SETUP);
       if (existing) {

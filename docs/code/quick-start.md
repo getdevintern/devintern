@@ -61,7 +61,7 @@ devintern init --yes
 
 ## Connect Your Task Tracker
 
-The wizard handles credentials for you. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
+The wizard handles credentials for you. If you skip `init`, running a task in an unconfigured project from an interactive terminal offers to launch the guided setup inline before failing. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
 
 | Tracker            | When to use                                               | Setup guide                                                 |
 | ------------------ | --------------------------------------------------------- | ----------------------------------------------------------- |
