@@ -21,7 +21,9 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.2.16
+          # Keep in sync with the Bun used locally to generate bun.lock;
+          # an older pinned version rejects newer lockfiles under --frozen-lockfile.
+          bun-version: latest
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
