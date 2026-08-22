@@ -1309,6 +1309,31 @@ if (process.argv[2] === "init") {
     // scripts and CI can gate on 'devintern sandbox'.
     process.exit(report.nextRunFails ? 1 : 0);
   })();
+} else if (process.argv[2] === "doctor") {
+  // Readiness doctor: everything needed for a first successful run, with a
+  // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
+  (async () => {
+    const { collectReadinessChecks, renderReadinessReport } = await import("./lib/readiness");
+    loadedEnvPath = loadEnvironment();
+    let supabaseConfig;
+    try {
+      supabaseConfig = loadSupabaseConfig();
+    } catch {
+      supabaseConfig = undefined;
+    }
+    const checks = await collectReadinessChecks({ envPath: loadedEnvPath, supabaseConfig });
+    console.log("🩺 devintern readiness:\n");
+    const report = renderReadinessReport(checks);
+    console.log(report.lines.join("\n"));
+    if (report.hasFailures) {
+      console.log("\n❌ Not ready — fix the failed checks above.");
+    } else if (report.hasWarnings) {
+      console.log("\n✅ Ready to run (with the warnings above).");
+    } else {
+      console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
+    }
+    process.exit(report.hasFailures ? 1 : 0);
+  })();
 } else if (process.argv[2] === "whoami") {
   (async () => {
     const supabaseConfig = loadSupabaseConfig();
@@ -1442,8 +1467,10 @@ Subcommands:
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
-  sandbox              Sandbox doctor: providers, remaining setup steps, and what
-                       the next run will do (exit 1 if it would fail)
+   sandbox              Sandbox doctor: providers, remaining setup steps, and what
+                        the next run will do (exit 1 if it would fail)
+  doctor               Readiness check: runtime, git, agent CLI, tracker
+                        credentials, sign-in, license (exit 1 if anything fails)
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`,
 );
@@ -1461,6 +1488,7 @@ const isSubcommand = [
   "logout",
   "whoami",
   "sandbox",
+  "doctor",
 ].includes(process.argv[2]);
 if (!isSubcommand) {
   program.parse();

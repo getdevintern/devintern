@@ -253,6 +253,24 @@ SENTRY_DISABLED=1
 
 Set this in your shell environment or in `.devintern-code/.env`.
 
+## Readiness Check
+
+Run `devintern doctor` for a one-screen answer to "is everything set up?":
+
+```bash
+devintern doctor
+```
+
+It checks, in order:
+
+- **Bun runtime** and **Git** availability
+- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
+- **DevIntern sign-in**: local session validity (`devintern login` when missing)
+- **License**: entitlement status when signed in (only needed for unattended automation)
+
+Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+
 ## Output Directory
 
 By default, task artifacts are saved to `/tmp/devintern-tasks`. You can customize this:
