@@ -13,6 +13,7 @@ import {
   getRelatedWorkItems,
 } from "@devintern/task-trackers";
 import type { JiraIssue } from "@devintern/task-trackers";
+import { markdownToADFContent } from "@devintern/text-formatter";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -141,6 +142,15 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
   // ------------------------------------------------------------------
 
   async postComment(taskKey: string, content: TaskTrackerCommentContent): Promise<void> {
+    if (content.format === "markdown") {
+      // Jira renders comments as ADF, so raw markdown would appear as
+      // literal `**bold**` / backtick text. Convert before posting.
+      await this.jiraClient.postCommentADF(
+        taskKey,
+        markdownToADFContent(content.body, { includeTables: true }),
+      );
+      return;
+    }
     await this.jiraClient.postComment(taskKey, content.body);
   }
 
