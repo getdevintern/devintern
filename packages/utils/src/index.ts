@@ -1,5 +1,5 @@
 export { fetchWithRetry } from "./fetch-retry.ts";
-export { findConfigDir, findEnvFile, resolveConfigDir } from "./find-env-file.ts";
+export { findConfigDir, findEnvFile, findProjectRoot, resolveConfigDir } from "./find-env-file.ts";
 export {
   detectInstallKind,
   fetchLatestVersion,

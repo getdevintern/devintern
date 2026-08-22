@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
+import { findProjectRoot } from "@devintern/utils";
 import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
 import type { EnvPromptStep } from "@devintern/task-trackers";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
@@ -317,12 +318,17 @@ export interface ScaffoldOptions {
 /**
  * Scaffold `.devintern-code/` with env files, settings, and gitignore entries.
  *
+ * The scaffold always targets the enclosing repository root (found by walking
+ * up for `.git`), so running from a subdirectory of a monorepo does not nest
+ * the config inside that subdirectory. Falls back to `cwd` outside a repo.
+ *
  * @returns true when files were written, false when the config dir already
  * existed (nothing touched)
  */
 export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
   const cwd = options.cwd ?? process.cwd();
-  const configDir = resolve(cwd, ".devintern-code");
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const configDir = resolve(projectRoot, ".devintern-code");
   const envFile = join(configDir, ".env");
   const envSampleFile = join(configDir, ".env.example");
 
@@ -440,7 +446,7 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
   // committing. Credentials, the lock file, and local state (queue.db) are
   // covered by default, so a new state file never lands in git — or gets wiped
   // by `git clean`.
-  const gitignorePath = join(cwd, ".gitignore");
+  const gitignorePath = join(projectRoot, ".gitignore");
   const gitignoreEntries = [
     ".devintern-code/*",
     "!.devintern-code/settings.json",

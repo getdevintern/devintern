@@ -13,6 +13,7 @@
 
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { findProjectRoot } from "@devintern/utils";
 import {
   defaultProbe,
   extractExistingTrackerConfig,
@@ -55,7 +56,8 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   log("🚀 Initializing @devintern/code for this project...");
 
-  const configDir = resolve(cwd, ".devintern-code");
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const configDir = resolve(projectRoot, ".devintern-code");
   if (existsSync(configDir)) {
     // Delegate to the scaffold's refusal message (it never overwrites).
     scaffoldProject({ cwd });
@@ -76,7 +78,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
     // Fast track: reuse tracker credentials from an existing @devintern/pm
     // config in the same project (env var names are shared).
-    const pmEnvPath = resolve(cwd, ".devintern-pm", ".env");
+    const pmEnvPath = resolve(projectRoot, ".devintern-pm", ".env");
     if (existsSync(pmEnvPath)) {
       const existing = extractExistingTrackerConfig(readFileSync(pmEnvPath, "utf8"), TRACKER_SETUP);
       if (existing) {

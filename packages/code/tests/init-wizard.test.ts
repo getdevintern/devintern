@@ -109,6 +109,17 @@ describe("scaffoldProject", () => {
       "OVERWRITTEN",
     );
   });
+
+  test("scaffolds at the repository root when run from a subdirectory", () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+
+    expect(scaffoldProject({ cwd: subDir })).toBe(true);
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
+  });
 });
 
 describe("runInitWizard", () => {
@@ -160,6 +171,23 @@ describe("runInitWizard", () => {
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
+  });
+
+  test("writes config at the repository root when run from a subdirectory", async () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+    ]);
+
+    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: subDir, log: silentLog });
+
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
   });
 
   test("failed probe: retry then success", async () => {
