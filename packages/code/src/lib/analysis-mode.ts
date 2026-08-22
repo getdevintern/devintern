@@ -14,6 +14,8 @@
 import { isConstrainedMode, isModeSupported } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 
+import { resolveAgentModel } from "./agent-model";
+
 /**
  * When true, analysis spawns prefer harness `readonly`/`plan` modes (with
  * fallback). Currently off: read-only runs often fail with empty/non-JSON
@@ -58,6 +60,7 @@ export function analysisRunOptions(harness: AgentHarness, maxTurns: number): Age
       skipPermissions: false,
       workingDir: process.cwd(),
       ...(allowedTools.length > 0 ? { allowedTools } : {}),
+      ...(resolveAgentModel() ? { model: resolveAgentModel() } : {}),
     };
   }
   return defaultAnalysisRunOptions(maxTurns);
@@ -65,7 +68,13 @@ export function analysisRunOptions(harness: AgentHarness, maxTurns: number): Age
 
 /** The pre-DEV-24 unattended path used when read-only mode is unavailable or failed. */
 export function defaultAnalysisRunOptions(maxTurns: number): AgentRunOptions {
-  return { maxTurns, skipPermissions: true, workingDir: process.cwd() };
+  const model = resolveAgentModel();
+  return {
+    maxTurns,
+    skipPermissions: true,
+    workingDir: process.cwd(),
+    ...(model ? { model } : {}),
+  };
 }
 
 /**

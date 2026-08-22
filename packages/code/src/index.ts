@@ -41,8 +41,16 @@ import {
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
+import {
+  captureError,
+  findEnvFile,
+  flushErrorTracking,
+  initErrorTracking,
+  maybeOfferCliUpdate,
+  resolveConfigDir,
+} from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
+import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
@@ -380,6 +388,14 @@ let loadedEnvPath: string | null = null;
  * @returns Path to the loaded .env file, or `null` if none was found
  */
 function loadEnvironment(envFile?: string): string | null {
+  const loaded = loadEnvironmentInner(envFile);
+  // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
+  // loading has had its chance to populate it.
+  initSentryOnce();
+  return loaded;
+}
+
+function loadEnvironmentInner(envFile?: string): string | null {
   // If user specified a custom env file, use that first
   if (envFile) {
     const customEnvPath = resolve(envFile);
@@ -420,6 +436,17 @@ function loadEnvironment(envFile?: string): string | null {
 function loadSupabaseConfig() {
   const configDir = resolveConfigDir({ configDirName: ".devintern-code" });
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
+}
+
+// Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
+let sentryInitialized = false;
+function initSentryOnce(): void {
+  if (sentryInitialized) return;
+  sentryInitialized = true;
+  initErrorTracking({
+    release: `code@${VERSION}`,
+    environment: process.env.NODE_ENV ?? "production",
+  });
 }
 
 // Migrate legacy config directory on startup
@@ -1283,6 +1310,31 @@ if (process.argv[2] === "init") {
     // scripts and CI can gate on 'devintern sandbox'.
     process.exit(report.nextRunFails ? 1 : 0);
   })();
+} else if (process.argv[2] === "doctor") {
+  // Readiness doctor: everything needed for a first successful run, with a
+  // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
+  (async () => {
+    const { collectReadinessChecks, renderReadinessReport } = await import("./lib/readiness");
+    loadedEnvPath = loadEnvironment();
+    let supabaseConfig;
+    try {
+      supabaseConfig = loadSupabaseConfig();
+    } catch {
+      supabaseConfig = undefined;
+    }
+    const checks = await collectReadinessChecks({ envPath: loadedEnvPath, supabaseConfig });
+    console.log("🩺 devintern readiness:\n");
+    const report = renderReadinessReport(checks);
+    console.log(report.lines.join("\n"));
+    if (report.hasFailures) {
+      console.log("\n❌ Not ready — fix the failed checks above.");
+    } else if (report.hasWarnings) {
+      console.log("\n✅ Ready to run (with the warnings above).");
+    } else {
+      console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
+    }
+    process.exit(report.hasFailures ? 1 : 0);
+  })();
 } else if (process.argv[2] === "whoami") {
   (async () => {
     const supabaseConfig = loadSupabaseConfig();
@@ -1416,8 +1468,10 @@ Subcommands:
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
-  sandbox              Sandbox doctor: providers, remaining setup steps, and what
-                       the next run will do (exit 1 if it would fail)
+   sandbox              Sandbox doctor: providers, remaining setup steps, and what
+                        the next run will do (exit 1 if it would fail)
+  doctor               Readiness check: runtime, git, agent CLI, tracker
+                        credentials, sign-in, license (exit 1 if anything fails)
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`,
 );
@@ -1435,6 +1489,7 @@ const isSubcommand = [
   "logout",
   "whoami",
   "sandbox",
+  "doctor",
 ].includes(process.argv[2]);
 if (!isSubcommand) {
   program.parse();
@@ -1513,6 +1568,52 @@ class UsageLimitError extends Error {
   }
 }
 
+// Context for the task currently being processed, so signal handlers and
+// error paths can leave feedback on the ticket instead of failing silently
+// with the task stranded in "In Progress".
+let activeTaskContext: {
+  taskKey: string;
+  tracker: TaskTrackerClient;
+  projectKey: string;
+  movedToInProgress: boolean;
+} | null = null;
+
+/**
+ * Best-effort failure feedback: post a comment explaining why no pull request
+ * was created and move the ticket back to its To Do status so the next
+ * scheduled run can retry. Never throws — feedback must not mask the
+ * original error.
+ */
+async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
+  const context = activeTaskContext;
+  if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
+
+  const { tracker, projectKey } = context;
+  try {
+    await tracker.postComment(taskKey, {
+      format: "markdown",
+      body:
+        `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
+        `**Reason:** ${reason}\n\n` +
+        `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.`,
+    });
+    console.log(`💬 Posted a failure comment to ${taskKey}`);
+  } catch (commentError) {
+    console.warn(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
+  }
+
+  if (!context.movedToInProgress) return;
+  try {
+    const todoStatus = getTodoStatusForProject(projectKey, loadProjectSettings());
+    if (todoStatus && todoStatus.trim()) {
+      await tracker.transitionStatus(taskKey, todoStatus.trim());
+      console.log(`🔄 Moved ${taskKey} back to '${todoStatus}' so it can be retried`);
+    }
+  } catch (transitionError) {
+    console.warn(`⚠️  Failed to move ${taskKey} back to To Do: ${transitionError}`);
+  }
+}
+
 /**
  * Run the full implementation workflow for one JIRA task key.
  *
@@ -1550,6 +1651,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Load project settings to get status transitions
     const projectSettings = loadProjectSettings();
     const projectKey = resolveProjectKey(workflowKey, task);
+    activeTaskContext = {
+      taskKey: workflowKey,
+      tracker,
+      projectKey,
+      movedToInProgress: false,
+    };
 
     // Fetch comments before the retry gate: a new comment since the last
     // incomplete attempt counts as a clarification and unlocks a retry.
@@ -1949,6 +2056,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.log(`\n🔄 Transitioning ${workflowKey} to '${inProgressStatus}'...`);
           await tracker.transitionStatus(workflowKey, inProgressStatus.trim());
           console.log(`✅ Task moved to '${inProgressStatus}'`);
+          if (activeTaskContext && activeTaskContext.taskKey === workflowKey) {
+            activeTaskContext.movedToInProgress = true;
+          }
         } catch (statusError) {
           console.warn(
             `⚠️  Failed to transition task to '${inProgressStatus}': ${
@@ -2056,12 +2166,20 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
+    activeTaskContext = null;
   } catch (error) {
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
       endRun("deferred", error.message);
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
+      // The ticket may already be "In Progress": leave feedback and move it
+      // back so the deferred retry can actually pick it up.
+      try {
+        await reportProcessingFailure(taskKey, `${error.message} (usage limit)`);
+      } catch {
+        /* best-effort */
+      }
       if (totalTasks > 1) {
         throw error;
       }
@@ -2079,6 +2197,15 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.error(err.stack);
     }
 
+    // Leave feedback on the ticket so a failed run never ends silently with
+    // the task stranded in "In Progress" and no PR.
+    try {
+      await reportProcessingFailure(taskKey, err.message);
+    } catch {
+      /* best-effort */
+    }
+    activeTaskContext = null;
+
     // For batch processing, throw the error to be handled by the main function
     // For single task processing, exit immediately
     if (totalTasks > 1) {
@@ -2094,6 +2221,8 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
+    initSentryOnce();
+
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
     const lockResult = lockManager.acquire();
@@ -3325,6 +3454,7 @@ async function runAgentHarness(
         maxTurns,
         skipPermissions: true,
         workingDir: process.cwd(),
+        model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
@@ -3906,6 +4036,7 @@ async function runAgentHarness(
                       maxTurns,
                       skipPermissions: true,
                       workingDir: process.cwd(),
+                      model: resolveAgentModel(),
                     });
                     const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
                       displayName: harness.displayName,
@@ -4193,28 +4324,49 @@ process.on("unhandledRejection", (error: Error) => {
   if (options.verbose && error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Handle process termination signals
-process.on("SIGINT", () => {
-  console.log("\n\n⚠️  Received SIGINT (Ctrl+C), cleaning up...");
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
+  // If a task is mid-flight, tell the tracker it was interrupted instead of
+  // leaving it silently in "In Progress" with no PR and no feedback.
+  const context = activeTaskContext;
+  if (context) {
+    // Bound the feedback attempt so tracker I/O can never stall shutdown.
+    const shutdownTimer = setTimeout(() => process.exit(exitCode), 15_000);
+    try {
+      await reportProcessingFailure(
+        context.taskKey,
+        `Processing was interrupted (${signal}) before a pull request could be created`,
+      );
+    } catch {
+      /* best-effort: never block shutdown on tracker I/O */
+    }
+    clearTimeout(shutdownTimer);
+  }
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(130); // Standard exit code for SIGINT
+  process.exit(exitCode);
+}
+
+process.on("SIGINT", () => {
+  void gracefulShutdown("SIGINT", 130); // Standard exit code for SIGINT
 });
 
 process.on("SIGTERM", () => {
-  console.log("\n\n⚠️  Received SIGTERM, cleaning up...");
-  if (lockManager) {
-    lockManager.release();
-  }
-  process.exit(143); // Standard exit code for SIGTERM
+  void gracefulShutdown("SIGTERM", 143); // Standard exit code for SIGTERM
 });
 
 // Handle uncaught exceptions
@@ -4223,11 +4375,12 @@ process.on("uncaughtException", (error: Error) => {
   if (error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Run the main function (only if not running a subcommand)

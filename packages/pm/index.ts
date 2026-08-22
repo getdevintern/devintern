@@ -25,7 +25,13 @@ import {
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
-import { maybeOfferCliUpdate } from "@devintern/utils";
+import {
+  captureError,
+  flushErrorTracking,
+  initErrorTracking,
+  maybeOfferCliUpdate,
+  resolveConfigDir,
+} from "@devintern/utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -43,6 +49,20 @@ function readPackageVersion(): string {
 }
 
 const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : readPackageVersion();
+
+/** Read SENTRY_DISABLED from `.devintern-pm/.env` before Sentry init. */
+function applySentryOptOutFromEnvFile(): void {
+  if (process.env.SENTRY_DISABLED === "1") return;
+  try {
+    const configDir = resolveConfigDir({ configDirName: ".devintern-pm" });
+    const content = readFileSync(join(configDir, ".env"), "utf8");
+    const match = /^SENTRY_DISABLED=(.*)$/m.exec(content);
+    const value = match?.[1]?.trim().replace(/^["']|["']$/g, "");
+    if (value === "1") process.env.SENTRY_DISABLED = "1";
+  } catch {
+    // No config dir or unreadable .env — shell env only.
+  }
+}
 
 /** Extract the last non-empty line from an agent stderr chunk for status display. */
 function lastStderrLine(chunk: string): string | undefined {
@@ -104,6 +124,13 @@ async function main() {
 
   // Migrate legacy .claude-pm directory to .devintern-pm if needed
   await migrateLegacyConfigDir();
+
+  // Sentry error tracking — baked-in DSN unless SENTRY_DISABLED=1 (shell or .env).
+  applySentryOptOutFromEnvFile();
+  initErrorTracking({
+    release: `pm@${VERSION}`,
+    environment: process.env.NODE_ENV ?? "production",
+  });
 
   // Parse arguments - null means interactive mode, 'init' means run initialization.
   // Help exits inside parseArgs before any update check.
@@ -202,7 +229,10 @@ async function main() {
     });
 
     const engine: PmEngine = await createEngine(configForInteractive, {
-      model: parsedArgs?.model,
+      // loadConfig() has already loaded .devintern-pm/.env into process.env,
+      // so AGENT_MODEL from the project config is visible here. The --model
+      // flag wins over the environment.
+      model: parsedArgs?.model ?? process.env.AGENT_MODEL,
     });
 
     if (parsedArgs === null) {
@@ -396,7 +426,9 @@ async function main() {
       console.log("\nBye!");
       process.exit(0);
     }
+    captureError(error);
     console.error("\n❌ Error:", error instanceof Error ? error.message : error);
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -796,6 +828,19 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     process.exit(1);
   }
 }
+
+// Global error handlers — report to Sentry (when configured), then exit.
+process.on("unhandledRejection", (reason: unknown) => {
+  console.error("\n❌ Unhandled error:", reason instanceof Error ? reason.message : reason);
+  captureError(reason);
+  void flushErrorTracking().finally(() => process.exit(1));
+});
+
+process.on("uncaughtException", (error: Error) => {
+  console.error("\n❌ Uncaught exception:", error.message);
+  captureError(error);
+  void flushErrorTracking().finally(() => process.exit(1));
+});
 
 // Run CLI mode
 main();

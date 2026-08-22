@@ -98,6 +98,11 @@ export interface ProjectStatus {
   /** Active harness registry id (e.g. `claude-code`), when config loaded. */
   activeHarnessName?: string;
   /**
+   * Active `AGENT_MODEL` override (harness-specific string), when set in
+   * `.devintern-pm/.env`. Empty/unset means the harness default model.
+   */
+  activeModel?: string;
+  /**
    * Installed/valid harnesses offered by the header switcher. Includes the
    * active harness even when PATH detection would miss a custom CLI path.
    */
@@ -405,6 +410,11 @@ export interface PmDesktopApi {
    */
   switchHarness(harnessName: string): Promise<IpcResult<ProjectStatus>>;
   /**
+   * Persist `AGENT_MODEL` (harness-specific string; empty clears) and reload
+   * the session. Open tickets are kept; subsequent agent actions use it.
+   */
+  switchModel(model: string): Promise<IpcResult<ProjectStatus>>;
+  /**
    * Fetch the project remote and fast-forward when clean or PM soft-dirty.
    * Soft-dirty must not block; hard-dirty skips with a clear message.
    */
@@ -470,6 +480,7 @@ export const IPC_CHANNELS = {
   switchTracker: "pm:switch-tracker",
   switchProjectKey: "pm:switch-project-key",
   switchHarness: "pm:switch-harness",
+  switchModel: "pm:switch-model",
   updateProjectFromRemote: "pm:update-project-from-remote",
   agentChunk: "pm:agent-chunk",
   showAbout: "pm:show-about",

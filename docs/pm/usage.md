@@ -72,7 +72,7 @@ devpm --prompt <text> [options]
 - `--style, -s <type>`: Prompt style: "pm" (default) or "technical"
   - **pm**: Focuses on user stories and acceptance criteria
   - **technical**: Includes Technical Considerations section
-- `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name)
+- `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
 - `--decompose`: Decompose the story into subtasks (default: off)
 - `--confirm`: Interactively confirm each subtask before creating
 - `--verbose, -v`: Enable verbose API logging for debugging (same as setting `DEVINTERN_VERBOSE=1`)

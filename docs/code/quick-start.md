@@ -48,6 +48,9 @@ In a terminal, this starts an interactive setup wizard that:
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Offers an optional GitHub token for pull request creation
+- Detects installed AI agent CLIs (and warns with install steps when none are found)
+- Offers to sign in to DevIntern on the spot (`devintern login` equivalent)
+- Finishes with a readiness checklist so your first run cannot fail on something setup could have caught
 - Writes your answers to `.devintern-code/.env`, creates `settings.json` for per-project configuration, and adds a whitelist block to your `.gitignore` (`.devintern-code/*` plus `!settings.json` and `!.env.example` exceptions) so credentials and local run state never get committed, while `settings.json` and the `.env.example` template stay trackable
 
 For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write a commented configuration template instead:
@@ -77,6 +80,8 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
 
 ## First Run
+
+Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
 
 Run `devintern` with a task reference from your configured tracker:
 

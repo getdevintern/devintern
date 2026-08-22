@@ -84,7 +84,7 @@
     "@devintern/task-trackers": "workspace:*",
     "@devintern/text-formatter": "workspace:*",
     "@devintern/utils": "workspace:*",
-    "@types/bun": "latest"
+    "@types/bun": "1.4.0"
   },
   "peerDependencies": {
     "typescript": "^5"

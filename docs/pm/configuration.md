@@ -160,7 +160,20 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
-**Qwen note:** Qwen Code has no `--model` flag; pick the model in `~/.qwen/settings.json`.
+**Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
+
+### Model selection
+
+Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-pm/.env`:
+
+```bash
+# .devintern-pm/.env
+AGENT_MODEL=sonnet
+```
+
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). For a single run, override it with `--model <model>`; the flag wins over the environment. A few harnesses have no model flag and ignore the setting.
+
+In the DevIntern PM desktop app, set the same override per project from **Settings → Agent model**; it persists to `.devintern-pm/.env` (same file the CLI reads) and applies to new agent runs immediately.
 
 **Advanced spawn tuning** (rarely needed):
 
@@ -195,6 +208,16 @@ When set to `1` or `true`, every API request, response status, and retry attempt
 @devintern/pm searches for `.devintern-pm/.env` by traversing up from the current working directory to the project root (the nearest `.git` directory or your home directory). You can run `devpm` from any subdirectory of your project and it will find the correct config automatically.
 
 Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
+
+## Error Reporting
+
+The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+
+```bash
+SENTRY_DISABLED=1
+```
+
+Set this in your shell environment or in `.devintern-pm/.env`.
 
 ## CLI Updates
 
