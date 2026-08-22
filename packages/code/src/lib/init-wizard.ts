@@ -58,7 +58,9 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   const projectRoot = findProjectRoot({ startDir: cwd });
   const configDir = resolve(projectRoot, ".devintern-code");
-  if (existsSync(configDir)) {
+  // A config folder without .env is an incomplete setup: keep guiding. Only
+  // refuse when credentials already exist (the scaffold never overwrites).
+  if (existsSync(join(configDir, ".env"))) {
     // Delegate to the scaffold's refusal message (it never overwrites).
     scaffoldProject({ cwd });
     return;
