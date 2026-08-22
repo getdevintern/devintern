@@ -1,9 +1,11 @@
 import { describe, test, expect } from "bun:test";
 import {
+  formatCiFixPrompt,
   formatReviewPrompt,
   formatReplyMessage,
   formatSingleCommentPrompt,
 } from "../src/lib/review-formatter";
+import type { CiFailureFeedback } from "../src/lib/review-formatter";
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../src/types/github-webhooks";
 
 describe("Review Formatter", () => {
@@ -240,6 +242,43 @@ describe("Review Formatter", () => {
       const prompt = formatSingleCommentPrompt(comment, "owner/repo", "main");
 
       expect(prompt).not.toContain("Line:");
+    });
+  });
+
+  describe("formatCiFixPrompt", () => {
+    const baseFeedback: CiFailureFeedback = {
+      repository: "acme/widgets",
+      prNumber: 42,
+      prTitle: "Add widget",
+      branch: "feature/dev-1",
+      failures: [
+        { name: "build", conclusion: "failure" },
+        { name: "ci/travis", conclusion: "error", detailsUrl: "https://ci.example.com/1" },
+      ],
+      logs: "ERROR: cannot find module 'x'",
+    };
+
+    test("includes failing checks and log excerpt", () => {
+      const prompt = formatCiFixPrompt(baseFeedback);
+
+      expect(prompt).toContain("CI Failure");
+      expect(prompt).toContain("**build** — `failure`");
+      expect(prompt).toContain("**ci/travis** — `error` (https://ci.example.com/1)");
+      expect(prompt).toContain("ERROR: cannot find module 'x'");
+    });
+
+    test("explains when logs are unavailable", () => {
+      const prompt = formatCiFixPrompt({ ...baseFeedback, logs: null });
+
+      expect(prompt).not.toContain("Failure Logs (excerpt)");
+      expect(prompt).toContain("Job logs were not available");
+    });
+
+    test("instructs the agent not to push and to flag flaky infra", () => {
+      const prompt = formatCiFixPrompt(baseFeedback);
+
+      expect(prompt).toContain("Do NOT push");
+      expect(prompt).toContain("flaky infrastructure");
     });
   });
 });

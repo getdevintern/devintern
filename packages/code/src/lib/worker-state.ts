@@ -33,6 +33,17 @@ export interface AgentPr {
   updatedAt: number;
 }
 
+/** Consecutive-CI-autofix bookkeeping for one agent PR. */
+export interface CiFixState {
+  /** Fix attempts made since the last CI pass / escalation reset. */
+  consecutiveFailures: number;
+  /**
+   * Head SHA at which retry budget was exhausted and a human was pinged.
+   * Any head move past this SHA clears the block.
+   */
+  escalatedSha?: string;
+}
+
 /**
  * Parse an `owner/repo` slug and PR number from a GitHub PR URL.
  *
@@ -103,6 +114,17 @@ export class WorkerState {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_agent_prs_state
       ON agent_prs(state)
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ci_fix_state (
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        escalated_sha TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (repo, pr_number)
+      )
     `);
   }
 
@@ -238,6 +260,47 @@ export class WorkerState {
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ? WHERE repo = ? AND pr_number = ?`,
       [Date.now(), repo, prNumber],
+    );
+  }
+
+  /**
+   * Read the CI-autofix retry bookkeeping for an agent PR.
+   *
+   * @param repo - Repo slug
+   * @param prNumber - PR number
+   */
+  getCiFixState(repo: string, prNumber: number): CiFixState {
+    const row = this.db
+      .query(
+        `SELECT consecutive_failures, escalated_sha FROM ci_fix_state
+         WHERE repo = ? AND pr_number = ?`,
+      )
+      .get(repo, prNumber) as Record<string, unknown> | null;
+    if (!row) {
+      return { consecutiveFailures: 0 };
+    }
+    return {
+      consecutiveFailures: row.consecutive_failures as number,
+      escalatedSha: (row.escalated_sha as string | null) ?? undefined,
+    };
+  }
+
+  /**
+   * Store the CI-autofix retry bookkeeping for an agent PR (upsert).
+   *
+   * @param repo - Repo slug
+   * @param prNumber - PR number
+   * @param state - New attempt count and/or escalation marker
+   */
+  setCiFixState(repo: string, prNumber: number, state: CiFixState): void {
+    this.db.run(
+      `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, escalated_sha, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(repo, pr_number) DO UPDATE SET
+         consecutive_failures = excluded.consecutive_failures,
+         escalated_sha = excluded.escalated_sha,
+         updated_at = excluded.updated_at`,
+      [repo, prNumber, state.consecutiveFailures, state.escalatedSha ?? null, Date.now()],
     );
   }
 

@@ -81,7 +81,7 @@ export function StatsView() {
             <StatTile
               label="Runs"
               value={stats.totals.runs}
-              hint={`${stats.byOrigin.task} task${stats.byOrigin.task === 1 ? "" : "s"}, ${stats.byOrigin.pr_mention} PR mention${stats.byOrigin.pr_mention === 1 ? "" : "s"}`}
+              hint={`${stats.byOrigin.task} task${stats.byOrigin.task === 1 ? "" : "s"}, ${stats.byOrigin.pr_mention} PR mention${stats.byOrigin.pr_mention === 1 ? "" : "s"}, ${stats.byOrigin.ci_fix} CI fix${stats.byOrigin.ci_fix === 1 ? "" : "es"}`}
             />
             <StatTile
               label="Success rate"

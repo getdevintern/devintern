@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-17
+dateModified: 2026-08-23
 ---
 
 # Worker Daemon
@@ -94,6 +94,20 @@ The polling is cheap: requests use ETags, and GitHub does not count `304 Not Mod
 When a watched PR falls behind its base branch and GitHub reports merge conflicts, the worker catches the branch up automatically: it merges the base branch into the PR branch, and if the merge conflicts, the agent resolves the conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected and the merge is abandoned for them to handle. A comment on the PR reports what happened either way, and stacked PRs benefit the most, since merging one PR routinely conflicts the next one in the chain.
 
 This applies only to the agent's own PRs (the same watch list as review polling). Each conflict state is attempted once: a failed resolution is retried only after the branch or its base moves again. The same logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+
+## CI failures on the agent's PRs
+
+The worker also watches GitHub Actions check runs and commit statuses on the agent's own PRs and fixes them without human intervention. When a check run completes with a `failure` conclusion (or a classic commit status reports failure) on the PR's current head SHA, the worker fetches the failing jobs' logs, reduces them to the error-relevant excerpt, and runs the agent through the same pipeline review feedback uses: worktree prep, sandboxed spawn, commit, push. The push restarts CI, closing the loop from "agent opened PR" to "PR green".
+
+Guardrails keep a red build from turning into churn:
+
+- Only terminal failures trigger a fix — pending and in-progress runs are ignored (the agent's own pushes constantly restart CI).
+- A given failure is fixed at most once: attempts dedupe per head SHA plus check run id, and the mapping survives worker restarts.
+- Consecutive failed autofix attempts are capped per PR (`CI_FIX_MAX_ATTEMPTS`, default 3). On exhaustion the worker posts a comment escalating to a human and stops retrying until someone pushes to the branch; CI going green resets the counter.
+- Fork PRs are skipped quietly (Actions rarely runs on forks, and the agent cannot push there).
+- When job logs cannot be downloaded (token scope, expired logs), the watcher falls back to the check run's annotations before giving up and letting the agent reproduce the failure locally.
+
+The same fix runs execute under your configured sandbox settings (`AGENT_SANDBOX`, `--sandbox`) exactly like review-feedback runs, and each attempt is recorded in the dashboard with the `ci_fix` origin. Downloading Actions job logs needs sufficient token scope (a PAT with `repo`, or a GitHub App with `actions:read`).
 
 ## Mention the bot on any PR
 

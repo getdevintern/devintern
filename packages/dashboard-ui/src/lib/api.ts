@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type RunOrigin = "task" | "pr_mention";
+export type RunOrigin = "task" | "pr_mention" | "ci_fix";
 
 export type RunStatus =
   | "in_progress"

@@ -45,6 +45,65 @@ export interface FileContent {
   sha: string;
 }
 
+/** Actions check run on a commit (subset of the API shape the watcher needs). */
+export interface CheckRunSummary {
+  id: number;
+  name: string;
+  /** `queued`, `in_progress`, or `completed`. */
+  status: string;
+  /** Terminal outcome; null while the run is still executing. */
+  conclusion: string | null;
+  html_url?: string;
+  details_url?: string;
+  /** The workflow run this check belongs to (for job/log lookup). */
+  check_suite?: { id: number };
+}
+
+/** Classic commit status (non-Actions CI reporter). */
+export interface CombinedStatus {
+  state: "error" | "failure" | "pending" | "success";
+  total_count: number;
+  statuses: Array<{
+    id: number;
+    state: string;
+    context?: string;
+    target_url?: string | null;
+    description?: string | null;
+  }>;
+}
+
+/** One job of an Actions workflow run. */
+export interface ActionJob {
+  id: number;
+  run_id?: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  /** Download URL for the job's log archive. */
+  logs_url?: string;
+  steps?: Array<{
+    name: string;
+    number: number;
+    conclusion: string | null;
+  }>;
+}
+
+/** Actions workflow run associated with a commit SHA (subset). */
+export interface WorkflowRunSummary {
+  id: number;
+  name?: string;
+  status?: string;
+  conclusion: string | null;
+}
+
+/** Annotation attached to a check run (log-download fallback). */
+export interface CheckAnnotation {
+  path?: string;
+  start_line?: number;
+  message: string;
+  annotation_level?: string;
+}
+
 /**
  * Client for interacting with GitHub's PR review APIs.
  */
@@ -683,6 +742,157 @@ export class GitHubReviewsClient {
       // File might not exist in this ref
       return null;
     }
+  }
+
+  /**
+   * Fetch the Actions check runs for a commit SHA (ETag-cached).
+   *
+   * A `304 Not Modified` response does not count against the rate limit,
+   * which makes per-tick polling of many watched PRs cheap.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param sha - Commit SHA (usually the PR head)
+   * @param etag - ETag from the previous response, if any
+   */
+  async getCheckRuns(
+    owner: string,
+    repo: string,
+    sha: string,
+    etag?: string,
+  ): Promise<{
+    data: CheckRunSummary[] | null;
+    etag?: string;
+    notModified: boolean;
+  }> {
+    const result = await this.conditionalGet<{
+      total_count: number;
+      check_runs: CheckRunSummary[];
+    }>(`/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=100`, owner, repo, etag);
+    return {
+      data: result.data ? result.data.check_runs : null,
+      etag: result.etag,
+      notModified: result.notModified,
+    };
+  }
+
+  /**
+   * Fetch the combined commit status for a SHA (ETag-cached).
+   *
+   * Covers classic commit statuses (non-Actions CI reporters).
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param sha - Commit SHA (usually the PR head)
+   * @param etag - ETag from the previous response, if any
+   */
+  async getCombinedStatus(
+    owner: string,
+    repo: string,
+    sha: string,
+    etag?: string,
+  ): Promise<{ data: CombinedStatus | null; etag?: string; notModified: boolean }> {
+    return this.conditionalGet<CombinedStatus>(
+      `/repos/${owner}/${repo}/commits/${sha}/status`,
+      owner,
+      repo,
+      etag,
+    );
+  }
+
+  /**
+   * Fetch the Actions jobs of a workflow run (to locate failing jobs).
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param runId - Workflow run id
+   */
+  async getWorkflowRunJobs(owner: string, repo: string, runId: number): Promise<ActionJob[]> {
+    const data = await this.apiRequest<{ jobs: ActionJob[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+      owner,
+      repo,
+    );
+    return data.jobs;
+  }
+
+  /**
+   * List Actions workflow runs for a commit SHA.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param sha - Commit SHA (usually the PR head)
+   */
+  async getWorkflowRunsForSha(
+    owner: string,
+    repo: string,
+    sha: string,
+  ): Promise<WorkflowRunSummary[]> {
+    const data = await this.apiRequest<{ workflow_runs: WorkflowRunSummary[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${sha}&per_page=20`,
+      owner,
+      repo,
+    );
+    return data.workflow_runs;
+  }
+
+  /**
+   * Download the log archive text of one Actions job.
+   *
+   * The job's `logs_url` answers with a redirect to log storage; plain
+   * authenticated GET follows it and yields plain text.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param logsUrl - Absolute `logs_url` of the job
+   * @returns Log text, or `null` on 403/404 (insufficient scope or expired)
+   */
+  async getJobLogs(owner: string, repo: string, logsUrl: string): Promise<string | null> {
+    let token: string | null;
+    try {
+      token = await this.getToken(owner, repo);
+    } catch {
+      return null;
+    }
+    const response = await Utils.fetchWithRetry(logsUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "devintern",
+      },
+      // Logs live behind a redirect to storage; follow it.
+      redirect: "follow",
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return response.text();
+  }
+
+  /**
+   * Fetch annotations of one check run.
+   *
+   * Used as a fallback when job-log download fails (403/404): annotations
+   * carry the lint/test failure messages GitHub surfaced on the check.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param checkRunId - Check run id
+   */
+  async getCheckRunAnnotations(
+    owner: string,
+    repo: string,
+    checkRunId: number,
+  ): Promise<CheckAnnotation[]> {
+    return this.apiRequest<CheckAnnotation[]>(
+      "GET",
+      `/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`,
+      owner,
+      repo,
+    );
   }
 
   /**

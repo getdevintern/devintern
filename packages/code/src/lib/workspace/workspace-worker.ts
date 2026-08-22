@@ -365,6 +365,7 @@ async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetCiFix,
     createFleetMentionHandler,
     createFleetTaskEvaluator,
     fleetGitHubSlugs,
@@ -420,6 +421,68 @@ async function buildFleetEventAcquirers(options: {
           },
         },
         addressPr,
+        verbose,
+      }),
+    );
+
+    // Tier 1: auto-fix CI failures on those same PRs. Fix runs execute as
+    // CLI subprocesses in each repo's base worktree with per-repo env.
+    const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
+    const fixPr = createFleetCiFix(eventDeps);
+    acquirers.push(
+      new CiFailureWatcherAcquirer({
+        intervalSeconds,
+        workerState: state.workerState,
+        queue: state.queue,
+        github: {
+          fetchPr: (repo, n, etag) =>
+            gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
+          fetchCheckRuns: (repo, sha, etag) =>
+            gh.getCheckRuns(ownerOf(repo), nameOf(repo), sha, etag),
+          fetchCommitStatus: (repo, sha, etag) =>
+            gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+          fetchFailingJobLogs: async (repo, sha) => {
+            const [owner, name] = repo.split("/") as [string, string];
+            const runs = await gh
+              .getWorkflowRunsForSha(owner, name, sha)
+              .catch(() => [] as Awaited<ReturnType<typeof gh.getWorkflowRunsForSha>>);
+            const chunks: string[] = [];
+            for (const run of runs.slice(0, 3)) {
+              const jobs = await gh.getWorkflowRunJobs(owner, name, run.id).catch(() => []);
+              for (const job of jobs.filter((j) => j.conclusion === "failure").slice(0, 5)) {
+                if (!job.logs_url) {
+                  continue;
+                }
+                const text = await gh.getJobLogs(owner, name, job.logs_url).catch(() => null);
+                if (text) {
+                  chunks.push(`## Job: ${job.name}\n${text}`);
+                }
+              }
+            }
+            return chunks.length > 0 ? chunks.join("\n\n") : null;
+          },
+          fetchCheckRunDetails: async (repo, checkRunId) => {
+            try {
+              const annotations = await gh.getCheckRunAnnotations(
+                ownerOf(repo),
+                nameOf(repo),
+                checkRunId,
+              );
+              if (annotations.length === 0) {
+                return null;
+              }
+              return annotations
+                .map((a) => `${a.path ? `${a.path}: ` : ""}${a.message}`)
+                .join("\n");
+            } catch {
+              return null;
+            }
+          },
+          postComment: async (repo, n, body) => {
+            await gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body);
+          },
+        },
+        fixPr: (slug, prNumber, feedbackPath) => fixPr(slug, prNumber, feedbackPath),
         verbose,
       }),
     );

@@ -12,6 +12,7 @@
  */
 
 import { runAddressReviewViaCli } from "../review-polling-acquirer";
+import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -27,6 +28,13 @@ export interface FleetEventDeps {
   runReview?: (
     repo: string,
     prNumber: number,
+    opts: { cwd: string; env: Record<string, string | undefined> },
+  ) => Promise<boolean>;
+  /** CI-fix runner (injected for tests; defaults to the CLI subprocess). */
+  runCiFix?: (
+    repo: string,
+    prNumber: number,
+    feedbackPath: string,
     opts: { cwd: string; env: Record<string, string | undefined> },
   ) => Promise<boolean>;
   verbose?: boolean;
@@ -79,6 +87,36 @@ export function createFleetAddressPr(
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
     return runReview(slug, prNumber, {
+      cwd: base,
+      env: buildRepoEnv(repo, workspaceDir),
+    });
+  };
+}
+
+/**
+ * Build the fleet CI-fix runner: auto-fix failing checks on an agent PR from
+ * the repo's base worktree, mirroring {@link createFleetAddressPr}.
+ *
+ * @returns Handler resolving false when the slug maps to no workspace repo.
+ */
+export function createFleetCiFix(
+  deps: FleetEventDeps,
+): (slug: string, prNumber: number, feedbackPath: string) => Promise<boolean> {
+  const { config, workspaceDir, repoManager } = deps;
+  const runCiFix = deps.runCiFix ?? runCiFixViaCli;
+
+  return async (slug, prNumber, feedbackPath) => {
+    const repo = repoBySlug(config, slug);
+    if (!repo) {
+      console.warn(
+        `⚠️  [fleet] CI failure for ${slug}#${prNumber} matches no workspace repo; skipping.`,
+      );
+      return false;
+    }
+    await repoManager.ensureBareClone(repo);
+    await repoManager.fetch(repo.name);
+    const base = await repoManager.ensureBaseWorktree(repo);
+    return runCiFix(slug, prNumber, feedbackPath, {
       cwd: base,
       env: buildRepoEnv(repo, workspaceDir),
     });

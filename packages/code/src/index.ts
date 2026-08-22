@@ -609,6 +609,8 @@ if (process.argv[2] === "init") {
         console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
         console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
         console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
+        console.log("  CI_FIX_MAX_ATTEMPTS  Consecutive CI autofix attempts per PR before");
+        console.log("                       escalating to a human (default: 3)");
         console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
         process.exit(0);
       }
@@ -742,6 +744,70 @@ if (process.argv[2] === "init") {
           },
           addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
           resolveConflicts: (repo, n) => runResolveConflictsViaCli(repo, n),
+          verbose,
+        }),
+      );
+
+      // Tier 1 CI failure watcher: auto-fix failing checks on the agent's
+      // own PRs (same registry as review polling). Shares the interval;
+      // failures dedupe per head SHA + check run id.
+      const { CiFailureWatcherAcquirer, runCiFixViaCli } =
+        await import("./lib/ci-failure-watcher-acquirer");
+      acquirers.push(
+        new CiFailureWatcherAcquirer({
+          intervalSeconds,
+          workerState: new WorkerState(dbPath),
+          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+          github: {
+            fetchPr: (repo, n, etag) =>
+              gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
+            fetchCheckRuns: (repo, sha, etag) =>
+              gh.getCheckRuns(ownerOf(repo), nameOf(repo), sha, etag),
+            fetchCommitStatus: (repo, sha, etag) =>
+              gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+            fetchFailingJobLogs: async (repo, sha) => {
+              const owner = ownerOf(repo);
+              const name = nameOf(repo);
+              const runs = await gh
+                .getWorkflowRunsForSha(owner, name, sha)
+                .catch(() => [] as Awaited<ReturnType<typeof gh.getWorkflowRunsForSha>>);
+              const chunks: string[] = [];
+              for (const run of runs.slice(0, 3)) {
+                const jobs = await gh.getWorkflowRunJobs(owner, name, run.id).catch(() => []);
+                for (const job of jobs.filter((j) => j.conclusion === "failure").slice(0, 5)) {
+                  if (!job.logs_url) {
+                    continue;
+                  }
+                  const text = await gh.getJobLogs(owner, name, job.logs_url).catch(() => null);
+                  if (text) {
+                    chunks.push(`## Job: ${job.name}\n${text}`);
+                  }
+                }
+              }
+              return chunks.length > 0 ? chunks.join("\n\n") : null;
+            },
+            fetchCheckRunDetails: async (repo, checkRunId) => {
+              try {
+                const annotations = await gh.getCheckRunAnnotations(
+                  ownerOf(repo),
+                  nameOf(repo),
+                  checkRunId,
+                );
+                if (annotations.length === 0) {
+                  return null;
+                }
+                return annotations
+                  .map((a) => `${a.path ? `${a.path}: ` : ""}${a.message}`)
+                  .join("\n");
+              } catch {
+                return null;
+              }
+            },
+            postComment: async (repo, n, body) => {
+              await gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body);
+            },
+          },
+          fixPr: (repo, n, feedbackPath) => runCiFixViaCli(repo, n, feedbackPath),
           verbose,
         }),
       );
@@ -1155,12 +1221,16 @@ if (process.argv[2] === "init") {
     let noPush = false;
     let noReply = false;
     let verbose = false;
+    let ciFeedbackPath: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
         noPush = true;
       } else if (args[i] === "--no-reply") {
         noReply = true;
+      } else if (args[i] === "--ci-feedback") {
+        ciFeedbackPath = args[i + 1];
+        i++;
       } else if (args[i] === "-v" || args[i] === "--verbose") {
         verbose = true;
       } else if (args[i] === "--help" || args[i] === "-h") {
@@ -1176,6 +1246,8 @@ if (process.argv[2] === "init") {
         console.log("Options:");
         console.log("  --no-push      Don't push changes after fixing");
         console.log("  --no-reply     Don't post a reply comment on the PR");
+        console.log("  --ci-feedback <path>  Fix CI failures from a feedback JSON file");
+        console.log("                        (written by the worker's CI failure watcher)");
         console.log("  -v, --verbose  Enable verbose logging");
         console.log("  -h, --help     Display this help message");
         console.log("");
@@ -1199,7 +1271,7 @@ if (process.argv[2] === "init") {
     // Import and run address-review
     const { addressReview } = await import("./lib/address-review");
     try {
-      await addressReview(prUrl, { noPush, noReply, verbose });
+      await addressReview(prUrl, { noPush, noReply, verbose, ciFeedbackPath });
     } catch (error) {
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
@@ -1469,6 +1541,7 @@ Subcommands:
   dashboard            Serve the local observability dashboard (run history and stats)
   serve                Deprecated alias for 'worker --listen'
   address-review       Address review feedback on an existing pull request
+                        (--ci-feedback <file> fixes CI failures instead)
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session

@@ -314,3 +314,88 @@ export function formatSingleCommentPrompt(
 
   return lines.join("\n");
 }
+
+/** Structured CI-failure feedback handed to {@link formatCiFixPrompt}. */
+export interface CiFailureFeedback {
+  repository: string;
+  prNumber: number;
+  prTitle?: string;
+  branch?: string;
+  /** The failing checks/statuses observed on the PR's current head SHA. */
+  failures: Array<{
+    /** Check run name or commit-status context. */
+    name: string;
+    conclusion: string | null;
+    detailsUrl?: string;
+  }>;
+  /**
+   * Failure-relevant log excerpt (already truncated by the watcher), or
+   * `null` when logs were unavailable (forks, scope, expiry).
+   */
+  logs: string | null;
+}
+
+/**
+ * Format CI failure feedback into an agent prompt.
+ *
+ * @param feedback - Failing check metadata and truncated log excerpt
+ * @returns Markdown prompt for the agent harness
+ */
+export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
+  const lines: string[] = [];
+
+  lines.push("# CI Failure - Fix Failing Checks");
+  lines.push("");
+  lines.push("## PR Information");
+  lines.push("");
+  lines.push(`- **Repository:** ${feedback.repository}`);
+  lines.push(`- **PR #${feedback.prNumber}:** ${feedback.prTitle ?? ""}`.trimEnd());
+  if (feedback.branch) {
+    lines.push(`- **Branch:** \`${feedback.branch}\``);
+  }
+  lines.push("");
+  lines.push("## Failing Checks");
+  lines.push("");
+  for (const failure of feedback.failures) {
+    const conclusion = failure.conclusion ?? "unknown";
+    const detail = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
+    lines.push(`- **${failure.name}** — \`${conclusion}\`${detail}`);
+  }
+  lines.push("");
+
+  if (feedback.logs && feedback.logs.trim()) {
+    lines.push("## Failure Logs (excerpt)");
+    lines.push("");
+    lines.push("```");
+    lines.push(feedback.logs.trimEnd());
+    lines.push("```");
+    lines.push("");
+  } else {
+    lines.push(
+      "## Failure Logs",
+      "",
+      "> Job logs were not available. Reproduce the failures locally by running",
+      "> the project's test/lint/build pipeline for the affected checks.",
+      "",
+    );
+  }
+
+  lines.push("## Instructions");
+  lines.push("");
+  lines.push("Please fix the code so every failing check above passes, without regressing");
+  lines.push("the rest of the suite.");
+  lines.push("");
+  lines.push("**Guidelines:**");
+  lines.push("1. Identify the root cause from the log excerpt before editing");
+  lines.push("2. Make minimal, focused changes that fix the failure");
+  lines.push("3. If a failure looks like flaky infrastructure rather than a code issue,");
+  lines.push("   say so explicitly in your final summary instead of masking it");
+  lines.push("4. Run the relevant tests to verify your fix");
+  lines.push("");
+  lines.push("**IMPORTANT:**");
+  lines.push("- After making your changes, commit them with a descriptive message");
+  lines.push("- Your commit message should summarize how the failure was fixed");
+  lines.push("- Do NOT push to the remote - that will be done automatically");
+
+  return lines.join("\n");
+}
