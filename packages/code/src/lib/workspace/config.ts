@@ -21,6 +21,30 @@ export interface WorkspaceDefaults {
   defaultBranch?: string;
 }
 
+/**
+ * Optional routing hints for one repository, used by multi-repo planning.
+ *
+ * Hints are advisory context for the agent that plans coordinated
+ * (cross-repo) tasks; plain single-repo fleet routing ignores them. Every
+ * field is optional and workspace files without hints stay valid.
+ */
+export interface RepoRoutingHints {
+  /** What the repository is for (one-line human description). */
+  purpose?: string;
+  /** Paths this repo owns, e.g. `api/`, `packages/client/**`. */
+  ownedPaths: string[];
+  /** Product domains / functional areas the repo covers. */
+  domains: string[];
+  /** Capabilities the repo provides to other repos (e.g. `auth`, `billing`). */
+  capabilities: string[];
+  /**
+   * Repos this one depends on at code level (must match other `[[repos]]`
+   * names). Used to order coordinated execution and to reject dependency
+   * cycles before any branch is created.
+   */
+  dependsOn: string[];
+}
+
 /** One managed repository from a `[[repos]]` entry. */
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
@@ -29,10 +53,17 @@ export interface RepoConfig {
   remote: string;
   /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
   defaultBranch?: string;
+  /**
+   * Branch prefix for feature branches in this repo (default `feature`,
+   * matching the single-repo workflow's `feature/{task-key}` convention).
+   */
+  branchPrefix?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
+  /** Optional routing hints for multi-repo planning (all fields optional). */
+  hints?: RepoRoutingHints;
 }
 
 /** One routing rule from a `[[routing.rules]]` entry. Set criteria are AND-ed; list values match any-of. */
@@ -140,6 +171,32 @@ function readEnvTable(
   return env;
 }
 
+/** Parse the optional `[repos.hints]` table into {@link RepoRoutingHints}. */
+function readRoutingHints(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): RepoRoutingHints | undefined {
+  const hintsTable = asTable(table.hints, `${label}.hints`, errors);
+  const purpose = readString(hintsTable, "purpose", `${label}.hints`, errors);
+  const ownedPaths = readStringList(hintsTable, "owned_paths", `${label}.hints`, errors);
+  const domains = readStringList(hintsTable, "domains", `${label}.hints`, errors);
+  const capabilities = readStringList(hintsTable, "capabilities", `${label}.hints`, errors);
+  const dependsOn = readStringList(hintsTable, "depends_on", `${label}.hints`, errors);
+
+  if (
+    purpose === undefined &&
+    ownedPaths.length === 0 &&
+    domains.length === 0 &&
+    capabilities.length === 0 &&
+    dependsOn.length === 0
+  ) {
+    return undefined;
+  }
+
+  return { purpose, ownedPaths, domains, capabilities, dependsOn };
+}
+
 /**
  * Parse and validate workspace configuration from TOML text.
  *
@@ -218,13 +275,34 @@ export function parseWorkspaceConfig(
     if (!name || !remote) {
       continue;
     }
+    const branchPrefix = readString(table, "branch_prefix", label, errors);
     repos.push({
       name,
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      branchPrefix,
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
+      hints: readRoutingHints(table, label, errors),
     });
+  }
+
+  // Dependency hints must reference configured repos (never guess at a typo)
+  // and cannot be self-referential; cycles are rejected when a plan that uses
+  // them is validated (hints alone do not make every task cyclic).
+  for (const repo of repos) {
+    for (const dependency of repo.hints?.dependsOn ?? []) {
+      if (dependency === repo.name) {
+        errors.push(
+          `[[repos]] "${repo.name}" hints.depends_on lists itself; remove the self-dependency.`,
+        );
+      } else if (!repoNames.has(dependency)) {
+        errors.push(
+          `[[repos]] "${repo.name}" hints.depends_on references unknown repo "${dependency}". ` +
+            "Dependencies must match other [[repos]] names.",
+        );
+      }
+    }
   }
 
   const routingTable = asTable(document.routing, "[routing]", errors);
