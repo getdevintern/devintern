@@ -41,7 +41,14 @@ import {
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
+import {
+  captureError,
+  findEnvFile,
+  flushErrorTracking,
+  initErrorTracking,
+  maybeOfferCliUpdate,
+  resolveConfigDir,
+} from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
@@ -380,6 +387,14 @@ let loadedEnvPath: string | null = null;
  * @returns Path to the loaded .env file, or `null` if none was found
  */
 function loadEnvironment(envFile?: string): string | null {
+  const loaded = loadEnvironmentInner(envFile);
+  // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
+  // loading has had its chance to populate it.
+  initSentryOnce();
+  return loaded;
+}
+
+function loadEnvironmentInner(envFile?: string): string | null {
   // If user specified a custom env file, use that first
   if (envFile) {
     const customEnvPath = resolve(envFile);
@@ -420,6 +435,17 @@ function loadEnvironment(envFile?: string): string | null {
 function loadSupabaseConfig() {
   const configDir = resolveConfigDir({ configDirName: ".devintern-code" });
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
+}
+
+// Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
+let sentryInitialized = false;
+function initSentryOnce(): void {
+  if (sentryInitialized) return;
+  sentryInitialized = true;
+  initErrorTracking({
+    release: `code@${VERSION}`,
+    environment: process.env.NODE_ENV ?? "production",
+  });
 }
 
 // Migrate legacy config directory on startup
@@ -2166,6 +2192,8 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
+    initSentryOnce();
+
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
     const lockResult = lockManager.acquire();
@@ -4257,11 +4285,12 @@ process.on("unhandledRejection", (error: Error) => {
   if (options.verbose && error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Handle process termination signals
@@ -4307,11 +4336,12 @@ process.on("uncaughtException", (error: Error) => {
   if (error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Run the main function (only if not running a subcommand)

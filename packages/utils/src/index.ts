@@ -11,3 +11,11 @@ export {
   type InstallKind,
 } from "./cli-auto-update.ts";
 export { upsertEnvVars } from "./upsert-env-vars.ts";
+export {
+  captureError,
+  DEVINTERN_SENTRY_DSN,
+  flushErrorTracking,
+  initErrorTracking,
+  setErrorTrackingEnabled,
+  type ErrorTrackingOptions,
+} from "./sentry.ts";
