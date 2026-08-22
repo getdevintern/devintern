@@ -5,7 +5,12 @@ import { tmpdir } from "os";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
-import { createWorkspaceTaskAcquirer, fleetTaskArgs } from "../src/lib/workspace/workspace-worker";
+import {
+  createWorkspaceTaskAcquirer,
+  fleetTaskArgs,
+  resolveWorkspaceAutomationContext,
+  validateWorkspaceAutomationProjects,
+} from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
@@ -222,5 +227,73 @@ describe("createWorkspaceTaskAcquirer", () => {
 describe("fleetTaskArgs", () => {
   test("workspace defaults win over the env default", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
+  });
+});
+
+describe("resolveWorkspaceAutomationContext", () => {
+  test("does not prepare the repository when its run lock is unavailable", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        action: "headless",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+      () => ({
+        acquire: () => ({ success: false, message: "busy" }),
+        release() {},
+      }),
+    );
+
+    expect(context).toBeNull();
+    expect(repoManager.calls).toEqual([]);
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("validates create-ticket defaults from the repository PM configuration", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-config-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+[[automations]]
+id = "create-backend-ticket"
+enabled = true
+prompt = "Create it"
+action = "create_ticket"
+interval = "1h"
+repo = "backend"
+`);
+    const baseDir = join(workspaceDir, "worktrees", "backend", "base");
+    mkdirSync(join(baseDir, ".devintern-pm"), { recursive: true });
+    await Bun.write(
+      join(baseDir, ".devintern-pm", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=test\nGITHUB_REPO=repo-owner/repo-name\n",
+    );
+
+    await expect(
+      validateWorkspaceAutomationProjects(config.automations, config, workspaceDir, repoManager),
+    ).resolves.toBeUndefined();
+    expect(repoManager.calls).toEqual(["clone:backend", "fetch:backend", "base:backend"]);
+    rmSync(workspaceDir, { recursive: true, force: true });
   });
 });

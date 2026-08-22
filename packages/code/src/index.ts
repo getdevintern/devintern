@@ -458,7 +458,43 @@ await checkForCliUpdate();
 
 // Check if running subcommands before parsing
 // This needs to happen early to avoid Commander treating them as task keys
-if (process.argv[2] === "init") {
+if (process.argv[2] === "__automation-run") {
+  (async () => {
+    loadEnvironment();
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk.toString();
+    let invocation: Record<string, unknown> = {};
+    try {
+      invocation = JSON.parse(input) as Record<string, unknown>;
+    } catch {
+      // The validation below reports one consistent internal-command error.
+    }
+    const id = typeof invocation.id === "string" ? invocation.id : undefined;
+    const action = invocation.action;
+    const prompt = typeof invocation.prompt === "string" ? invocation.prompt : undefined;
+    if (!id || !prompt || (action !== "headless" && action !== "create_ticket")) {
+      console.error("❌ Invalid internal automation invocation");
+      process.exit(1);
+    }
+    const licenseResult = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: loadSupabaseConfig(),
+      requireAutomation: true,
+    });
+    requireLicense(licenseResult);
+    const { executeScheduledAutomation } = await import("./lib/scheduled-executor");
+    const ok = await executeScheduledAutomation({
+      automationId: id,
+      action,
+      prompt,
+      trackerProject:
+        typeof invocation.trackerProject === "string" ? invocation.trackerProject : undefined,
+      repo: typeof invocation.repo === "string" ? invocation.repo : undefined,
+      cwd: process.cwd(),
+    });
+    process.exit(ok ? 0 : 1);
+  })();
+} else if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
       if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
@@ -658,6 +694,31 @@ if (process.argv[2] === "init") {
       await import("./lib/webhook-queue");
     const dbPath = resolveQueueDbPath();
     const acquirers = [];
+
+    const { loadSingleRepoAutomations, resolvePmTrackerConfig, validateAutomationProjects } =
+      await import("./lib/automation-config");
+    const automations = loadSingleRepoAutomations();
+    if (automations.some((automation) => automation.action === "create_ticket")) {
+      validateAutomationProjects(automations, await resolvePmTrackerConfig(process.cwd()));
+    }
+    if (automations.length > 0) {
+      const { AutomationAcquirer } = await import("./lib/automation-acquirer");
+      acquirers.push(
+        new AutomationAcquirer({
+          automations,
+          dbPath,
+          resolveContext: async () => {
+            const runLock = new LockManager(process.cwd());
+            if (!runLock.acquire().success) return null;
+            return {
+              cwd: process.cwd(),
+              env: { ...process.env },
+              release: () => runLock.release(),
+            };
+          },
+        }),
+      );
+    }
 
     if (workerQuery) {
       const trackerType = process.env.TASK_TRACKER || "jira";
