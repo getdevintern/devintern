@@ -316,6 +316,24 @@ export function App() {
     }
   }, []);
 
+  // Persist AGENT_MODEL and apply the reloaded session status. Resolves with
+  // an error message on failure (surfaced inline in Settings), null on success.
+  const switchModel = useCallback(async (model: string): Promise<string | null> => {
+    const projectStore = useProjectStore.getState();
+    if (isContextBusy()) return "Another operation is in progress. Try again in a moment.";
+    projectStore.setLoadingProject(true);
+    try {
+      const result = await window.pm.switchModel(model);
+      if (!result.ok) return toError(result.error).message;
+      // Model switches keep open tickets; only the agent for subsequent
+      // generate/edit/decompose changes.
+      projectStore.setStatus(result.value);
+      return null;
+    } finally {
+      useProjectStore.getState().setLoadingProject(false);
+    }
+  }, []);
+
   // Restore last project only after required tools are present, so a missing
   // git/agent CLI surfaces on launch instead of as a later spawn error.
   useEffect(() => {
@@ -773,6 +791,7 @@ export function App() {
         onSwitchTracker={switchTracker}
         onSwitchProjectKey={switchProjectKey}
         onSwitchHarness={switchHarness}
+        onSwitchModel={switchModel}
         onChangeTrackerSettings={openTrackerSettings}
         onUpdateFromRemote={updateFromRemote}
         onProjectRemoved={onProjectRemoved}

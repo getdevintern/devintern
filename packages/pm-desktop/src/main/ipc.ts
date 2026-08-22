@@ -62,6 +62,7 @@ import {
   requireSession,
   switchContext,
   switchHarness,
+  switchModel,
   switchProjectKey,
   switchTracker,
   updateProjectFromRemote,
@@ -636,6 +637,10 @@ export function registerIpcHandlers(): void {
 
   handle(IPC_CHANNELS.switchHarness, async (_event, harnessName: string) => {
     return switchHarness(harnessName);
+  });
+
+  handle(IPC_CHANNELS.switchModel, async (_event, model: string) => {
+    return switchModel(model);
   });
 
   handle(IPC_CHANNELS.updateProjectFromRemote, async () => {
