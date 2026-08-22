@@ -16,7 +16,7 @@ import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
-import { beginRun, endRun, recordRunStage } from "./run-recorder";
+import { beginRun, endRun, recordRunStage, recordSessionOutput } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
@@ -30,6 +30,17 @@ export interface AddressReviewOptions {
   noPush?: boolean;
   noReply?: boolean;
   verbose?: boolean;
+}
+
+/**
+ * Thrown when a worker budget cap defers the change-request session before
+ * it starts. Callers treat it as "leave the work queued", not as a failure.
+ */
+export class BudgetDeferredError extends Error {
+  constructor() {
+    super("deferred: worker spend cap reached");
+    this.name = "BudgetDeferredError";
+  }
 }
 
 interface ParsedPRUrl {
@@ -201,6 +212,8 @@ export async function runAgent(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this change-request session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         const maxTurnsReached = detectMaxTurnsReached(
           stdoutOutput,
           stderrOutput,
@@ -466,6 +479,18 @@ export async function addressReview(
       processedConversationComments.length > 0 ? processedConversationComments : undefined,
   };
 
+  // Shared budget/admission boundary for unattended review runs: a met
+  // daily cap stops here before any run row is created, leaving the PR
+  // mention queued for later processing.
+  const { checkWorkerAdmission } = await import("./worker-budget");
+  const admission = checkWorkerAdmission();
+  if (admission && !admission.allowed) {
+    console.log(
+      `\n⏸️  Deferring PR #${prNumber}: daily spend cap reached; review stays queued until the cap resets`,
+    );
+    throw new BudgetDeferredError();
+  }
+
   // Run record: begun only once there is actual feedback to handle, so
   // no-op invocations (nothing unaddressed) do not create run rows.
   beginRun({
@@ -473,6 +498,8 @@ export async function addressReview(
     repo: `${owner}/${repo}`,
     prNumber,
     branch: pr.head.ref,
+    harness: resolveHarness().harness.name,
+    unattended: process.env.DEVINTERN_WORKER === "1" || undefined,
   });
   recordRunStage("change_request", {
     status: "succeeded",

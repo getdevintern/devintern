@@ -169,6 +169,42 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                     : "in progress"
                 }
               />
+              <MetaItem
+                label="Cost"
+                value={
+                  data.run.usage?.costUsd != null ? (
+                    <>
+                      ${data.run.usage.costUsd.toFixed(4)}
+                      <span className="ml-1 text-xs text-muted-foreground">
+                        {data.run.usage.costSource === "estimated" ? "est." : "reported"}
+                      </span>
+                    </>
+                  ) : data.run.usage ? (
+                    <span className="text-muted-foreground">unknown</span>
+                  ) : (
+                    "–"
+                  )
+                }
+              />
+              {data.run.usage?.model ? (
+                <MetaItem
+                  label="Model"
+                  value={<code className="font-mono text-xs">{data.run.usage.model}</code>}
+                />
+              ) : null}
+              {data.run.usage?.inputTokens != null || data.run.usage?.outputTokens != null ? (
+                <MetaItem
+                  label="Tokens (in / out)"
+                  value={
+                    <span className="tabular-nums">
+                      {data.run.usage.inputTokens ?? "?"} / {data.run.usage.outputTokens ?? "?"}
+                      {data.run.usage.complete === false ? (
+                        <span className="ml-1 text-xs text-muted-foreground">(partial)</span>
+                      ) : null}
+                    </span>
+                  }
+                />
+              ) : null}
             </CardContent>
           </Card>
 

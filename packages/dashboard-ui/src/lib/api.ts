@@ -15,6 +15,27 @@ export type RunStatus =
   | "escalated"
   | "abandoned";
 
+export interface RunUsage {
+  /** Where usage numbers came from ("mixed" when sessions disagree). */
+  source: string | null;
+  /** False when any session's accounting was partial or missing entirely. */
+  complete: boolean;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  /** Known cost in USD (null = unknown, never zero). */
+  costUsd: number | null;
+  costCurrency: string | null;
+  /** "reported" (provider-computed) or "estimated" (pricing catalog). */
+  costSource: "reported" | "estimated" | null;
+  pricingVersion: string | null;
+  sessionCount: number;
+  sessionsWithoutUsage: number;
+}
+
 export interface RunRecord {
   id: number;
   origin: RunOrigin;
@@ -29,6 +50,8 @@ export interface RunRecord {
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  unattended?: boolean;
+  usage?: RunUsage | null;
 }
 
 /** Outcome stages carry the run's terminal status (escalated, deferred, …). */
@@ -60,6 +83,32 @@ export interface RunDetailResponse {
   stages: RunStageRecord[];
 }
 
+export interface RunStatsUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  /** Known spend in USD; null when no run in the window had a computable cost. */
+  knownSpendUsd: number | null;
+  currency: "USD";
+  runsWithUsage: number;
+  runsWithoutUsage: number;
+  runsWithIncompleteUsage: number;
+}
+
+export interface RunStatsHarness {
+  harness: string;
+  runs: number;
+  succeeded: number;
+  failed: number;
+  escalated: number;
+  medianDurationMs: number | null;
+  /** Known spend for this harness; null when nothing priced. */
+  spendUsd: number | null;
+  runsWithUnknownCost: number;
+}
+
 export interface StatsResponse {
   window: string;
   stats: {
@@ -68,15 +117,9 @@ export interface StatsResponse {
     escalationRate: number | null;
     runsPerWeek: { weekStart: string; count: number }[];
     medianDurationMs: number | null;
-    byHarness: {
-      harness: string;
-      runs: number;
-      succeeded: number;
-      failed: number;
-      escalated: number;
-      medianDurationMs: number | null;
-    }[];
+    byHarness: RunStatsHarness[];
     byOrigin: Record<RunOrigin, number>;
+    usage: RunStatsUsage;
   } | null;
 }
 

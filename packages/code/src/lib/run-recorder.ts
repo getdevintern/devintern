@@ -13,6 +13,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { estimateUsageCost, extractAgentUsage, mergeAgentUsages } from "@devintern/agent-harness";
+import type { AgentUsage, MergedAgentUsage } from "@devintern/agent-harness";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export type RunOrigin = "task" | "pr_mention";
@@ -50,6 +52,40 @@ export interface RunMeta {
   branch?: string;
   repo?: string;
   prNumber?: number;
+  /**
+   * True when the run was started by the unattended worker (polling, relay,
+   * webhook, mention, or workspace paths) rather than a manual CLI run.
+   * Only unattended spend counts toward worker budget caps.
+   */
+  unattended?: boolean;
+}
+
+/**
+ * Normalized token/cost usage persisted with one run. Null means the
+ * provider (or extraction) did not supply the value — never zero.
+ */
+export interface RunUsage {
+  /** Where usage numbers came from ("mixed" when sessions disagree). */
+  source: MergedAgentUsage["source"] | null;
+  /** False when any session's accounting was partial or missing entirely. */
+  complete: boolean;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  /** Known cost for the whole run in `costCurrency` (USD unless stated). */
+  costUsd: number | null;
+  costCurrency: string | null;
+  /** "reported" (provider-computed) or "estimated" (pricing catalog). */
+  costSource: "reported" | "estimated" | null;
+  /** Pricing catalog version used for estimates; null for reported costs. */
+  pricingVersion: string | null;
+  /** Number of agent sessions attributable to this run. */
+  sessionCount: number;
+  /** Sessions that yielded no usage signal at all (unknown exposure). */
+  sessionsWithoutUsage: number;
 }
 
 export interface RunRecord extends RunMeta {
@@ -61,6 +97,7 @@ export interface RunRecord extends RunMeta {
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  usage?: RunUsage | null;
 }
 
 export interface RunStageRecord {
@@ -96,6 +133,29 @@ export interface RunStatsHarness {
   escalated: number;
   /** Median duration of succeeded runs, or null when none finished. */
   medianDurationMs: number | null;
+  /** Known spend for this harness in USD; null when no run reported cost. */
+  spendUsd: number | null;
+  /** Runs in this harness with usage but unknown cost (never counted as $0). */
+  runsWithUnknownCost: number;
+}
+
+/** Aggregate token/cost usage over a stats window. */
+export interface RunStatsUsage {
+  /** Sum of known per-category tokens; categories never inferred. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  /** Known estimated+reported spend in USD; null when nothing is priced. */
+  knownSpendUsd: number | null;
+  currency: "USD";
+  /** Runs with at least one usage-bearing session. */
+  runsWithUsage: number;
+  /** Terminal-ish runs without usage data (unknown exposure). */
+  runsWithoutUsage: number;
+  /** Runs whose sessions had partial accounting or unpriced models. */
+  runsWithIncompleteUsage: number;
 }
 
 export interface RunStats {
@@ -109,10 +169,34 @@ export interface RunStats {
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
+  usage: RunStatsUsage;
 }
 
 /** Statuses that no longer change (excluded: in_progress and deferred-for-retry). */
 const TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "escalated", "abandoned"];
+
+/**
+ * Additive usage/cost columns, applied idempotently on every open. All are
+ * nullable: historical rows (and runs whose harness reported nothing) keep
+ * unknown usage rather than zeros.
+ */
+const USAGE_SCHEMA_MIGRATIONS: { column: string; decl: string }[] = [
+  { column: "unattended", decl: "INTEGER" },
+  { column: "usage_source", decl: "TEXT" },
+  { column: "usage_complete", decl: "INTEGER" },
+  { column: "model", decl: "TEXT" },
+  { column: "input_tokens", decl: "INTEGER" },
+  { column: "output_tokens", decl: "INTEGER" },
+  { column: "cached_input_tokens", decl: "INTEGER" },
+  { column: "reasoning_tokens", decl: "INTEGER" },
+  { column: "total_tokens", decl: "INTEGER" },
+  { column: "cost_usd", decl: "REAL" },
+  { column: "cost_currency", decl: "TEXT" },
+  { column: "cost_source", decl: "TEXT" },
+  { column: "pricing_version", decl: "TEXT" },
+  { column: "session_count", decl: "INTEGER" },
+  { column: "sessions_without_usage", decl: "INTEGER" },
+];
 
 /** ISO date (UTC) of the Monday starting the week that contains `epochMs`. */
 function weekStartIso(epochMs: number): string {
@@ -133,6 +217,17 @@ function median(values: number[]): number | null {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** Sum two optional numbers; null survives when both sides are null. */
+function sumNullable(a: number | null, b: number | null): number | null {
+  if (a === null) {
+    return b;
+  }
+  if (b === null) {
+    return a;
+  }
+  return a + b;
 }
 
 /**
@@ -187,8 +282,17 @@ export class RunStore {
 
     // Additive migration for databases created before the attempt column.
     const columns = this.db.query("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
-    if (!columns.some((c) => c.name === "attempt")) {
+    const hasColumn = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!hasColumn("attempt")) {
       this.db.run("ALTER TABLE runs ADD COLUMN attempt INTEGER");
+    }
+
+    // Additive usage/cost migration (DEV-78). Nullable columns keep
+    // pre-migration rows readable with unknown (null) usage.
+    for (const statement of USAGE_SCHEMA_MIGRATIONS) {
+      if (!hasColumn(statement.column)) {
+        this.db.run(`ALTER TABLE runs ADD COLUMN ${statement.column} ${statement.decl}`);
+      }
     }
 
     this.db.run(`
@@ -221,8 +325,8 @@ export class RunStore {
   createRun(meta: RunMeta): number {
     const attempt = meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null;
     const result = this.db.run(
-      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, status, started_at, attempt, unattended)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -233,6 +337,7 @@ export class RunStore {
         meta.prNumber ?? null,
         Date.now(),
         attempt,
+        meta.unattended === true ? 1 : null,
       ],
     );
     return Number(result.lastInsertRowid);
@@ -291,6 +396,83 @@ export class RunStore {
        WHERE id = ?`,
       [pr.repo ?? null, pr.prNumber ?? null, pr.url ?? null, runId],
     );
+  }
+
+  /**
+   * Persist normalized token/cost usage for a run (one row per run; the
+   * latest call wins). Null fields stay null — never coerced to zero.
+   *
+   * @param runId - Run id
+   * @param usage - Merged usage across all sessions attributable to the run
+   */
+  recordRunUsage(runId: number, usage: RunUsage): void {
+    this.db.run(
+      `UPDATE runs SET
+         usage_source = ?,
+         usage_complete = ?,
+         model = ?,
+         input_tokens = ?,
+         output_tokens = ?,
+         cached_input_tokens = ?,
+         reasoning_tokens = ?,
+         total_tokens = ?,
+         cost_usd = ?,
+         cost_currency = ?,
+         cost_source = ?,
+         pricing_version = ?,
+         session_count = ?,
+         sessions_without_usage = ?
+       WHERE id = ?`,
+      [
+        usage.source ?? null,
+        usage.complete === undefined ? null : usage.complete ? 1 : 0,
+        usage.model ?? null,
+        usage.inputTokens ?? null,
+        usage.outputTokens ?? null,
+        usage.cachedInputTokens ?? null,
+        usage.reasoningTokens ?? null,
+        usage.totalTokens ?? null,
+        usage.costUsd ?? null,
+        usage.costCurrency ?? null,
+        usage.costSource ?? null,
+        usage.pricingVersion ?? null,
+        usage.sessionCount ?? null,
+        usage.sessionsWithoutUsage ?? null,
+        runId,
+      ],
+    );
+  }
+
+  /**
+   * Sum known spend over unattended runs finished since `sinceMs` (UTC ms).
+   * Only runs with a computable cost contribute; unknown-cost exposure is
+   * reported separately so caps can surface it.
+   *
+   * @param sinceMs - Inclusive lower bound on `finished_at`
+   * @returns Known spend plus how many unattended runs have unknown cost
+   */
+  getUnattendedSpendSince(sinceMs: number): {
+    knownSpendUsd: number | null;
+    runsWithUnknownCost: number;
+  } {
+    const rows = this.db
+      .query(
+        `SELECT cost_usd AS costUsd FROM runs
+         WHERE unattended = 1 AND finished_at IS NOT NULL AND finished_at >= ?`,
+      )
+      .all(sinceMs) as { costUsd: number | null }[];
+    let total = 0;
+    let priced = 0;
+    let unknown = 0;
+    for (const row of rows) {
+      if (typeof row.costUsd === "number") {
+        total += row.costUsd;
+        priced += 1;
+      } else {
+        unknown += 1;
+      }
+    }
+    return { knownSpendUsd: priced > 0 ? total : null, runsWithUnknownCost: unknown };
   }
 
   /**
@@ -388,7 +570,9 @@ export class RunStore {
     const since = windowMs === null ? 0 : Date.now() - windowMs;
     const rows = this.db
       .query(
-        `SELECT origin, harness, status, pr_url, started_at, finished_at
+        `SELECT origin, harness, status, pr_url, started_at, finished_at,
+                input_tokens, output_tokens, cached_input_tokens, reasoning_tokens,
+                total_tokens, cost_usd, usage_complete, session_count
          FROM runs WHERE started_at >= ? ORDER BY started_at ASC`,
       )
       .all(since) as {
@@ -398,6 +582,14 @@ export class RunStore {
       pr_url: string | null;
       started_at: number;
       finished_at: number | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      cached_input_tokens: number | null;
+      reasoning_tokens: number | null;
+      total_tokens: number | null;
+      cost_usd: number | null;
+      usage_complete: number | null;
+      session_count: number | null;
     }[];
 
     const byStatus: Record<RunStatus, number> = {
@@ -412,9 +604,29 @@ export class RunStore {
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
-      { runs: number; byStatus: Map<RunStatus, number>; durations: number[] }
+      {
+        runs: number;
+        byStatus: Map<RunStatus, number>;
+        durations: number[];
+        spendUsd: number;
+        pricedRuns: number;
+        unknownCostRuns: number;
+      }
     >();
     const durations: number[] = [];
+
+    // Usage aggregation: known values sum; categories are never inferred.
+    const tokens = {
+      inputTokens: null as number | null,
+      outputTokens: null as number | null,
+      cachedInputTokens: null as number | null,
+      reasoningTokens: null as number | null,
+      totalTokens: null as number | null,
+    };
+    let knownSpendUsd: number | null = null;
+    let runsWithUsage = 0;
+    let runsWithoutUsage = 0;
+    let runsWithIncompleteUsage = 0;
 
     for (const row of rows) {
       byStatus[row.status] += 1;
@@ -426,7 +638,14 @@ export class RunStore {
       const harnessKey = row.harness ?? "unknown";
       let harness = harnesses.get(harnessKey);
       if (!harness) {
-        harness = { runs: 0, byStatus: new Map(), durations: [] };
+        harness = {
+          runs: 0,
+          byStatus: new Map(),
+          durations: [],
+          spendUsd: 0,
+          pricedRuns: 0,
+          unknownCostRuns: 0,
+        };
         harnesses.set(harnessKey, harness);
       }
       harness.runs += 1;
@@ -438,6 +657,38 @@ export class RunStore {
         if (row.pr_url) {
           durations.push(duration);
         }
+      }
+
+      // --- per-run usage ---
+      const hasUsage =
+        row.session_count !== null &&
+        row.session_count > 0 &&
+        (row.input_tokens !== null ||
+          row.output_tokens !== null ||
+          row.total_tokens !== null ||
+          row.cost_usd !== null);
+      if (hasUsage) {
+        runsWithUsage += 1;
+      } else if (row.finished_at !== null) {
+        runsWithoutUsage += 1;
+      }
+      if (hasUsage && row.usage_complete === 0) {
+        runsWithIncompleteUsage += 1;
+      }
+
+      tokens.inputTokens = sumNullable(tokens.inputTokens, row.input_tokens);
+      tokens.outputTokens = sumNullable(tokens.outputTokens, row.output_tokens);
+      tokens.cachedInputTokens = sumNullable(tokens.cachedInputTokens, row.cached_input_tokens);
+      tokens.reasoningTokens = sumNullable(tokens.reasoningTokens, row.reasoning_tokens);
+      tokens.totalTokens = sumNullable(tokens.totalTokens, row.total_tokens);
+
+      if (typeof row.cost_usd === "number") {
+        knownSpendUsd = (knownSpendUsd ?? 0) + row.cost_usd;
+        harness.spendUsd += row.cost_usd;
+        harness.pricedRuns += 1;
+      } else if (hasUsage) {
+        // Usage without a computable cost is unknown exposure — never $0.
+        harness.unknownCostRuns += 1;
       }
     }
 
@@ -460,8 +711,18 @@ export class RunStore {
           failed: data.byStatus.get("failed") ?? 0,
           escalated: data.byStatus.get("escalated") ?? 0,
           medianDurationMs: median(data.durations),
+          spendUsd: data.pricedRuns > 0 ? data.spendUsd : null,
+          runsWithUnknownCost: data.unknownCostRuns,
         })),
       byOrigin,
+      usage: {
+        ...tokens,
+        knownSpendUsd,
+        currency: "USD",
+        runsWithUsage,
+        runsWithoutUsage,
+        runsWithIncompleteUsage,
+      },
     };
   }
 
@@ -487,6 +748,7 @@ export class RunStore {
 
   /** Map a SQLite row to a {@link RunRecord}. */
   private rowToRun(row: Record<string, unknown>): RunRecord {
+    const usage = this.rowToUsage(row);
     return {
       id: row.id as number,
       origin: row.origin as RunOrigin,
@@ -502,6 +764,41 @@ export class RunStore {
       startedAt: row.started_at as number,
       finishedAt: (row.finished_at as number | null) ?? undefined,
       attempt: (row.attempt as number | null) ?? undefined,
+      unattended: row.unattended === 1 ? true : undefined,
+      usage,
+    };
+  }
+
+  /**
+   * Map usage columns to a {@link RunUsage}. Rows from before the migration
+   * have all-null columns and surface `usage: null` so the dashboard can
+   * distinguish "no data" from zeros.
+   */
+  private rowToUsage(row: Record<string, unknown>): RunUsage | null {
+    if (
+      row.usage_source === undefined ||
+      (row.session_count === null &&
+        row.input_tokens === null &&
+        row.output_tokens === null &&
+        row.cost_usd === null)
+    ) {
+      return null;
+    }
+    return {
+      source: (row.usage_source as RunUsage["source"] | null) ?? null,
+      complete: row.usage_complete === 1,
+      model: (row.model as string | null) ?? null,
+      inputTokens: (row.input_tokens as number | null) ?? null,
+      outputTokens: (row.output_tokens as number | null) ?? null,
+      cachedInputTokens: (row.cached_input_tokens as number | null) ?? null,
+      reasoningTokens: (row.reasoning_tokens as number | null) ?? null,
+      totalTokens: (row.total_tokens as number | null) ?? null,
+      costUsd: (row.cost_usd as number | null) ?? null,
+      costCurrency: (row.cost_currency as string | null) ?? null,
+      costSource: (row.cost_source as RunUsage["costSource"] | null) ?? null,
+      pricingVersion: (row.pricing_version as string | null) ?? null,
+      sessionCount: (row.session_count as number | null) ?? 0,
+      sessionsWithoutUsage: (row.sessions_without_usage as number | null) ?? 0,
     };
   }
 
@@ -521,6 +818,8 @@ export class RunStore {
 
 let currentStore: RunStore | null = null;
 let currentRunId: number | null = null;
+/** Agent sessions recorded for the current run (implementation, feasibility, reviews). */
+let currentSessions: (AgentUsage | null)[] = [];
 
 /** Log a recording failure without ever propagating it into the pipeline. */
 function warnOnce(action: string, error: unknown): void {
@@ -536,10 +835,147 @@ export function beginRun(meta: RunMeta): void {
   try {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
+    currentSessions = [];
   } catch (error) {
     currentRunId = null;
+    currentSessions = [];
     warnOnce("begin", error);
   }
+}
+
+/**
+ * Attribute one finished agent session to the current run (best-effort).
+ *
+ * Called after every harness spawn in the pipeline — implementation,
+ * feasibility, auto-review, change-request sessions. Usage is merged at
+ * {@link endRun} time so multi-session runs record one normalized total
+ * without double counting session artifacts.
+ *
+ * @param usage - Extracted usage, or `null` when the harness reported nothing
+ */
+export function recordAgentSession(usage: AgentUsage | null): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  currentSessions.push(usage);
+}
+
+/**
+ * Extract normalized usage from a finished session's captured output and
+ * attribute it to the current run. Never throws — extraction/persistence
+ * failures must not affect the agent run.
+ *
+ * @param harness - Harness id (e.g. "claude-code")
+ * @param stdout - Captured session stdout
+ * @param stderr - Captured session stderr
+ */
+export function recordSessionOutput(harness: string, stdout: string, stderr: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    const usage = extractAgentUsage({ harness, stdout, stderr });
+    currentSessions.push(usage);
+  } catch {
+    // Best-effort by contract.
+  }
+}
+
+/**
+ * Merge the run's agent-session usage into a persisted {@link RunUsage}.
+ *
+ * Cost rules: provider-reported costs are preferred and summed across
+ * sessions; sessions without a reported cost are priced via the versioned
+ * catalog when possible. Any session with missing tokens or an unknown model
+ * marks the run incomplete and its cost stays partially unknown — never a
+ * fabricated number.
+ */
+function buildRunUsage(): RunUsage | null {
+  if (currentSessions.length === 0) {
+    return null;
+  }
+  const merged = mergeAgentUsages(currentSessions);
+  if (!merged) {
+    return null;
+  }
+
+  // Sessions that produced no usage signal contribute nothing priceable.
+  const priceable = currentSessions.filter(
+    (session): session is AgentUsage =>
+      session !== null && (session.inputTokens !== null || session.outputTokens !== null),
+  );
+  const reportedCosts = priceable.filter((session) => session.reportedCost !== null);
+  let costUsd: number | null = null;
+  let costSource: RunUsage["costSource"] = null;
+  let pricingVersion: string | null = null;
+
+  if (reportedCosts.length > 0) {
+    // Prefer provider-reported values; sum only over sessions that have them.
+    costUsd = reportedCosts.reduce((sum, session) => sum + (session.reportedCost ?? 0), 0);
+    costSource = "reported";
+    // Mixed reported + unpriced sessions leave part of the spend unknown.
+    if (reportedCosts.length < priceable.length) {
+      costSource = null;
+    }
+  }
+
+  const unpricedSessions = priceable.filter((session) => session.reportedCost === null);
+  if (unpricedSessions.length > 0) {
+    let estimatedTotal = 0;
+    let allEstimated = true;
+    for (const session of unpricedSessions) {
+      const estimate = estimateUsageCost({
+        inputTokens: session.inputTokens,
+        outputTokens: session.outputTokens,
+        cachedInputTokens: session.cachedInputTokens,
+        reasoningTokens: session.reasoningTokens,
+        totalTokens: session.totalTokens,
+        model: session.model,
+      });
+      if (estimate.costUsd === null) {
+        allEstimated = false; // unknown model or unusable counts — no fabricated cost
+        break;
+      }
+      estimatedTotal += estimate.costUsd;
+      pricingVersion = estimate.pricingVersion;
+    }
+    if (allEstimated && reportedCosts.length === 0) {
+      costUsd = estimatedTotal;
+      costSource = "estimated";
+    } else if (!allEstimated) {
+      // At least one session could not be priced: keep only provider-reported
+      // amounts (already set above) and mark the source mixed/incomplete.
+      if (costSource !== "reported") {
+        costSource = null;
+      }
+      pricingVersion = null;
+    } else if (reportedCosts.length > 0) {
+      // Some reported + some estimable: sum both, flag as mixed estimate.
+      costUsd = (costUsd ?? 0) + estimatedTotal;
+      costSource = "estimated";
+    }
+  }
+
+  return {
+    source: merged.source,
+    complete:
+      merged.complete &&
+      costSource !== null &&
+      merged.sessionsWithoutUsage === 0 &&
+      !merged.mixedModels,
+    model: merged.model,
+    inputTokens: merged.inputTokens,
+    outputTokens: merged.outputTokens,
+    cachedInputTokens: merged.cachedInputTokens,
+    reasoningTokens: merged.reasoningTokens,
+    totalTokens: merged.totalTokens,
+    costUsd,
+    costCurrency: costUsd === null ? null : "USD",
+    costSource,
+    pricingVersion,
+    sessionCount: merged.sessions,
+    sessionsWithoutUsage: merged.sessionsWithoutUsage,
+  };
 }
 
 /**
@@ -582,18 +1018,76 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
 /**
  * Finish the current run and clear the context (no-op when no run is active).
  *
+ * Usage from every session attributed to the run is merged and persisted
+ * before the terminal status is written, so budget evaluation after a run
+ * always sees final numbers.
+ *
  * @param status - Terminal status
  * @param reason - Optional human-readable reason
  */
 export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: string): void {
   if (currentStore === null || currentRunId === null) {
+    currentSessions = [];
     return;
   }
+  const usage = buildRunUsage();
+  try {
+    if (usage) {
+      currentStore.recordRunUsage(currentRunId, usage);
+    }
+  } catch (error) {
+    warnOnce("usage", error);
+  }
+  const finishedUsage = usage;
   try {
     currentStore.finishRun(currentRunId, status, reason);
   } catch (error) {
     warnOnce("end", error);
   } finally {
     currentRunId = null;
+    currentSessions = [];
   }
+  // Notify observers (budget caps) only after the row is durably finished.
+  for (const listener of runFinishedListeners) {
+    try {
+      listener(finishedUsage);
+    } catch (error) {
+      warnOnce("run-finished-listener", error);
+    }
+  }
+}
+
+type RunFinishedListener = (usage: RunUsage | null) => void;
+const runFinishedListeners: RunFinishedListener[] = [];
+
+/**
+ * Subscribe to run completions (used by worker budget caps to enforce
+ * per-run limits post-run). Listeners never affect recording.
+ *
+ * @param listener - Called with the persisted usage (null when unknown)
+ * @returns Unsubscribe function
+ */
+export function onRunFinished(listener: RunFinishedListener): () => void {
+  runFinishedListeners.push(listener);
+  return () => {
+    const index = runFinishedListeners.indexOf(listener);
+    if (index !== -1) {
+      runFinishedListeners.splice(index, 1);
+    }
+  };
+}
+
+/** Test hook: drop the ambient recorder context between scenarios. */
+export function resetRunRecorderForTests(): void {
+  if (currentStore) {
+    try {
+      currentStore.close();
+    } catch {
+      // Already closed.
+    }
+  }
+  currentStore = null;
+  currentRunId = null;
+  currentSessions = [];
+  runFinishedListeners.length = 0;
 }
