@@ -38,7 +38,26 @@ export interface TaskPollingAcquirerOptions {
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
   /** Execute step: process one ready task; returns success (injected for tests). */
   executeTask: (taskKey: string) => Promise<boolean>;
+  /**
+   * Batch execution strategy over one tick's ready tasks (dedupe already
+   * filtered). The default runs tasks strictly sequentially, marking each
+   * before executing. Workspace (fleet) mode injects a scheduler-backed
+   * strategy that marks the whole batch first and lets independent repos
+   * run concurrently within the configured global limit.
+   */
+  executeBatch?: (
+    tasks: ReadyTask[],
+    helpers: {
+      markProcessed: (externalId: string) => void;
+      removeProcessed: (externalId: string) => void;
+    },
+  ) => Promise<void>;
   verbose?: boolean;
+}
+
+/** External id for one task version in the dedupe store. */
+export function taskExternalId(task: ReadyTask): string {
+  return `task:${task.key}:${task.updated ?? ""}`;
 }
 
 /**
@@ -134,24 +153,36 @@ export class TaskPollingAcquirer implements Acquirer {
           console.log(`   [${this.name}] change detected; ${tasks.length} task(s) match query`);
         }
 
-        for (const task of tasks) {
-          const externalId = `task:${task.key}:${task.updated ?? ""}`;
-          if (queue.hasProcessed(detector.source, externalId)) {
-            continue;
-          }
-          // Mark before executing: a persistently failing task must not loop
-          // every tick. It re-enters when the ticket is updated again (new
-          // stamp), and the pipeline's own incomplete-attempt check guards
-          // the retry.
-          queue.markProcessed(detector.source, externalId);
-
-          console.log(`\n📌 [${this.name}] picking up ${task.key}`);
-          const ok = await executeTask(task.key);
-          console.log(
-            ok
-              ? `✅ [${this.name}] ${task.key} completed`
-              : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+        if (this.options.executeBatch) {
+          // Fleet strategy: dedupe-filter, then hand the whole ready batch to
+          // the injected runner (which marks + executes via the scheduler).
+          const ready = tasks.filter(
+            (task) => !queue.hasProcessed(detector.source, taskExternalId(task)),
           );
+          await this.options.executeBatch(ready, {
+            markProcessed: (externalId) => queue.markProcessed(detector.source, externalId),
+            removeProcessed: (externalId) => queue.removeProcessed(detector.source, externalId),
+          });
+        } else {
+          for (const task of tasks) {
+            const externalId = taskExternalId(task);
+            if (queue.hasProcessed(detector.source, externalId)) {
+              continue;
+            }
+            // Mark before executing: a persistently failing task must not loop
+            // every tick. It re-enters when the ticket is updated again (new
+            // stamp), and the pipeline's own incomplete-attempt check guards
+            // the retry.
+            queue.markProcessed(detector.source, externalId);
+
+            console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+            const ok = await executeTask(task.key);
+            console.log(
+              ok
+                ? `✅ [${this.name}] ${task.key} completed`
+                : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+            );
+          }
         }
       }
 

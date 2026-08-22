@@ -55,7 +55,7 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 | `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`) |
 | `GET /api/runs/:id`         | One run with its stage timeline                                       |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
-| `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
+| `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors, per-repo fleet activity |
 | `GET /api/health`           | Health check                                                          |
 
 ## License

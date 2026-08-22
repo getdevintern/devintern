@@ -133,6 +133,26 @@ export function prepareQueueDbDirectory(dbPath: string): void {
 }
 
 /**
+ * Apply the SQLite settings every concurrent writer on a shared database
+ * needs: WAL journaling (readers never block the writer and vice versa),
+ * a busy timeout so simultaneous writes retry instead of failing with
+ * SQLITE_BUSY, and NORMAL sync (safe with WAL, much faster per write).
+ *
+ * Workspace/fleet mode opens several connections to one central `queue.db`
+ * (queue, worker state, run records, routing skips, activity) and may run
+ * tasks for different repos concurrently, so all of them call this right
+ * after opening.
+ *
+ * @param db - Freshly opened (writable or readonly) database connection
+ */
+export function applySqliteConcurrencyPragmas(db: Database): void {
+  // busy_timeout first: switching journal modes can itself require a lock.
+  db.run("PRAGMA busy_timeout = 5000");
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA synchronous = NORMAL");
+}
+
+/**
  * SQLite-backed webhook queue for durable event processing.
  */
 export class WebhookQueue {
@@ -152,7 +172,7 @@ export class WebhookQueue {
 
     if (config.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      applySqliteConcurrencyPragmas(this.db);
       return;
     }
 
@@ -161,6 +181,7 @@ export class WebhookQueue {
     this.migrateLegacyDb(dbPath, config.legacyDbPath);
 
     this.db = new Database(dbPath);
+    applySqliteConcurrencyPragmas(this.db);
     this.initializeSchema();
   }
 
@@ -301,6 +322,21 @@ export class WebhookQueue {
        ON CONFLICT(source, external_id) DO NOTHING`,
       [source, externalId, Date.now()],
     );
+  }
+
+  /**
+   * Roll back a dedupe record for work that was accepted but never started
+   * (graceful-shutdown cancellation), so the next worker start re-acquires
+   * it instead of skipping it as already handled.
+   *
+   * @param source - Event origin (e.g. the fleet query's tracker source)
+   * @param externalId - Provider delivery/comment/review/task id
+   */
+  removeProcessed(source: string, externalId: string): void {
+    this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+      source,
+      externalId,
+    ]);
   }
 
   /**

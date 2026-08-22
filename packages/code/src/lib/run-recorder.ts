@@ -13,7 +13,11 @@
  */
 
 import { Database } from "bun:sqlite";
-import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
+import {
+  applySqliteConcurrencyPragmas,
+  prepareQueueDbDirectory,
+  resolveQueueDbPath,
+} from "./webhook-queue";
 
 export type RunOrigin = "task" | "pr_mention";
 
@@ -152,15 +156,16 @@ export class RunStore {
   constructor(dbPath: string = resolveQueueDbPath(), options: { readonly?: boolean } = {}) {
     if (options.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      applySqliteConcurrencyPragmas(this.db);
       return;
     }
 
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue / worker state may hold connections to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    // The webhook queue / worker state may hold connections to the same file;
+    // parallel fleet runs record stages concurrently.
+    applySqliteConcurrencyPragmas(this.db);
     this.initializeSchema();
   }
 

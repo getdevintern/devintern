@@ -4,7 +4,9 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  DEFAULT_MAX_CONCURRENCY,
   DEFAULT_WORKTREES_TTL_DAYS,
+  effectiveMaxConcurrency,
   findRepo,
   loadWorkspaceConfig,
   parseWorkspaceConfig,
@@ -87,8 +89,155 @@ describe("parseWorkspaceConfig", () => {
 tracker = "markdown"
 `);
     expect(config.workspace.worktreesTtlDays).toBe(DEFAULT_WORKTREES_TTL_DAYS);
+    expect(config.workspace.parallelAcrossRepos).toBe(false);
+    expect(config.workspace.maxConcurrency).toBeUndefined();
     expect(config.repos).toEqual([]);
     expect(config.routing).toEqual([]);
+  });
+
+  test("parses parallel execution settings", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = true
+max_concurrency = 6
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/b.git"
+`);
+    expect(config.workspace.parallelAcrossRepos).toBe(true);
+    expect(config.workspace.maxConcurrency).toBe(6);
+    // Effective limit respects the explicit cap.
+    expect(effectiveMaxConcurrency(config)).toBe(6);
+  });
+
+  test("serial mode always has an effective concurrency of one", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+max_concurrency = 8
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.workspace.parallelAcrossRepos).toBe(false);
+    expect(config.workspace.maxConcurrency).toBe(8); // validated, kept, inert
+    expect(effectiveMaxConcurrency(config)).toBe(1);
+  });
+
+  test("effective concurrency defaults safely and is bounded by the repo count", () => {
+    const two = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = true
+
+[[repos]]
+name = "a"
+remote = "git@github.com:acme/a.git"
+
+[[repos]]
+name = "b"
+remote = "git@github.com:acme/b.git"
+`);
+    expect(two.workspace.maxConcurrency).toBeUndefined();
+    expect(effectiveMaxConcurrency(two)).toBe(DEFAULT_MAX_CONCURRENCY);
+
+    const five = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = true
+max_concurrency = 2
+
+[[repos]]
+name = "a"
+remote = "git@github.com:acme/a.git"
+[[repos]]
+name = "b"
+remote = "git@github.com:acme/b.git"
+[[repos]]
+name = "c"
+remote = "git@github.com:acme/c.git"
+[[repos]]
+name = "d"
+remote = "git@github.com:acme/d.git"
+[[repos]]
+name = "e"
+remote = "git@github.com:acme/e.git"
+`);
+    expect(effectiveMaxConcurrency(five)).toBe(2);
+
+    // A cap larger than the fleet is valid and naturally bounded.
+    const oversized = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = true
+max_concurrency = 50
+
+[[repos]]
+name = "a"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(() => oversized).not.toThrow();
+    expect(effectiveMaxConcurrency(oversized)).toBe(50);
+  });
+
+  test("rejects a non-boolean parallel_across_repos", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = "yes"
+`),
+    ).toThrow(/parallel_across_repos must be a boolean/);
+  });
+
+  test.each([true, false])("accepts max_concurrency while parallel is %s", (parallel) => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+parallel_across_repos = ${parallel}
+max_concurrency = 3
+`),
+    ).not.toThrow();
+  });
+
+  test.each([
+    ["true (boolean)", "true", /max_concurrency must be a positive integer/],
+    ["zero", "0", /max_concurrency must be a positive integer/],
+    ["negative", "-2", /max_concurrency must be a positive integer/],
+    ["fraction", "1.5", /max_concurrency must be a positive integer/],
+    ["string", '"4"', /max_concurrency must be a positive integer/],
+  ])("rejects max_concurrency as %s", (_label, raw, pattern) => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[workspace]
+max_concurrency = ${raw}
+`),
+    ).toThrow(pattern);
   });
 
   test("rejects invalid TOML", () => {

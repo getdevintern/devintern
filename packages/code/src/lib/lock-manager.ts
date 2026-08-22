@@ -124,15 +124,22 @@ export class LockManager {
   /**
    * Read a lock file's status without acquiring or touching it.
    *
-   * @param workingDir - Project root used to locate the lock file
+   * @param workingDir - Directory used to locate the lock file
    * @param lockFileName - Lock file name (e.g. `.worker.lock`)
+   * @param options - `plainDir` reads the lock from `workingDir` itself
+   *                  instead of its `.devintern-code/` subdirectory
+   *                  (workspace locks live directly in `~/.devintern/`)
    * @returns Lock status, or `null` when no lock file exists (or it is unreadable)
    */
   static readLockStatus(
     workingDir: string = process.cwd(),
     lockFileName = ".pid.lock",
+    options: { plainDir?: boolean } = {},
   ): LockStatus | null {
-    const lockFilePath = join(resolve(workingDir, ".devintern-code"), lockFileName);
+    const configDir = options.plainDir
+      ? resolve(workingDir)
+      : resolve(workingDir, ".devintern-code");
+    const lockFilePath = join(configDir, lockFileName);
     if (!existsSync(lockFilePath)) {
       return null;
     }

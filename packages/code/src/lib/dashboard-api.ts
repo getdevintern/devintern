@@ -17,6 +17,8 @@ import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
 import { WorkerState } from "./worker-state";
 import type { Cursor } from "./worker-state";
+import { FleetActivityStore } from "./workspace/state";
+import type { FleetActivityReport } from "./workspace/state";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -56,6 +58,7 @@ interface Stores {
   runs: RunStore;
   state: WorkerState;
   queue: WebhookQueue;
+  fleet: FleetActivityStore;
 }
 
 /**
@@ -85,6 +88,7 @@ export class DashboardData {
         runs: new RunStore(this.dbPath, { readonly: true }),
         state: new WorkerState(this.dbPath, { readonly: true }),
         queue: new WebhookQueue({ dbPath: this.dbPath, readonly: true }),
+        fleet: new FleetActivityStore(this.dbPath, { readonly: true }),
       };
       return this.stores;
     } catch {
@@ -150,12 +154,21 @@ export class DashboardData {
     return this.read([], (stores) => stores.state.listCursors());
   }
 
+  /**
+   * Latest per-repo fleet activity snapshot, or null when the worker never
+   * reported (or the database predates the activity table).
+   */
+  getFleetActivity(): FleetActivityReport | null {
+    return this.read(null, (stores) => stores.fleet.latest());
+  }
+
   /** Close the underlying SQLite connections (tests, shutdown). */
   close(): void {
     if (this.stores) {
       this.stores.runs.close();
       this.stores.state.close();
       this.stores.queue.close();
+      this.stores.fleet.close();
       this.stores = null;
     }
   }
@@ -236,12 +249,32 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 }
 
 /**
- * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors.
+ * Read the worker daemon's liveness lock, checking both layouts: the
+ * workspace (fleet) daemon locks its workspace home directly
+ * (`<workspace>/.worker.lock`), while a single-repo daemon nests it under
+ * `.devintern-code/`.
+ *
+ * @param workingDir - Directory to inspect (workspace home or project root)
+ */
+function readWorkerLock(workingDir: string): ReturnType<typeof LockManager.readLockStatus> {
+  return (
+    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE, { plainDir: true }) ??
+    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE)
+  );
+}
+
+/**
+ * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors,
+ * and per-repo fleet activity.
+ *
+ * The fleet section is null when this database has no workspace activity
+ * (single-repo mode, standalone dashboard on an old database).
  *
  * @param data - Dashboard data source
  */
 export function handleWorkerStatus(data: DashboardData): ApiResponse {
-  const lock = LockManager.readLockStatus(data.workingDir, WORKER_LOCK_FILE);
+  const lock = readWorkerLock(data.workingDir);
+  const fleet = data.getFleetActivity();
   return {
     status: 200,
     body: {
@@ -254,8 +287,29 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
         cursorValue: cursor.cursorValue,
         updatedAt: cursor.updatedAt,
       })),
+      fleet: fleet === null ? null : formatFleetActivity(fleet),
       dbPath: data.dbPath,
       dbMissing: data.dbMissing,
     },
+  };
+}
+
+/** Shape the fleet snapshot for the API response. */
+function formatFleetActivity(fleet: FleetActivityReport) {
+  return {
+    parallel: fleet.parallel,
+    maxConcurrency: fleet.maxConcurrency,
+    // A crashed writer's rows stay until the next start clears them; never
+    // present dead work as live concurrency.
+    active: fleet.stale ? 0 : fleet.rows.filter((row) => row.status === "running").length,
+    stale: fleet.stale,
+    pid: fleet.pid,
+    updatedAt: fleet.updatedAt,
+    repos: fleet.rows.map((row) => ({
+      repo: row.repo,
+      status: row.stale && row.status !== "idle" ? ("stale" as const) : row.status,
+      label: row.label,
+      startedAt: row.startedAt,
+    })),
   };
 }

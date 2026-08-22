@@ -30,6 +30,12 @@ export interface WorkerOptions {
   lock?: LockManager;
   /** What this worker serves, for the startup banner (defaults to cwd). */
   label?: string;
+  /**
+   * Graceful-shutdown hook, awaited between "acquirers stopped" and
+   * "lock released". Workspace mode uses it to drain its execution
+   * scheduler and close shared SQLite handles.
+   */
+  onShutdown?: () => Promise<void>;
 }
 
 /**
@@ -114,6 +120,17 @@ export async function startWorker(
     if (server) {
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       console.log("   Webhook listener stopped");
+    }
+
+    // Give the mode-specific owner (fleet scheduler drain, state close) a
+    // chance to settle accepted-but-unstarted and in-flight work before the
+    // single-instance lock disappears.
+    if (options.onShutdown) {
+      try {
+        await options.onShutdown();
+      } catch (error) {
+        console.warn(`⚠️  Shutdown hook failed: ${(error as Error).message}`);
+      }
     }
 
     // In-flight queue events stay marked in SQLite and are recovered on the
