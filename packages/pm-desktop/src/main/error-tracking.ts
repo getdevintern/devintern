@@ -1,9 +1,8 @@
 /**
  * Sentry error tracking for the Electron main process.
  *
- * Mirrors analytics.ts conventions: no-ops without a DSN (baked at build time
- * via electron.vite.config.ts), respects the shared analytics opt-out setting,
- * and never breaks IPC/UI.
+ * Uses the baked-in DevIntern DSN from `@devintern/utils`, respects the shared
+ * analytics opt-out setting, and never breaks IPC/UI.
  */
 
 import {
@@ -18,7 +17,7 @@ let telemetryEnabled = true;
 
 /**
  * Initialize error tracking using the current telemetry setting.
- * Safe to call unconditionally: without a baked DSN this is a no-op.
+ * Safe to call unconditionally: disabled via Settings or SENTRY_DISABLED=1.
  */
 export async function initErrorTrackingFromSettings(appVersion: string): Promise<void> {
   try {
@@ -27,7 +26,6 @@ export async function initErrorTrackingFromSettings(appVersion: string): Promise
     // Settings unreadable — default to enabled.
   }
   initErrorTracking({
-    dsn: process.env.SENTRY_DSN,
     release: `pm-desktop@${appVersion}`,
     environment: process.env.NODE_ENV ?? "production",
     isEnabled: () => telemetryEnabled,

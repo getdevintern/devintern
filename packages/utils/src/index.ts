@@ -13,6 +13,7 @@ export {
 export { upsertEnvVars } from "./upsert-env-vars.ts";
 export {
   captureError,
+  DEVINTERN_SENTRY_DSN,
   flushErrorTracking,
   initErrorTracking,
   setErrorTrackingEnabled,

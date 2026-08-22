@@ -50,19 +50,17 @@ function readPackageVersion(): string {
 
 const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : readPackageVersion();
 
-/**
- * Read SENTRY_DSN from `.devintern-pm/.env` (same resolution as loadConfig)
- * so error tracking works without exporting the DSN into the shell.
- */
-function readDsnFromPmEnv(): string | undefined {
+/** Read SENTRY_DISABLED from `.devintern-pm/.env` before Sentry init. */
+function applySentryOptOutFromEnvFile(): void {
+  if (process.env.SENTRY_DISABLED === "1") return;
   try {
     const configDir = resolveConfigDir({ configDirName: ".devintern-pm" });
     const content = readFileSync(join(configDir, ".env"), "utf8");
-    const match = /^SENTRY_DSN=(.*)$/m.exec(content);
+    const match = /^SENTRY_DISABLED=(.*)$/m.exec(content);
     const value = match?.[1]?.trim().replace(/^["']|["']$/g, "");
-    return value ? value : undefined;
+    if (value === "1") process.env.SENTRY_DISABLED = "1";
   } catch {
-    return undefined;
+    // No config dir or unreadable .env — shell env only.
   }
 }
 
@@ -127,10 +125,9 @@ async function main() {
   // Migrate legacy .claude-pm directory to .devintern-pm if needed
   await migrateLegacyConfigDir();
 
-  // Sentry error tracking — no-op unless SENTRY_DSN is set (shell env or
-  // .devintern-pm/.env). Initialized after migration so the config dir is final.
+  // Sentry error tracking — baked-in DSN unless SENTRY_DISABLED=1 (shell or .env).
+  applySentryOptOutFromEnvFile();
   initErrorTracking({
-    dsn: process.env.SENTRY_DSN ?? readDsnFromPmEnv(),
     release: `pm@${VERSION}`,
     environment: process.env.NODE_ENV ?? "production",
   });

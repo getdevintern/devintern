@@ -35,7 +35,6 @@ jobs:
       POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
       POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
       GITHUB_OAUTH_CLIENT_ID: ${{ vars.PM_DESKTOP_GITHUB_OAUTH_CLIENT_ID }}
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
     steps:
       - name: Checkout

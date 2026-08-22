@@ -387,7 +387,7 @@ let loadedEnvPath: string | null = null;
  */
 function loadEnvironment(envFile?: string): string | null {
   const loaded = loadEnvironmentInner(envFile);
-  // Sentry reads SENTRY_DSN from process.env, so initialize only after .env
+  // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
   // loading has had its chance to populate it.
   initSentryOnce();
   return loaded;
@@ -436,13 +436,12 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
-// Sentry error tracking — no-op unless SENTRY_DSN is set (env or .devintern-code/.env).
+// Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
 let sentryInitialized = false;
 function initSentryOnce(): void {
   if (sentryInitialized) return;
   sentryInitialized = true;
   initErrorTracking({
-    dsn: process.env.SENTRY_DSN,
     release: `code@${VERSION}`,
     environment: process.env.NODE_ENV ?? "production",
   });

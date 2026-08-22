@@ -198,17 +198,13 @@ Run `devpm init` once per project to create this file (guided wizard in a termin
 
 ## Error Reporting
 
-The CLI can report crashes and unhandled errors to Sentry. Set `SENTRY_DSN` in your `.devintern-pm/.env` (or shell environment) to enable it:
-
-```bash
-SENTRY_DSN=https://<key>@<org>.ingest.sentry.io/<project>
-```
-
-Without a DSN nothing is ever sent. To explicitly disable reporting even when a DSN is present:
+The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
 
 ```bash
 SENTRY_DISABLED=1
 ```
+
+Set this in your shell environment or in `.devintern-pm/.env`.
 
 ## CLI Updates
 
