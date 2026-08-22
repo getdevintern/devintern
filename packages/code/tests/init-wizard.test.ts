@@ -409,9 +409,11 @@ describe("runInitWizard", () => {
       "markdown",
       "", // accept ./tasks default
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
