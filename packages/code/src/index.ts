@@ -578,6 +578,8 @@ if (process.argv[2] === "init") {
         console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
         console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
         console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
+        console.log("  SENTRY_AUTH_TOKEN    (+ SENTRY_ORG) Also watch Sentry for new errors");
+        console.log("                       and create bugfixes; see `devintern sentry --help`");
         process.exit(0);
       }
     }
@@ -665,6 +667,39 @@ if (process.argv[2] === "init") {
           queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
           searchTasks: (q) => tracker.searchTasks(q),
           executeTask: (taskKey) => runTaskViaCli(taskKey),
+          verbose,
+        }),
+      );
+    }
+
+    // Sentry error watcher: opt-in by configuring SENTRY_AUTH_TOKEN and
+    // SENTRY_ORG in .devintern-code/.env. Shares the same queue DB as the
+    // standalone `devintern sentry` command, so handled error groups are
+    // deduplicated across both modes.
+    if (
+      process.env.SENTRY_AUTH_TOKEN &&
+      (process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION)
+    ) {
+      const { SentryClient } = await import("./lib/sentry-client");
+      const { SentryErrorAcquirer, runSentryBugfixViaCli } = await import("./lib/sentry-acquirer");
+      const sentryClient = new SentryClient({
+        authToken: process.env.SENTRY_AUTH_TOKEN,
+        organization: process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION || "",
+        project: process.env.SENTRY_PROJECT,
+        baseUrl: process.env.SENTRY_BASE_URL,
+      });
+
+      acquirers.push(
+        new SentryErrorAcquirer({
+          intervalSeconds: parseInt(
+            process.env.SENTRY_POLL_INTERVAL || String(intervalSeconds),
+            10,
+          ),
+          minEvents: parseInt(process.env.SENTRY_MIN_EVENTS || "5", 10),
+          maxIssuesPerTick: parseInt(process.env.SENTRY_MAX_PER_TICK || "3", 10),
+          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+          fetchIssues: () => sentryClient.fetchUnresolvedIssues(process.env.SENTRY_QUERY),
+          createBugfix: (issue) => runSentryBugfixViaCli(issue),
           verbose,
         }),
       );
@@ -1046,6 +1081,139 @@ if (process.argv[2] === "init") {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   })();
+} else if (process.argv[2] === "sentry") {
+  // Sentry error watcher: poll unresolved issues and create bugfixes for new,
+  // valid error groups. Dedupe lives in the shared queue DB (`processed_events`,
+  // source `sentry`), so restarts and overlapping ticks never re-run a group.
+  (async () => {
+    loadedEnvPath = loadEnvironment();
+
+    const args = process.argv.slice(3);
+    let token = process.env.SENTRY_AUTH_TOKEN;
+    let org = process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION;
+    let project = process.env.SENTRY_PROJECT;
+    let baseUrl = process.env.SENTRY_BASE_URL;
+    let intervalSeconds = parseInt(process.env.SENTRY_POLL_INTERVAL || "60", 10);
+    let minEvents = parseInt(process.env.SENTRY_MIN_EVENTS || "5", 10);
+    let maxPerTick = 3;
+    let query: string | undefined;
+    let once = false;
+    let verbose = false;
+
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--token" && args[i + 1]) {
+        token = args[i + 1];
+        i++;
+      } else if (args[i] === "--org" && args[i + 1]) {
+        org = args[i + 1];
+        i++;
+      } else if (args[i] === "--project" && args[i + 1]) {
+        project = args[i + 1];
+        i++;
+      } else if (args[i] === "--base-url" && args[i + 1]) {
+        baseUrl = args[i + 1];
+        i++;
+      } else if (args[i] === "--interval" && args[i + 1]) {
+        intervalSeconds = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--min-events" && args[i + 1]) {
+        minEvents = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--max-per-tick" && args[i + 1]) {
+        maxPerTick = parseInt(args[i + 1], 10);
+        i++;
+      } else if (args[i] === "--query" && args[i + 1]) {
+        query = args[i + 1];
+        i++;
+      } else if (args[i] === "--once") {
+        once = true;
+      } else if (args[i] === "-v" || args[i] === "--verbose") {
+        verbose = true;
+      } else if (args[i] === "--help" || args[i] === "-h") {
+        console.log("Usage: devintern sentry [options]");
+        console.log("");
+        console.log("Watch Sentry for new errors and create bugfixes automatically.");
+        console.log("Each unresolved error group is validated (minimum event count,");
+        console.log("actionable metadata) before a bugfix task runs through the standard");
+        console.log("pipeline. Every group is handled at most once, persisted across");
+        console.log("restarts in .devintern-code/queue.db.");
+        console.log("");
+        console.log("Options:");
+        console.log("  --token <token>     Sentry auth token (or SENTRY_AUTH_TOKEN)");
+        console.log("  --org <slug>        Organization slug (or SENTRY_ORG)");
+        console.log("  --project <slug>    Project slug (or SENTRY_PROJECT); omit to watch");
+        console.log("                      every project in the organization");
+        console.log("  --base-url <url>    Sentry base URL for self-hosted (or");
+        console.log("                      SENTRY_BASE_URL; default: https://sentry.io)");
+        console.log("  --interval <secs>   Polling interval in seconds (default: 60 or");
+        console.log("                      SENTRY_POLL_INTERVAL)");
+        console.log("  --min-events <n>    Minimum event count to treat an error as valid");
+        console.log("                      (default: 5 or SENTRY_MIN_EVENTS)");
+        console.log("  --max-per-tick <n>  Max bugfixes started per polling tick (default: 3)");
+        console.log("  --query <terms>     Extra Sentry search terms ANDed with is:unresolved");
+        console.log("  --once              Run a single polling tick and exit (for cron)");
+        console.log("  -v, --verbose       Verbose logging");
+        console.log("  -h, --help          Display this help message");
+        process.exit(0);
+      }
+    }
+
+    if (!token || !org) {
+      console.error(
+        "❌ Sentry is not configured. Set SENTRY_AUTH_TOKEN and SENTRY_ORG in\n" +
+          "   .devintern-code/.env (or pass --token / --org). Use --project to scope\n" +
+          "   the watcher to a single project.",
+      );
+      process.exit(1);
+    }
+
+    // Unattended automation — same entitlement as the worker.
+    const supabaseConfig = loadSupabaseConfig();
+    const licenseResult = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig,
+      requireAutomation: true,
+    });
+    requireLicense(licenseResult);
+
+    const { SentryClient } = await import("./lib/sentry-client");
+    const { SentryErrorAcquirer, runSentryBugfixViaCli } = await import("./lib/sentry-acquirer");
+    const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
+      await import("./lib/webhook-queue");
+
+    const client = new SentryClient({ authToken: token, organization: org, project, baseUrl });
+    const dbPath = resolveQueueDbPath();
+    const queue = new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH });
+
+    const acquirer = new SentryErrorAcquirer({
+      intervalSeconds,
+      minEvents,
+      maxIssuesPerTick: maxPerTick,
+      queue,
+      fetchIssues: () => client.fetchUnresolvedIssues(query),
+      createBugfix: (issue) => runSentryBugfixViaCli(issue),
+      verbose,
+    });
+
+    if (once) {
+      await acquirer.tick();
+      queue.close();
+      process.exit(0);
+    }
+
+    await acquirer.start();
+    console.log(
+      `👷 Watching Sentry ${project ? `project ${project}` : `org ${org}`} for new errors`,
+    );
+    const shutdown = (): void => {
+      console.log("\n👋 Sentry watcher stopped");
+      acquirer.stop();
+      queue.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  })();
 } else if (process.argv[2] === "serve") {
   // Handle serve command - start webhook server
   // Deprecated alias for `devintern worker --listen`.
@@ -1417,7 +1585,9 @@ Subcommands:
   logout               Clear local auth session
   whoami               Show current authenticated user
   sandbox              Sandbox doctor: providers, remaining setup steps, and what
-                       the next run will do (exit 1 if it would fail)
+                        the next run will do (exit 1 if it would fail)
+  sentry               Watch Sentry for new errors and create bugfixes
+                        automatically (deduplicated per error group)
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`,
 );
@@ -1435,6 +1605,7 @@ const isSubcommand = [
   "logout",
   "whoami",
   "sandbox",
+  "sentry",
 ].includes(process.argv[2]);
 if (!isSubcommand) {
   program.parse();
