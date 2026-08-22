@@ -10,6 +10,7 @@ import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
+import { recordSessionOutput } from "./run-recorder";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";
 
@@ -317,6 +318,8 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       agent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this hook-fix session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         if (timedOut) {
           console.error(
             `❌ ${harness.displayName} timed out after ${timeoutMinutes} minutes while fixing git hook`,

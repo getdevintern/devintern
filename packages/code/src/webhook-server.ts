@@ -25,6 +25,9 @@ import {
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
 import { resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
+import { BudgetDeferredError } from "./lib/address-review";
+import { checkWorkerAdmission } from "./lib/worker-budget";
+import { startOfUtcDay } from "./lib/budget-guard";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
@@ -32,6 +35,7 @@ import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
+import { recordSessionOutput } from "./lib/run-recorder";
 import {
   handlePingEvent,
   isGitHubIP,
@@ -93,6 +97,61 @@ class UsageLimitError extends Error {
 /** Name of the agent harness this server drives (e.g. `claude-code`). */
 function currentHarnessName(): string {
   return resolveHarness().harness.name;
+}
+
+// --- Worker budget cap gating ----------------------------------------------
+// While a daily spend cap is met, the review queue pauses until the next UTC
+// midnight; queued events stay persisted and drain on resume. Mirrors the
+// usage-limit pause above.
+
+let budgetPausedUntil: number | null = null;
+let budgetResumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Admission boundary for unattended webhook-driven agent runs.
+ *
+ * @param prLabel - Human-readable target for log messages (e.g. "owner/repo#12")
+ * @throws {@link BudgetDeferredError} when a worker budget cap blocks new runs
+ */
+function assertBudgetAdmission(prLabel: string): void {
+  const decision = checkWorkerAdmission();
+  if (decision && !decision.allowed) {
+    console.log(
+      `\n⏸️  Deferring ${prLabel}: daily spend cap reached; event stays queued until the cap resets`,
+    );
+    throw new BudgetDeferredError();
+  }
+}
+
+/** Pause the review queue until the next UTC midnight (daily cap reset). */
+function enterBudgetPause(): void {
+  const nextMidnight = startOfUtcDay(Date.now()) + 24 * 60 * 60 * 1000;
+  // Keep the furthest resume when multiple events hit the cap.
+  budgetPausedUntil = Math.max(budgetPausedUntil ?? 0, nextMidnight);
+  if (!reviewQueue.isPaused) {
+    reviewQueue.pause();
+  }
+  console.warn(
+    `⏸️  [budget] Daily spend cap reached — pausing webhook queue until ${new Date(budgetPausedUntil).toISOString()} (UTC midnight). Queued events are preserved.`,
+  );
+  scheduleBudgetResume();
+}
+
+/** (Re)arm the timer that resumes the queue at the next UTC midnight. */
+function scheduleBudgetResume(): void {
+  if (budgetResumeTimer) {
+    clearTimeout(budgetResumeTimer);
+  }
+  if (budgetPausedUntil === null) {
+    return;
+  }
+  const waitMs = Math.max(0, budgetPausedUntil - Date.now());
+  budgetResumeTimer = setTimeout(() => {
+    budgetPausedUntil = null;
+    budgetResumeTimer = null;
+    console.log("▶️  [budget] Spend-cap window ended — resuming webhook queue");
+    reviewQueue.start();
+  }, waitMs);
 }
 
 /**
@@ -506,6 +565,18 @@ async function processReviewWithPersistence(
         .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
       return;
     }
+    if (error instanceof BudgetDeferredError) {
+      // Deferred by the worker's daily spend cap — pause until UTC midnight
+      // and keep the event queued; not a failure.
+      enterBudgetPause();
+      if (eventId && webhookQueue) {
+        webhookQueue.requeuePending(eventId);
+      }
+      reviewQueue
+        .add(() => processReviewWithPersistence(eventId, event, config))
+        .catch((e) => console.error("❌ Error reprocessing budget-deferred review:", e));
+      return;
+    }
     // Mark as failed (will retry if under max retries)
     if (eventId && webhookQueue) {
       webhookQueue.markFailed(eventId, (error as Error).message);
@@ -545,6 +616,16 @@ async function processIssueCommentWithPersistence(
       reviewQueue
         .add(() => processIssueCommentWithPersistence(eventId, event, config))
         .catch((e) => console.error("❌ Error reprocessing deferred PR comment:", e));
+      return;
+    }
+    if (error instanceof BudgetDeferredError) {
+      enterBudgetPause();
+      if (eventId && webhookQueue) {
+        webhookQueue.requeuePending(eventId);
+      }
+      reviewQueue
+        .add(() => processIssueCommentWithPersistence(eventId, event, config))
+        .catch((e) => console.error("❌ Error reprocessing budget-deferred PR comment:", e));
       return;
     }
     if (eventId && webhookQueue) {
@@ -801,6 +882,10 @@ async function processReviewAsync(
     // Check if this is an auto-review trigger (e.g., "@bot enhance", "@bot improve")
     const reviewBody = event.review.body;
     const isAutoReviewRequest = isAutoReviewTrigger(reviewBody, botName || undefined);
+
+    // Budget admission boundary: both the auto-review loop and the normal
+    // review flow spawn agent sessions, so gate before either starts.
+    assertBudgetAdmission(`${owner}/${repo}#${prNumber}`);
 
     if (isAutoReviewRequest && config.autoReview) {
       console.log(`\n🔄 Auto-review trigger detected: "${reviewBody?.trim()}"`);
@@ -1331,6 +1416,8 @@ async function runAgentHarnessForReview(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this review session's usage when a run is being recorded.
+        recordSessionOutput(currentHarnessName(), stdoutOutput, stderrOutput);
         const maxTurnsReached = detectMaxTurnsReached(
           stdoutOutput,
           stderrOutput,

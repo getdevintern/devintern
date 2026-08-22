@@ -89,6 +89,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                 <TableHead className="px-4">Harness</TableHead>
                 <TableHead className="px-4">PR</TableHead>
                 <TableHead className="px-4">Duration</TableHead>
+                <TableHead className="px-4">Cost</TableHead>
                 <TableHead className="px-4">Started</TableHead>
               </TableRow>
             </TableHeader>
@@ -125,6 +126,13 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                   </TableCell>
                   <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
                     {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}
+                  </TableCell>
+                  <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+                    {run.usage?.costUsd != null
+                      ? `$${run.usage.costUsd.toFixed(4)}${run.usage.complete === false ? "*" : ""}`
+                      : run.usage
+                        ? "unknown"
+                        : "–"}
                   </TableCell>
                   <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
                     {formatTime(run.startedAt)}

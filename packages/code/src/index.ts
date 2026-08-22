@@ -75,9 +75,17 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunPr,
+  recordRunStage,
+  recordSessionOutput,
+} from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
+import { checkWorkerAdmission } from "./lib/worker-budget";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -610,6 +618,15 @@ if (process.argv[2] === "init") {
         console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
         console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
         console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
+        console.log("  WORKER_MAX_SPEND_PER_RUN_USD   Soft per-run spend cap in USD (post-run:");
+        console.log(
+          "                                 offending runs finish and are flagged; see docs)",
+        );
+        console.log("  WORKER_MAX_SPEND_PER_DAY_USD   Spend cap in USD for unattended runs per");
+        console.log("                                 UTC day; new dispatch pauses when met until");
+        console.log(
+          "                                 midnight UTC (queued work resumes after reset)",
+        );
         process.exit(0);
       }
     }
@@ -623,6 +640,24 @@ if (process.argv[2] === "init") {
       requireAutomation: true,
     });
     requireLicense(licenseResult);
+
+    // Budget caps: parse/validate before any work starts so invalid
+    // configuration fails startup with an actionable message. The spend
+    // store binds lazily so workspace mode's DB override wins.
+    const { initWorkerBudget } = await import("./lib/worker-budget");
+    const { SpendCapConfigError } = await import("./lib/budget-guard");
+    try {
+      initWorkerBudget();
+    } catch (error) {
+      if (error instanceof SpendCapConfigError) {
+        console.error(`❌ Invalid spend cap configuration: ${error.message}`);
+        console.error(
+          `   Set a plain non-negative decimal number of US dollars, or unset the variable to disable that cap.`,
+        );
+        process.exit(1);
+      }
+      throw error;
+    }
 
     // Workspace (fleet) mode: one daemon serves every repo in the workspace.
     // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
@@ -697,6 +732,7 @@ if (process.argv[2] === "init") {
           queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
           searchTasks: (q) => tracker.searchTasks(q),
           executeTask: (taskKey) => runTaskViaCli(taskKey),
+          canStartTask: () => checkWorkerAdmission()?.allowed ?? true,
           verbose,
         }),
       );
@@ -1710,11 +1746,29 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       }
     }
 
+    // Shared budget/admission boundary: unattended worker trees stop here
+    // when a spend cap is met, leaving the task queued for later. Manual
+    // CLI runs never have the gate initialized and are unaffected.
+    const admission = checkWorkerAdmission();
+    if (admission && !admission.allowed) {
+      console.log(
+        `\n⏸️  Skipping ${workflowKey}: daily spend cap reached; task stays queued until the cap resets`,
+      );
+      if (totalTasks > 1) {
+        return;
+      }
+      if (lockManager) {
+        lockManager.release();
+      }
+      process.exit(0);
+    }
+
     // Structured run record for this attempt (skips above are not attempts).
     beginRun({
       origin: "task",
       taskKey: workflowKey,
       tracker: process.env.TASK_TRACKER || "jira",
+      unattended: process.env.DEVINTERN_WORKER === "1" || undefined,
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
@@ -2707,6 +2761,8 @@ async function runClarityCheck(
       clarityAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this feasibility session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         if (timedOut) {
           reject(
             new Error(
@@ -3089,6 +3145,8 @@ async function runEstimation(
       estimationAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this estimation session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
 
         if (timedOut) {
           reject(new Error(`Agent estimation timed out after ${timeoutMinutes} minutes`));
@@ -3536,6 +3594,8 @@ async function runAgentHarness(
       codeAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this implementation session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         console.log("\n" + "=".repeat(60));
 
         if (timedOut) {
@@ -4074,6 +4134,8 @@ async function runAgentHarness(
 
                     retryProcess.on("close", async (retryCode: number | null) => {
                       retrySandboxCleanup().catch(() => {});
+                      // Attribute this plan-retry session's usage to the run.
+                      recordSessionOutput(harness.name, retryStdoutOutput, retryStderrOutput);
                       console.log("\n" + "=".repeat(60));
 
                       if (retryCode === 0) {
