@@ -14,6 +14,7 @@ import { RunStore } from "../src/lib/run-recorder";
 import type { RunStats } from "../src/lib/run-recorder";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
+import { FleetActivityStore } from "../src/lib/workspace/state";
 import { startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -228,6 +229,18 @@ describe("dashboard API", () => {
     expect(body.dbMissing).toBe(true);
   });
 
+  test("worker lock is found in the workspace (plainDir) layout too", () => {
+    // Fleet daemon locks <workspace>/.worker.lock directly.
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const response = handleWorkerStatus(data);
+    const body = response.body as { worker: { running: boolean; pid: number } | null };
+    expect(body.worker?.running).toBe(true);
+    expect(body.worker?.pid).toBe(process.pid);
+  });
+
   test("all handlers return empty states when the DB does not exist", () => {
     const runs = handleRuns(data, new URLSearchParams());
     expect(runs.status).toBe(200);
@@ -248,6 +261,73 @@ describe("dashboard API", () => {
     store.close();
 
     expect((handleRuns(data, new URLSearchParams()).body as { total: number }).total).toBe(1);
+  });
+
+  test("fleet activity: per-repo rows and aggregate concurrency in worker status", () => {
+    const activity = new FleetActivityStore(dbPath);
+    activity.save({
+      rows: [
+        { repo: "backend", status: "running", label: "BACK-12", startedAt: Date.now() - 5000 },
+        { repo: "frontend", status: "queued", label: "WEB-3" },
+        { repo: "docs", status: "idle" },
+      ],
+      pid: process.pid,
+      maxConcurrency: 4,
+      parallel: true,
+    });
+    activity.close();
+
+    const body = (handleWorkerStatus(data).body as { fleet: Record<string, unknown> | null })
+      .fleet!;
+    expect(body.parallel).toBe(true);
+    expect(body.maxConcurrency).toBe(4);
+    expect(body.active).toBe(1);
+    expect(body.stale).toBe(false);
+    expect(body.repos).toEqual([
+      { repo: "backend", status: "running", label: "BACK-12", startedAt: expect.any(Number) },
+      { repo: "docs", status: "idle", label: undefined, startedAt: undefined },
+      { repo: "frontend", status: "queued", label: "WEB-3", startedAt: undefined },
+    ]);
+  });
+
+  test("fleet activity from a crashed worker is reported stale with no live runs", () => {
+    const activity = new FleetActivityStore(dbPath);
+    activity.save({
+      rows: [{ repo: "backend", status: "running", label: "BACK-13" }],
+      pid: 999999999, // no such process
+      maxConcurrency: 4,
+      parallel: true,
+    });
+    activity.close();
+
+    const body = (handleWorkerStatus(data).body as { fleet: Record<string, unknown> | null })
+      .fleet!;
+    expect(body.stale).toBe(true);
+    expect(body.active).toBe(0); // never present dead work as live
+    expect((body.repos as { repo: string; status: string }[])[0]).toMatchObject({
+      repo: "backend",
+      status: "stale",
+    });
+  });
+
+  test("worker status reports a null fleet section when the DB has no snapshot", async () => {
+    // A database that exists but was written by an older version (no
+    // fleet_activity table) must degrade to null instead of failing.
+    mkdirSync(join(dir, "state"), { recursive: true });
+    const legacyDb = join(dir, "state", "queue.db");
+    const legacyData = new DashboardData({ dbPath: legacyDb, workingDir: dir });
+    try {
+      const store = new RunStore(legacyDb);
+      store.createRun({ origin: "task", taskKey: "PROJ-1" });
+      store.close();
+
+      const response = handleWorkerStatus(legacyData);
+      expect(response.status).toBe(200);
+      const body = response.body as { fleet: unknown };
+      expect(body.fleet).toBeNull();
+    } finally {
+      legacyData.close();
+    }
   });
 });
 

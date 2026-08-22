@@ -7,6 +7,19 @@ import { parseToml } from "./toml";
 export interface WorkspaceSettings {
   /** Days before a leftover (failed-run) task worktree is swept. */
   worktreesTtlDays: number;
+  /**
+   * Opt-in concurrency across repositories: when true, tasks routed to
+   * different repos may run at the same time (bounded by
+   * {@link WorkspaceSettings.maxConcurrency}). Execution within one repo
+   * stays serialized. Defaults to false: the fleet runs one task at a time.
+   */
+  parallelAcrossRepos: boolean;
+  /**
+   * Global cap on concurrent fleet runs while parallel execution is enabled.
+   * Positive integer; defaults to {@link DEFAULT_MAX_CONCURRENCY} when unset.
+   * Ignored (and validated anyway) while `parallel_across_repos` is false.
+   */
+  maxConcurrency?: number;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -56,6 +69,13 @@ export interface WorkspaceConfig {
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
+
+/**
+ * Safe default cap on concurrent fleet runs when
+ * `[workspace].parallel_across_repos` is enabled without an explicit
+ * `[workspace].max_concurrency`.
+ */
+export const DEFAULT_MAX_CONCURRENCY = 4;
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -177,6 +197,32 @@ export function parseWorkspaceConfig(
     }
   }
 
+  const parallelValue = workspaceTable.parallel_across_repos;
+  let parallelAcrossRepos = false;
+  if (parallelValue !== undefined && parallelValue !== null) {
+    if (typeof parallelValue !== "boolean") {
+      errors.push("[workspace].parallel_across_repos must be a boolean (true or false).");
+    } else {
+      parallelAcrossRepos = parallelValue;
+    }
+  }
+
+  let maxConcurrency: number | undefined;
+  const concurrencyValue = workspaceTable.max_concurrency;
+  if (concurrencyValue !== undefined && concurrencyValue !== null) {
+    if (
+      typeof concurrencyValue !== "number" ||
+      !Number.isInteger(concurrencyValue) ||
+      concurrencyValue < 1
+    ) {
+      errors.push(
+        "[workspace].max_concurrency must be a positive integer (concurrent fleet runs).",
+      );
+    } else {
+      maxConcurrency = concurrencyValue;
+    }
+  }
+
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
   if (tracker && !supportsPolling(tracker)) {
@@ -259,7 +305,29 @@ export function parseWorkspaceConfig(
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
-  return { workspace: { worktreesTtlDays }, defaults, repos, routing };
+  return {
+    workspace: { worktreesTtlDays, parallelAcrossRepos, maxConcurrency },
+    defaults,
+    repos,
+    routing,
+  };
+}
+
+/**
+ * Effective global concurrency limit for a workspace.
+ *
+ * Serial mode (`parallel_across_repos` omitted or false) always yields 1.
+ * Parallel mode yields the configured cap (or
+ * {@link DEFAULT_MAX_CONCURRENCY}); a cap larger than the fleet is valid —
+ * per-repo serialization naturally bounds actual concurrency.
+ *
+ * @param config - Validated {@link WorkspaceConfig}
+ */
+export function effectiveMaxConcurrency(config: WorkspaceConfig): number {
+  if (!config.workspace.parallelAcrossRepos) {
+    return 1;
+  }
+  return Math.max(1, config.workspace.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
 }
 
 /**

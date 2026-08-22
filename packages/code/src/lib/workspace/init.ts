@@ -24,6 +24,12 @@ const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo lis
 [workspace]
 # Days before a leftover (failed-run) task worktree is swept.
 worktrees_ttl_days = 7
+# Opt-in: let tasks for DIFFERENT repos run at the same time. Work within a
+# repo stays strictly one-at-a-time (per-repo lock). Default false (serial).
+# parallel_across_repos = false
+# Global cap on concurrent runs when parallel_across_repos is true.
+# Must be a whole number >= 1; defaults to 4 when omitted.
+# max_concurrency = 4
 
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, azure-devops,

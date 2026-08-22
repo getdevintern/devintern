@@ -9,11 +9,17 @@
  */
 
 import { LockManager } from "../lock-manager";
-import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
+import {
+  TaskPollingAcquirer,
+  runTaskViaCli,
+  taskExternalId,
+  workerTaskArgs,
+} from "../task-polling-acquirer";
+import type { ReadyTask } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
-import { findRepo, loadWorkspaceConfig } from "./config";
+import { effectiveMaxConcurrency, findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, parseEnvFile } from "./env";
 import {
@@ -24,6 +30,7 @@ import {
 } from "./paths";
 import { routeTask, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
+import { RepoBusyError, SchedulerStoppedError, WorkspaceScheduler } from "./scheduler";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
@@ -58,6 +65,12 @@ export interface WorkspaceTaskAcquirerDeps {
   query: string;
   intervalSeconds: number;
   verbose?: boolean;
+  /**
+   * Shared fleet scheduler. When provided, ready tasks are dispatched
+   * through it (per-repo lanes + global concurrency limit); when omitted,
+   * the acquirer executes strictly sequentially.
+   */
+  scheduler?: WorkspaceScheduler;
   /** Task runner (injected for tests; defaults to the CLI subprocess). */
   runTask?: (
     taskKey: string,
@@ -81,6 +94,11 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
  * Build the fleet task acquirer: detect-then-evaluate (reusing
  * {@link TaskPollingAcquirer}) with routing between evaluate and execute.
  *
+ * With a scheduler, each tick's ready batch is marked and dispatched
+ * together: different repos' runs overlap up to the configured global limit,
+ * while same-repo work stays FIFO inside its lane. Without one, tasks run
+ * strictly sequentially — the historical behavior.
+ *
  * Ambiguous/unrouted tasks are recorded as routing skips and count as
  * handled: the acquirer's dedupe keeps them out of the loop until the task
  * changes again — the same policy as failing tasks.
@@ -94,11 +112,12 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
   // task's routing fields from the evaluate step of the same tick.
   const routables = new Map<string, RoutableTask>();
 
-  const executeTask = (taskKey: string): Promise<boolean> =>
-    execute(
-      taskKey,
-      routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
-    );
+  const routableFor = (taskKey: string): RoutableTask =>
+    routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] });
+
+  const executeTask = (taskKey: string): Promise<boolean> => execute(taskKey, routableFor(taskKey));
+
+  const sourceLabel = `poll:${config.defaults.tracker}`;
 
   return new TaskPollingAcquirer({
     trackerType: config.defaults.tracker,
@@ -123,20 +142,87 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       return { tasks };
     },
     executeTask,
+    executeBatch: deps.scheduler
+      ? (tasks, helpers) =>
+          dispatchBatchViaScheduler(tasks, helpers, deps.scheduler!, sourceLabel, (taskKey) =>
+            execute(taskKey, routableFor(taskKey)),
+          )
+      : undefined,
     verbose,
   });
+}
+
+/**
+ * Fleet tick strategy: mark every ready task version, then submit all of
+ * them to the scheduler and await settlement. The cursor advances only after
+ * the whole batch is settled (completed, failed, or deferred to a later
+ * start), so nothing accepted is silently dropped by an early exit.
+ *
+ * Lock contention never reaches this function as a failure: scheduled work
+ * parks inside the scheduler until the repo frees up. A cancellation at
+ * shutdown rolls back the dedupe mark so the next start re-acquires the task.
+ */
+export async function dispatchBatchViaScheduler(
+  tasks: ReadyTask[],
+  helpers: {
+    markProcessed: (externalId: string) => void;
+    removeProcessed: (externalId: string) => void;
+  },
+  scheduler: WorkspaceScheduler,
+  sourceLabel: string,
+  run: (taskKey: string) => Promise<boolean>,
+): Promise<void> {
+  await Promise.all(
+    tasks.map(async (task) => {
+      const externalId = taskExternalId(task);
+      // Mark before executing (same convention as serial mode): a
+      // persistently failing task must not loop every tick. A shutdown that
+      // cancels the queued work rolls the mark back below.
+      helpers.markProcessed(externalId);
+      console.log(`\n📌 [${sourceLabel}] picking up ${task.key}`);
+      try {
+        const ok = await run(task.key);
+        console.log(
+          ok
+            ? `✅ [${sourceLabel}] ${task.key} completed`
+            : `⚠️  [${sourceLabel}] ${task.key} did not complete cleanly`,
+        );
+      } catch (error) {
+        if (error instanceof SchedulerStoppedError) {
+          helpers.removeProcessed(externalId);
+          console.warn(
+            `⏸️  [${sourceLabel}] ${task.key} deferred to next start (worker shutting down)`,
+          );
+          return;
+        }
+        console.warn(`⚠️  [${sourceLabel}] ${task.key} failed: ${(error as Error).message}`);
+      }
+    }),
+  );
 }
 
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
   "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
->;
+> & {
+  /**
+   * Shared fleet scheduler. Routing happens BEFORE scheduling: the task is
+   * routed to its repo, then queued under that repo's lane so different
+   * repos may run concurrently while same-repo work stays FIFO and serial.
+   */
+  scheduler?: WorkspaceScheduler;
+};
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
- * disposable worktree. Shared by the polling acquirer and the relay's task
- * evaluation, which acquire tasks differently but execute identically.
+ * disposable worktree. Shared by the polling acquirer, the relay's task
+ * evaluation, and (via {@link WorkspaceScheduler}) every other fleet event
+ * path, which acquire work differently but execute identically.
+ *
+ * The per-repo run lock (`createRepoRunLock`) remains the cross-process
+ * safety boundary: contention with another process defers the scheduled work
+ * (the dedupe record is not consumed) instead of counting it as an attempt.
  *
  * Ambiguous/unrouted tasks are recorded as routing skips and count as
  * handled: dedupe keeps them out of the loop until the task changes again,
@@ -177,40 +263,52 @@ export function createFleetTaskExecutor(
       return false;
     }
 
-    const lock = repoLock(repo.name);
-    const lockResult = lock.acquire();
-    if (!lockResult.success) {
-      console.warn(
-        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
-      );
-      return false;
-    }
-
-    try {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const worktree = await repoManager.createTaskWorktree(repo, taskKey);
-      console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
-
-      const ok = await runTask(taskKey, extraArgs, {
-        cwd: worktree,
-        env: buildRepoEnv(repo, workspaceDir),
-      });
-
-      if (ok) {
-        await repoManager.removeTaskWorktree(repo.name, worktree);
-      } else {
-        console.warn(`⚠️  [fleet] keeping worktree for debugging: ${worktree}`);
+    const runInRepo = async (): Promise<boolean> => {
+      const lock = repoLock(repo.name);
+      const lockResult = lock.acquire();
+      if (!lockResult.success) {
+        if (deps.scheduler) {
+          // Cross-process contention: defer through the scheduler's retry
+          // lane instead of consuming the task's only dedupe slot.
+          throw new RepoBusyError(repo.name, lockResult.message);
+        }
+        console.warn(
+          `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
+        );
+        return false;
       }
-      return ok;
-    } catch (error) {
-      console.error(
-        `❌ [fleet] ${taskKey} failed in repo "${repo.name}": ${(error as Error).message}`,
-      );
-      return false;
-    } finally {
-      lock.release();
+
+      try {
+        await repoManager.ensureBareClone(repo);
+        await repoManager.fetch(repo.name);
+        const worktree = await repoManager.createTaskWorktree(repo, taskKey);
+        console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
+
+        const ok = await runTask(taskKey, extraArgs, {
+          cwd: worktree,
+          env: buildRepoEnv(repo, workspaceDir),
+        });
+
+        if (ok) {
+          await repoManager.removeTaskWorktree(repo.name, worktree);
+        } else {
+          console.warn(`⚠️  [fleet] keeping worktree for debugging: ${worktree}`);
+        }
+        return ok;
+      } catch (error) {
+        console.error(
+          `❌ [fleet] ${taskKey} failed in repo "${repo.name}": ${(error as Error).message}`,
+        );
+        return false;
+      } finally {
+        lock.release();
+      }
+    };
+
+    if (!deps.scheduler) {
+      return runInRepo();
     }
+    return deps.scheduler.schedule<boolean>(repo.name, { label: taskKey }, runInRepo);
   };
 }
 
@@ -231,7 +329,11 @@ export interface RunWorkspaceWorkerOptions {
  *
  * Loads the workspace config and shared `.env` (applied to this process so
  * the tracker client can be constructed), sweeps stale worktrees, and runs
- * one fleet task acquirer under the workspace-wide lock.
+ * one fleet task acquirer under the workspace-wide lock. Every execution
+ * path — polling tasks, relay task events, PR reviews, mention runs — is
+ * dispatched through one bounded scheduler: serial by default, or concurrent
+ * across repos up to `[workspace].max_concurrency` when
+ * `[workspace].parallel_across_repos` is enabled.
  *
  * The caller has already passed the license and team-automation gates.
  */
@@ -281,6 +383,35 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
 
+  // Bounded fleet execution: serial (limit 1) by default, or overlapping
+  // repos up to the configured cap. One scheduler instance funnels every
+  // acquirer, so independent repos never overlap work in the same repo.
+  const scheduler = new WorkspaceScheduler({ maxConcurrent: effectiveMaxConcurrency(config) });
+
+  // Persist the per-repo activity snapshot on every scheduler transition so
+  // `GET /api/worker` and the dashboard can show what each repo is doing.
+  const repoNames = config.repos.map((repo) => repo.name);
+  const persistActivity = (): void => {
+    try {
+      const status = scheduler.status(repoNames);
+      state.activity.save({
+        rows: status.repos.map((repo) => ({
+          repo: repo.repo,
+          status: repo.status,
+          label: repo.label,
+          startedAt: repo.startedAt,
+        })),
+        pid: process.pid,
+        maxConcurrency: status.max,
+        parallel: config.workspace.parallelAcrossRepos,
+      });
+    } catch (error) {
+      console.warn(`⚠️  [fleet] could not persist activity: ${(error as Error).message}`);
+    }
+  };
+  scheduler.onChange = persistActivity;
+  persistActivity();
+
   for (const repo of config.repos) {
     const removed = await repoManager.sweepStaleWorktrees(
       repo.name,
@@ -304,6 +435,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       query,
       intervalSeconds: options.intervalSeconds,
       verbose: options.verbose,
+      scheduler,
     }),
   ];
 
@@ -313,6 +445,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       workspaceDir,
       state,
       repoManager,
+      scheduler,
       searchTasks: (q) => tracker.searchTasks(q),
       query,
       intervalSeconds: options.intervalSeconds,
@@ -322,10 +455,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   if (options.ui) {
     const { startDashboardServer } = await import("../../dashboard-server");
-    startDashboardServer({ port: options.uiPort });
+    startDashboardServer({ port: options.uiPort, workingDir: workspaceDir });
   }
 
   console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s))`);
+  console.log(
+    config.workspace.parallelAcrossRepos
+      ? `🚀 Parallel across repos: enabled (up to ${scheduler.capacity} concurrent run(s))`
+      : "🚂 Serial execution: one task at a time ([workspace].parallel_across_repos = true to overlap repos)",
+  );
   const { startWorker } = await import("../../worker");
   await startWorker(
     {
@@ -334,6 +472,22 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       verbose: options.verbose,
       lock: createWorkspaceLock(workspaceDir),
       label: workspaceDir,
+      onShutdown: async () => {
+        // Stop admissions, roll back never-started tasks' dedupe marks, and
+        // drain in-flight runs so every per-repo lock is released cleanly.
+        const summary = await scheduler.drain();
+        if (summary.cancelled > 0 || summary.drained > 0) {
+          console.log(
+            `   [fleet] drained ${summary.drained} in-flight run(s); deferred ${summary.cancelled} queued task(s) to next start`,
+          );
+        }
+        try {
+          state.activity.clear();
+          state.close();
+        } catch (error) {
+          console.warn(`⚠️  [fleet] state close failed: ${(error as Error).message}`);
+        }
+      },
     },
     acquirers,
   );
@@ -354,13 +508,23 @@ async function buildFleetEventAcquirers(options: {
   workspaceDir: string;
   state: ReturnType<typeof openWorkspaceState>;
   repoManager: RepoManagerLike;
+  scheduler: WorkspaceScheduler;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   query: string;
   intervalSeconds: number;
   verbose?: boolean;
 }): Promise<import("../../worker").Acquirer[]> {
-  const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
-    options;
+  const {
+    config,
+    workspaceDir,
+    state,
+    repoManager,
+    scheduler,
+    searchTasks,
+    query,
+    intervalSeconds,
+    verbose,
+  } = options;
   const acquirers: import("../../worker").Acquirer[] = [];
 
   const {
@@ -383,6 +547,9 @@ async function buildFleetEventAcquirers(options: {
       config,
       workspaceDir,
       repoManager,
+      // Review and mention runs join the same per-repo lanes as task runs,
+      // so a review can never overlap a task in one repo.
+      scheduler,
       userHasPushAccess: (owner: string, repo: string, user: string) =>
         gh.userHasPushAccess(owner, repo, user),
       verbose,
@@ -510,6 +677,7 @@ async function buildFleetEventAcquirers(options: {
           workspaceDir,
           skips: state.skips,
           repoManager,
+          scheduler,
         });
         const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
 

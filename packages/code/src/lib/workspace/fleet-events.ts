@@ -15,12 +15,19 @@ import { runAddressReviewViaCli } from "../review-polling-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
+import type { WorkspaceScheduler } from "./scheduler";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
   workspaceDir: string;
   repoManager: RepoManagerLike;
+  /**
+   * Shared fleet scheduler. When provided, PR runs join the same per-repo
+   * lanes as task runs, so a review or mention can never overlap other work
+   * in one repo (and independent repos proceed concurrently).
+   */
+  scheduler?: WorkspaceScheduler;
   /** Permission gate backend (GitHub collaborator check; injected for tests). */
   userHasPushAccess: (owner: string, repo: string, username: string) => Promise<boolean>;
   /** Review runner (injected for tests; defaults to the CLI subprocess). */
@@ -75,13 +82,21 @@ export function createFleetAddressPr(
       );
       return false;
     }
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const base = await repoManager.ensureBaseWorktree(repo);
-    return runReview(slug, prNumber, {
-      cwd: base,
-      env: buildRepoEnv(repo, workspaceDir),
-    });
+
+    const runInBase = async (): Promise<boolean> => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      return runReview(slug, prNumber, {
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir),
+      });
+    };
+
+    if (!deps.scheduler) {
+      return runInBase();
+    }
+    return deps.scheduler.schedule<boolean>(repo.name, { label: `${slug}#${prNumber}` }, runInBase);
   };
 }
 

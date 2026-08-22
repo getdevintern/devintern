@@ -80,11 +80,32 @@ export interface StatsResponse {
   } | null;
 }
 
+export interface FleetRepoActivity {
+  repo: string;
+  status: "idle" | "queued" | "running" | "stale";
+  /** Active task key or PR reference, when known. */
+  label?: string;
+  startedAt?: number;
+}
+
+/** Per-repo workspace (fleet) activity; null outside workspace mode. */
+export interface FleetStatus {
+  parallel: boolean;
+  maxConcurrency: number;
+  active: number;
+  /** True when the writing worker process is gone (crashed). */
+  stale: boolean;
+  pid: number;
+  updatedAt: number;
+  repos: FleetRepoActivity[];
+}
+
 export interface WorkerResponse {
   worker: { running: boolean; pid?: number; startedAt?: string } | null;
   queue: { pending: number; processing: number; failed: number };
   agentPrs: { open: number; closed: number };
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
+  fleet: FleetStatus | null;
   dbPath: string;
   dbMissing: boolean;
 }

@@ -1,7 +1,7 @@
 import { Activity, CircleCheck, CircleOff, GitPullRequest, Inbox } from "lucide-react";
 
 import { usePoll } from "@/lib/api";
-import type { WorkerResponse } from "@/lib/api";
+import type { FleetStatus, WorkerResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function Item({
@@ -21,7 +21,45 @@ function Item({
   );
 }
 
-/** Header strip: worker liveness, queue counts, and open agent PRs. */
+const REPO_STATUS_STYLES: Record<string, string> = {
+  running: "text-chart-4",
+  queued: "text-muted-foreground",
+  idle: "text-muted-foreground/60",
+  stale: "text-destructive",
+};
+
+/** One compact chip per repo: "backend ▸ TASK-12", "frontend · queued". */
+export function RepoActivityChips({ fleet }: { fleet: FleetStatus }) {
+  const active = fleet.repos.filter((repo) => repo.status === "running").length;
+  return (
+    <span
+      className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground"
+      data-testid="fleet-activity"
+    >
+      <Item
+        icon={<Activity className="size-4" />}
+        label={
+          fleet.stale
+            ? `fleet stale (worker ${fleet.pid} gone)`
+            : `${active}/${fleet.maxConcurrency} repos active${fleet.parallel ? "" : " (serial)"}`
+        }
+        className={cn(
+          fleet.stale ? "text-destructive" : active > 0 ? "text-foreground" : undefined,
+        )}
+      />
+      {fleet.repos.map((repo) => (
+        <span key={repo.repo} className={cn("text-xs", REPO_STATUS_STYLES[repo.status])}>
+          {repo.repo}
+          {repo.status === "running" && repo.label ? ` ▸ ${repo.label}` : ""}
+          {repo.status === "queued" ? ` (${repo.status})` : ""}
+          {repo.status === "stale" ? " (stale)" : ""}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Header strip: worker liveness, queue counts, open agent PRs, fleet activity. */
 export function StatusStrip() {
   const { data } = usePoll<WorkerResponse>("/api/worker");
   if (!data) {
@@ -52,6 +90,7 @@ export function StatusStrip() {
         icon={<GitPullRequest className="size-4" />}
         label={`${data.agentPrs.open} agent PR${data.agentPrs.open === 1 ? "" : "s"} open`}
       />
+      {data.fleet ? <RepoActivityChips fleet={data.fleet} /> : null}
       {data.dbMissing ? (
         <Item
           icon={<Activity className="size-4" />}

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Parallel execution across workspace repos (opt-in)**: `[workspace].parallel_across_repos = true` lets tasks routed to different repositories run concurrently while work within one repo stays strictly FIFO and serialized — task polling, relay task events, PR review runs, and mention-triggered runs all join the same per-repo lane through one bounded scheduler, so independent acquirers can never overlap in a repo. `[workspace].max_concurrency` (positive integer, default 4) caps total concurrent fleet runs; excess ready tasks queue and start as slots free up. Serial-by-default behavior is unchanged when the key is omitted or false. The per-repo lock file remains the cross-process boundary: contention defers the run with automatic retries instead of consuming its dedupe record, so contended tasks are not lost or miscounted as attempts
+- **Fleet activity in the dashboard and `GET /api/worker`**: the worker persists a per-repo snapshot (`idle` / `queued` / `running`, current task key or PR, start time) plus aggregate active/max concurrency to the central database on every scheduling transition; the dashboard header renders live per-repo chips. Snapshots written by a process that is no longer running are flagged stale (and never presented as live), a graceful shutdown clears them, and databases from older versions degrade gracefully to an empty fleet section
+
+### Changed
+
+- **Graceful worker shutdown drains the fleet**: on SIGINT/SIGTERM the worker stops acquiring events, cancels queued-but-unstarted tasks **with their dedupe marks rolled back** (they re-enter on the next start instead of being silently skipped), awaits in-flight runs so every per-repo lock is released cleanly, closes shared SQLite handles, then releases the workspace lock. A second signal exits immediately if a run appears hung; interrupted runs recover through the normal incomplete-attempt machinery
+- **Central state database uses WAL**: `queue.db` connections (webhook queue, worker state, run records, routing skips, fleet activity) now enable WAL journaling, a busy timeout, and NORMAL sync so concurrent fleet runs read and write history without `SQLITE_BUSY` failures; `WebhookQueue.removeProcessed` rolls back dedupe marks for accepted-but-cancelled work
+
 ## [2.4.0] - 2026-08-22
 
 The onboarding release: `devintern doctor`, an extended init wizard with post-setup checks, first-run rescue when running a task in an unconfigured project, and upgrade-in-place for existing setups.
