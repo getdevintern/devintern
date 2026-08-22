@@ -214,14 +214,20 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
     const reusedExisting = trackerId !== undefined;
     if (trackerId === undefined) {
-      trackerId = await promptForTracker(
-        prompt,
-        log,
-        Object.keys(TRACKER_SETUP).map((id) => ({
+      // Zero-account path first: markdown needs no credentials, so evaluators
+      // can reach a first successful run in minutes.
+      const otherIds = Object.keys(TRACKER_SETUP).filter((id) => id !== "markdown");
+      trackerId = await promptForTracker(prompt, log, [
+        {
+          id: "markdown",
+          displayName: "Markdown files",
+          hint: "local .md task files, no account needed — quickest way to try DevIntern",
+        },
+        ...otherIds.map((id) => ({
           id,
           displayName: TRACKER_CAPABILITIES[id]?.displayName ?? id,
         })),
-      );
+      ]);
     }
     const steps = TRACKER_SETUP[trackerId] ?? [];
 

@@ -145,7 +145,7 @@ describe("runInitWizard", () => {
   test("jira happy path: prompts, validates, writes real .env", async () => {
     const probeCalls: Array<{ trackerId: string; env: Record<string, string> }> = [];
     const { prompt } = promptQueue([
-      "1", // jira
+      "jira", // markdown now leads the menu, so pick Jira by id
       "https://acme.atlassian.net",
       "dev@acme.com",
       "secret-token",
@@ -401,6 +401,30 @@ describe("runInitWizard", () => {
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain(`TRELLO_API_KEY=${BUNDLED_TRELLO_API_KEY}`);
     expect(env).toContain("TRELLO_API_TOKEN=trello-token");
+  });
+
+  test("tracker menu leads with the zero-account markdown option", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "markdown",
+      "", // accept ./tasks default
+      "", // skip PR token
+    ]);
+
+    await runInitWizard({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain(
+      "1. Markdown files (markdown) — local .md task files, no account needed",
+    );
+    expect(output).toContain("2. JIRA (jira)");
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("TASK_TRACKER=markdown");
   });
 
   test("markdown tracker: no probe, defaults tasks dir", async () => {
