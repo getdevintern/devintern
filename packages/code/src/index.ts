@@ -43,6 +43,7 @@ import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
+import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
@@ -3386,6 +3387,7 @@ async function runAgentHarness(
         maxTurns,
         skipPermissions: true,
         workingDir: process.cwd(),
+        model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
@@ -3967,6 +3969,7 @@ async function runAgentHarness(
                       maxTurns,
                       skipPermissions: true,
                       workingDir: process.cwd(),
+                      model: resolveAgentModel(),
                     });
                     const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
                       displayName: harness.displayName,
