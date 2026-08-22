@@ -19,8 +19,9 @@ export default defineConfig(({ mode }) => {
     main: {
       // Bake PostHog credentials and the GitHub OAuth App Client ID into release
       // builds (set via .env, shell, or CI). Absent PostHog key → analytics no-ops.
-      // The GitHub Client ID is public (device flow needs no secret); absent ID →
-      // the "Sign in with GitHub" button is hidden and PAT remains available.
+      // Sentry uses the baked-in DevIntern DSN from @devintern/utils. The GitHub
+      // Client ID is public (device flow needs no secret); absent ID → the
+      // "Sign in with GitHub" button is hidden and PAT remains available.
       define: {
         "process.env.POSTHOG_API_KEY": JSON.stringify(posthogApiKey),
         "process.env.POSTHOG_HOST": JSON.stringify(posthogHost),

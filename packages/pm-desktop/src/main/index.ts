@@ -5,6 +5,11 @@
 import { BrowserWindow, app } from "electron";
 import { appOpenedProps, shutdownAnalytics, track } from "./analytics.ts";
 import {
+  captureError,
+  initErrorTrackingFromSettings,
+  shutdownErrorTracking,
+} from "./error-tracking.ts";
+import {
   initAutoUpdate,
   resolveElectronAutoUpdater,
   startAutoUpdateChecks,
@@ -17,10 +22,23 @@ import { createWindow } from "./window.ts";
 
 augmentPath();
 
+// Report main-process crashes and unhandled rejections to Sentry (no-op
+// without a baked DSN). We keep the app alive — Electron decides on quit.
+process.on("uncaughtException", (error) => {
+  console.error("❌ Uncaught exception:", error);
+  void captureError(error);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled rejection:", reason);
+  void captureError(reason);
+});
+
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) {
   app.quit();
 } else {
+  void initErrorTrackingFromSettings(app.getVersion());
+
   // Claim the application menu before Electron's default `will-finish-launching`
   // handler installs `role: "appMenu"` (native About → "Electron" in dev).
   installAppMenu({ createWindow });
@@ -68,6 +86,7 @@ if (!hasLock) {
   app.on("before-quit", () => {
     stopAutoUpdateChecks();
     void shutdownAnalytics();
+    void shutdownErrorTracking();
   });
 
   app.on("window-all-closed", () => {

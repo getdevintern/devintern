@@ -8,6 +8,7 @@ import { existsSync } from "fs";
 import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
+import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";
@@ -258,6 +259,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         maxTurns,
         skipPermissions: true,
         workingDir,
+        model: resolveAgentModel(),
       });
 
       // Spawn agent process to fix the issues. The executable path was already

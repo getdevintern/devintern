@@ -19,7 +19,7 @@
     "test": "turbo run test"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "1.4.0",
     "lefthook": "^2.1.5",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",

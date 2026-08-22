@@ -97,6 +97,8 @@ Configure these on the repo / environment that runs `.github/workflows/pm-deskto
 | `POSTHOG_API_KEY`  | Actions secret   | Baked into the main bundle via `electron.vite.config.ts` at package time. Use the PostHog project API key, not a personal API key. Missing → analytics permanently no-op in that build. |
 | `POSTHOG_HOST`     | Actions variable | Optional; defaults to `https://us.i.posthog.com` when unset. The existing Actions secret remains a compatibility fallback.                                                              |
 
+Error reporting uses the baked-in DevIntern Sentry DSN from `@devintern/utils`. Users can opt out via Settings (shares the analytics toggle) or by setting `SENTRY_DISABLED=1`.
+
 ### GitHub OAuth (build-time)
 
 | Repository setting                  | Kind             | Maps to env                                                                                                                                                                                                      |

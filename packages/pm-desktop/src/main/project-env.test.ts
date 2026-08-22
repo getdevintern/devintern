@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   listConfiguredTrackersForProject,
   persistActiveHarness,
+  persistActiveModel,
   persistActiveProject,
   persistActiveTracker,
   persistTrackerCredentials,
@@ -230,6 +231,41 @@ describe("project-env", () => {
       );
       const { env } = await readProjectEnv(dir);
       expect(env.AGENT_HARNESS).toBe("claude-code");
+    });
+  });
+
+  describe("persistActiveModel", () => {
+    afterEach(() => {
+      delete process.env.AGENT_MODEL;
+    });
+
+    test("writes AGENT_MODEL and syncs process.env", async () => {
+      const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+      await persistActiveModel(dir, "sonnet");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_MODEL).toBe("sonnet");
+      expect(process.env.AGENT_MODEL).toBe("sonnet");
+      const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
+      expect(raw).toContain("AGENT_MODEL=sonnet");
+    });
+
+    test("trims whitespace around the model string", async () => {
+      const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+      await persistActiveModel(dir, "  qwen3-coder-plus  ");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_MODEL).toBe("qwen3-coder-plus");
+    });
+
+    test("an empty value clears the override (empty in .env, falsy for engine)", async () => {
+      const dir = await writeEnv(
+        "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\nAGENT_MODEL=sonnet\n",
+      );
+      await persistActiveModel(dir, "");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_MODEL).toBe("");
+      expect(process.env.AGENT_MODEL).toBe("");
+      const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
+      expect(raw.split("\n")).toContain("AGENT_MODEL=");
     });
   });
 

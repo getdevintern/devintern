@@ -5,6 +5,7 @@ import {
   PREFER_READONLY_ANALYSIS,
   ReadonlyAnalysisError,
   analysisRunOptions,
+  defaultAnalysisRunOptions,
   runAnalysisWithFallback,
   shouldRetryInDefaultMode,
 } from "../src/lib/analysis-mode";
@@ -26,6 +27,7 @@ const defaultOnlyHarness: AgentHarness = {
 
 afterEach(() => {
   delete process.env.AGENT_ANALYSIS_ALLOWED_TOOLS;
+  delete process.env.AGENT_MODEL;
 });
 
 describe("analysisRunOptions", () => {
@@ -47,6 +49,17 @@ describe("analysisRunOptions", () => {
     const options = analysisRunOptions(defaultOnlyHarness, 10);
     expect(options.mode).toBeUndefined();
     expect(options.skipPermissions).toBe(true);
+  });
+
+  test("includes AGENT_MODEL in unattended options when set", () => {
+    process.env.AGENT_MODEL = "sonnet";
+    const options = defaultAnalysisRunOptions(10);
+    expect(options.model).toBe("sonnet");
+  });
+
+  test("omits model when AGENT_MODEL is unset", () => {
+    const options = defaultAnalysisRunOptions(10);
+    expect(options.model).toBeUndefined();
   });
 });
 
