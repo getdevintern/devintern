@@ -40,6 +40,7 @@ import { useLabels } from "./queries/useLabels.ts";
 import { useRecentProjects } from "./queries/useRecentProjects.ts";
 import { useToolValidation } from "./queries/useToolValidation.ts";
 import { isBusy } from "./state/app-store.ts";
+import { composerForCapture } from "./state/composer-values.ts";
 import { useProjectStore } from "./state/project-store.ts";
 import {
   useActiveTicket,
@@ -52,7 +53,7 @@ import {
   useTicketWorkspacesStore,
 } from "./state/ticket-workspaces-store.ts";
 import { nextTicketId } from "./state/ticket-workspaces.ts";
-import type { IpcError, ProjectStatus } from "../../shared/ipc-contract.ts";
+import type { IpcError, ProjectStatus, QuickCaptureEvent } from "../../shared/ipc-contract.ts";
 import { shouldShowCodeDiscovery } from "../../shared/code-discovery.ts";
 import { isToolValidationBlocking } from "../../shared/tool-validation.ts";
 
@@ -117,6 +118,11 @@ export function App() {
   );
   /** In-app setup wizard for unconfigured / misconfigured projects. */
   const [setupOpen, setSetupOpen] = useState(false);
+  /**
+   * Bumped on every Quick Capture invocation so the composer focuses its
+   * source editor (capture lands ready-to-type).
+   */
+  const [composerFocusToken, setComposerFocusToken] = useState(0);
   /** Post-init tracker settings wizard (add / reconfigure a tracker). */
   const [trackerSettingsOpen, setTrackerSettingsOpen] = useState(false);
   /** Connect a GitHub repository → managed clone dialog. */
@@ -133,6 +139,33 @@ export function App() {
   useEffect(() => {
     return window.pm.onShowAbout(() => {
       setAboutOpen(true);
+    });
+  }, []);
+
+  // Quick Capture: OS global shortcut → focus app + open a fresh ticket
+  // workspace prefilled from the clipboard. Existing tickets and running
+  // streams are untouched (a new tab is opened; nothing is closed).
+  useEffect(() => {
+    return window.pm.onQuickCapture((event: QuickCaptureEvent) => {
+      const current = useProjectStore.getState().status;
+      // No project ready yet: the window is already focused by main, and the
+      // Welcome screen / setup wizard is the visible path (never fail silently
+      // into a broken composer).
+      if (!current?.isGitRepository || !current.configured) return;
+
+      // Issue types for the new ticket's default project key; seeded on load,
+      // falls back to defaults until fetched (corrected by the reset effect).
+      const cachedTypes =
+        queryClient.getQueryData<string[]>(
+          qk.issueTypes(current.projectDir, current.defaultProjectKey ?? ""),
+        ) ?? DEFAULT_ISSUE_TYPES;
+      const composer = defaultComposerForProject(current, resolveIssueTypes(cachedTypes));
+      // Useful clipboard text prefills the inferred source tab; empty keeps
+      // the Prompt tab ready to type (focus moves there via the signal).
+      useTicketWorkspacesStore
+        .getState()
+        .openTicket(nextTicketId(), composerForCapture(composer, event));
+      setComposerFocusToken((token) => token + 1);
     });
   }, []);
 
@@ -855,6 +888,7 @@ export function App() {
                 labelsError={labelsError}
                 labelsTruncated={labelsTruncated}
                 onRetryLabels={retryLabels}
+                focusEditorSignal={composerFocusToken}
               />
               {/* key remounts local edit-prompt state when switching tickets */}
               <OutputPanel

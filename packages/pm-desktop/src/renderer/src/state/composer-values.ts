@@ -8,7 +8,12 @@
  * `ComposerForm.tsx` re-exports these to preserve its existing import surface.
  */
 
-import type { AttachmentRef, PromptStyle, SourceType } from "../../../shared/ipc-contract.ts";
+import type {
+  AttachmentRef,
+  PromptStyle,
+  QuickCaptureEvent,
+  SourceType,
+} from "../../../shared/ipc-contract.ts";
 
 export interface ComposerValues {
   sourceType: SourceType;
@@ -37,3 +42,17 @@ export const initialComposerValues: ComposerValues = {
   attachments: [],
   decompose: false,
 };
+
+/**
+ * Overlay a Quick Capture payload onto a freshly built composer:
+ * useful clipboard text selects the inferred source tab and prefills it;
+ * a null text leaves the empty Prompt tab ready to type.
+ */
+export function composerForCapture(base: ComposerValues, event: QuickCaptureEvent): ComposerValues {
+  if (event.text === null) return base;
+  return {
+    ...base,
+    sourceType: event.sourceType,
+    sourceContent: { ...base.sourceContent, [event.sourceType]: event.text },
+  };
+}
