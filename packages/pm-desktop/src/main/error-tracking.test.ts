@@ -1,24 +1,25 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setUserDataDirForTests, updateSettings } from "./settings.ts";
 
 const sentryCalls = {
-  initOpts: undefined as { dsn?: string; isEnabled?: () => boolean; release?: string } | undefined,
+  initOpts: undefined as
+    | { release?: string; environment?: string; beforeSend?: (event: unknown) => unknown }
+    | undefined,
   captured: [] as unknown[],
 };
 
-mock.module("@devintern/utils", () => ({
-  initErrorTracking: (opts: typeof sentryCalls.initOpts) => {
+// Mock Sentry directly so @devintern/utils keeps its real exports for other test files.
+mock.module("@sentry/node", () => ({
+  init: (opts: typeof sentryCalls.initOpts) => {
     sentryCalls.initOpts = opts;
   },
-  captureError: (error: unknown) => {
-    // Mirror the real wrapper: the live opt-out gate blocks captures.
-    if (!sentryCalls.initOpts?.isEnabled?.()) return;
+  captureException: (error: unknown) => {
     sentryCalls.captured.push(error);
   },
-  flushErrorTracking: async () => undefined,
+  flush: async () => true,
 }));
 
 const { captureError, initErrorTrackingFromSettings, setTelemetryEnabled, shutdownErrorTracking } =
@@ -27,6 +28,10 @@ const { captureError, initErrorTrackingFromSettings, setTelemetryEnabled, shutdo
 describe("error-tracking", () => {
   let tempDir: string;
 
+  afterAll(() => {
+    mock.restore();
+  });
+
   afterEach(async () => {
     setUserDataDirForTests(undefined);
     if (tempDir) {
@@ -34,6 +39,7 @@ describe("error-tracking", () => {
     }
     sentryCalls.initOpts = undefined;
     sentryCalls.captured = [];
+    delete process.env.SENTRY_DISABLED;
   });
 
   async function setupSettings(analyticsEnabled?: boolean): Promise<void> {
@@ -48,7 +54,7 @@ describe("error-tracking", () => {
     await setupSettings(false);
     await initErrorTrackingFromSettings("1.2.3");
 
-    expect(sentryCalls.initOpts?.isEnabled?.()).toBe(false);
+    expect(sentryCalls.initOpts?.beforeSend?.({ event_id: "x" })).toBeNull();
     await captureError(new Error("blocked"));
     expect(sentryCalls.captured).toHaveLength(0);
   });
@@ -57,7 +63,7 @@ describe("error-tracking", () => {
     await setupSettings();
     await initErrorTrackingFromSettings("1.2.3");
 
-    expect(sentryCalls.initOpts?.isEnabled?.()).toBe(true);
+    expect(sentryCalls.initOpts?.beforeSend?.({ event_id: "x" })).not.toBeNull();
     expect(sentryCalls.initOpts?.release).toBe("pm-desktop@1.2.3");
     const error = new Error("boom");
     await captureError(error);
