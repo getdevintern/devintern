@@ -1513,6 +1513,52 @@ class UsageLimitError extends Error {
   }
 }
 
+// Context for the task currently being processed, so signal handlers and
+// error paths can leave feedback on the ticket instead of failing silently
+// with the task stranded in "In Progress".
+let activeTaskContext: {
+  taskKey: string;
+  tracker: TaskTrackerClient;
+  projectKey: string;
+  movedToInProgress: boolean;
+} | null = null;
+
+/**
+ * Best-effort failure feedback: post a comment explaining why no pull request
+ * was created and move the ticket back to its To Do status so the next
+ * scheduled run can retry. Never throws — feedback must not mask the
+ * original error.
+ */
+async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
+  const context = activeTaskContext;
+  if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
+
+  const { tracker, projectKey } = context;
+  try {
+    await tracker.postComment(taskKey, {
+      format: "markdown",
+      body:
+        `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
+        `**Reason:** ${reason}\n\n` +
+        `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.`,
+    });
+    console.log(`💬 Posted a failure comment to ${taskKey}`);
+  } catch (commentError) {
+    console.warn(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
+  }
+
+  if (!context.movedToInProgress) return;
+  try {
+    const todoStatus = getTodoStatusForProject(projectKey, loadProjectSettings());
+    if (todoStatus && todoStatus.trim()) {
+      await tracker.transitionStatus(taskKey, todoStatus.trim());
+      console.log(`🔄 Moved ${taskKey} back to '${todoStatus}' so it can be retried`);
+    }
+  } catch (transitionError) {
+    console.warn(`⚠️  Failed to move ${taskKey} back to To Do: ${transitionError}`);
+  }
+}
+
 /**
  * Run the full implementation workflow for one JIRA task key.
  *
@@ -1550,6 +1596,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Load project settings to get status transitions
     const projectSettings = loadProjectSettings();
     const projectKey = resolveProjectKey(workflowKey, task);
+    activeTaskContext = {
+      taskKey: workflowKey,
+      tracker,
+      projectKey,
+      movedToInProgress: false,
+    };
 
     // Fetch comments before the retry gate: a new comment since the last
     // incomplete attempt counts as a clarification and unlocks a retry.
@@ -1949,6 +2001,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.log(`\n🔄 Transitioning ${workflowKey} to '${inProgressStatus}'...`);
           await tracker.transitionStatus(workflowKey, inProgressStatus.trim());
           console.log(`✅ Task moved to '${inProgressStatus}'`);
+          if (activeTaskContext && activeTaskContext.taskKey === workflowKey) {
+            activeTaskContext.movedToInProgress = true;
+          }
         } catch (statusError) {
           console.warn(
             `⚠️  Failed to transition task to '${inProgressStatus}': ${
@@ -2056,12 +2111,20 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
+    activeTaskContext = null;
   } catch (error) {
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
       endRun("deferred", error.message);
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
+      // The ticket may already be "In Progress": leave feedback and move it
+      // back so the deferred retry can actually pick it up.
+      try {
+        await reportProcessingFailure(taskKey, `${error.message} (usage limit)`);
+      } catch {
+        /* best-effort */
+      }
       if (totalTasks > 1) {
         throw error;
       }
@@ -2078,6 +2141,15 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+
+    // Leave feedback on the ticket so a failed run never ends silently with
+    // the task stranded in "In Progress" and no PR.
+    try {
+      await reportProcessingFailure(taskKey, err.message);
+    } catch {
+      /* best-effort */
+    }
+    activeTaskContext = null;
 
     // For batch processing, throw the error to be handled by the main function
     // For single task processing, exit immediately
@@ -4193,20 +4265,40 @@ process.on("unhandledRejection", (error: Error) => {
 });
 
 // Handle process termination signals
-process.on("SIGINT", () => {
-  console.log("\n\n⚠️  Received SIGINT (Ctrl+C), cleaning up...");
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
+  // If a task is mid-flight, tell the tracker it was interrupted instead of
+  // leaving it silently in "In Progress" with no PR and no feedback.
+  const context = activeTaskContext;
+  if (context) {
+    // Bound the feedback attempt so tracker I/O can never stall shutdown.
+    const shutdownTimer = setTimeout(() => process.exit(exitCode), 15_000);
+    try {
+      await reportProcessingFailure(
+        context.taskKey,
+        `Processing was interrupted (${signal}) before a pull request could be created`,
+      );
+    } catch {
+      /* best-effort: never block shutdown on tracker I/O */
+    }
+    clearTimeout(shutdownTimer);
+  }
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(130); // Standard exit code for SIGINT
+  process.exit(exitCode);
+}
+
+process.on("SIGINT", () => {
+  void gracefulShutdown("SIGINT", 130); // Standard exit code for SIGINT
 });
 
 process.on("SIGTERM", () => {
-  console.log("\n\n⚠️  Received SIGTERM, cleaning up...");
-  if (lockManager) {
-    lockManager.release();
-  }
-  process.exit(143); // Standard exit code for SIGTERM
+  void gracefulShutdown("SIGTERM", 143); // Standard exit code for SIGTERM
 });
 
 // Handle uncaught exceptions

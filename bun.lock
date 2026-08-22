@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "devintern",
@@ -7,7 +8,7 @@
         "@radix-ui/react-slot": "^1.2.4",
       },
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "lefthook": "^2.1.5",
         "oxfmt": "^0.44.0",
         "oxlint": "^1.59.0",
@@ -19,7 +20,7 @@
       "name": "@devintern/agent-harness",
       "version": "0.1.0",
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -30,7 +31,7 @@
         "@supabase/supabase-js": "^2.104.1",
       },
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -57,7 +58,7 @@
         "@devintern/utils": "workspace:*",
         "@types/bun": "^1.3.3",
         "@types/node": "^20.10.0",
-        "bun-types": "latest",
+        "bun-types": "1.4.0",
         "oxfmt": "^0.44.0",
         "oxlint": "^1.59.0",
         "typescript": "^5.3.0",
@@ -81,7 +82,7 @@
       },
       "devDependencies": {
         "@tailwindcss/vite": "^4.2.4",
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "@types/react": "^19.2.0",
         "@types/react-dom": "^19.2.0",
         "@vitejs/plugin-react": "^5.0.0",
@@ -99,7 +100,7 @@
         "@getdevintern/license-policy": "workspace:*",
       },
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -107,7 +108,7 @@
       "name": "@getdevintern/license-policy",
       "version": "0.1.0",
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -135,7 +136,7 @@
         "@devintern/task-trackers": "workspace:*",
         "@devintern/text-formatter": "workspace:*",
         "@devintern/utils": "workspace:*",
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
       },
       "peerDependencies": {
         "typescript": "^5",
@@ -168,7 +169,7 @@
         "@electron/notarize": "^3.0.1",
         "@fontsource-variable/inter": "^5.2.8",
         "@tailwindcss/vite": "^4.2.4",
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "@types/react": "^19.2.7",
         "@types/react-dom": "^19.2.3",
         "@vitejs/plugin-react": "^5.0.0",
@@ -191,7 +192,7 @@
         "@devintern/utils": "workspace:*",
       },
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -199,7 +200,7 @@
       "name": "@devintern/text-formatter",
       "version": "0.1.0",
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -207,7 +208,7 @@
       "name": "@devintern/utils",
       "version": "0.1.0",
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.0",
         "typescript": "^5.3.0",
       },
     },
@@ -932,7 +933,7 @@
 
     "@types/babel__traverse": ["@types/babel__traverse@7.28.0", "", { "dependencies": { "@babel/types": "^7.28.2" } }, "sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q=="],
 
-    "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+    "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
 
     "@types/cacheable-request": ["@types/cacheable-request@6.0.3", "", { "dependencies": { "@types/http-cache-semantics": "*", "@types/keyv": "^3.1.4", "@types/node": "*", "@types/responselike": "^1.0.0" } }, "sha512-IQ3EbTzGxIigb1I3qPZc1rWJnH0BmSKv5QYTalEwweFvyBDLSAe24zP0le/hyi7ecGfZVlIVAg4BZqb8WBwKqw=="],
 
@@ -1060,7 +1061,7 @@
 
     "builder-util-runtime": ["builder-util-runtime@9.7.0", "", { "dependencies": { "debug": "^4.3.4", "sax": "^1.2.4" } }, "sha512-g/kR520giAFYkSXTzcmF3kqQq7wi8F6N6SzeDgZrqTBN+VHdmgWOyTdD1yD7AATDId/yXLvuP34CxW46/BwCdw=="],
 
-    "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+    "bun-types": ["bun-types@1.4.0", "", { "dependencies": { "@types/node": "*" } }, "sha512-iIKw23BspnQQYd3prITOBxeUsxBHnwzX6YJfGMuNOZzeNcMmVqzIIVGRm1l69ogaPQmb4wB6BN8mA5bE9YuC5Q=="],
 
     "bundle-name": ["bundle-name@4.1.0", "", { "dependencies": { "run-applescript": "^7.0.0" } }, "sha512-tjwM5exMg6BGRI+kNmTntNsvdZS1X8BFYS6tnJ2hdH0kVxM6/eVZ2xy+FqStSWvYmtfFMDLIxurorHwDKfDz5Q=="],
 
@@ -2372,6 +2373,8 @@
 
     "buffer-image-size/@types/node": ["@types/node@22.20.1", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q=="],
 
+    "bun-types/@types/node": ["@types/node@24.13.3", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q=="],
+
     "cacheable-request/get-stream": ["get-stream@5.2.0", "", { "dependencies": { "pump": "^3.0.0" } }, "sha512-nBF+F1rAZVCu/p7rjzgA+Yb4lfYXrpl7a6VmJrU8wF9I1CKvP/QwPNZHnOlwbTkY6dvtFIzFMSyQXbLoTQPRpA=="],
 
     "chalk/ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
@@ -2545,6 +2548,8 @@
     "app-builder-lib/@electron/notarize/fs-extra": ["fs-extra@9.1.0", "", { "dependencies": { "at-least-node": "^1.0.0", "graceful-fs": "^4.2.0", "jsonfile": "^6.0.1", "universalify": "^2.0.0" } }, "sha512-hcg3ZmepS30/7BSFqRvoo3DOMQu7IjqxO5nCDt+zM9XWjb33Wg7ziNT+Qvqbuc3+gWpzO02JubVyk2G4Zvo1OQ=="],
 
     "axios/https-proxy-agent/agent-base": ["agent-base@6.0.2", "", { "dependencies": { "debug": "4" } }, "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ=="],
+
+    "bun-types/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
     "cliui/string-width/is-fullwidth-code-point": ["is-fullwidth-code-point@3.0.0", "", {}, "sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg=="],
 
