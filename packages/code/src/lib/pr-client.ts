@@ -76,6 +76,10 @@ export abstract class PRClient {
   /**
    * Build default PR description markdown from task tracker details.
    *
+   * When a coordinated multi-repo run injects `DEVINTERN_PR_FOOTER`, its
+   * coordination section (task, role, dependencies, sibling links) is
+   * appended so reviewers see the full change set on every PR.
+   *
    * @param task - Source task (JIRA issue or generic Task)
    * @param implementationSummary - Optional agent implementation summary
    */
@@ -94,6 +98,11 @@ export abstract class PRClient {
 
     lines.push("---");
     lines.push("*This PR was automatically created by @devintern/code*");
+
+    const footer = process.env.DEVINTERN_PR_FOOTER;
+    if (footer && footer.trim()) {
+      lines.push("", footer.trim());
+    }
 
     return lines.join("\n");
   }
@@ -421,7 +430,7 @@ export class PRManager {
     return `[${taskKey}] ${taskSummary}`;
   }
 
-  /** @inheritdoc PRClient.createPRBody */
+  /** @inheritdoc PRClient.createPRBody (plus the coordination footer when set) */
   private createPRBody(task: Task | JiraIssue, implementationSummary?: string): string {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
@@ -437,6 +446,11 @@ export class PRManager {
 
     lines.push("---");
     lines.push("*This PR was automatically created by @devintern/code*");
+
+    const footer = process.env.DEVINTERN_PR_FOOTER;
+    if (footer && footer.trim()) {
+      lines.push("", footer.trim());
+    }
 
     return lines.join("\n");
   }

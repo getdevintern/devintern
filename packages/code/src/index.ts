@@ -1012,6 +1012,58 @@ if (process.argv[2] === "init") {
       const { runWorkspaceImport } = await import("./lib/workspace/init");
       process.exit(await runWorkspaceImport(process.cwd()));
     }
+    if (sub === "reconcile") {
+      const coordinationId = process.argv[4];
+      loadedEnvPath = loadEnvironment();
+      if (!coordinationId) {
+        console.error("❌ Usage: devintern workspace reconcile <coordination-id>");
+        console.error("   Updates every PR of a coordinated effort with the final");
+        console.error("   sibling-PR link set. Find IDs in the dashboard or worker logs.");
+        process.exit(1);
+      }
+      const { resolveWorkspaceDir, workspaceConfigPath, workspaceDbPath } =
+        await import("./lib/workspace/paths");
+      const { CoordinationStore } = await import("./lib/workspace/coordination");
+      const { reconcileCoordinatedPrs } = await import("./lib/workspace/orchestrator");
+      const { GitHubReviewsClient } = await import("./lib/github-reviews");
+      const { loadWorkspaceConfig } = await import("./lib/workspace/config");
+
+      let config;
+      try {
+        config = loadWorkspaceConfig(workspaceConfigPath(resolveWorkspaceDir()));
+      } catch (error) {
+        console.error(`❌ ${(error as Error).message}`);
+        process.exit(1);
+      }
+      const store = new CoordinationStore(workspaceDbPath(resolveWorkspaceDir()));
+      const gh = new GitHubReviewsClient({ preferAppAuth: true });
+      const failedRepos = await reconcileCoordinatedPrs(
+        {
+          store,
+          config,
+          github: {
+            getPullRequestBody: async (slug, prNumber) => {
+              const [owner, name] = slug.split("/") as [string, string];
+              return (await gh.getPullRequest(owner, name, prNumber)).body;
+            },
+            updatePullRequestBody: async (slug, prNumber, body) => {
+              const [owner, name] = slug.split("/") as [string, string];
+              await gh.updatePullRequestBody(owner, name, prNumber, body);
+            },
+          },
+        },
+        coordinationId,
+      );
+      store.close();
+      if (failedRepos.length > 0) {
+        console.error(
+          `❌ Reconciliation still failing for: ${failedRepos.join(", ")}. Fix GitHub access and retry.`,
+        );
+        process.exit(1);
+      }
+      console.log(`✅ Sibling PR links reconciled for ${coordinationId}`);
+      process.exit(0);
+    }
     console.log("Usage: devintern workspace <command>");
     console.log("");
     console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
@@ -1022,6 +1074,10 @@ if (process.argv[2] === "init") {
     console.log("  import    Add the current repo to the workspace (run inside the repo);");
     console.log("            merges its .devintern-code/.env into the workspace .env and");
     console.log("            keeps conflicting values repo-local in [repos.env]");
+    console.log(
+      "  reconcile <id>",
+      "\n            Re-run sibling-PR link updates for a coordinated effort",
+    );
     process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
   })();
 } else if (process.argv[2] === "dashboard") {
@@ -1938,7 +1994,14 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Create feature branch before running Agent (unless disabled)
     if (options.git) {
       console.log("\n🌿 Creating feature branch...");
-      const branchResult = await Utils.createFeatureBranch(workflowKey, effectiveTargetBranch);
+      // Coordinated multi-repo runs inject a deterministic branch derived
+      // from the task + coordination ID; plain runs keep the default naming.
+      const coordinationBranch = process.env.DEVINTERN_FEATURE_BRANCH;
+      const branchResult = await Utils.createFeatureBranch(
+        workflowKey,
+        effectiveTargetBranch,
+        coordinationBranch ? { branchName: coordinationBranch } : undefined,
+      );
 
       if (branchResult.success) {
         console.log(`✅ ${branchResult.message}`);

@@ -17,6 +17,12 @@ import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
 import { WorkerState } from "./worker-state";
 import type { Cursor } from "./worker-state";
+import { CoordinationStore } from "./workspace/coordination";
+import type {
+  CoordinationRecord,
+  CoordinationRunRecord,
+  CoordinationRunStatus,
+} from "./workspace/coordination";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -56,6 +62,7 @@ interface Stores {
   runs: RunStore;
   state: WorkerState;
   queue: WebhookQueue;
+  coordination: CoordinationStore;
 }
 
 /**
@@ -85,6 +92,7 @@ export class DashboardData {
         runs: new RunStore(this.dbPath, { readonly: true }),
         state: new WorkerState(this.dbPath, { readonly: true }),
         queue: new WebhookQueue({ dbPath: this.dbPath, readonly: true }),
+        coordination: new CoordinationStore(this.dbPath),
       };
       return this.stores;
     } catch {
@@ -115,6 +123,7 @@ export class DashboardData {
     taskKey?: string;
     status?: RunStatus;
     origin?: RunOrigin;
+    coordinationId?: string;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
@@ -122,6 +131,30 @@ export class DashboardData {
       runs: stores.runs.listRuns(filter),
       total: stores.runs.countFilteredRuns(filter),
     }));
+  }
+
+  /** Per-repo run rows of a coordinated effort, newest effort first. */
+  listCoordinations(limit = 20): CoordinationListItem[] {
+    return this.read([], (stores) =>
+      stores.coordination.listCoordinations(limit).map((coordination) => ({
+        ...coordination,
+        runs: withDependencyState(stores.coordination.listRuns(coordination.coordinationId)),
+      })),
+    );
+  }
+
+  /** One coordinated effort (parent + per-repo runs), or null. */
+  getCoordination(coordinationId: string): CoordinationListItem | null {
+    return this.read(null, (stores) => {
+      const coordination = stores.coordination.getCoordination(coordinationId);
+      if (!coordination) {
+        return null;
+      }
+      return {
+        ...coordination,
+        runs: withDependencyState(stores.coordination.listRuns(coordinationId)),
+      };
+    });
   }
 
   getRunDetail(id: number): { run: RunRecord; stages: RunStageRecord[] } | null {
@@ -156,9 +189,51 @@ export class DashboardData {
       this.stores.runs.close();
       this.stores.state.close();
       this.stores.queue.close();
+      this.stores.coordination.close();
       this.stores = null;
     }
   }
+}
+
+/** A coordinated effort with its per-repository runs (dashboard shape). */
+export interface CoordinationListItem extends CoordinationRecord {
+  runs: CoordinationRunView[];
+}
+
+/** Per-repo run row plus the derived dependency state. */
+export interface CoordinationRunView extends CoordinationRunRecord {
+  /**
+   * `none` when the repo has no dependencies; `satisfied` when every
+   * prerequisite succeeded or was skipped; `blocked` when a prerequisite
+   * failed/blocked; `waiting` otherwise.
+   */
+  dependencyState: "none" | "satisfied" | "blocked" | "waiting";
+}
+
+/**
+ * Derive each run's dependency state from its siblings' statuses so the
+ * dashboard can explain WHY a dependent repository has not run.
+ */
+function withDependencyState(runs: CoordinationRunRecord[]): CoordinationRunView[] {
+  const statusByRepo = new Map(runs.map((run) => [run.repo, run.status]));
+  const succeeded = new Set(
+    runs.filter((run) => run.status === "succeeded" || run.status === "skipped").map((r) => r.repo),
+  );
+  return runs.map((run) => {
+    let dependencyState: CoordinationRunView["dependencyState"] = "none";
+    if (run.dependencies.length > 0) {
+      if (
+        run.dependencies.some((dep) => ["failed", "blocked"].includes(statusByRepo.get(dep) ?? ""))
+      ) {
+        dependencyState = "blocked";
+      } else if (run.dependencies.every((dep) => succeeded.has(dep))) {
+        dependencyState = "satisfied";
+      } else {
+        dependencyState = "waiting";
+      }
+    }
+    return { ...run, dependencyState };
+  });
 }
 
 function badRequest(message: string): ApiResponse {
@@ -196,6 +271,7 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    coordinationId: params.get("coordinationId") ?? undefined,
     limit,
     offset,
   });
@@ -258,4 +334,36 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbMissing: data.dbMissing,
     },
   };
+}
+
+const COORDINATION_LIMIT = 50;
+
+/**
+ * `GET /api/coordination` — coordinated multi-repo efforts with their
+ * per-repository runs (repository, branch, status, dependency state, PR URL).
+ *
+ * @param data - Dashboard data source
+ * @param params - Query params: `limit` (default 20, max {@link COORDINATION_LIMIT})
+ */
+export function handleCoordinations(data: DashboardData, params: URLSearchParams): ApiResponse {
+  const rawLimit = params.get("limit");
+  const limit = rawLimit === null ? 20 : parseInt(rawLimit, 10);
+  if (!Number.isFinite(limit) || limit < 1 || limit > COORDINATION_LIMIT) {
+    return badRequest(`limit must be between 1 and ${COORDINATION_LIMIT}`);
+  }
+  return { status: 200, body: { coordinations: data.listCoordinations(limit) } };
+}
+
+/**
+ * `GET /api/coordination/:id` — one coordinated effort and its per-repo runs.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Coordination ID path segment
+ */
+export function handleCoordinationDetail(data: DashboardData, idParam: string): ApiResponse {
+  const detail = data.getCoordination(decodeURIComponent(idParam));
+  if (!detail) {
+    return { status: 404, body: { error: `coordination ${idParam} not found` } };
+  }
+  return { status: 200, body: detail };
 }

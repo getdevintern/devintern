@@ -11,7 +11,8 @@
  *
  * Routing skips are recorded here too: a task whose routing is ambiguous or
  * unmatched is never guessed at — it is skipped, recorded, and only retried
- * when the task changes again.
+ * when the task changes again. Coordinated (multi-repo) planning failures are
+ * recorded the same way (`unplanned`).
  */
 
 import { Database } from "bun:sqlite";
@@ -21,10 +22,11 @@ import { dirname, join } from "path";
 import { LockManager } from "../lock-manager";
 import { WebhookQueue } from "../webhook-queue";
 import { WorkerState } from "../worker-state";
+import { CoordinationStore } from "./coordination";
 import { locksDir, resolveWorkspaceDir, workspaceDbPath } from "./paths";
 
 /** Reason a task was not routed to any repo. */
-export type RoutingSkipReason = "ambiguous" | "unrouted";
+export type RoutingSkipReason = "ambiguous" | "unrouted" | "unplanned";
 
 export interface RoutingSkip {
   taskKey: string;
@@ -41,6 +43,8 @@ export interface WorkspaceState {
   workerState: WorkerState;
   queue: WebhookQueue;
   skips: RoutingSkipStore;
+  /** Coordinated multi-repo efforts (parent + per-repo run rows). */
+  coordination: CoordinationStore;
   dbPath: string;
   close(): void;
 }
@@ -56,15 +60,18 @@ export function openWorkspaceState(workspaceDir: string = resolveWorkspaceDir())
   const workerState = new WorkerState(dbPath);
   const queue = new WebhookQueue({ dbPath });
   const skips = new RoutingSkipStore(dbPath);
+  const coordination = new CoordinationStore(dbPath);
   return {
     workerState,
     queue,
     skips,
+    coordination,
     dbPath,
     close() {
       workerState.close();
       queue.close();
       skips.close();
+      coordination.close();
     },
   };
 }
