@@ -23,6 +23,33 @@ export function Welcome({
   recentProjects = null,
   onOpenRecentProject,
 }: WelcomeProps) {
+  if (loading) {
+    return (
+      <div
+        className="relative flex h-screen flex-col items-center justify-center gap-4 p-6 text-center"
+        data-testid="welcome-screen"
+        data-state="loading"
+      >
+        <div className="absolute top-3 right-3">
+          <AnalyticsSettings />
+        </div>
+        <h1 className="text-2xl font-semibold">
+          <span className="product-pm">devintern</span>
+          <span className="product-sep">/</span>
+          <span>pm</span>
+        </h1>
+        <div className="flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+          <Loader2 className="size-6 animate-spin" aria-hidden />
+        </div>
+        <p className="max-w-md text-sm text-muted-foreground" data-testid="welcome-loading-status">
+          Opening your project…
+        </p>
+      </div>
+    );
+  }
+
+  const showRecentProjects = recentProjects !== null && recentProjects.length > 0;
+
   return (
     <div
       className="relative flex h-screen flex-col items-center justify-center gap-4 p-6 text-center"
@@ -37,65 +64,46 @@ export function Welcome({
         <span>pm</span>
       </h1>
       <p className="max-w-md text-sm text-muted-foreground">
-        Turn Figma designs, error logs, or plain-language requirements into well-structured tracker
-        issues. Connect a GitHub repository — the app keeps a managed clone and you can finish PM
-        setup entirely in the app.
+        Connect a GitHub repository to set up your first project. The app keeps a managed clone and
+        guides you through connecting a task tracker, all without leaving the app.
       </p>
-      <Button size="lg" onClick={onConnectGitHub} disabled={loading} data-testid="welcome-connect">
-        {loading ? (
-          <Loader2 className="animate-spin" data-icon="inline-start" />
-        ) : (
-          <GitPullRequest data-icon="inline-start" />
-        )}
-        {loading ? "Opening project…" : "Connect GitHub repository"}
+      <Button size="lg" onClick={onConnectGitHub} data-testid="welcome-connect">
+        <GitPullRequest data-icon="inline-start" />
+        Connect GitHub repository
       </Button>
       <Button
         type="button"
         variant="ghost"
         size="sm"
         onClick={onChooseProject}
-        disabled={loading}
         data-testid="welcome-choose"
       >
         <FolderOpen data-icon="inline-start" />
         Open existing folder
       </Button>
-      {loading ? (
-        <p className="max-w-sm text-xs text-muted-foreground" data-testid="welcome-loading-status">
-          Syncing git and loading tracker settings…
-        </p>
-      ) : null}
-      <div
-        className="mt-2 flex w-full max-w-md flex-col items-stretch gap-2 text-left"
-        data-testid="welcome-recent-projects"
-      >
-        <p className="text-center text-xs font-medium text-muted-foreground">Recent projects</p>
-        {recentProjects === null ? null : recentProjects.length === 0 ? (
-          <p
-            className="rounded-md border border-dashed px-3 py-2 text-center text-xs text-muted-foreground"
-            data-testid="recent-projects-empty"
-          >
-            No recent projects yet. Connect a GitHub repo or open a PM-initialized folder.
-          </p>
-        ) : (
-          recentProjects.map((dir) => (
+      {showRecentProjects && onOpenRecentProject ? (
+        <div
+          className="mt-2 flex w-full max-w-md flex-col items-stretch gap-2 text-left"
+          data-testid="welcome-recent-projects"
+        >
+          <p className="text-center text-xs font-medium text-muted-foreground">Recent projects</p>
+          {recentProjects.map((dir) => (
             <Button
               key={dir}
               type="button"
               variant="outline"
               className="h-auto min-h-9 justify-start px-3 py-2"
-              disabled={loading || !onOpenRecentProject}
               title={dir}
-              onClick={() => onOpenRecentProject?.(dir)}
+              onClick={() => onOpenRecentProject(dir)}
             >
               <FolderOpen data-icon="inline-start" />
               <span className="min-w-0 flex-1 truncate text-left">
                 {formatProjectDirLabel(dir, recentProjects)}
               </span>
             </Button>
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
