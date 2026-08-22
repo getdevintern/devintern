@@ -80,9 +80,11 @@ export function spawnFailedError(message: string, cause?: string): AgentLaunchEr
 //
 // Patterns are deliberately narrow multi-word phrases tied to auth vocabulary
 // so agent-generated source text (docs, code snippets about auth) is not
-// mistaken for a live authentication failure. Detection only matters before
-// meaningful output exists (see {@link classifyExitFailure}), which further
-// bounds false positives.
+// mistaken for a live authentication failure. {@link classifyExitFailure}
+// additionally only honors a match when nothing task-related precedes it in
+// the captured stream (or the matching line itself reports an error): an
+// agent transcript that implements login/OAuth features can legitimately
+// contain auth vocabulary mid-work, and such exits must never fall back.
 // ---------------------------------------------------------------------------
 
 const AUTH_FAILURE_PATTERNS: RegExp[] = [
@@ -98,15 +100,69 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /\brun `?\/?(login|auth)`?( first| to continue)?\b/i,
 ];
 
+/** Where an authentication-vocabulary match occurred in captured output. */
+interface AuthFailureHit {
+  /** Index of the match inside the combined stdout/stderr stream. */
+  index: number;
+  /** Full text of the line containing the match. */
+  line: string;
+}
+
+/** Line prefixes that present their content as a live error report. */
+const ERROR_REPORT_LINE_PATTERNS: RegExp[] = [
+  /^\[?\s*(?:error|err|fatal|exception|traceback|panic)\b/i,
+  /^\[\s*(?:error|fatal)\s*\]/i,
+  /^[✗✖×⨯✘]/u,
+];
+
+/**
+ * Whether a line presents itself as an actual error report (as opposed to
+ * prose that happens to discuss error topics).
+ *
+ * @param line - Raw line from captured agent output (ANSI codes allowed).
+ */
+function isErrorReportLine(line: string): boolean {
+  const clean = line.replace(ANSI_ESCAPE, "").trim();
+  return ERROR_REPORT_LINE_PATTERNS.some((pattern) => pattern.test(clean));
+}
+
+/**
+ * Locate the earliest authentication-vocabulary match in combined output.
+ *
+ * @param stdout - Captured agent stdout.
+ * @param stderr - Captured agent stderr.
+ */
+function findAuthFailureHit(stdout: string, stderr: string): AuthFailureHit | null {
+  const combined = `${stdout}\n${stderr}`;
+  let earliestIndex: number | undefined;
+  for (const pattern of AUTH_FAILURE_PATTERNS) {
+    const match = pattern.exec(combined);
+    if (match && (earliestIndex === undefined || match.index < earliestIndex)) {
+      earliestIndex = match.index;
+    }
+  }
+  if (earliestIndex === undefined) {
+    return null;
+  }
+  const lineStart = combined.lastIndexOf("\n", earliestIndex) + 1;
+  const lineEnd = combined.indexOf("\n", earliestIndex);
+  return {
+    index: earliestIndex,
+    line: combined.slice(lineStart, lineEnd === -1 ? combined.length : lineEnd),
+  };
+}
+
 /**
  * Whether combined stdout/stderr matches a known authentication failure.
+ *
+ * Pure vocabulary check; {@link classifyExitFailure} adds positional context
+ * so mid-work mentions are not treated as live auth failures.
  *
  * @param stdout - Captured agent stdout.
  * @param stderr - Captured agent stderr.
  */
 export function detectAuthFailure(stdout: string, stderr: string): boolean {
-  const combined = `${stdout}\n${stderr}`;
-  return AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(combined));
+  return findAuthFailureHit(stdout, stderr) !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,19 +220,58 @@ export function hasMeaningfulAgentOutput(output: string): boolean {
 /**
  * Classify a non-zero exit for fallback eligibility.
  *
+ * A recognized authentication failure counts as *pre-work* only when its
+ * earliest matched phrase appears before any meaningful task-related output
+ * (live auth errors print immediately, after at most startup banners), or
+ * when the matching line itself presents an error report. Verbose multi-line
+ * auth error dumps therefore stay fallback-eligible, while a transcript that
+ * implemented login/OAuth features and merely mentions auth vocabulary
+ * mid-task does not. Only when no auth match is honored does meaningful task
+ * output disqualify the exit from fallback.
+ *
  * @param stdout - Captured agent stdout.
  * @param stderr - Captured agent stderr.
  * @returns The failure class when fallback is safe, or `null` when the exit
  *          happened after meaningful output (never fall back then).
  */
 export function classifyExitFailure(stdout: string, stderr: string): LaunchFailureClass | null {
+  const hit = findAuthFailureHit(stdout, stderr);
+  if (hit) {
+    const combined = `${stdout}\n${stderr}`;
+    const outputBeforeMatch = combined.slice(0, hit.index);
+    if (!hasMeaningfulAgentOutput(outputBeforeMatch) || isErrorReportLine(hit.line)) {
+      return "auth-failed";
+    }
+  }
   if (hasMeaningfulAgentOutput(stdout)) {
     return null;
   }
-  if (detectAuthFailure(stdout, stderr)) {
-    return "auth-failed";
-  }
   return "exited-before-output";
+}
+
+/**
+ * Build the rejection error for a captured non-zero agent exit.
+ *
+ * This is the exact wiring every spawn site uses to hand a failed launch to
+ * the fallback coordinator: safe failure classes become an
+ * {@link AgentLaunchError} (fallback-eligible), everything else becomes a
+ * plain {@link Error} that never advances the chain.
+ *
+ * @param message - Full failure message, e.g. ``Agent exited with code 1``.
+ * @param stdout - Captured agent stdout.
+ * @param stderr - Captured agent stderr.
+ * @param exitCode - The child's exit code.
+ */
+export function exitClassificationError(
+  message: string,
+  stdout: string,
+  stderr: string,
+  exitCode: number | null,
+): Error {
+  const classification = classifyExitFailure(stdout, stderr);
+  return classification
+    ? new AgentLaunchError(message, { classification, stdout, stderr, exitCode })
+    : new Error(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +282,22 @@ export function classifyExitFailure(stdout: string, stderr: string): LaunchFailu
 const MAX_REASON_LENGTH = 200;
 
 /**
+ * Credential-shaped substrings: a key-ish name (`sk`, `rk`, `key`, `token`,
+ * `bearer`, including prefixed env-var names like `AUTH_TOKEN` / `API_KEY`,
+ * where the underscore prefix defeats `\b`) optionally separated from its
+ * value by `-`, `=`, or `:` plus optional whitespace.
+ */
+const CREDENTIAL_SHAPE =
+  /(?<![A-Za-z0-9])(?:sk|rk|key|token|bearer)(?:[-=:]\s*)?[A-Za-z0-9_-]{8,}/gi;
+
+/**
  * Redact credential-shaped substrings and clamp a failure reason for display.
  *
  * @param reason - Raw reason text (error message or matched output line).
  */
 export function sanitizeFallbackReason(reason: string): string {
   const redacted = reason
-    .replace(/\b(sk|rk|key|token|bearer)-?[A-Za-z0-9_-]{8,}/gi, "[redacted]")
+    .replace(CREDENTIAL_SHAPE, "[redacted]")
     .replace(/\b[A-Za-z0-9+/=_-]{40,}\b/g, "[redacted]");
   const singleLine = redacted.replace(/\s+/g, " ").trim();
   return singleLine.length > MAX_REASON_LENGTH

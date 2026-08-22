@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { ChainExhaustedError, HarnessFallbackCoordinator } from "../src/lib/harness-fallback";
+import {
+  ChainExhaustedError,
+  HarnessFallbackCoordinator,
+  preExhaustedFor,
+  recordProcessLevelExecutableMissing,
+  resetProcessLevelExecutableMissing,
+} from "../src/lib/harness-fallback";
 import type { FallbackAttemptRecord } from "../src/lib/harness-fallback";
 import { parseHarnessChain, resolveHarnessCandidates } from "../src/lib/harness-chain";
 import type { HarnessCandidate } from "../src/lib/harness-chain";
@@ -320,5 +326,138 @@ describe("attempt record shape", () => {
     expect(first.canonical).toBe("antigravity");
     expect(first.outcome).toBe("executable-missing");
     expect(first.detail).toContain("agy CLI not found");
+  });
+});
+
+describe("process-level executable-missing memoization", () => {
+  let logged: string[];
+  let originalLog: typeof console.log;
+
+  beforeEach(() => {
+    resetProcessLevelExecutableMissing();
+    logged = [];
+    originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+  });
+
+  afterEach(() => {
+    console.log = originalLog;
+    resetProcessLevelExecutableMissing();
+  });
+
+  test("run() remembers executable-missing failures for fresh coordinators", async () => {
+    // Task attempt 1: primary binary missing; the chain falls back.
+    const first = cleanTreeCoordinator("claude-code,codex").coordinator;
+    await first.run("feasibility", async (candidate) => {
+      if (candidate.entry.canonical === "claude-code") {
+        throw executableMissingError("Claude Code CLI not found");
+      }
+      return candidate.entry.canonical;
+    });
+
+    // Task attempt 2 recreates the coordinator (batch mode); seeding must
+    // skip the known-dead primary instead of re-paying its ENOENT budget.
+    const candidates = buildCandidates("claude-code,codex");
+    const attempted: string[] = [];
+    const second = new HarnessFallbackCoordinator(candidates, {
+      cwd: "/tmp/opencode",
+      snapshotRepoState: () => "clean",
+      preExhausted: preExhaustedFor(candidates),
+    });
+    const result = await second.run("feasibility", async (candidate) => {
+      attempted.push(candidate.entry.canonical);
+      return candidate.entry.canonical;
+    });
+
+    expect(attempted).toEqual(["codex"]);
+    expect(result).toBe("codex");
+    expect(second.switched).toBe(true);
+    expect(second.provenanceNote()).toContain('"claude-code"');
+  });
+
+  test("other failure classes are never memoized across attempts", async () => {
+    const { coordinator } = cleanTreeCoordinator("claude-code,codex");
+    await coordinator.run("feasibility", async (candidate) => {
+      if (candidate.entry.canonical === "claude-code") {
+        throw launchError("auth-failed", "Not logged in. Run claude login.");
+      }
+      return candidate.entry.canonical;
+    });
+
+    const candidates = buildCandidates("claude-code,codex");
+    const attempted: string[] = [];
+    const second = new HarnessFallbackCoordinator(candidates, {
+      cwd: "/tmp/opencode",
+      snapshotRepoState: () => "clean",
+      preExhausted: preExhaustedFor(candidates),
+    });
+    await second.run("feasibility", async (candidate) => {
+      attempted.push(candidate.entry.canonical);
+      return candidate.entry.canonical;
+    });
+    // Auth failures are retryable; a new attempt starts from the primary.
+    expect(attempted).toEqual(["claude-code"]);
+  });
+
+  test("a fully known-dead chain fails fast without invoking any operation", async () => {
+    recordProcessLevelExecutableMissing({
+      stage: "implementation",
+      requested: "claude-code",
+      canonical: "claude-code",
+      outcome: "executable-missing",
+      detail: "Claude Code CLI not found",
+    });
+    recordProcessLevelExecutableMissing({
+      stage: "implementation",
+      requested: "codex",
+      canonical: "codex",
+      outcome: "executable-missing",
+      detail: "Codex CLI not found",
+    });
+
+    const candidates = buildCandidates("claude-code,codex");
+    const coordinator = new HarnessFallbackCoordinator(candidates, {
+      cwd: "/tmp/opencode",
+      snapshotRepoState: () => "clean",
+      preExhausted: preExhaustedFor(candidates),
+    });
+    let ran = false;
+    await expect(
+      coordinator.run("implementation", async () => {
+        ran = true;
+        return null;
+      }),
+    ).rejects.toBeInstanceOf(ChainExhaustedError);
+    expect(ran).toBe(false);
+  });
+
+  test("run skips a seeded dead middle candidate and reaches a live later one", async () => {
+    recordProcessLevelExecutableMissing({
+      stage: "feasibility",
+      requested: "opencode",
+      canonical: "opencode",
+      outcome: "executable-missing",
+      detail: "Opencode CLI not found",
+    });
+    const candidates = buildCandidates("claude-code,opencode,codex");
+    const coordinator = new HarnessFallbackCoordinator(candidates, {
+      cwd: "/tmp/opencode",
+      snapshotRepoState: () => "clean",
+      preExhausted: preExhaustedFor(candidates),
+    });
+
+    const attempted: string[] = [];
+    const result = await coordinator.run("implementation", async (candidate) => {
+      attempted.push(candidate.entry.canonical);
+      if (candidate.entry.canonical === "claude-code") {
+        throw executableMissingError("Claude Code CLI vanished");
+      }
+      return candidate.entry.canonical;
+    });
+
+    expect(attempted).toEqual(["claude-code", "codex"]);
+    expect(result).toBe("codex");
   });
 });

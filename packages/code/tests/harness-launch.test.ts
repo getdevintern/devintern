@@ -109,6 +109,55 @@ describe("classifyExitFailure", () => {
       "and added unit tests covering token expiry handling for the scheduled refresher job.";
     expect(classifyExitFailure(transcript, "exit status 3")).toBeNull();
   });
+
+  test("verbose multi-line auth errors on stdout still fall back", () => {
+    const verboseAuthError = [
+      "Error: authentication failed (401 Unauthorized).",
+      "The API token you provided is invalid or has expired.",
+      "For troubleshooting, see https://example.com/docs/troubleshooting-auth-errors",
+      "for step-by-step instructions covering credential configuration, renewal,",
+      "and how to verify your account access before retrying the request.",
+    ].join("\n");
+    // The error text alone is long enough to count as meaningful output, yet
+    // a recognized auth failure must stay fallback-eligible.
+    expect(hasMeaningfulAgentOutput(verboseAuthError)).toBe(true);
+    expect(classifyExitFailure(verboseAuthError, "")).toBe("auth-failed");
+  });
+
+  test("auth errors preceded only by startup banners still fall back", () => {
+    const bannerThenAuth = [
+      "Welcome to Codex",
+      "v2.1.0",
+      "Session: abc123",
+      "error: Invalid API key provided. Check your credentials and retry.",
+    ].join("\n");
+    expect(hasMeaningfulAgentOutput(bannerThenAuth)).toBe(false);
+    expect(classifyExitFailure(bannerThenAuth, "")).toBe("auth-failed");
+  });
+
+  test("work transcripts that merely mention auth vocabulary never fall back", () => {
+    // Regression: the phrases below match the narrow auth patterns, but they
+    // occur after meaningful task content (an implemented login/OAuth flow),
+    // so the exit must be classified as post-work rather than auth-failed.
+    const transcript =
+      "Implemented the OAuth login feature end to end: created src/auth/device-flow.ts " +
+      "exposing startDeviceAuthorization() with polling, wired the token exchange into\n" +
+      "the session store, and documented that users are told 'You need to log in to the " +
+      "API' whenever a stored token is invalid so the UI can prompt for re-authentication.";
+    expect(hasMeaningfulAgentOutput(transcript)).toBe(true);
+    expect(detectAuthFailure(transcript, "")).toBe(true);
+    expect(classifyExitFailure(transcript, "exit status 1")).toBeNull();
+  });
+
+  test("an explicit auth error line after real work still classifies as auth-failed", () => {
+    const workedThenFailed = [
+      "Implemented the OAuth login feature across src/auth/device-flow.ts and its tests,",
+      "covering polling timeouts and the credential refresh path.",
+      "Error: invalid api key provided.",
+    ].join("\n");
+    expect(hasMeaningfulAgentOutput(workedThenFailed)).toBe(true);
+    expect(classifyExitFailure(workedThenFailed, "")).toBe("auth-failed");
+  });
 });
 
 describe("AgentLaunchError", () => {
@@ -135,6 +184,16 @@ describe("sanitizeFallbackReason", () => {
     const sanitized = sanitizeFallbackReason("auth failed for sk-ant-api03-abcdef1234567890");
     expect(sanitized).toContain("[redacted]");
     expect(sanitized).not.toContain("sk-ant");
+  });
+
+  test("redacts env-var-style secrets with '=' and ':' separators", () => {
+    const sanitized = sanitizeFallbackReason(
+      "AUTH_TOKEN=abc123secret and API_KEY=shortvalue1 (token=deadbeef123)",
+    );
+    expect(sanitized).toContain("[redacted]");
+    expect(sanitized).not.toContain("abc123secret");
+    expect(sanitized).not.toContain("shortvalue1");
+    expect(sanitized).not.toContain("deadbeef123");
   });
 
   test("collapses newlines and clamps length", () => {

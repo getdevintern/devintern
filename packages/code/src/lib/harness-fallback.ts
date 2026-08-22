@@ -13,6 +13,12 @@
  * Once a candidate becomes active it stays active for every later invocation
  * in the same task attempt, so review/repair spawns reuse the same harness
  * and its sandbox capabilities.
+ *
+ * Across task attempts (batch mode recreates coordinators per attempt),
+ * `executable-missing` disqualifications are memoized at process level via
+ * {@link recordProcessLevelExecutableMissing} and re-seeded through the
+ * `preExhausted` option, so a binary already found missing is never
+ * re-attempted — including its ENOENT retry budget.
  */
 
 import { execFileSync } from "child_process";
@@ -81,6 +87,13 @@ export interface FallbackCoordinatorOptions {
    * blocks fallback. Return `null` when state cannot be determined (fail-safe).
    */
   snapshotRepoState?: (cwd: string) => string | null;
+  /**
+   * Failure records for candidates already disqualified earlier in this
+   * process (e.g. an executable found missing by a previous task attempt).
+   * Seeded candidates are never re-attempted; the coordinator starts at the
+   * first live candidate instead of the configured primary.
+   */
+  preExhausted?: readonly FallbackAttemptRecord[];
 }
 
 /**
@@ -98,6 +111,48 @@ export function defaultSnapshotRepoState(cwd: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Process-level memory of candidates already disqualified because their
+ * executable was missing, keyed by canonical harness name.
+ *
+ * Batch mode recreates coordinators per task attempt; without this shared
+ * record every task would re-attempt a binary known not to exist, paying the
+ * full ENOENT retry budget per stage. Only `executable-missing` is memoized:
+ * it is deterministic within one process run (unlike auth or spawn failures).
+ */
+const processMissingExecutables = new Map<string, FallbackAttemptRecord>();
+
+/**
+ * Remember an executable-missing disqualification for the rest of this
+ * process. The first record per canonical name wins.
+ *
+ * @param attempt - Failure record carrying the canonical candidate name.
+ */
+export function recordProcessLevelExecutableMissing(attempt: FallbackAttemptRecord): void {
+  if (!processMissingExecutables.has(attempt.canonical)) {
+    processMissingExecutables.set(attempt.canonical, { ...attempt });
+  }
+}
+
+/**
+ * Pre-exhaustion records for candidates this process already saw missing.
+ *
+ * @param candidates - Configured candidates of a fresh coordinator.
+ * @returns Records suitable for {@link FallbackCoordinatorOptions.preExhausted}.
+ */
+export function preExhaustedFor(
+  candidates: readonly { entry: { canonical: string } }[],
+): FallbackAttemptRecord[] {
+  return candidates
+    .map((candidate) => processMissingExecutables.get(candidate.entry.canonical))
+    .filter((record): record is FallbackAttemptRecord => record !== undefined);
+}
+
+/** Clear the process-level executable-missing memo. Exposed for tests. */
+export function resetProcessLevelExecutableMissing(): void {
+  processMissingExecutables.clear();
 }
 
 /**
@@ -119,6 +174,21 @@ export class HarnessFallbackCoordinator {
     this.candidates = candidates;
     this.cwd = options.cwd ?? process.cwd();
     this.snapshotRepoState = options.snapshotRepoState ?? defaultSnapshotRepoState;
+    for (const record of options.preExhausted ?? []) {
+      if (this.exhaustedCanonical.has(record.canonical)) {
+        continue;
+      }
+      this.exhaustedCanonical.add(record.canonical);
+      this.attempts.push({ ...record });
+    }
+    // Inherited disqualifications must not re-attempt known-dead binaries:
+    // start at the first candidate that has not already failed pre-work.
+    while (
+      this.activePosition < this.candidates.length - 1 &&
+      this.exhaustedCanonical.has(this.candidates[this.activePosition].entry.canonical)
+    ) {
+      this.activePosition += 1;
+    }
   }
 
   /** The candidate all current and future invocations will use. */
@@ -194,6 +264,14 @@ export class HarnessFallbackCoordinator {
     const baseline = this.snapshotRepoState(this.cwd);
 
     for (;;) {
+      // Advance past candidates already disqualified (seeded pre-exhaustion
+      // or an eligible failure earlier in this run) while a live one remains.
+      while (
+        this.activePosition < this.candidates.length - 1 &&
+        this.exhaustedCanonical.has(this.active.entry.canonical)
+      ) {
+        this.activePosition += 1;
+      }
       const candidate = this.active;
 
       if (this.exhaustedCanonical.has(candidate.entry.canonical)) {
@@ -259,13 +337,19 @@ export class HarnessFallbackCoordinator {
         }
 
         this.exhaustedCanonical.add(candidate.entry.canonical);
-        this.attempts.push({
+        const attemptRecord: FallbackAttemptRecord = {
           stage,
           requested: candidate.entry.raw,
           canonical: candidate.entry.canonical,
           outcome: error.classification,
           detail: sanitizeFallbackReason(error.message),
-        });
+        };
+        this.attempts.push(attemptRecord);
+        // A missing executable stays missing for later task attempts in this
+        // process; remember it so fresh coordinators skip straight past it.
+        if (error.classification === "executable-missing") {
+          recordProcessLevelExecutableMissing(attemptRecord);
+        }
 
         const nextCandidate = this.candidates[this.activePosition + 1];
         console.log(
