@@ -164,4 +164,34 @@ describe("RunStore", () => {
       rmSync(`${legacyPath}${suffix}`, { force: true });
     }
   });
+
+  test("setRunHarness re-attributes a run to the harness that actually ran", () => {
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-10",
+      harness: "claude-code",
+    });
+    expect(store.getRun(id)?.harness).toBe("claude-code");
+
+    // Fallback engaged mid-run: attribution follows the active harness.
+    store.setRunHarness(id, "codex");
+    expect(store.getRun(id)?.harness).toBe("codex");
+  });
+
+  test("per-harness statistics attribute runs to the updated harness", () => {
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-11",
+      harness: "claude-code",
+    });
+    store.setRunHarness(id, "codex");
+    store.finishRun(id, "succeeded");
+
+    const stats = store.getStats(null);
+    const codexRow = stats.byHarness.find((h) => h.harness === "codex");
+    const claudeRow = stats.byHarness.find((h) => h.harness === "claude-code");
+    expect(codexRow?.runs).toBe(1);
+    expect(codexRow?.succeeded).toBe(1);
+    expect(claudeRow ?? { runs: 0 }).toEqual({ runs: 0 });
+  });
 });

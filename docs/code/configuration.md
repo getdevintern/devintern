@@ -301,10 +301,12 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 Configure which AI agent runs and how long it can work:
 
 ```bash
-# Agent harness type (default: claude-code)
+# Agent harness type — a single value or an ordered fallback chain (default: claude-code)
 AGENT_HARNESS=claude-code
+# Fallback chain example:
+# AGENT_HARNESS=claude-code,codex,opencode
 
-# Optional: path to the agent CLI (leave unset in most cases)
+# Optional: path to the primary agent CLI (leave unset in most cases)
 # AGENT_CLI_PATH=/custom/path/to/claude
 
 # Optional: model the harness runs with (harness-specific string)
@@ -326,6 +328,39 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
 **Qwen note:** Qwen Code accepts a model via its `--model` flag (e.g. `qwen3-coder-plus`) — set it with `AGENT_MODEL`; you can also keep the model in `~/.qwen/settings.json`.
+
+### Fallback chains
+
+`AGENT_HARNESS` accepts an ordered, comma-separated list of candidates. DevIntern attempts them left to right and switches harnesses for the current task run when a candidate cannot start:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=claude-code,codex,opencode
+```
+
+Parsing rules:
+
+- Entries are tried in the configured order; surrounding whitespace is ignored.
+- Aliases resolve exactly like single values (`agy` → `antigravity`; deprecated `gemini` warns once and routes to `antigravity`).
+- Duplicate canonical entries are attempted only once — first occurrence wins.
+- An empty entry or unknown harness fails validation before any task runs, identifying the invalid value plus the supported harnesses.
+- A single value (or an unset variable, which defaults to `claude-code`) behaves exactly as before.
+
+Path resolution per candidate:
+
+- The **primary** candidate honors `--agent-path` / `AGENT_CLI_PATH`, then its own `<HARNESS>_CLI_PATH` variable, then the default command — identical to single-value configuration.
+- **Fallback** candidates never reuse the primary's explicit path. Each resolves independently via its own `<HARNESS>_CLI_PATH` variable (e.g. `CODEX_CLI_PATH`, `OPENCODE_CLI_PATH`, `AGY_CLI_PATH`) and default command.
+
+A fallback engages only for safe pre-work failures:
+
+- the configured CLI binary is missing (after the existing executable-resolution retry budget is exhausted),
+- the process failed to spawn,
+- a recognized authentication failure, or
+- a non-zero exit before any meaningful agent output.
+
+DevIntern does **not** switch harnesses once work has begun: timeouts, max-turn completions, incomplete implementations after meaningful output, repository changes made by a failing attempt, user cancellation, and usage-limit deferrals all fail (or defer) without silently starting another harness — this prevents duplicate or conflicting repository changes. If every candidate fails with an eligible failure, the run fails once with an aggregated summary of each attempted harness and sanitized reason.
+
+When a fallback succeeds, the CLI output names the transition, tracker comments note that the configured primary was replaced by the selected harness, and run history (`devintern dashboard`) attributes the run to the harness that actually performed it, with the full attempt list in stage detail.
 
 ### Model selection
 
