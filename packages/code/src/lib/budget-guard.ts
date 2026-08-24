@@ -3,7 +3,7 @@
  *
  * Operators running DevIntern unattended can cap agent spend:
  *
- * - `WORKER_MAX_SPEND_PER_RUN_USD` — maximum estimated+reported cost for a
+ * - `WORKER_MAX_SPEND_PER_RUN_USD` — maximum reported cost for a
  *   single agent run. Hard enforcement requires native harness cancellation,
  *   which no supported CLI exposes today, so this acts as an
  * *admission/post-run* cap: a run whose final usage exceeds the cap finishes
@@ -19,9 +19,9 @@
  * inside the worker process tree (`devintern worker` sets an internal env
  * marker inherited by the task subprocesses it spawns).
  *
- * Only *known* spend counts toward caps; runs whose cost could not be
- * computed (unknown model, partial usage) are surfaced as unknown exposure in
- * every capped-state notification rather than silently treated as $0.
+ * Only *known* spend counts toward caps; runs whose harness did not report
+ * a cost are surfaced as unknown exposure in every capped-state notification
+ * rather than silently treated as $0.
  */
 
 import { RunStore } from "./run-recorder";

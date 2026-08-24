@@ -54,8 +54,8 @@ export interface AgentUsage {
   source: UsageSource;
   /**
    * True when both input and output tokens were found and the model (or a
-   * provider cost) is known — i.e. downstream cost estimation can be exact.
-   * Partial reads are still returned, just with `complete: false`.
+   * provider cost) is known. Partial reads are still returned, just with
+   * `complete: false`.
    */
   complete: boolean;
 }

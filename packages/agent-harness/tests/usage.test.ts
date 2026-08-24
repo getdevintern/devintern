@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  estimateUsageCost,
-  lookupModelPricing,
-  PRICING_CATALOG_VERSION,
-} from "../src/usage-pricing.js";
-import {
   extractAgentUsage,
   findJsonUsageObjects,
   mergeAgentUsages,
@@ -197,115 +192,5 @@ describe("mergeAgentUsages", () => {
   test("incomplete sessions mark the merge incomplete", () => {
     const merged = mergeAgentUsages([{ ...base, complete: false }]);
     expect(merged?.complete).toBe(false);
-  });
-});
-
-describe("lookupModelPricing", () => {
-  test("matches known model families case-insensitively", () => {
-    expect(lookupModelPricing("Claude-Sonnet-4-5")?.canonicalModel).toBe("claude-sonnet-4");
-    expect(lookupModelPricing("gpt-5.2-codex")?.canonicalModel).toBe("gpt-5");
-    expect(lookupModelPricing("GEMINI-3-PRO")?.canonicalModel).toBe("gemini-3-pro");
-  });
-
-  test("longest prefix wins", () => {
-    expect(lookupModelPricing("claude-opus-4-1")?.inputPerMTok).toBe(15);
-    expect(lookupModelPricing("grok-code-fast-1")?.canonicalModel).toBe("grok-code-fast-1");
-  });
-
-  test("unknown models return null", () => {
-    expect(lookupModelPricing("totally-made-up-9")).toBeNull();
-    expect(lookupModelPricing("")).toBeNull();
-  });
-});
-
-describe("estimateUsageCost", () => {
-  test("prices known models per million tokens", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: 1_000_000,
-      outputTokens: 1_000_000,
-      cachedInputTokens: null,
-      reasoningTokens: null,
-      totalTokens: null,
-      model: "claude-sonnet-4-5",
-    });
-    expect(estimate.costUsd).toBe(18); // 3 + 15
-    expect(estimate.currency).toBe("USD");
-    expect(estimate.pricingVersion).toBe(PRICING_CATALOG_VERSION);
-  });
-
-  test("cache-read tokens use the discounted price", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cachedInputTokens: 400_000,
-      reasoningTokens: null,
-      totalTokens: null,
-      model: "claude-sonnet-4-5",
-    });
-    // 600k uncached * $3/M + 400k cached * $0.3/M
-    expect(estimate.costUsd).toBeCloseTo(1.92, 6);
-  });
-
-  test("reasoning tokens bill at the reasoning price when separate", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: 0,
-      outputTokens: 100_000,
-      cachedInputTokens: null,
-      reasoningTokens: 40_000,
-      totalTokens: null,
-      model: "o3",
-    });
-    // 60k output * $8/M + 40k reasoning * $8/M = same here, but exercised
-    expect(estimate.costUsd).toBeCloseTo(0.8, 6);
-  });
-
-  test("total-only usage splits with a documented ratio", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: null,
-      outputTokens: null,
-      cachedInputTokens: null,
-      reasoningTokens: null,
-      totalTokens: 1000,
-      model: "gpt-5",
-    });
-    expect(estimate.costUsd).not.toBeNull();
-    expect(estimate.pricingVersion).toBe(PRICING_CATALOG_VERSION);
-  });
-
-  test("unknown models never fabricate a cost", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: 1000,
-      outputTokens: 1000,
-      cachedInputTokens: null,
-      reasoningTokens: null,
-      totalTokens: null,
-      model: "mystery-model-v2",
-    });
-    expect(estimate.costUsd).toBeNull();
-    expect(estimate.pricingVersion).toBeNull();
-  });
-
-  test("missing model never fabricates a cost", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: 1000,
-      outputTokens: 1000,
-      cachedInputTokens: null,
-      reasoningTokens: null,
-      totalTokens: null,
-      model: null,
-    });
-    expect(estimate.costUsd).toBeNull();
-  });
-
-  test("no usable token counts yield no cost even for known models", () => {
-    const estimate = estimateUsageCost({
-      inputTokens: null,
-      outputTokens: null,
-      cachedInputTokens: null,
-      reasoningTokens: null,
-      totalTokens: null,
-      model: "claude-sonnet-4-5",
-    });
-    expect(estimate.costUsd).toBeNull();
   });
 });

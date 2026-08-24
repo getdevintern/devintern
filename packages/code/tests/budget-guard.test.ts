@@ -97,8 +97,6 @@ describe("BudgetGate admission", () => {
         totalTokens: null,
         costUsd,
         costCurrency: "USD",
-        costSource: "estimated",
-        pricingVersion: "v",
         sessionCount: 1,
         sessionsWithoutUsage: 0,
       });
@@ -151,8 +149,6 @@ describe("BudgetGate admission", () => {
       totalTokens: null,
       costUsd: 500,
       costCurrency: "USD",
-      costSource: "reported",
-      pricingVersion: null,
       sessionCount: 1,
       sessionsWithoutUsage: 0,
     });
@@ -210,8 +206,6 @@ describe("BudgetGate admission", () => {
         totalTokens: null,
         costUsd: 2.5,
         costCurrency: "USD",
-        costSource: null,
-        pricingVersion: null,
         sessionCount: 2,
         sessionsWithoutUsage: 1,
       });
@@ -226,8 +220,6 @@ describe("BudgetGate admission", () => {
         totalTokens: null,
         costUsd: 0.5,
         costCurrency: "USD",
-        costSource: "estimated",
-        pricingVersion: null,
         sessionCount: 1,
         sessionsWithoutUsage: 0,
       });

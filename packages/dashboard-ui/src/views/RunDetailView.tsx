@@ -173,12 +173,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                 label="Cost"
                 value={
                   data.run.usage?.costUsd != null ? (
-                    <>
-                      ${data.run.usage.costUsd.toFixed(4)}
-                      <span className="ml-1 text-xs text-muted-foreground">
-                        {data.run.usage.costSource === "estimated" ? "est." : "reported"}
-                      </span>
-                    </>
+                    <>${data.run.usage.costUsd.toFixed(4)}</>
                   ) : data.run.usage ? (
                     <span className="text-muted-foreground">unknown</span>
                   ) : (

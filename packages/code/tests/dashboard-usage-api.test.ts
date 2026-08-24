@@ -19,8 +19,6 @@ function usage(overrides: Partial<RunUsage> = {}): RunUsage {
     totalTokens: null,
     costUsd: 0.75,
     costCurrency: "USD",
-    costSource: "estimated",
-    pricingVersion: "2026-08-01",
     sessionCount: 1,
     sessionsWithoutUsage: 0,
     ...overrides,
@@ -60,7 +58,6 @@ describe("dashboard API usage exposure", () => {
     const record = run as never as { usage: RunUsage; unattended?: boolean };
     expect(record.usage.costUsd).toBeCloseTo(0.75);
     expect(record.usage.model).toBe("claude-sonnet-4-5");
-    expect(record.usage.costSource).toBe("estimated");
     expect(record.unattended).toBe(true);
   });
 

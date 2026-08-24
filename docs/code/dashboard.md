@@ -29,7 +29,7 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 ## What it shows
 
 - **Run list**: every run with its status, task key, origin (tracker task or PR mention), agent harness, PR link, duration, and known cost. Filter by status or origin.
-- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome. Runs that reported token usage also show the model, token totals (input / output), and cost with its source (`reported` by the provider or `estimated` from the pricing catalog).
+- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome. Runs that reported token usage also show the model, token totals (input / output), and cost (only when the harness reported one).
 - **Stats**: runs per week, success and escalation rates, median run duration, aggregate token usage and known spend, and a per-harness breakdown (including per-harness spend) over a selectable window (7, 30, or 90 days, or all time).
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
 

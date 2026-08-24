@@ -29,9 +29,6 @@ export interface RunUsage {
   /** Known cost in USD (null = unknown, never zero). */
   costUsd: number | null;
   costCurrency: string | null;
-  /** "reported" (provider-computed) or "estimated" (pricing catalog). */
-  costSource: "reported" | "estimated" | null;
-  pricingVersion: string | null;
   sessionCount: number;
   sessionsWithoutUsage: number;
 }

@@ -123,7 +123,7 @@ export { detectMaxTurnsReached, findMaxTurnsReachedLine } from "./detect-max-tur
 // Usage/rate-limit detection
 export { detectUsageLimit, resetHintToMs, type UsageLimitResult } from "./detect-usage-limit.js";
 
-// Normalized token/cost usage extraction + pricing estimation
+// Normalized token/cost usage extraction
 export {
   extractAgentUsage,
   findJsonUsageObjects,
@@ -134,14 +134,6 @@ export {
   type UsageExtractionInput,
   type UsageSource,
 } from "./usage.js";
-export {
-  estimateUsageCost,
-  lookupModelPricing,
-  PRICING_CATALOG_VERSION,
-  PRICING_CURRENCY,
-  type ModelPricing,
-  type UsageCostEstimate,
-} from "./usage-pricing.js";
 
 // Incomplete implementation detection
 export {

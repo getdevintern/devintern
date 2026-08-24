@@ -72,8 +72,6 @@ describe("worker budget admission", () => {
       totalTokens: null,
       costUsd,
       costCurrency: "USD",
-      costSource: "estimated",
-      pricingVersion: "v",
       sessionCount: 1,
       sessionsWithoutUsage: 0,
     });
@@ -195,9 +193,9 @@ describe("module-level usage recording", () => {
     // fabricate per-category numbers.
     expect(run?.usage?.inputTokens).toBe(100);
     expect(run?.usage?.outputTokens).toBe(40);
-    // Provider-reported cost wins for the priced session.
-    expect(run?.usage?.costUsd).toBeCloseTo(0.01);
-    expect(run?.usage?.costSource).toBe("reported");
+    // Cost is unknown: only one of two sessions reported one — never a
+    // partial or fabricated sum.
+    expect(run?.usage?.costUsd).toBeNull();
     expect(run?.usage?.complete).toBe(false); // second session had partial data
     store.close();
   });

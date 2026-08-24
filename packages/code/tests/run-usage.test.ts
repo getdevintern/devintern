@@ -19,8 +19,6 @@ function usage(overrides: Partial<RunUsage> = {}): RunUsage {
     totalTokens: null,
     costUsd: 0.02,
     costCurrency: "USD",
-    costSource: "estimated",
-    pricingVersion: "2026-08-01",
     sessionCount: 1,
     sessionsWithoutUsage: 0,
     ...overrides,
@@ -51,8 +49,6 @@ describe("RunStore usage recording", () => {
         cachedInputTokens: 250,
         reasoningTokens: 75,
         totalTokens: 1825,
-        costSource: "reported",
-        pricingVersion: null,
       }),
     );
     store.finishRun(id, "succeeded");
@@ -67,8 +63,6 @@ describe("RunStore usage recording", () => {
     expect(run?.usage?.model).toBe("claude-sonnet-4-5");
     expect(run?.usage?.costUsd).toBeCloseTo(0.02);
     expect(run?.usage?.costCurrency).toBe("USD");
-    expect(run?.usage?.costSource).toBe("reported");
-    expect(run?.usage?.pricingVersion).toBeNull();
     expect(run?.usage?.complete).toBe(true);
     expect(run?.unattended).toBe(true);
   });
@@ -84,8 +78,6 @@ describe("RunStore usage recording", () => {
         outputTokens: null,
         costUsd: null,
         costCurrency: null,
-        costSource: null,
-        pricingVersion: null,
       }),
     );
 
@@ -93,7 +85,6 @@ describe("RunStore usage recording", () => {
     expect(run?.usage?.inputTokens).toBeNull();
     expect(run?.usage?.outputTokens).toBeNull();
     expect(run?.usage?.costUsd).toBeNull();
-    expect(run?.usage?.costSource).toBeNull();
     expect(run?.usage?.model).toBeNull();
     expect(run?.usage?.complete).toBe(false);
   });

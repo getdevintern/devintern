@@ -13,7 +13,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { estimateUsageCost, extractAgentUsage, mergeAgentUsages } from "@devintern/agent-harness";
+import { extractAgentUsage, mergeAgentUsages } from "@devintern/agent-harness";
 import type { AgentUsage, MergedAgentUsage } from "@devintern/agent-harness";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
@@ -78,10 +78,6 @@ export interface RunUsage {
   /** Known cost for the whole run in `costCurrency` (USD unless stated). */
   costUsd: number | null;
   costCurrency: string | null;
-  /** "reported" (provider-computed) or "estimated" (pricing catalog). */
-  costSource: "reported" | "estimated" | null;
-  /** Pricing catalog version used for estimates; null for reported costs. */
-  pricingVersion: string | null;
   /** Number of agent sessions attributable to this run. */
   sessionCount: number;
   /** Sessions that yielded no usage signal at all (unknown exposure). */
@@ -147,7 +143,7 @@ export interface RunStatsUsage {
   cachedInputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
-  /** Known estimated+reported spend in USD; null when nothing is priced. */
+  /** Known reported spend in USD; null when nothing is priced. */
   knownSpendUsd: number | null;
   currency: "USD";
   /** Runs with at least one usage-bearing session. */
@@ -192,8 +188,6 @@ const USAGE_SCHEMA_MIGRATIONS: { column: string; decl: string }[] = [
   { column: "total_tokens", decl: "INTEGER" },
   { column: "cost_usd", decl: "REAL" },
   { column: "cost_currency", decl: "TEXT" },
-  { column: "cost_source", decl: "TEXT" },
-  { column: "pricing_version", decl: "TEXT" },
   { column: "session_count", decl: "INTEGER" },
   { column: "sessions_without_usage", decl: "INTEGER" },
 ];
@@ -418,8 +412,6 @@ export class RunStore {
          total_tokens = ?,
          cost_usd = ?,
          cost_currency = ?,
-         cost_source = ?,
-         pricing_version = ?,
          session_count = ?,
          sessions_without_usage = ?
        WHERE id = ?`,
@@ -434,8 +426,6 @@ export class RunStore {
         usage.totalTokens ?? null,
         usage.costUsd ?? null,
         usage.costCurrency ?? null,
-        usage.costSource ?? null,
-        usage.pricingVersion ?? null,
         usage.sessionCount ?? null,
         usage.sessionsWithoutUsage ?? null,
         runId,
@@ -795,8 +785,6 @@ export class RunStore {
       totalTokens: (row.total_tokens as number | null) ?? null,
       costUsd: (row.cost_usd as number | null) ?? null,
       costCurrency: (row.cost_currency as string | null) ?? null,
-      costSource: (row.cost_source as RunUsage["costSource"] | null) ?? null,
-      pricingVersion: (row.pricing_version as string | null) ?? null,
       sessionCount: (row.session_count as number | null) ?? 0,
       sessionsWithoutUsage: (row.sessions_without_usage as number | null) ?? 0,
     };
@@ -884,11 +872,9 @@ export function recordSessionOutput(harness: string, stdout: string, stderr: str
 /**
  * Merge the run's agent-session usage into a persisted {@link RunUsage}.
  *
- * Cost rules: provider-reported costs are preferred and summed across
- * sessions; sessions without a reported cost are priced via the versioned
- * catalog when possible. Any session with missing tokens or an unknown model
- * marks the run incomplete and its cost stays partially unknown — never a
- * fabricated number.
+ * Cost rule: a run's cost is reported only when every agent session
+ * properly reported its own provider-computed cost. Anything less stays
+ * unknown — never estimated, never fabricated.
  */
 function buildRunUsage(): RunUsage | null {
   if (currentSessions.length === 0) {
@@ -899,70 +885,14 @@ function buildRunUsage(): RunUsage | null {
     return null;
   }
 
-  // Sessions that produced no usage signal contribute nothing priceable.
-  const priceable = currentSessions.filter(
-    (session): session is AgentUsage =>
-      session !== null && (session.inputTokens !== null || session.outputTokens !== null),
-  );
-  const reportedCosts = priceable.filter((session) => session.reportedCost !== null);
-  let costUsd: number | null = null;
-  let costSource: RunUsage["costSource"] = null;
-  let pricingVersion: string | null = null;
-
-  if (reportedCosts.length > 0) {
-    // Prefer provider-reported values; sum only over sessions that have them.
-    costUsd = reportedCosts.reduce((sum, session) => sum + (session.reportedCost ?? 0), 0);
-    costSource = "reported";
-    // Mixed reported + unpriced sessions leave part of the spend unknown.
-    if (reportedCosts.length < priceable.length) {
-      costSource = null;
-    }
-  }
-
-  const unpricedSessions = priceable.filter((session) => session.reportedCost === null);
-  if (unpricedSessions.length > 0) {
-    let estimatedTotal = 0;
-    let allEstimated = true;
-    for (const session of unpricedSessions) {
-      const estimate = estimateUsageCost({
-        inputTokens: session.inputTokens,
-        outputTokens: session.outputTokens,
-        cachedInputTokens: session.cachedInputTokens,
-        reasoningTokens: session.reasoningTokens,
-        totalTokens: session.totalTokens,
-        model: session.model,
-      });
-      if (estimate.costUsd === null) {
-        allEstimated = false; // unknown model or unusable counts — no fabricated cost
-        break;
-      }
-      estimatedTotal += estimate.costUsd;
-      pricingVersion = estimate.pricingVersion;
-    }
-    if (allEstimated && reportedCosts.length === 0) {
-      costUsd = estimatedTotal;
-      costSource = "estimated";
-    } else if (!allEstimated) {
-      // At least one session could not be priced: keep only provider-reported
-      // amounts (already set above) and mark the source mixed/incomplete.
-      if (costSource !== "reported") {
-        costSource = null;
-      }
-      pricingVersion = null;
-    } else if (reportedCosts.length > 0) {
-      // Some reported + some estimable: sum both, flag as mixed estimate.
-      costUsd = (costUsd ?? 0) + estimatedTotal;
-      costSource = "estimated";
-    }
-  }
+  const allReportedCost =
+    merged.sessionsWithoutUsage === 0 &&
+    currentSessions.every((session) => session !== null && session.reportedCost !== null);
+  const costUsd = allReportedCost ? merged.reportedCost : null;
 
   return {
     source: merged.source,
-    complete:
-      merged.complete &&
-      costSource !== null &&
-      merged.sessionsWithoutUsage === 0 &&
-      !merged.mixedModels,
+    complete: merged.complete && allReportedCost && !merged.mixedModels,
     model: merged.model,
     inputTokens: merged.inputTokens,
     outputTokens: merged.outputTokens,
@@ -970,9 +900,7 @@ function buildRunUsage(): RunUsage | null {
     reasoningTokens: merged.reasoningTokens,
     totalTokens: merged.totalTokens,
     costUsd,
-    costCurrency: costUsd === null ? null : "USD",
-    costSource,
-    pricingVersion,
+    costCurrency: costUsd === null ? null : (merged.costCurrency ?? "USD"),
     sessionCount: merged.sessions,
     sessionsWithoutUsage: merged.sessionsWithoutUsage,
   };
