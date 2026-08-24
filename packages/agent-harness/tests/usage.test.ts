@@ -68,6 +68,15 @@ describe("findJsonUsageObjects", () => {
   test("returns empty for non-JSON garbage", () => {
     expect(findJsonUsageObjects("{not json")).toEqual([]);
   });
+
+  test("JSONL usage rows far from the end of a transcript are ignored", () => {
+    const filler = Array.from({ length: 200 }, (_, i) => `doing work ${i}`).join("\n");
+    const after = Array.from({ length: 80 }, (_, i) => `more work ${i}`).join("\n");
+    const text = `${filler}\n{"usage": {"prompt_tokens": 120, "completion_tokens": 30}}\n${after}`;
+    // Only the whole-document parse is trusted; mid-transcript JSONL rows
+    // look like app/test output, not provider reporting.
+    expect(findJsonUsageObjects(text)).toEqual([]);
+  });
 });
 
 describe("extractAgentUsage", () => {
@@ -101,6 +110,54 @@ describe("extractAgentUsage", () => {
     expect(usage?.complete).toBe(false);
   });
 
+  test("real codex headless output (number on the line after the label) parses", () => {
+    // Captured verbatim from `codex exec "reply with just: ok"`:
+    // stderr ends with "tokens used" / "6,530" on separate lines.
+    const usage = extract("codex", "ok\n", "reply with just: ok\ncodex\nok\ntokens used\n6,530\n");
+    expect(usage?.totalTokens).toBe(6530);
+    expect(usage?.source).toBe("stderr");
+    expect(usage?.reportedCost).toBeNull();
+  });
+
+  test("codex --jsonl turn events yield token counts", () => {
+    const usage = extract(
+      "codex",
+      '{"type":"turn.completed","usage":{"input_tokens":17439,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}',
+    );
+    expect(usage?.inputTokens).toBe(17439);
+    expect(usage?.cachedInputTokens).toBe(11008);
+    expect(usage?.outputTokens).toBe(5);
+  });
+
+  test("opencode --format json step_finish events yield full token breakdown", () => {
+    const usage = extract(
+      "opencode",
+      '{"type":"step_finish","part":{"tokens":{"total":9527,"input":2151,"output":11,"reasoning":5,"cache":{"write":0,"read":7360}},"cost":0}}',
+    );
+    expect(usage?.inputTokens).toBe(2151);
+    expect(usage?.cachedInputTokens).toBe(7360);
+    expect(usage?.outputTokens).toBe(11);
+    expect(usage?.reasoningTokens).toBe(5);
+    expect(usage?.totalTokens).toBe(9527);
+  });
+
+  test("grok --output-format json result yields tokens and provider cost", () => {
+    const usage = extract(
+      "grok",
+      JSON.stringify({
+        text: "ok",
+        usage: { input_tokens: 3472, cache_read_input_tokens: 11520, output_tokens: 37 },
+        total_cost_usd: 0.00219742,
+        modelUsage: { "grok-4": { inputTokens: 3472, outputTokens: 37 } },
+      }),
+    );
+    expect(usage?.inputTokens).toBe(3472);
+    expect(usage?.cachedInputTokens).toBe(11520);
+    expect(usage?.totalTokens).toBeNull();
+    expect(usage?.reportedCost).toBeCloseTo(0.00219742);
+    expect(usage?.complete).toBe(true);
+  });
+
   test("codex input/output summary lines parse separately", () => {
     const usage = extract("codex", "", "OpenAI Tokens used: 1,234 input (567 cached), 890 output");
     expect(usage?.inputTokens).toBe(1234);
@@ -118,14 +175,22 @@ describe("extractAgentUsage", () => {
   });
 
   test("unknown harness falls back to generic scanning", () => {
-    const usage = extract(
-      "future-cli",
-      "",
-      'Total tokens: 4321\nModel: future-model-x\ncost: $0.05',
-    );
+    // Token totals and model lines parse; costs never come from prose.
+    const usage = extract("future-cli", "", "Total tokens: 4321\nModel: future-model-x\n");
     expect(usage?.totalTokens).toBe(4321);
     expect(usage?.model).toBe("future-model-x");
-    expect(usage?.reportedCost).toBeCloseTo(0.05);
+    expect(usage?.reportedCost).toBeNull();
+  });
+
+  test("prose cost mentions are never recorded as provider cost", () => {
+    const usage = extract("codex", "", "done\ntokens used: 500\ntotal cost: $0.42");
+    expect(usage?.totalTokens).toBe(500);
+    expect(usage?.reportedCost).toBeNull();
+    expect(usage?.costCurrency).toBeNull();
+  });
+
+  test("model-only JSON (configs, fixtures) is not usage", () => {
+    expect(extract("opencode", '{"name":"x","model":"y","scripts":{"t":"t"}}')).toBeNull();
   });
 
   test("malformed JSON degrades to null instead of throwing", () => {

@@ -114,17 +114,28 @@ interface RawUsageFields {
 }
 
 const JSON_USAGE_FIELD_ALIASES: Record<keyof RawUsageFields, readonly string[]> = {
-  inputTokens: ["input_tokens", "inputTokens", "prompt_tokens", "promptTokenCount"],
-  outputTokens: ["output_tokens", "outputTokens", "completion_tokens", "candidatesTokenCount"],
+  inputTokens: ["input_tokens", "inputTokens", "prompt_tokens", "promptTokenCount", "tokens.input"],
+  outputTokens: [
+    "output_tokens",
+    "outputTokens",
+    "completion_tokens",
+    "candidatesTokenCount",
+    "tokens.output",
+  ],
   cachedInputTokens: [
     "cache_read_input_tokens",
     "cached_input_tokens",
     "cachedContentTokenCount",
     "cache_read_tokens",
     "prompt_tokens_details.cached_tokens",
+    "tokens.cache.read",
   ],
-  reasoningTokens: ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"],
-  totalTokens: ["total_tokens", "totalTokens", "total_token_count"],
+  reasoningTokens: [
+    "reasoning_tokens",
+    "completion_tokens_details.reasoning_tokens",
+    "tokens.reasoning",
+  ],
+  totalTokens: ["total_tokens", "totalTokens", "total_token_count", "tokens.total"],
   model: ["model", "modelId", "model_id"],
   cost: ["total_cost_usd", "cost_usd", "costUSD", "total_cost", "cost"],
   currency: ["currency", "cost_currency"],
@@ -170,7 +181,9 @@ export function normalizeJsonUsage(object: Record<string, unknown>): RawUsageFie
   const total = firstNumber(object, JSON_USAGE_FIELD_ALIASES.totalTokens);
   const cost = firstNumber(object, JSON_USAGE_FIELD_ALIASES.cost);
   const model = firstString(object, JSON_USAGE_FIELD_ALIASES.model);
-  if (input === null && output === null && total === null && cost === null && model === null) {
+  // A bare `model` key (configs, fixtures, API payloads) is not usage; at
+  // least one consumption number must be present.
+  if (input === null && output === null && total === null && cost === null) {
     return null;
   }
   if (input !== null) {
@@ -319,15 +332,21 @@ function collectFromParsed(root: unknown): RawUsageFields | null {
 }
 
 const USAGE_MARKER_SENTINEL =
-  /"(?:input_tokens|inputTokens|prompt_tokens|output_tokens|outputTokens|completion_tokens|total_tokens|totalTokens|total_cost_usd|costUSD|modelUsage|usage)"/;
+  /"(?:input_tokens|inputTokens|prompt_tokens|output_tokens|outputTokens|completion_tokens|total_tokens|totalTokens|total_cost_usd|costUSD|modelUsage|usage|tokens)"/;
+
+/**
+ * Summary lines appear at the end of a run; scanning the whole transcript
+ * would risk matching source code, test output, or docs the agent printed.
+ */
+const TAIL_SCAN_LINES = 60;
 
 /**
  * Find usage-bearing JSON objects in a captured stream.
  *
  * Handles streams that are entirely one JSON document (structured result
- * mode) plus single-line JSON / JSONL rows mixed into plain output. Free text
- * around the JSON is ignored, which keeps prose like "the cost is $5" from
- * being mistaken for provider reporting.
+ * mode) plus single-line JSON / JSONL rows near the end of plain output.
+ * Everything else is ignored, which keeps echoed fixtures, app logs, and
+ * test output from being mistaken for provider reporting.
  */
 export function findJsonUsageObjects(text: string): RawUsageFields[] {
   if (!text || !text.includes("{")) {
@@ -341,7 +360,7 @@ export function findJsonUsageObjects(text: string): RawUsageFields[] {
     return [whole];
   }
 
-  for (const line of trimmed.split(/\r?\n/)) {
+  for (const line of trimmed.split(/\r?\n/).slice(-TAIL_SCAN_LINES)) {
     const candidate = line.trim();
     if (!candidate.startsWith("{") || !USAGE_MARKER_SENTINEL.test(candidate)) {
       continue;
@@ -462,16 +481,6 @@ const TEXT_PATTERNS: TextPattern[] = [
       usage.totalTokens ??= parseNumber(match.groups?.total);
     },
   },
-  {
-    regex: new RegExp(
-      String.raw`(?:total\s*)?cost\s*[:(=]\s*\$(?<cost>` + NUMBER_WITH_SEPARATORS + ")",
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.reportedCost ??= parseNumber(match.groups?.cost);
-      usage.costCurrency ??= "USD";
-    },
-  },
 ];
 
 function parseNumber(value: string | undefined): number | null {
@@ -483,17 +492,33 @@ function parseNumber(value: string | undefined): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-/** Summary lines appear at the end of a run; scanning the whole transcript
- * would risk matching source code or docs the agent printed. */
-const TEXT_SCAN_TAIL_LINES = 60;
-
 function scanTextSummaries(text: string, usage: AgentUsage): boolean {
   if (!text.trim()) {
     return false;
   }
   const lines = outputLines(text);
+  const tail = lines.slice(-TAIL_SCAN_LINES).map((line) => line.normalized);
   let matched = false;
-  for (const { normalized } of lines.slice(-TEXT_SCAN_TAIL_LINES)) {
+
+  // Codex headless mode reports its total on the line after the label:
+  //   tokens used
+  //   6,530
+  const nextLineTotal = tail
+    .join("\n")
+    .match(
+      new RegExp(
+        String.raw`tokens\s+used\s*:?\s*\n\s*(?<total>` +
+          NUMBER_WITH_SEPARATORS +
+          String.raw`)\s*$`,
+        "im",
+      ),
+    );
+  if (nextLineTotal) {
+    usage.totalTokens ??= parseNumber(nextLineTotal.groups?.total);
+    matched = true;
+  }
+
+  for (const normalized of tail) {
     if (!normalized.trim() || isSourceOrDiffLine(normalized)) {
       continue;
     }
