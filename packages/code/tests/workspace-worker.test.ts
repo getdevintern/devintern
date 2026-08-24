@@ -258,4 +258,29 @@ describe("resolveWorkspaceAutomationContext", () => {
     expect(repoManager.calls).toEqual([]);
     rmSync(workspaceDir, { recursive: true, force: true });
   });
+
+  test("pins occurrence task files to the workspace home", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.taskFileDir).toBe(join(workspaceDir, "automations"));
+    expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
 });

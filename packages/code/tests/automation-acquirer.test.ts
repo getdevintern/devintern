@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -142,6 +142,28 @@ describe("AutomationAcquirer", () => {
 
     expect(filePath.startsWith(join(worktree, ".devintern-code", "automations"))).toBe(true);
     rmSync(worktree, { recursive: true, force: true });
+  });
+
+  test("honors an explicit task file directory from the run context", () => {
+    const worktree = join(tmpdir(), `acquirer-explicit-${Date.now()}-${Math.random()}`);
+    const workspaceHome = join(tmpdir(), `acquirer-home-${Date.now()}-${Math.random()}`);
+    mkdirSync(worktree, { recursive: true });
+
+    const filePath = writeAutomationTaskFile(
+      {
+        id: "explicit",
+        enabled: true,
+        prompt: "work",
+        interval: "1d",
+        intervalMs: 86_400_000,
+      },
+      { cwd: worktree, env: {}, taskFileDir: join(workspaceHome, "automations"), release() {} },
+    );
+
+    expect(filePath.startsWith(join(workspaceHome, "automations", "explicit"))).toBe(true);
+    expect(existsSync(join(worktree, ".devintern-code"))).toBe(false);
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(workspaceHome, { recursive: true, force: true });
   });
 
   test("escalates to SIGKILL when an automation ignores SIGTERM", async () => {

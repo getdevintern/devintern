@@ -3,7 +3,7 @@ title: "Observability Dashboard"
 description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, and aggregate stats"
 section: "Server Automation"
 order: 2
-dateModified: 2026-08-21
+dateModified: 2026-08-24
 ---
 
 # Observability Dashboard
@@ -28,7 +28,7 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, created ticket/PR metadata, and duration. Filter by status or origin.
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs).
 - **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.

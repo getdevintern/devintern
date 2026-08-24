@@ -8,6 +8,8 @@
  * in the central workspace DB.
  */
 
+import { join } from "path";
+
 import { LockManager } from "../lock-manager";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
@@ -83,12 +85,15 @@ export async function resolveWorkspaceAutomationContext(
   repoManager: RepoManagerLike,
   repoLock: (repoName: string) => RepoRunLockLike = (name) => createRepoRunLock(name, workspaceDir),
 ) {
+  // Keep occurrence task files in the workspace home (next to repos/,
+  // worktrees/, and the central DB) instead of inside a repo worktree.
+  const taskFileDir = join(workspaceDir, "automations");
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
       ? config.repos[0]
       : undefined;
-  if (!repo) return { cwd: workspaceDir, env: { ...process.env }, release() {} };
+  if (!repo) return { cwd: workspaceDir, env: { ...process.env }, taskFileDir, release() {} };
 
   const lock = repoLock(repo.name);
   if (!lock.acquire().success) return null;
@@ -100,6 +105,7 @@ export async function resolveWorkspaceAutomationContext(
       cwd,
       env: buildRepoEnv(repo, workspaceDir),
       repo: repo.name,
+      taskFileDir,
       release: () => lock.release(),
     };
   } catch (error) {

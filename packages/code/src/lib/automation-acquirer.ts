@@ -25,6 +25,11 @@ export interface AutomationRunContext {
   cwd: string;
   env: Record<string, string | undefined>;
   repo?: string;
+  /**
+   * Explicit directory for occurrence task files. When omitted, files go
+   * under the nearest `.devintern-code` found above {@linkcode cwd}.
+   */
+  taskFileDir?: string;
   release(): void | Promise<void>;
 }
 
@@ -242,16 +247,20 @@ export class AutomationAcquirer implements Acquirer {
 /**
  * Directory that receives one markdown task file per occurrence.
  *
- * Resolved like every other durable-state location: the nearest existing
- * `.devintern-code` found by walking up from the run cwd, so a worker
- * launched from a subfolder reuses the project's config directory instead
- * of creating a stray one beside the cwd. Falls back to `<cwd>/.devintern-code`
- * (e.g. inside disposable worktrees where no parent config exists).
+ * When the context does not pin an explicit directory, resolved like every
+ * other durable-state location: the nearest existing `.devintern-code` found
+ * by walking up from the run cwd, so a worker launched from a subfolder
+ * reuses the project's config directory instead of creating a stray one
+ * beside the cwd. Falls back to `<cwd>/.devintern-code` (e.g. inside
+ * disposable worktrees where no parent config exists).
  */
 export function automationTaskDir(context: AutomationRunContext): string {
-  return join(
-    resolveConfigDir({ configDirName: ".devintern-code", startDir: context.cwd }),
-    "automations",
+  return (
+    context.taskFileDir ??
+    join(
+      resolveConfigDir({ configDirName: ".devintern-code", startDir: context.cwd }),
+      "automations",
+    )
   );
 }
 
