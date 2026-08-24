@@ -15,7 +15,7 @@ dateModified: 2026-08-23
 
 DevIntern PM Desktop can register an OS-level global shortcut so you can turn fleeting context into ticket drafts without switching apps:
 
-- Enable it in **Settings → Quick Capture**. The default binding is `Cmd+Shift+Space` on macOS and `Ctrl+Shift+Space` on Windows/Linux, and you can record any combination.
+- Enable it in **Settings → Quick Capture**. The default binding is `Cmd+Alt+Q` on macOS and `Ctrl+Alt+Q` on Windows/Linux, and you can record any combination.
 - Invoking the shortcut focuses (or launches) the app and opens a **new** ticket workspace as the active tab — open tickets and running agents keep working in the background.
 - If the clipboard holds useful text, it is prefilled and the source tab is inferred automatically (Figma URL → **Figma**, stack-trace-like text → **Error log**, anything else → **Prompt**). An empty clipboard opens an empty Prompt field with the cursor ready.
 - If no project is configured yet, capturing just brings the app forward so you can finish setup first. If the shortcut is already taken by another app, Settings shows how to change the binding.

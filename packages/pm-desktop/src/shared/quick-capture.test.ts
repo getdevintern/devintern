@@ -151,8 +151,8 @@ describe("acceleratorFromKeyboardEvent", () => {
 
 describe("prettyAccelerator", () => {
   test("renders CommandOrControl per platform", () => {
-    expect(prettyAccelerator(DEFAULT_QUICK_CAPTURE_ACCELERATOR, true)).toBe("Cmd+Shift+Space");
-    expect(prettyAccelerator(DEFAULT_QUICK_CAPTURE_ACCELERATOR, false)).toBe("Ctrl+Shift+Space");
+    expect(prettyAccelerator(DEFAULT_QUICK_CAPTURE_ACCELERATOR, true)).toBe("Cmd+Alt+Q");
+    expect(prettyAccelerator(DEFAULT_QUICK_CAPTURE_ACCELERATOR, false)).toBe("Ctrl+Alt+Q");
   });
 });
 

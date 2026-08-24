@@ -12,10 +12,10 @@
 import type { SourceType } from "./ipc-contract.ts";
 
 /** Sensible default binding, valid on macOS (⌘) and Windows/Linux (Ctrl). */
-export const DEFAULT_QUICK_CAPTURE_ACCELERATOR = "CommandOrControl+Shift+Space";
+export const DEFAULT_QUICK_CAPTURE_ACCELERATOR = "CommandOrControl+Alt+Q";
 
 /** Human-readable default for docs/UI copy. */
-export const QUICK_CAPTURE_DEFAULT_LABEL = "Cmd/Ctrl+Shift+Space";
+export const QUICK_CAPTURE_DEFAULT_LABEL = "Cmd/Ctrl+Alt+Q";
 
 /** Above this size a capture is treated as not useful (protects the composer + agent prompt). */
 export const MAX_CAPTURE_CHARS = 50_000;
