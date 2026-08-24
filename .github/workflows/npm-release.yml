@@ -29,14 +29,14 @@ on:
       - "pm-v*"
   workflow_dispatch:
     inputs:
-      package:
-        description: "Package to release"
-        type: choice
-        default: both
-        options:
-          - both
-          - code
-          - pm
+      code:
+        description: "Publish @getdevintern/code"
+        type: boolean
+        default: true
+      pm:
+        description: "Publish @getdevintern/pm"
+        type: boolean
+        default: true
 
 concurrency:
   group: npm-release-${{ github.ref }}
@@ -47,28 +47,17 @@ permissions:
   id-token: write # npm Trusted Publishing (OIDC)
 
 jobs:
-  publish:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package: code
-            dir: packages/code
-            tag_prefix: code-v
-          - package: pm
-            dir: packages/pm
-            tag_prefix: pm-v
-
-    # Tag pushes publish only the tagged package; manual dispatch follows the input.
+  # Two explicit jobs instead of a matrix: the matrix context is not
+  # available in job-level `if`, which broke workflow parsing entirely.
+  release-code:
     if: >-
-      (startsWith(github.ref, 'refs/tags/') && startsWith(github.ref_name, matrix.tag_prefix)) ||
-      (github.event_name == 'workflow_dispatch' &&
-        (inputs.package == 'both' || inputs.package == matrix.package))
+      startsWith(github.ref, 'refs/tags/code-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.code)
 
     runs-on: ubuntu-latest
     env:
       # Job-level so any rebuild (e.g. a prepublishOnly hook during publish)
-      # still bakes the analytics key into the @getdevintern/code bundle.
+      # still bakes the analytics key into the bundle.
       POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
       POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
     steps:
@@ -85,25 +74,82 @@ jobs:
 
       - name: Verify tag matches package.json version
         if: startsWith(github.ref, 'refs/tags/')
-        working-directory: ${{ matrix.dir }}
+        working-directory: packages/code
         run: |
-          expected="${GITHUB_REF_NAME#${{ matrix.tag_prefix }}}"
+          expected="${GITHUB_REF_NAME#code-v}"
           actual="$(bun -p "require('./package.json').version")"
           if [ "$expected" != "$actual" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${actual}." >&2
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match @getdevintern/code version ${actual}." >&2
             exit 1
           fi
 
       - name: Build
-        working-directory: ${{ matrix.dir }}
+        working-directory: packages/code
         run: bun run build
 
       - name: Typecheck
-        working-directory: ${{ matrix.dir }}
+        working-directory: packages/code
         run: bun run typecheck
 
       - name: Publish
-        working-directory: ${{ matrix.dir }}
+        working-directory: packages/code
+        # Trusted Publishing requires the npm CLI (>= 11.5.1) to perform the
+        # OIDC exchange; bun publish does not support it. Provenance is
+        # attached automatically when publishing via OIDC.
+        run: |
+          npm install -g npm@latest
+          npm publish --access public
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-pm:
+    if: >-
+      startsWith(github.ref, 'refs/tags/pm-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.pm)
+
+    runs-on: ubuntu-latest
+    env:
+      POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+      POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: packages/pm
+        run: |
+          expected="${GITHUB_REF_NAME#pm-v}"
+          actual="$(bun -p "require('./package.json').version")"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match @getdevintern/pm version ${actual}." >&2
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: packages/pm
+        run: bun run build
+
+      - name: Typecheck
+        working-directory: packages/pm
+        run: bun run typecheck
+
+      - name: Publish
+        working-directory: packages/pm
         # Trusted Publishing requires the npm CLI (>= 11.5.1) to perform the
         # OIDC exchange; bun publish does not support it. Provenance is
         # attached automatically when publishing via OIDC.
