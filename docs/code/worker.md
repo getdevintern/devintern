@@ -123,26 +123,6 @@ Polling reacts within one interval (about a minute). For instant reaction withou
 
 Every run is recorded stage by stage in the local database. Add `--ui` to serve the [observability dashboard](./dashboard.md) alongside the daemon, or run `devintern dashboard` standalone at any time (it works with the worker stopped too).
 
-## Spend caps (budget)
-
-Unattended agents consume tokens, so the worker can cap its own spend:
-
-| Environment variable          | Meaning                                                                 |
-| ----------------------------- | ----------------------------------------------------------------------- |
-| `WORKER_MAX_SPEND_PER_RUN_USD`  | Soft cap for a single run's cost in US dollars                          |
-| `WORKER_MAX_SPEND_PER_DAY_USD`  | Cap for total unattended spend per **UTC day** in US dollars            |
-
-Both accept plain non-negative decimals (`10`, `4.50`). Negative values, non-numeric values, and currency suffixes are rejected at startup with an actionable error; unset or empty disables the cap.
-
-How the caps behave:
-
-- **Daily cap (`…_PER_DAY_USD`)** — checked immediately before admitting every new unattended run (polling, relay, webhook reviews, mentions, workspace fleets). When the known spend of unattended runs finished today meets the cap, the worker pauses new dispatch: queued/detected work is preserved and resumes after the next UTC midnight; a single one-line notice is logged when entering the capped state. Runs already in progress finish normally, their final usage is recorded, and only then is the budget re-evaluated — so a run admitted below the cap can push the total above it, but no further runs start.
-- **Per-run cap (`…_PER_RUN_USD`)** — no supported harness exposes native spend cancellation, so this cannot abort an in-flight session. It behaves as a post-run cap: a run whose recorded cost exceeds the limit finishes and is recorded normally, then triggers a loud warning. The limitation is logged once at startup when this cap is set.
-
-Only *known* costs count toward the caps. Costs are never estimated: a run's cost is recorded only when its harness reported one, and runs without a reported cost never silently count as $0 — they are surfaced as "unknown exposure" in capped-state notices and on the [dashboard](./dashboard.md).
-
-Manual `devintern TASK-123` executions are never affected by these caps.
-
 ## Running as a service
 
 The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a systemd service file to `.devintern-code/devintern-worker.service` with install instructions. For pm2 and tunnel setups (webhook mode), see the [GitHub Integration guide](./github-integration.md). In polling mode no public endpoint is needed, so a plain systemd service with `ExecStart=devintern worker --query "..."` is enough.

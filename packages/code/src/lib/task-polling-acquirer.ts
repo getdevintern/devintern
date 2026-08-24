@@ -38,13 +38,6 @@ export interface TaskPollingAcquirerOptions {
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
   /** Execute step: process one ready task; returns success (injected for tests). */
   executeTask: (taskKey: string) => Promise<boolean>;
-  /**
-   * Admission gate (worker budget caps): return false to pause dispatch.
-   * Skipped tasks are NOT marked processed, so they are re-detected and
-   * re-evaluated on a later tick once the gate allows again. The pipeline
-   * itself re-checks authoritatively before each run.
-   */
-  canStartTask?: () => boolean;
   verbose?: boolean;
 }
 
@@ -130,19 +123,8 @@ export class TaskPollingAcquirer implements Acquirer {
     }
     this.busy = true;
 
-    const { detector, workerState, queue, query, searchTasks, executeTask, canStartTask, verbose } =
-      this.options;
+    const { detector, workerState, queue, query, searchTasks, executeTask, verbose } = this.options;
     try {
-      // Budget gate: when a spend cap blocks new runs, stop before consuming
-      // any queue slots. Detection state stays untouched so the same tasks
-      // are re-evaluated next tick; the pipeline logs the capped state once.
-      if (canStartTask && !canStartTask()) {
-        if (verbose) {
-          console.log(`   [${this.name}] dispatch paused by budget cap`);
-        }
-        return;
-      }
-
       const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursor);
 
@@ -153,13 +135,6 @@ export class TaskPollingAcquirer implements Acquirer {
         }
 
         for (const task of tasks) {
-          // Re-check per task: a run finishing mid-tick can cross the cap.
-          if (canStartTask && !canStartTask()) {
-            if (verbose) {
-              console.log(`   [${this.name}] dispatch paused by budget cap mid-tick`);
-            }
-            break;
-          }
           const externalId = `task:${task.key}:${task.updated ?? ""}`;
           if (queue.hasProcessed(detector.source, externalId)) {
             continue;

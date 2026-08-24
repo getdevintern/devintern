@@ -55,7 +55,6 @@ export interface RunMeta {
   /**
    * True when the run was started by the unattended worker (polling, relay,
    * webhook, mention, or workspace paths) rather than a manual CLI run.
-   * Only unattended spend counts toward worker budget caps.
    */
   unattended?: boolean;
 }
@@ -431,38 +430,6 @@ export class RunStore {
         runId,
       ],
     );
-  }
-
-  /**
-   * Sum known spend over unattended runs finished since `sinceMs` (UTC ms).
-   * Only runs with a computable cost contribute; unknown-cost exposure is
-   * reported separately so caps can surface it.
-   *
-   * @param sinceMs - Inclusive lower bound on `finished_at`
-   * @returns Known spend plus how many unattended runs have unknown cost
-   */
-  getUnattendedSpendSince(sinceMs: number): {
-    knownSpendUsd: number | null;
-    runsWithUnknownCost: number;
-  } {
-    const rows = this.db
-      .query(
-        `SELECT cost_usd AS costUsd FROM runs
-         WHERE unattended = 1 AND finished_at IS NOT NULL AND finished_at >= ?`,
-      )
-      .all(sinceMs) as { costUsd: number | null }[];
-    let total = 0;
-    let priced = 0;
-    let unknown = 0;
-    for (const row of rows) {
-      if (typeof row.costUsd === "number") {
-        total += row.costUsd;
-        priced += 1;
-      } else {
-        unknown += 1;
-      }
-    }
-    return { knownSpendUsd: priced > 0 ? total : null, runsWithUnknownCost: unknown };
   }
 
   /**
@@ -947,8 +914,7 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
  * Finish the current run and clear the context (no-op when no run is active).
  *
  * Usage from every session attributed to the run is merged and persisted
- * before the terminal status is written, so budget evaluation after a run
- * always sees final numbers.
+ * before the terminal status is written.
  *
  * @param status - Terminal status
  * @param reason - Optional human-readable reason
@@ -966,7 +932,6 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
   } catch (error) {
     warnOnce("usage", error);
   }
-  const finishedUsage = usage;
   try {
     currentStore.finishRun(currentRunId, status, reason);
   } catch (error) {
@@ -975,34 +940,6 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
     currentRunId = null;
     currentSessions = [];
   }
-  // Notify observers (budget caps) only after the row is durably finished.
-  for (const listener of runFinishedListeners) {
-    try {
-      listener(finishedUsage);
-    } catch (error) {
-      warnOnce("run-finished-listener", error);
-    }
-  }
-}
-
-type RunFinishedListener = (usage: RunUsage | null) => void;
-const runFinishedListeners: RunFinishedListener[] = [];
-
-/**
- * Subscribe to run completions (used by worker budget caps to enforce
- * per-run limits post-run). Listeners never affect recording.
- *
- * @param listener - Called with the persisted usage (null when unknown)
- * @returns Unsubscribe function
- */
-export function onRunFinished(listener: RunFinishedListener): () => void {
-  runFinishedListeners.push(listener);
-  return () => {
-    const index = runFinishedListeners.indexOf(listener);
-    if (index !== -1) {
-      runFinishedListeners.splice(index, 1);
-    }
-  };
 }
 
 /** Test hook: drop the ambient recorder context between scenarios. */
@@ -1017,5 +954,4 @@ export function resetRunRecorderForTests(): void {
   currentStore = null;
   currentRunId = null;
   currentSessions = [];
-  runFinishedListeners.length = 0;
 }

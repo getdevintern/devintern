@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync } from "fs";
+import { mkdirSync, rmSync } from "fs";
 import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { RunStore } from "../src/lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordSessionOutput,
+  resetRunRecorderForTests,
+} from "../src/lib/run-recorder";
 import type { RunUsage } from "../src/lib/run-recorder";
 
 function usage(overrides: Partial<RunUsage> = {}): RunUsage {
@@ -143,39 +149,6 @@ describe("RunStore usage recording", () => {
       rmSync(`${legacyPath}${suffix}`, { force: true });
     }
   });
-
-  test("getUnattendedSpendSince sums only unattended finished runs and counts unknown exposure", () => {
-    const now = Date.now();
-    const attended = store.createRun({ origin: "task", taskKey: "MAN-1" });
-    store.finishRun(attended, "succeeded");
-    store.recordRunUsage(attended, usage({ costUsd: 99 }));
-
-    const unattendedPriced = store.createRun({
-      origin: "task",
-      taskKey: "AUTO-1",
-      unattended: true,
-    });
-    store.recordRunUsage(unattendedPriced, usage({ costUsd: 1.25 }));
-    store.finishRun(unattendedPriced, "succeeded");
-
-    const unattendedUnknown = store.createRun({
-      origin: "pr_mention",
-      repo: "a/b",
-      unattended: true,
-    });
-    store.recordRunUsage(unattendedUnknown, usage({ costUsd: null }));
-    store.finishRun(unattendedUnknown, "failed");
-
-    // Manual run is not counted; unknown-cost run is reported separately.
-    const summary = store.getUnattendedSpendSince(0);
-    expect(summary.knownSpendUsd).toBeCloseTo(1.25);
-    expect(summary.runsWithUnknownCost).toBe(1);
-
-    // A window before the runs excludes everything.
-    const empty = store.getUnattendedSpendSince(now + 10_000);
-    expect(empty.knownSpendUsd).toBeNull();
-    expect(empty.runsWithUnknownCost).toBe(0);
-  });
 });
 
 describe("RunStats usage aggregation", () => {
@@ -279,5 +252,77 @@ describe("RunStats usage aggregation", () => {
     const all = store.getStats(null);
     expect(all.totals.runs).toBe(2);
     expect(all.usage.knownSpendUsd).toBeCloseTo(103);
+  });
+});
+
+describe("module-level usage recording", () => {
+  let dir: string;
+  let dbPath: string;
+  let savedQueueDb: string | undefined;
+
+  beforeEach(() => {
+    resetRunRecorderForTests();
+    dir = join(tmpdir(), `ru-rec-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    dbPath = join(dir, "queue.db");
+    savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
+    process.env.WEBHOOK_QUEUE_DB = dbPath;
+  });
+
+  afterEach(() => {
+    resetRunRecorderForTests();
+    if (savedQueueDb === undefined) {
+      delete process.env.WEBHOOK_QUEUE_DB;
+    } else {
+      process.env.WEBHOOK_QUEUE_DB = savedQueueDb;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("sessions merge across stages and persist on endRun without double counting", () => {
+    beginRun({
+      origin: "task",
+      taskKey: "MERGE-1",
+      harness: "codex",
+      unattended: true,
+    });
+
+    // Feasibility session: structured result.
+    recordSessionOutput(
+      "codex",
+      JSON.stringify({
+        modelUsage: { "gpt-5": { input_tokens: 100, output_tokens: 40 } },
+        total_cost_usd: 0.01,
+      }),
+      "",
+    );
+    // Implementation session: unstructured output — no usage signal.
+    recordSessionOutput("codex", "", "tokens used: 500\n");
+
+    endRun("succeeded");
+
+    const store = new RunStore(dbPath);
+    const run = store.getRun(1);
+    expect(run?.usage).not.toBeNull();
+    expect(run?.usage?.sessionCount).toBe(2);
+    expect(run?.usage?.sessionsWithoutUsage).toBe(1);
+    // Structured tokens (100 in / 40 out) survive; the unstructured session
+    // contributes nothing.
+    expect(run?.usage?.inputTokens).toBe(100);
+    expect(run?.usage?.outputTokens).toBe(40);
+    // Cost is unknown: not every session reported one — never a partial or
+    // fabricated sum.
+    expect(run?.usage?.costUsd).toBeNull();
+    expect(run?.usage?.complete).toBe(false);
+    store.close();
+  });
+
+  test("runs with no agent sessions persist no usage row data", () => {
+    beginRun({ origin: "task", taskKey: "NOUSAGE-1" });
+    endRun("failed", "branch creation failed");
+    const store = new RunStore(dbPath);
+    expect(store.getRun(1)?.status).toBe("failed");
+    expect(store.getRun(1)?.usage).toBeNull();
+    store.close();
   });
 });

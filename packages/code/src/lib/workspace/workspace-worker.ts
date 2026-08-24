@@ -13,7 +13,6 @@ import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-poll
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
-import { checkWorkerAdmission } from "../worker-budget";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, parseEnvFile } from "./env";
@@ -124,7 +123,6 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       return { tasks };
     },
     executeTask,
-    canStartTask: () => checkWorkerAdmission()?.allowed ?? true,
     verbose,
   });
 }

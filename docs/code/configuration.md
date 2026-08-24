@@ -362,21 +362,6 @@ These control how devintern handles a brief window where the agent CLI symlink i
 
 DevIntern always runs the full workflow after fetching a task (clarity check → agent → commit/PR). There is no fetch-only mode.
 
-### Worker spend caps
-
-The unattended worker can cap its own token spend. Both variables take plain non-negative decimal US dollars and are validated at worker startup (invalid, negative, or non-numeric values abort startup with an actionable message; currency suffixes are not supported — caps are always USD):
-
-```bash
-# In .devintern-code/.env
-WORKER_MAX_SPEND_PER_RUN_USD=5
-WORKER_MAX_SPEND_PER_DAY_USD=50
-```
-
-- `WORKER_MAX_SPEND_PER_RUN_USD` is a **post-run cap**: no supported harness can cancel an in-flight session on spend, so offending runs finish and are recorded, then trigger a warning.
-- `WORKER_MAX_SPEND_PER_DAY_USD` blocks new unattended dispatch once the day's known unattended spend meets it; queued work resumes at the next **UTC midnight** (the day boundary is UTC regardless of host timezone). In-flight runs finish and are recorded before the budget is re-evaluated.
-
-Only known costs count toward caps; runs with unknown or partial usage are surfaced as unknown exposure instead of being silently treated as $0. Manual `devintern TASK-123` runs are never gated. See [Worker Daemon → Spend caps](./worker.md#spend-caps-budget).
-
 ## Sandboxing the Agent
 
 Agents run with their own permission prompts disabled (the equivalent of `--dangerously-skip-permissions`), so by default they have the same access to your machine as your user account. DevIntern can wrap every agent run in an OS-level sandbox so the agent stays confined even in fully automated worker runs.

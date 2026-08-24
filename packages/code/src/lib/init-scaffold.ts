@@ -222,16 +222,6 @@ AGENT_HARNESS=claude-code
 # Required for unattended automation (systemd, cron, CI, webhook server); interactive use needs no license
 # License keys start with CODE-****
 # LICENSE_KEY=CODE-XXXX-XXXX-XXXX-XXXX
-
-# Optional: worker spend caps (USD; plain non-negative decimals only)
-# WORKER_MAX_SPEND_PER_RUN_USD caps a single run's cost (post-run cap: the
-#   offending run finishes and is recorded, then flagged — no harness can
-#   cancel an in-flight session on spend).
-# WORKER_MAX_SPEND_PER_DAY_USD blocks new unattended dispatch once today's
-#   known unattended spend meets it; work resumes after midnight UTC.
-# Unset or empty disables each cap. Manual CLI runs are never capped.
-# WORKER_MAX_SPEND_PER_RUN_USD=5
-# WORKER_MAX_SPEND_PER_DAY_USD=50
 `;
 
 /**

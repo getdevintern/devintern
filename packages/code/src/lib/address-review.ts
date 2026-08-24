@@ -32,17 +32,6 @@ export interface AddressReviewOptions {
   verbose?: boolean;
 }
 
-/**
- * Thrown when a worker budget cap defers the change-request session before
- * it starts. Callers treat it as "leave the work queued", not as a failure.
- */
-export class BudgetDeferredError extends Error {
-  constructor() {
-    super("deferred: worker spend cap reached");
-    this.name = "BudgetDeferredError";
-  }
-}
-
 interface ParsedPRUrl {
   owner: string;
   repo: string;
@@ -478,18 +467,6 @@ export async function addressReview(
     conversationComments:
       processedConversationComments.length > 0 ? processedConversationComments : undefined,
   };
-
-  // Shared budget/admission boundary for unattended review runs: a met
-  // daily cap stops here before any run row is created, leaving the PR
-  // mention queued for later processing.
-  const { checkWorkerAdmission } = await import("./worker-budget");
-  const admission = checkWorkerAdmission();
-  if (admission && !admission.allowed) {
-    console.log(
-      `\n⏸️  Deferring PR #${prNumber}: daily spend cap reached; review stays queued until the cap resets`,
-    );
-    throw new BudgetDeferredError();
-  }
 
   // Run record: begun only once there is actual feedback to handle, so
   // no-op invocations (nothing unaddressed) do not create run rows.
