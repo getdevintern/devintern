@@ -57,6 +57,29 @@ describe("extractJsonPayload", () => {
     });
   });
 
+  test("repairs raw newlines inside JSON string values", () => {
+    const raw = [
+      "```json",
+      "{",
+      '  "summary": "Support GitLab",',
+      '  "description": "## User Story',
+      "",
+      "As a developer using `gitlab.com`, I want support.",
+      "",
+      "## Acceptance",
+      "",
+      "- [ ] Works",
+      '"',
+      "}",
+      "```",
+    ].join("\n");
+    expect(extractJsonPayload(raw, isStory, "missing fields")).toEqual({
+      summary: "Support GitLab",
+      description:
+        "## User Story\n\nAs a developer using `gitlab.com`, I want support.\n\n## Acceptance\n\n- [ ] Works\n",
+    });
+  });
+
   test("throws parse-failed with raw output in detail for garbage", () => {
     let caught: unknown;
     try {
