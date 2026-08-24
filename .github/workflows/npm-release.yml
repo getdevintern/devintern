@@ -1,0 +1,113 @@
+name: npm release
+
+# Publishes @getdevintern/code and/or @getdevintern/pm to npm.
+#
+# Triggered by pushing a version tag named after the package:
+#   git tag code-v2.4.1 && git push origin code-v2.4.1   -> publishes @getdevintern/code
+#   git tag pm-v2.4.1 && git push origin pm-v2.4.1       -> publishes @getdevintern/pm
+#
+# Required secrets:
+#   NPM_TOKEN         npm automation token with publish rights to both scopes
+#   POSTHOG_API_KEY   PostHog project key, baked into the @getdevintern/code bundle
+# Optional variables:
+#   POSTHOG_HOST      PostHog ingest host (defaults to https://us.i.posthog.com)
+
+on:
+  push:
+    tags:
+      - "code-v*"
+      - "pm-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to release"
+        type: choice
+        default: both
+        options:
+          - both
+          - code
+          - pm
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: code
+            dir: packages/code
+            tag_prefix: code-v
+          - package: pm
+            dir: packages/pm
+            tag_prefix: pm-v
+
+    # Tag pushes publish only the tagged package; manual dispatch follows the input.
+    if: >-
+      (startsWith(github.ref, 'refs/tags/') && startsWith(github.ref_name, matrix.tag_prefix)) ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.package == 'both' || inputs.package == matrix.package))
+
+    runs-on: ubuntu-latest
+    env:
+      # Job-level so any rebuild (e.g. a prepublishOnly hook during publish)
+      # still bakes the analytics key into the @getdevintern/code bundle.
+      POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+      POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: ${{ matrix.dir }}
+        run: |
+          expected="${GITHUB_REF_NAME#${{ matrix.tag_prefix }}}"
+          actual="$(bun -p "require('./package.json').version")"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${actual}." >&2
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: ${{ matrix.dir }}
+        run: bun run build
+
+      - name: Typecheck
+        working-directory: ${{ matrix.dir }}
+        run: bun run typecheck
+
+      - name: Configure npm auth
+        run: |
+          mkdir -p ~/.bun
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish
+        working-directory: ${{ matrix.dir }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun publish --access public
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
