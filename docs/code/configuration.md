@@ -539,6 +539,16 @@ On startup, a globally installed `devintern` checks the npm registry (at most on
 
 Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
 
+To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
+
+```bash
+bun install -g @getdevintern/code@latest
+# or
+npm install -g @getdevintern/code@latest
+```
+
+Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
+
 ## Troubleshooting
 
 **"Missing required environment variables"**
