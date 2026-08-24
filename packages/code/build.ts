@@ -9,6 +9,11 @@ await Bun.build({
   minify: true,
   define: {
     __VERSION__: JSON.stringify(pkg.version),
+    // Analytics is permanently disabled in builds without a key (local dev).
+    __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY?.trim() ?? ""),
+    __POSTHOG_HOST__: JSON.stringify(
+      process.env.POSTHOG_HOST?.trim() || "https://us.i.posthog.com",
+    ),
   },
 });
 
