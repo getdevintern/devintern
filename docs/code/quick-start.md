@@ -44,10 +44,13 @@ devintern init
 In a terminal, this starts an interactive setup wizard that:
 
 - Detects an existing @devintern/pm configuration (`.devintern-pm/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation
-- Asks which task tracker you use (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, or markdown files)
+- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, Azure DevOps, Asana, and Trello
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Offers an optional GitHub token for pull request creation
+- Detects installed AI agent CLIs (and warns with install steps when none are found)
+- Offers to sign in to DevIntern on the spot (`devintern login` equivalent)
+- Finishes with a readiness checklist so your first run cannot fail on something setup could have caught
 - Writes your answers to `.devintern-code/.env`, creates `settings.json` for per-project configuration, and adds a whitelist block to your `.gitignore` (`.devintern-code/*` plus `!settings.json` and `!.env.example` exceptions) so credentials and local run state never get committed, while `settings.json` and the `.env.example` template stay trackable
 
 For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write a commented configuration template instead:
@@ -56,9 +59,13 @@ For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prom
 devintern init --yes
 ```
 
+### Re-running init on an existing setup
+
+Running `devintern init` in an already-configured project no longer refuses — it offers a short menu: **update** your current tracker's credentials (stored values become Enter-to-keep defaults), **switch** to a different tracker (your GitHub PR token carries over), or exit without changes. Updates are merged into `.env`, so comments, custom variables, and previously-skipped optionals are preserved.
+
 ## Connect Your Task Tracker
 
-The wizard handles credentials for you. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
+The wizard handles credentials for you. If you skip `init`, running a task in an unconfigured project from an interactive terminal offers to launch the guided setup inline before failing. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
 
 | Tracker            | When to use                                               | Setup guide                                                 |
 | ------------------ | --------------------------------------------------------- | ----------------------------------------------------------- |
@@ -77,6 +84,8 @@ The wizard handles credentials for you. If you used `--yes`, or want to change t
 Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
 
 ## First Run
+
+Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
 
 Run `devintern` with a task reference from your configured tracker:
 

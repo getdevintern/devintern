@@ -14,6 +14,8 @@ setDefaultTimeout(30_000);
 
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
 const CLI_SPAWN_TIMEOUT_MS = 30_000;
+/** Closed local port: argument-parse tests must not hang on a live tracker host. */
+const CLI_UNREACHABLE_TRACKER_URL = "http://127.0.0.1:1";
 
 // Helper to run the CLI in an isolated directory
 function runCLI(args: string[]): {
@@ -34,9 +36,10 @@ function runCLI(args: string[]): {
       cwd: testDir,
       env: {
         ...process.env,
-        JIRA_BASE_URL: "https://test.atlassian.net",
+        JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
         JIRA_EMAIL: "test@example.com",
         JIRA_API_TOKEN: "test-token",
+        DEVINTERN_FETCH_MAX_RETRIES: "0",
         DEVINTERN_SKIP_LICENSE_CHECK: "1",
         DEVINTERN_NO_UPDATE: "1",
       },

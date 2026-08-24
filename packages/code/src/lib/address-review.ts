@@ -12,6 +12,7 @@ import {
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
+import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
@@ -132,7 +133,12 @@ export async function runAgent(
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
-      const runOptions = { maxTurns, skipPermissions: true, workingDir: workDir };
+      const runOptions = {
+        maxTurns,
+        skipPermissions: true,
+        workingDir: workDir,
+        model: resolveAgentModel(),
+      };
       const agentArgs = buildHeadlessAgentArgs(harness, prompt, runOptions);
 
       if (verbose) {

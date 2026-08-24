@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
+import { findProjectRoot } from "@devintern/utils";
 import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
 import type { EnvPromptStep } from "@devintern/task-trackers";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
@@ -317,34 +318,37 @@ export interface ScaffoldOptions {
 /**
  * Scaffold `.devintern-code/` with env files, settings, and gitignore entries.
  *
- * @returns true when files were written, false when the config dir already
- * existed (nothing touched)
+ * The scaffold always targets the enclosing repository root (found by walking
+ * up for `.git`), so running from a subdirectory of a monorepo does not nest
+ * the config inside that subdirectory. Falls back to `cwd` outside a repo.
+ *
+ * The only hard refusal is an existing `.env`: credentials are never
+ * overwritten. A config folder missing `.env` (or missing `.env.example` /
+ * `settings.json`) is completed in place; existing files are kept.
+ *
+ * @returns true when files were written, false when `.env` already existed
  */
 export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
   const cwd = options.cwd ?? process.cwd();
-  const configDir = resolve(cwd, ".devintern-code");
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const configDir = resolve(projectRoot, ".devintern-code");
   const envFile = join(configDir, ".env");
   const envSampleFile = join(configDir, ".env.example");
 
-  // Check if .devintern-code folder already exists
-  if (existsSync(configDir)) {
-    console.log(`\n⚠️  Configuration folder already exists: ${configDir}`);
-
-    if (existsSync(envFile)) {
-      console.log("✅ .env file found");
-    } else {
-      console.log("⚠️  .env file not found");
-    }
-
+  // Never overwrite credentials.
+  if (existsSync(envFile)) {
+    console.log(`\n⚠️  Configuration file already exists: ${envFile}`);
     console.log("\n💡 To reconfigure, either:");
-    console.log(`   1. Delete the folder: rm -rf ${configDir}`);
-    console.log("   2. Or edit the files directly");
+    console.log(`   1. Delete the file: rm ${envFile}`);
+    console.log("   2. Or edit the file directly");
     return false;
   }
 
   try {
-    mkdirSync(configDir, { recursive: true });
-    console.log(`✅ Created configuration folder: ${configDir}`);
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true });
+      console.log(`✅ Created configuration folder: ${configDir}`);
+    }
   } catch (error) {
     console.error(`❌ Failed to create configuration folder: ${error}`);
     process.exit(1);
@@ -352,12 +356,14 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
 
   const envSampleContent = buildEnvExample();
 
-  try {
-    writeFileSync(envSampleFile, envSampleContent, "utf8");
-    console.log(`✅ Created template file: ${envSampleFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create .env.example: ${error}`);
-    process.exit(1);
+  if (!existsSync(envSampleFile)) {
+    try {
+      writeFileSync(envSampleFile, envSampleContent, "utf8");
+      console.log(`✅ Created template file: ${envSampleFile}`);
+    } catch (error) {
+      console.error(`❌ Failed to create .env.example: ${error}`);
+      process.exit(1);
+    }
   }
 
   try {
@@ -368,7 +374,7 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     process.exit(1);
   }
 
-  // Create settings.json for per-project configuration
+  // Create settings.json for per-project configuration (kept if present)
   const settingsFile = join(configDir, "settings.json");
   const settingsContent = {
     jira: {
@@ -428,23 +434,26 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     },
   };
 
-  try {
-    writeFileSync(settingsFile, JSON.stringify(settingsContent, null, 2), "utf8");
-    console.log(`✅ Created settings file: ${settingsFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create settings.json: ${error}`);
-    process.exit(1);
+  if (!existsSync(settingsFile)) {
+    try {
+      writeFileSync(settingsFile, JSON.stringify(settingsContent, null, 2), "utf8");
+      console.log(`✅ Created settings file: ${settingsFile}`);
+    } catch (error) {
+      console.error(`❌ Failed to create settings.json: ${error}`);
+      process.exit(1);
+    }
   }
 
   // Ignore everything under .devintern-code/ and whitelist the two files worth
   // committing. Credentials, the lock file, and local state (queue.db) are
   // covered by default, so a new state file never lands in git — or gets wiped
   // by `git clean`.
-  const gitignorePath = join(cwd, ".gitignore");
+  const gitignorePath = join(projectRoot, ".gitignore");
   const gitignoreEntries = [
     ".devintern-code/*",
     "!.devintern-code/settings.json",
     "!.devintern-code/.env.example",
+    "!.devintern-code/automations.toml",
   ];
 
   try {

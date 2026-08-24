@@ -109,6 +109,8 @@ export function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
 export interface TrackerChoice {
   id: string;
   displayName: string;
+  /** Optional trailing note on the menu line (e.g. "no account needed"). */
+  hint?: string;
 }
 
 /** Ask which tracker to use, accepting a menu number or a tracker id. */
@@ -120,7 +122,10 @@ export async function promptForTracker(
   const trackerIds = trackers.map((t) => t.id);
   log("\nWhich task tracker do you use?");
   trackers.forEach((tracker, index) => {
-    log(`   ${index + 1}. ${tracker.displayName} (${tracker.id})`);
+    log(
+      `   ${index + 1}. ${tracker.displayName} (${tracker.id})` +
+        (tracker.hint ? ` — ${tracker.hint}` : ""),
+    );
   });
 
   for (;;) {

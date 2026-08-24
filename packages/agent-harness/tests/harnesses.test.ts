@@ -154,8 +154,23 @@ describe("AntigravityHarness", () => {
     expect(h.buildArgs({ skipPermissions: false })).toEqual([]);
   });
 
-  test("buildArgs ignores model and maxTurns (not stable CLI flags)", () => {
-    expect(h.buildArgs({ model: "gemini-3.5-flash", maxTurns: 10 })).toEqual([]);
+  test("buildArgs with model (stable CLI flag since v1.0.5)", () => {
+    expect(h.buildArgs({ model: "gemini-3.5-flash-medium" })).toEqual([
+      "--model",
+      "gemini-3.5-flash-medium",
+    ]);
+  });
+
+  test("buildArgs with skipPermissions and model", () => {
+    expect(h.buildArgs({ skipPermissions: true, model: "gemini-3.5-flash-medium" })).toEqual([
+      "--dangerously-skip-permissions",
+      "--model",
+      "gemini-3.5-flash-medium",
+    ]);
+  });
+
+  test("buildArgs ignores maxTurns (not a stable CLI flag)", () => {
+    expect(h.buildArgs({ maxTurns: 10 })).toEqual([]);
   });
 });
 
@@ -288,6 +303,13 @@ describe("PiHarness", () => {
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual([]);
   });
+
+  test("buildArgs with model", () => {
+    expect(h.buildArgs({ model: "claude-sonnet-4-6:high" })).toEqual([
+      "--model",
+      "claude-sonnet-4-6:high",
+    ]);
+  });
 });
 
 describe("QwenCodeHarness", () => {
@@ -308,8 +330,16 @@ describe("QwenCodeHarness", () => {
     expect(h.buildArgs({ skipPermissions: true })).toEqual(["--yolo"]);
   });
 
-  test("buildArgs ignores model (not supported)", () => {
-    expect(h.buildArgs({ model: "qwen-coder" })).toEqual([]);
+  test("buildArgs with model", () => {
+    expect(h.buildArgs({ model: "qwen3-coder-plus" })).toEqual(["--model", "qwen3-coder-plus"]);
+  });
+
+  test("buildArgs with skipPermissions and model", () => {
+    expect(h.buildArgs({ skipPermissions: true, model: "qwen3-coder-plus" })).toEqual([
+      "--yolo",
+      "--model",
+      "qwen3-coder-plus",
+    ]);
   });
 });
 

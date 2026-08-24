@@ -241,7 +241,35 @@ To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` e
 DEVINTERN_VERBOSE=1
 ```
 
-This logs every API request, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+
+## Error Reporting
+
+The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+
+```bash
+SENTRY_DISABLED=1
+```
+
+Set this in your shell environment or in `.devintern-code/.env`.
+
+## Readiness Check
+
+Run `devintern doctor` for a one-screen answer to "is everything set up?":
+
+```bash
+devintern doctor
+```
+
+It checks, in order:
+
+- **Bun runtime** and **Git** availability
+- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
+- **DevIntern sign-in**: local session validity (`devintern login` when missing)
+- **License**: entitlement status when signed in (only needed for unattended automation)
+
+Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
 ## Output Directory
 
@@ -278,6 +306,9 @@ AGENT_HARNESS=claude-code
 
 # Optional: path to the agent CLI (leave unset in most cases)
 # AGENT_CLI_PATH=/custom/path/to/claude
+
+# Optional: model the harness runs with (harness-specific string)
+# AGENT_MODEL=sonnet
 ```
 
 You usually only need `AGENT_HARNESS`. By default devintern uses the harness's standard command (for example `claude` for `claude-code`) and finds it on your `PATH` automatically, so `AGENT_CLI_PATH` can be left unset.
@@ -290,11 +321,22 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **DeepSeek note:** Harness id is `deepseek`; the CLI binary is `reasonix` (DeepSeek-Reasonix, listed in DeepSeek's agent integrations). Install with `npm i -g reasonix`, set `DEEPSEEK_API_KEY` (or run `reasonix setup`), then set `AGENT_HARNESS=deepseek`. `--max-turns` and permission-skip flags have no effect on `reasonix run` (turn limits live in Reasonix config; headless runs are already autonomous).
 
-**Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning; DevIntern does not spawn the retired `gemini` binary. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`. `--max-turns` has no effect; model selection is via Antigravity settings/`/model`, not a DevIntern model flag.
+**Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning; DevIntern does not spawn the retired `gemini` binary. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`. `--max-turns` has no effect; model selection accepts slugs from `agy models` via `AGENT_MODEL`.
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
-**Qwen note:** Qwen Code has no `--model` flag; pick the model in `~/.qwen/settings.json`.
+**Qwen note:** Qwen Code accepts a model via its `--model` flag (e.g. `qwen3-coder-plus`) — set it with `AGENT_MODEL`; you can also keep the model in `~/.qwen/settings.json`.
+
+### Model selection
+
+Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-code/.env`:
+
+```bash
+# .devintern-code/.env
+AGENT_MODEL=sonnet
+```
+
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes). A few harnesses have no model flag and ignore the setting.
 
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 
@@ -496,6 +538,16 @@ On startup, a globally installed `devintern` checks the npm registry (at most on
 | Opt-in auto-install (including non-interactive)     | `DEVINTERN_AUTO_UPDATE=1`                                                                               |
 
 Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
+
+To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
+
+```bash
+bun install -g @getdevintern/code@latest
+# or
+npm install -g @getdevintern/code@latest
+```
+
+Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
 
 ## Troubleshooting
 

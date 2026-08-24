@@ -7,6 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import { PostHog } from "posthog-node";
+import { setTelemetryEnabled } from "./error-tracking.ts";
 import { isAnalyticsEnabled, readSettings, updateSettings } from "./settings.ts";
 
 /** Curated event names — keep in sync with privacy copy. */
@@ -19,6 +20,7 @@ export type AnalyticsEvent =
   | "story_decomposed"
   | "task_created"
   | "analytics_opt_out"
+  | "quick_capture_invoked"
   | "update_available"
   | "update_downloaded"
   | "update_applied"
@@ -182,6 +184,8 @@ export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
   }
 
   await updateSettings({ analyticsEnabled: enabled });
+  // Error reporting shares the same opt-out.
+  setTelemetryEnabled(enabled);
 }
 
 export async function getAnalyticsEnabled(): Promise<boolean> {

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
+import { RunResult } from "@/components/RunResult";
 import { EmptyState, FilterGroup, StatusBadge } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -28,7 +29,13 @@ const STATUS_FILTERS: (RunStatus | "all")[] = [
   "deferred",
   "abandoned",
 ];
-const ORIGIN_FILTERS: (RunOrigin | "all")[] = ["all", "task", "pr_mention", "conflict_resolution"];
+const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
+  "all",
+  "task",
+  "pr_mention",
+  "conflict_resolution",
+  "scheduled",
+];
 
 /** Paginated, filterable list of worker runs. */
 export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
@@ -76,7 +83,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
       {data && data.runs.length === 0 ? (
         <EmptyState
           title="No runs yet"
-          body="Runs appear here as the worker picks up tasks and PR mentions. Start it with: devintern worker --query '<ready-tasks query>'"
+          body="Runs appear here as the worker picks up tasks, PR mentions, and scheduled automations."
         />
       ) : null}
 
@@ -86,10 +93,10 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
             <TableHeader>
               <TableRow>
                 <TableHead className="px-4">Status</TableHead>
-                <TableHead className="px-4">Task</TableHead>
+                <TableHead className="px-4">Work</TableHead>
                 <TableHead className="px-4">Origin</TableHead>
                 <TableHead className="px-4">Harness</TableHead>
-                <TableHead className="px-4">PR</TableHead>
+                <TableHead className="px-4">Result</TableHead>
                 <TableHead className="px-4">Duration</TableHead>
                 <TableHead className="px-4">Started</TableHead>
               </TableRow>
@@ -101,7 +108,9 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                     <StatusBadge status={run.status} />
                   </TableCell>
                   <TableCell className="px-4 py-2.5 font-medium">
-                    {run.taskKey ?? (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)}
+                    {run.taskKey ??
+                      run.automationId ??
+                      (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)}
                   </TableCell>
                   <TableCell className="px-4 py-2.5 text-muted-foreground">
                     {formatRunOrigin(run.origin)}
@@ -110,20 +119,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                     {run.harness ?? "–"}
                   </TableCell>
                   <TableCell className="px-4 py-2.5">
-                    {run.prUrl ? (
-                      <a
-                        href={run.prUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(event) => event.stopPropagation()}
-                        className="inline-flex items-center gap-1 text-primary hover:underline"
-                      >
-                        #{run.prNumber ?? "PR"}
-                        <ExternalLink className="size-3" />
-                      </a>
-                    ) : (
-                      <span className="text-muted-foreground">–</span>
-                    )}
+                    <RunResult run={run} />
                   </TableCell>
                   <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
                     {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}

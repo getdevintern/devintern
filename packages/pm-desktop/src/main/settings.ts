@@ -33,8 +33,15 @@ export interface Settings {
   analyticsEnabled?: boolean;
   /** Version the user chose "Later" for (paired with {@link updateSnoozedUntil}). */
   updateSnoozedVersion?: string;
-  /** Epoch ms until which prompts for {@link updateSnoozedVersion} stay hidden. */
+  /** Epoch ms until which {@link updateSnoozedVersion} prompts stay hidden. */
   updateSnoozedUntil?: number;
+  /**
+   * When true, the Quick Capture global shortcut is registered. Default off —
+   * an OS-wide hotkey is opt-in.
+   */
+  quickCaptureEnabled?: boolean;
+  /** Custom Quick Capture accelerator; null/undefined uses the platform default. */
+  quickCaptureShortcut?: string | null;
 }
 
 /** Analytics is on unless the user explicitly opted out. */
