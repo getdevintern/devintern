@@ -10,11 +10,20 @@ function isRetryableNetworkError(error: Error): boolean {
     message.includes("econnreset") ||
     message.includes("etimedout") ||
     message.includes("econnrefused") ||
+    message.includes("econnaborted") ||
     message.includes("enotfound") ||
+    message.includes("eai_again") ||
     message.includes("unable to connect") ||
+    message.includes("unable to resolve") ||
+    message.includes("getaddrinfo") ||
+    // libcurl/Bun DNS and connect failures surface as
+    // "Failed to connect to ... Was there a typo in the url or port?"
+    message.includes("typo in the url or port") ||
+    message.includes("fetch failed") ||
     message.includes("network") ||
     message.includes("socket hang up") ||
-    message.includes("epipe")
+    message.includes("epipe") ||
+    message.includes("timed out")
   );
 }
 
