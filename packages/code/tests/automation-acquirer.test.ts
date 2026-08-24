@@ -249,10 +249,28 @@ describe("AutomationAcquirer", () => {
   test("heartbeats a claim while context resolution exceeds the lease", async () => {
     const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
     dbPaths.push(dbPath);
-    let preparationStarted!: () => void;
-    const started = new Promise<void>((resolve) => (preparationStarted = resolve));
+    let now = 0;
     let firstRuns = 0;
     let secondContexts = 0;
+    // Injected heartbeat interval so beats fire on a manual clock — real
+    // timers made this test flaky under CI load (a single delayed beat let
+    // the 40ms lease expire and the second acquirer steal the claim).
+    const heartbeatTimers: Array<{ callback: () => void }> = [];
+    const timerHandles = {
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+      setInterval: (callback: () => void) => {
+        const timer = { callback };
+        heartbeatTimers.push(timer);
+        return timer as unknown as ReturnType<typeof setInterval>;
+      },
+      clearInterval: (timer: ReturnType<typeof setInterval>) => {
+        const index = heartbeatTimers.indexOf(timer as unknown as { callback: () => void });
+        if (index >= 0) heartbeatTimers.splice(index, 1);
+      },
+    };
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => (releaseContext = resolve));
     const automation: AutomationConfig = {
       id: "slow-context",
       enabled: true,
@@ -265,9 +283,10 @@ describe("AutomationAcquirer", () => {
       dbPath,
       leaseMs: 40,
       heartbeatMs: 10,
+      now: () => now,
+      ...timerHandles,
       resolveContext: async () => {
-        preparationStarted();
-        await new Promise((resolve) => setTimeout(resolve, 120));
+        await contextGate;
         return { cwd: "/tmp", env: {}, release() {} };
       },
       spawnRun: () => {
@@ -280,6 +299,8 @@ describe("AutomationAcquirer", () => {
       dbPath,
       leaseMs: 40,
       heartbeatMs: 10,
+      now: () => now,
+      ...timerHandles,
       resolveContext: async () => {
         secondContexts += 1;
         return { cwd: "/tmp", env: {}, release() {} };
@@ -288,14 +309,28 @@ describe("AutomationAcquirer", () => {
     });
 
     await first.start();
-    await started;
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    // Advance past the initial cursor and let the first occurrence claim.
+    // Registration of the heartbeat interval happens synchronously before
+    // resolveContext suspends on the gate, so it exists right after the call.
+    now += 10;
+    const claiming = first.tick();
+    expect(heartbeatTimers).toHaveLength(1);
+
+    // Advance past the original lease expiry (t=40), firing every scheduled
+    // heartbeat. Each beat renews the lease to now + 40ms, so it never lapses.
+    for (let beat = 0; beat < 5; beat++) {
+      now += 10;
+      for (const timer of [...heartbeatTimers]) timer.callback();
+    }
+
     await second.start();
     expect(secondContexts).toBe(0);
     await second.stop();
 
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    releaseContext();
+    await claiming;
     expect(firstRuns).toBe(1);
+    expect(heartbeatTimers).toHaveLength(0);
     await first.stop();
   });
 

@@ -49,6 +49,8 @@ export interface AutomationAcquirerOptions {
   terminationGraceMs?: number;
   setTimer?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  setInterval?: (callback: () => void, ms: number) => ReturnType<typeof setInterval>;
+  clearInterval?: (timer: ReturnType<typeof setInterval>) => void;
 }
 
 interface ActiveAutomationRun {
@@ -153,7 +155,9 @@ export class AutomationAcquirer implements Acquirer {
       try {
         let ownsClaim = true;
         const heartbeatMs = Math.min(this.options.heartbeatMs ?? HEARTBEAT_MS, leaseMs / 2);
-        const preparationHeartbeat = setInterval(
+        const setHeartbeatInterval = this.options.setInterval ?? setInterval;
+        const clearHeartbeatInterval = this.options.clearInterval ?? clearInterval;
+        const preparationHeartbeat = setHeartbeatInterval(
           () => {
             if (!this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs)) {
               ownsClaim = false;
@@ -161,11 +165,11 @@ export class AutomationAcquirer implements Acquirer {
           },
           Math.max(1, heartbeatMs),
         );
-        preparationHeartbeat.unref();
+        (preparationHeartbeat as { unref?: () => void }).unref?.();
         try {
           context = await this.options.resolveContext(automation);
         } finally {
-          clearInterval(preparationHeartbeat);
+          clearHeartbeatInterval(preparationHeartbeat);
         }
         if (!context) {
           console.warn(`⏭️  [automation:${automation.id}] occurrence skipped: repository is busy`);
