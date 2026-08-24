@@ -49,6 +49,8 @@ import {
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
+import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/analytics";
+import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
@@ -115,6 +117,34 @@ async function checkForCliUpdate(): Promise<void> {
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
 const __filename_resolved = fileURLToPath(import.meta.url);
 const __dirname_resolved = dirname(__filename_resolved);
+
+const KNOWN_SANDBOX_PROVIDERS = new Set([
+  "none",
+  "auto",
+  "native",
+  "nono",
+  "srt",
+  "docker",
+  "smolvm",
+]);
+
+/** Allowlisted, non-identifying props for the `cli_run` analytics event. */
+function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | undefined> {
+  const sandboxProvider = options.sandbox ?? process.env.AGENT_SANDBOX;
+  return {
+    cli_version: VERSION,
+    os: process.platform,
+    arch: process.arch,
+    ci: isAutomatedEnvironment(),
+    tracker,
+    run_mode: options.estimate ? "estimate" : options.query ? "query" : "tasks",
+    task_count: options.query ? undefined : taskKeys.length,
+    create_pr: options.createPr === true,
+    auto_review: options.autoReview === true,
+    estimate: options.estimate === true,
+    sandbox: KNOWN_SANDBOX_PROVIDERS.has(sandboxProvider ?? "") ? sandboxProvider : undefined,
+  };
+}
 
 /**
  * Rename legacy `.claude-intern` project config to `.devintern-code` once.
@@ -2312,6 +2342,18 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
+    // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
+    // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
+    // analytics.enabled: false in .devintern-code/settings.json.
+    const firstTelemetryRun = isAnonymousIdNewlyCreated();
+    void track("cli_run", buildCliRunProps(activeTrackerType));
+    if (firstTelemetryRun && !isAutomatedEnvironment()) {
+      console.log(
+        "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
+          "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
+      );
+    }
+
     // Validate environment — skip when every argument is a local markdown file path
     // (those tasks need no PM credentials). With missing credentials in an
     // interactive terminal, offer the setup wizard inline before failing.
@@ -2561,6 +2603,7 @@ async function main(): Promise<void> {
       if (lockManager) {
         lockManager.release();
       }
+      await flushAnalytics();
       if (estimationResults.failed > 0) {
         process.exit(1);
       }
@@ -2632,6 +2675,7 @@ async function main(): Promise<void> {
         if (lockManager) {
           lockManager.release();
         }
+        await flushAnalytics();
         process.exit(1);
       }
     }
@@ -2640,6 +2684,7 @@ async function main(): Promise<void> {
     if (lockManager) {
       lockManager.release();
     }
+    await flushAnalytics();
   } catch (error) {
     const err = error as Error;
     console.error(`❌ Error: ${err.message}`);
@@ -2650,6 +2695,7 @@ async function main(): Promise<void> {
     if (lockManager) {
       lockManager.release();
     }
+    await flushAnalytics();
     process.exit(1);
   }
 }

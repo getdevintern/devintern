@@ -253,6 +253,32 @@ SENTRY_DISABLED=1
 
 Set this in your shell environment or in `.devintern-code/.env`.
 
+## Anonymous Usage Analytics
+
+The CLI sends one anonymous usage event per run to DevIntern's PostHog project so we can understand popularity and which features are used. It never sends task content, code, repository names, file paths, or credentials — only:
+
+- CLI version, OS, architecture
+- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
+- Whether the session runs in CI
+
+A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`. Analytics are disabled automatically when running from source. To opt out, either:
+
+```bash
+# Shell or .devintern-code/.env
+DEVINTERN_TELEMETRY_DISABLED=1
+```
+
+or set in `.devintern-code/settings.json`:
+
+```json
+{
+  "analytics": { "enabled": false }
+}
+```
+
+See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+
 ## Readiness Check
 
 Run `devintern doctor` for a one-screen answer to "is everything set up?":
