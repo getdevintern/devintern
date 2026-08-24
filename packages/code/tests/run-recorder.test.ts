@@ -47,6 +47,22 @@ describe("RunStore", () => {
     expect(run?.prNumber).toBe(42);
   });
 
+  test("scheduled runs persist automation metadata", () => {
+    const id = store.createRun({
+      origin: "scheduled",
+      automationId: "weekly-plan",
+      repo: "backend",
+      harness: "codex",
+    });
+    store.finishRun(id, "succeeded");
+
+    expect(store.getRun(id)).toMatchObject({
+      origin: "scheduled",
+      automationId: "weekly-plan",
+    });
+    expect(store.getStats(null).byOrigin.scheduled).toBe(1);
+  });
+
   test("stages accumulate in order with structured detail", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-2" });
     store.addStage(id, "feasibility", "succeeded", "clear enough", '{"clarityScore":8}');
@@ -159,6 +175,8 @@ describe("RunStore", () => {
     const migrated = new RunStore(legacyPath);
     const id = migrated.createRun({ origin: "task", taskKey: "OLD-1" });
     expect(migrated.getRun(id)?.attempt).toBe(2);
+    const scheduled = migrated.createRun({ origin: "scheduled", automationId: "new-schedule" });
+    expect(migrated.getRun(scheduled)?.automationId).toBe("new-schedule");
     migrated.close();
     for (const suffix of ["", "-wal", "-shm"]) {
       rmSync(`${legacyPath}${suffix}`, { force: true });

@@ -659,6 +659,27 @@ if (process.argv[2] === "init") {
     const dbPath = resolveQueueDbPath();
     const acquirers = [];
 
+    const { loadSingleRepoAutomations } = await import("./lib/automation-config");
+    const automations = loadSingleRepoAutomations();
+    if (automations.length > 0) {
+      const { AutomationAcquirer } = await import("./lib/automation-acquirer");
+      acquirers.push(
+        new AutomationAcquirer({
+          automations,
+          dbPath,
+          resolveContext: async () => {
+            const runLock = new LockManager(process.cwd());
+            if (!runLock.acquire().success) return null;
+            return {
+              cwd: process.cwd(),
+              env: { ...process.env },
+              release: () => runLock.release(),
+            };
+          },
+        }),
+      );
+    }
+
     if (workerQuery) {
       const trackerType = process.env.TASK_TRACKER || "jira";
       const { supportsPolling, trackersSupportingPolling } =
@@ -1711,10 +1732,14 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     // Structured run record for this attempt (skips above are not attempts).
+    // Scheduled automations run through this same pipeline with their prompt
+    // materialized as a markdown task; env markers attribute those runs.
+    const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
     beginRun({
-      origin: "task",
+      origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
       tracker: process.env.TASK_TRACKER || "jira",
+      ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
     });
 
     if (!isMarkdownTaskTracker(tracker)) {

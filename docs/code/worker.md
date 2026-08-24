@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-17
+dateModified: 2026-08-24
 ---
 
 # Worker Daemon
@@ -33,6 +33,76 @@ devintern worker --query "status=todo" --listen
 ```
 
 `devintern serve` still works as a deprecated alias for `devintern worker --listen`.
+
+## Recurring automations
+
+For a single repository, put recurring work in `.devintern-code/automations.toml`:
+
+```toml
+[[automations]]
+id = "dependency-health"
+enabled = true
+interval = "6h"
+prompt = """Pick one outdated dependency and upgrade it within the same major version.
+Run the test suite; if anything breaks, revert the upgrade instead of fixing forward."""
+
+[[automations]]
+id = "flaky-test-triage"
+enabled = true
+cron = "0 9 * * 1"
+prompt = """Re-run the test suite twice and look for flaky tests.
+For each flaky test, add a short comment explaining the suspected race condition.
+Do not change production code."""
+```
+
+Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
+
+Configuration is validated as a group at worker startup and changes require a restart. An automation file is itself a valid event source, so `devintern worker` stays running without `--query` or `--listen` when at least one automation entry is configured (disabled entries are validated but not scheduled).
+
+### What an automation is
+
+Automations are independent of your task tracker: **the prompt is the task**. Each occurrence writes the prompt to a local markdown task file and feeds it through exactly the same pipeline as any other task — clarity check, planning, implementation, commit, PR creation, auto-review, run records. Nothing is created in your tracker, so no tracker credentials are needed for automation-only workers.
+
+Concretely, each occurrence:
+
+1. Writes `.devintern-code/automations/<id>/<timestamp>.md` (resolved like every other devintern state: the nearest `.devintern-code` walking up from the working directory).
+2. Spawns the normal CLI on that file as a subprocess, so the run gets its own branch, commits, and — by default — a pull request.
+3. Records the attempt with the `scheduled` origin and the automation id, so you can filter scheduled runs in the [dashboard](./dashboard.md).
+
+Because the occurrence is just a markdown task, you can reproduce or rerun any occurrence by hand:
+
+```bash
+devintern .devintern-code/automations/dependency-health/2026-08-24T09-00-00-000Z.md
+```
+
+### Writing good prompts
+
+The prompt replaces the ticket description the agent would normally read, so treat it like you would write a task for a new teammate:
+
+- **Scope it to one change per run.** "Apply one safe improvement" produces reviewable PRs; "clean up the repository" produces sprawling ones.
+- **State the guardrails.** What not to touch, when to stop, what must pass (`Run the test suite before committing`).
+- **Say what done means.** The pipeline's incomplete-detection reads the agent output; concrete success criteria make escalations rare.
+- Prefer recurring maintenance work (dependency bumps within a major, flaky-test triage, changelog refreshes, TODO sweeps) over open-ended feature work.
+
+### Tuning how occurrences run
+
+Occurrences use the same flag defaults as polled tasks: `WORKER_TASK_ARGS` overrides them (default `--create-pr`). For example, set `WORKER_TASK_ARGS=--auto-review` to have every automated PR go through the review loop too, or clear it to keep runs local without PRs. Note this variable applies to polled tracker tasks as well.
+
+### Schedule semantics
+
+Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
+
+On shutdown the scheduler stops its timer, terminates active automation subprocess groups, waits for them to exit, and leaves their claims recoverable in SQLite.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+| ---------------------------- | ------------------------------------------------------------ |
+| No occurrences fire after editing the TOML | Config is loaded at startup — restart the worker. Startup validation errors name the offending entry. |
+| `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
+| `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
+| Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
+| Task files pile up under `.devintern-code/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
 
 ## Polling mode
 
@@ -113,7 +183,7 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 - Events are persisted to a local SQLite queue (`.devintern-code/queue.db`) before processing, so a crash or restart never loses accepted work.
 - Duplicate webhook deliveries are detected by GitHub's delivery id and skipped.
 - Review feedback is processed before new task pickup: a human waiting on feedback beats a ticket that can wait a minute.
-- One task runs at a time per repository.
+- One task or scheduled automation runs at a time per repository.
 
 ## Instant events with the relay
 

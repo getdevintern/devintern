@@ -8,6 +8,8 @@
  * in the central workspace DB.
  */
 
+import { join } from "path";
+
 import { LockManager } from "../lock-manager";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
@@ -27,6 +29,8 @@ import type { RoutableTask } from "./router";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
+import { AutomationAcquirer } from "../automation-acquirer";
+import type { AutomationConfig } from "../automation-config";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -66,6 +70,48 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<boolean>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
+}
+
+interface RepoRunLockLike {
+  acquire(): { success: boolean; message: string; pid?: number };
+  release(): void;
+}
+
+/** Resolve a scheduled run context while holding the repo lock during preparation. */
+export async function resolveWorkspaceAutomationContext(
+  automation: AutomationConfig,
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  repoManager: RepoManagerLike,
+  repoLock: (repoName: string) => RepoRunLockLike = (name) => createRepoRunLock(name, workspaceDir),
+) {
+  // Keep occurrence task files in the workspace home (next to repos/,
+  // worktrees/, and the central DB) instead of inside a repo worktree.
+  const taskFileDir = join(workspaceDir, "automations");
+  const repo = automation.repo
+    ? findRepo(config, automation.repo)
+    : config.repos.length === 1
+      ? config.repos[0]
+      : undefined;
+  if (!repo) return { cwd: workspaceDir, env: { ...process.env }, taskFileDir, release() {} };
+
+  const lock = repoLock(repo.name);
+  if (!lock.acquire().success) return null;
+  try {
+    await repoManager.ensureBareClone(repo);
+    await repoManager.fetch(repo.name);
+    const cwd = await repoManager.ensureBaseWorktree(repo);
+    return {
+      cwd,
+      env: buildRepoEnv(repo, workspaceDir),
+      repo: repo.name,
+      taskFileDir,
+      release: () => lock.release(),
+    };
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
 }
 
 /** Per-task CLI args: workspace defaults win, then the usual env/default. */
@@ -258,22 +304,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
 
   const query = options.query ?? config.defaults.taskQuery;
-  if (!query) {
+  if (!query && config.automations.length === 0) {
     console.error(
       "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml " +
         "or pass --query.",
-    );
-    process.exit(1);
-  }
-
-  const { TaskTrackerManager } = await import("../task-tracker-manager");
-  const { createChangeDetector } = await import("../change-detector");
-  const tracker = new TaskTrackerManager().getClient();
-  const detector = createChangeDetector(config.defaults.tracker, (q) => tracker.searchTasks(q));
-  if (!detector) {
-    console.error(
-      `❌ Could not initialize the ${config.defaults.tracker} change detector. ` +
-        "Check the tracker's required variables in the workspace .env.",
     );
     process.exit(1);
   }
@@ -291,34 +325,71 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
   }
 
-  const acquirers: import("../../worker").Acquirer[] = [
-    createWorkspaceTaskAcquirer({
-      config,
-      workspaceDir,
-      workerState: state.workerState,
-      queue: state.queue,
-      skips: state.skips,
-      repoManager,
-      detector,
-      searchTasks: (q) => tracker.searchTasks(q),
-      query,
-      intervalSeconds: options.intervalSeconds,
-      verbose: options.verbose,
-    }),
-  ];
+  const acquirers: import("../../worker").Acquirer[] = [];
 
-  acquirers.push(
-    ...(await buildFleetEventAcquirers({
-      config,
-      workspaceDir,
-      state,
-      repoManager,
-      searchTasks: (q) => tracker.searchTasks(q),
-      query,
-      intervalSeconds: options.intervalSeconds,
-      verbose: options.verbose,
-    })),
-  );
+  if (config.automations.length > 0) {
+    const semanticErrors: string[] = [];
+    for (const automation of config.automations) {
+      if (!automation.repo && config.repos.length !== 1) {
+        semanticErrors.push(
+          `Automation "${automation.id}" must set repo when the workspace has multiple repositories.`,
+        );
+      }
+    }
+    if (semanticErrors.length > 0) {
+      throw new Error(`Invalid ${configPath}:\n- ${semanticErrors.join("\n- ")}`);
+    }
+
+    acquirers.push(
+      new AutomationAcquirer({
+        automations: config.automations,
+        dbPath: state.dbPath,
+        resolveContext: (automation) =>
+          resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+      }),
+    );
+  }
+
+  if (query) {
+    const { TaskTrackerManager } = await import("../task-tracker-manager");
+    const { createChangeDetector } = await import("../change-detector");
+    const tracker = new TaskTrackerManager().getClient();
+    const detector = createChangeDetector(config.defaults.tracker, (q) => tracker.searchTasks(q));
+    if (!detector) {
+      console.error(
+        `❌ Could not initialize the ${config.defaults.tracker} change detector. ` +
+          "Check the tracker's required variables in the workspace .env.",
+      );
+      process.exit(1);
+    }
+    acquirers.push(
+      createWorkspaceTaskAcquirer({
+        config,
+        workspaceDir,
+        workerState: state.workerState,
+        queue: state.queue,
+        skips: state.skips,
+        repoManager,
+        detector,
+        searchTasks: (q) => tracker.searchTasks(q),
+        query,
+        intervalSeconds: options.intervalSeconds,
+        verbose: options.verbose,
+      }),
+    );
+    acquirers.push(
+      ...(await buildFleetEventAcquirers({
+        config,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: (q) => tracker.searchTasks(q),
+        query,
+        intervalSeconds: options.intervalSeconds,
+        verbose: options.verbose,
+      })),
+    );
+  }
 
   if (options.ui) {
     const { startDashboardServer } = await import("../../dashboard-server");
