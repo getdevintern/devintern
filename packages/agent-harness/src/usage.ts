@@ -1,29 +1,29 @@
 /**
  * Normalized token/cost usage contract.
  *
- * Every harness reports consumption differently (some print a final JSON
- * result, some a human-readable summary line, some nothing at all in headless
- * mode). {@link extractAgentUsage} normalizes whatever is available from a
- * finished session's captured output into one {@link AgentUsage} value:
+ * Every harness can report consumption through structured output (a JSON
+ * result document or JSONL event stream — e.g. `codex exec --json`,
+ * `opencode run --format json`, `grok -p --output-format json`).
+ * {@link extractAgentUsage} normalizes whatever structured data a finished
+ * session's captured output contains into one {@link AgentUsage} value:
  *
  * - Unavailable values stay `null` — never zero — so callers can distinguish
  *   "the provider did not report this" from "this really was 0".
- * - `source` records where the numbers came from; `complete` says whether the
- *   session's usage accounting looked whole (both input and output tokens,
- *   plus either a model identity or a provider-reported cost).
+ * - Only structured output is trusted. Human-readable summary lines are
+ *   deliberately ignored: heuristics over free text misread echoed task
+ *   content, test output, and agent prose, so unstructured output means
+ *   unknown usage, not flaky guesses.
  *
  * Extractors are defensive by design: harness CLIs change their output
  * between versions, so any parse failure degrades to fewer populated fields
  * (or `null` overall) instead of throwing into the run pipeline.
  */
 
-import { isSourceOrDiffLine, outputLines, stripAnsi } from "./output-lines.js";
+import { stripAnsi } from "./output-lines.js";
 
 /** Where a usage reading was extracted from. */
 export type UsageSource =
-  | "stdout"
-  | "stderr"
-  | "structured_output" // embedded/piped JSON result object
+  | "structured_output" // embedded/piped JSON result object or JSONL events
   | "session_artifacts" // on-disk session transcripts written by the CLI
   | "mixed"; // merged from sessions with differing sources
 
@@ -407,216 +407,44 @@ function mergeRawIntoUsage(usage: AgentUsage, raw: RawUsageFields): void {
 }
 
 // ---------------------------------------------------------------------------
-// Text summary scanning (human-readable totals lines)
-// ---------------------------------------------------------------------------
-
-const NUMBER_WITH_SEPARATORS = String.raw`\d[\d,_]*(?:\.\d+)?`;
-
-interface TextPattern {
-  regex: RegExp;
-  apply: (usage: AgentUsage, match: RegExpMatchArray) => void;
-}
-
-const TEXT_PATTERNS: TextPattern[] = [
-  {
-    // Codex combined format: `Tokens used: 1,234 input (567 cached), 890 output`
-    regex: new RegExp(
-      String.raw`(?<input>` +
-        NUMBER_WITH_SEPARATORS +
-        String.raw`)\s*input(?:\s*\(?\s*(?<cached>` +
-        NUMBER_WITH_SEPARATORS +
-        String.raw`)\s*cached\s*\)?)?(?:\s*[,/]\s*(?:,\s*)?(?<output>` +
-        NUMBER_WITH_SEPARATORS +
-        String.raw`)?\s*output)?`,
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.inputTokens ??= parseNumber(match.groups?.input);
-      usage.cachedInputTokens ??= parseNumber(match.groups?.cached);
-      const output = match.groups?.output;
-      if (output !== undefined) {
-        usage.outputTokens ??= parseNumber(output);
-      }
-    },
-  },
-  {
-    // Bare total, but only when the number is not followed by input/output
-    // labels (that is the combined format handled above).
-    regex: new RegExp(
-      String.raw`tokens\s*used\s*:?\s*(?<total>` +
-        NUMBER_WITH_SEPARATORS +
-        String.raw`)(?!\s*\d*\s*(?:input|output))`,
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.totalTokens ??= parseNumber(match.groups?.total);
-    },
-  },
-  {
-    regex: new RegExp(
-      String.raw`(?:input|prompt)\s*(?:tokens)?\s*[:(]\s*(?<input>` + NUMBER_WITH_SEPARATORS + ")",
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.inputTokens ??= parseNumber(match.groups?.input);
-    },
-  },
-  {
-    regex: new RegExp(
-      String.raw`(?:output|completion)(?:\s+tokens)?\s*[:(]\s*(?<output>` +
-        NUMBER_WITH_SEPARATORS +
-        ")",
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.outputTokens ??= parseNumber(match.groups?.output);
-    },
-  },
-  {
-    regex: new RegExp(
-      String.raw`total\s*(?:tokens|token count)\s*[:(]\s*(?<total>` + NUMBER_WITH_SEPARATORS + ")",
-      "i",
-    ),
-    apply: (usage, match) => {
-      usage.totalTokens ??= parseNumber(match.groups?.total);
-    },
-  },
-];
-
-function parseNumber(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-  const cleaned = value.replace(/[,_]/g, "");
-  const parsed = Number.parseFloat(cleaned);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function scanTextSummaries(text: string, usage: AgentUsage): boolean {
-  if (!text.trim()) {
-    return false;
-  }
-  const lines = outputLines(text);
-  const tail = lines.slice(-TAIL_SCAN_LINES).map((line) => line.normalized);
-  let matched = false;
-
-  // Codex headless mode reports its total on the line after the label:
-  //   tokens used
-  //   6,530
-  const nextLineTotal = tail
-    .join("\n")
-    .match(
-      new RegExp(
-        String.raw`tokens\s+used\s*:?\s*\n\s*(?<total>` +
-          NUMBER_WITH_SEPARATORS +
-          String.raw`)\s*$`,
-        "im",
-      ),
-    );
-  if (nextLineTotal) {
-    usage.totalTokens ??= parseNumber(nextLineTotal.groups?.total);
-    matched = true;
-  }
-
-  for (const normalized of tail) {
-    if (!normalized.trim() || isSourceOrDiffLine(normalized)) {
-      continue;
-    }
-    for (const pattern of TEXT_PATTERNS) {
-      const match = normalized.match(pattern.regex);
-      if (match) {
-        pattern.apply(usage, match);
-        matched = true;
-      }
-    }
-    // Grok/Codex-style model line next to summaries (`Model: grok-4-fast`)
-    if (/^\s*model\b\s*[:(]/i.test(normalized) && usage.model === null) {
-      const modelMatch = normalized.match(/model\b\s*[:(]\s*"?([\w./:-]+)"?/i);
-      if (modelMatch?.[1]) {
-        usage.model = modelMatch[1];
-      }
-    }
-  }
-  return matched;
-}
-
-// ---------------------------------------------------------------------------
 // Per-harness extractors
 // ---------------------------------------------------------------------------
 
-type HarnessExtractor = (input: UsageExtractionInput) => AgentUsage | null;
-
-/** Generic extraction used by every harness: JSON first, then text summaries. */
-function genericExtract(input: UsageExtractionInput): AgentUsage | null {
-  // Structured JSON wins over prose-style summary lines.
+/**
+ * Extract usage from a finished session's captured output.
+ *
+ * Only structured output counts: whole-document JSON results and usage-bearing
+ * JSONL rows near the end of the stream. Human-readable summary lines are
+ * deliberately ignored — heuristics over free text misread echoed task
+ * content, test output, and agent prose, so anything not structured stays
+ * unknown instead of flaky.
+ */
+function extractStructuredUsage(input: UsageExtractionInput): AgentUsage | null {
   const jsonCandidates = [
     ...findJsonUsageObjects(input.stdout),
     ...findJsonUsageObjects(input.stderr),
   ];
-  if (jsonCandidates.length > 0) {
-    const usage = emptyUsage("structured_output");
-    for (const raw of jsonCandidates) {
-      mergeRawIntoUsage(usage, raw);
-    }
-    return finalize(usage);
+  if (jsonCandidates.length === 0) {
+    return null;
   }
-
-  const usage = emptyUsage("stdout");
-  const stdoutMatched = scanTextSummaries(input.stdout, usage);
-  const stderrMatched = scanTextSummaries(input.stderr, usage);
-  if (!stdoutMatched && !stderrMatched) {
-    return null; // explicit "usage unknown", not zeros
-  }
-  if (stderrMatched && !stdoutMatched) {
-    usage.source = "stderr";
+  const usage = emptyUsage("structured_output");
+  for (const raw of jsonCandidates) {
+    mergeRawIntoUsage(usage, raw);
   }
   return finalize(usage);
 }
 
 /**
- * Claude Code writes JSONL session transcripts under
- * `~/.claude/projects/<cwd-slug>/*.jsonl`. Headless `-p` text mode does not
- * print usage, so artifacts are the reliable source; each assistant message
- * carries `message.usage`, result rows carry `costUSD`.
- */
-function claudeCodeExtract(input: UsageExtractionInput): AgentUsage | null {
-  const jsonCandidates = [
-    ...findJsonUsageObjects(input.stdout),
-    ...findJsonUsageObjects(input.stderr),
-  ];
-  if (jsonCandidates.length > 0) {
-    const usage = emptyUsage("structured_output");
-    for (const raw of jsonCandidates) {
-      mergeRawIntoUsage(usage, raw);
-    }
-    return finalize(usage);
-  }
-  // Plain-text `-p` mode prints no usage; without artifact access callers can
-  // still pass transcript contents via stdout. Explicitly report nothing.
-  return null;
-}
-
-const HARNESS_EXTRACTORS: Record<string, HarnessExtractor> = {
-  "claude-code": claudeCodeExtract,
-};
-
-/**
  * Normalize a finished agent session's output into usage data.
  *
- * Returns `null` when nothing usable was found — that is an explicit "usage
- * unknown" rather than zeros. Harnesses without a dedicated extractor fall
- * back to generic JSON/text scanning so new CLIs degrade gracefully.
+ * Returns `null` when no structured usage was found — that is an explicit
+ * "usage unknown" rather than zeros or a guess.
  *
  * @param input - Harness id plus the session's captured stdout/stderr.
  */
 export function extractAgentUsage(input: UsageExtractionInput): AgentUsage | null {
   try {
-    // A harness-specific extractor returning null means "this CLI does not
-    // report usage in its captured output" — do not fall back to the generic
-    // text scan, whose heuristics could misread echoed task content.
-    const extractor = HARNESS_EXTRACTORS[input.harness];
-    const usage = extractor ? extractor(input) : genericExtract(input);
-    return usage === null ? null : finalize(usage);
+    return extractStructuredUsage(input);
   } catch {
     // Extraction must never break the run pipeline.
     return null;
@@ -645,7 +473,7 @@ export interface MergedAgentUsage extends AgentUsage {
 export function mergeAgentUsages(usages: (AgentUsage | null)[]): MergedAgentUsage | null {
   const present = usages.filter((usage): usage is AgentUsage => usage !== null);
   const merged: MergedAgentUsage = {
-    ...emptyUsage(present.length === 0 ? "stdout" : present[0]!.source),
+    ...emptyUsage(present.length === 0 ? "structured_output" : present[0]!.source),
     sessions: usages.length,
     sessionsWithoutUsage: usages.length - present.length,
     mixedModels: false,

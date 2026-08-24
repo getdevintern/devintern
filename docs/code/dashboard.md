@@ -37,7 +37,7 @@ Success and escalation rates are computed over finished runs only. Run duration 
 
 ### Usage and cost data quality
 
-Token/cost accounting depends on what each harness CLI reports: some print nothing usable in headless mode, so their runs show no usage at all rather than zeros. Wherever data is partial, the dashboard says so explicitly — unknown costs render as "unknown" (never `$0.00`) and incomplete accounting is marked "(partial)". Aggregate stats sum only *known* values and show an explicit partial-data notice when runs in the window have missing or unpriced usage.
+Token/cost accounting depends on what each harness CLI reports: usage is captured only from structured JSON output (e.g. `--json` / `--output-format json` modes), and CLIs that don't emit it show no usage at all rather than zeros. Wherever data is partial, the dashboard says so explicitly — unknown costs render as "unknown" (never `$0.00`) and incomplete accounting is marked "(partial)". Aggregate stats sum only *known* values and show an explicit partial-data notice when runs in the window have missing or unpriced usage.
 
 ## Options
 

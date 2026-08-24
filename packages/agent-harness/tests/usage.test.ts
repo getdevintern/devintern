@@ -103,22 +103,6 @@ describe("extractAgentUsage", () => {
     expect(extract("claude-code", "Implemented the feature.\n\nDone.")).toBeNull();
   });
 
-  test("codex stderr summary line parses token totals", () => {
-    const usage = extract("codex", "", "tokens used: 23,456\n");
-    expect(usage?.totalTokens).toBe(23456);
-    expect(usage?.source).toBe("stderr");
-    expect(usage?.complete).toBe(false);
-  });
-
-  test("real codex headless output (number on the line after the label) parses", () => {
-    // Captured verbatim from `codex exec "reply with just: ok"`:
-    // stderr ends with "tokens used" / "6,530" on separate lines.
-    const usage = extract("codex", "ok\n", "reply with just: ok\ncodex\nok\ntokens used\n6,530\n");
-    expect(usage?.totalTokens).toBe(6530);
-    expect(usage?.source).toBe("stderr");
-    expect(usage?.reportedCost).toBeNull();
-  });
-
   test("codex --jsonl turn events yield token counts", () => {
     const usage = extract(
       "codex",
@@ -158,35 +142,14 @@ describe("extractAgentUsage", () => {
     expect(usage?.complete).toBe(true);
   });
 
-  test("codex input/output summary lines parse separately", () => {
-    const usage = extract("codex", "", "OpenAI Tokens used: 1,234 input (567 cached), 890 output");
-    expect(usage?.inputTokens).toBe(1234);
-    expect(usage?.cachedInputTokens).toBe(567);
-    expect(usage?.outputTokens).toBe(890);
-  });
-
-  test("text summaries do not match source-looking lines", () => {
-    const stdout = [
-      "const inputTokens = config.input;",
-      "+ total cost: $999",
-      "done",
-    ].join("\n");
+  test("unstructured output (prose, summaries, source) yields explicit null", () => {
+    // Real default-mode outputs: no structured usage → unknown, never guesses.
+    expect(extract("codex", "ok\n", "tokens used\n6,530\n")).toBeNull();
+    expect(extract("grok", "ok\n")).toBeNull();
+    expect(extract("opencode", "ok\n")).toBeNull();
+    const stdout = ["const inputTokens = config.input;", "+ total cost: $999", "done"].join("\n");
     expect(extract("goose", stdout)).toBeNull();
-  });
-
-  test("unknown harness falls back to generic scanning", () => {
-    // Token totals and model lines parse; costs never come from prose.
-    const usage = extract("future-cli", "", "Total tokens: 4321\nModel: future-model-x\n");
-    expect(usage?.totalTokens).toBe(4321);
-    expect(usage?.model).toBe("future-model-x");
-    expect(usage?.reportedCost).toBeNull();
-  });
-
-  test("prose cost mentions are never recorded as provider cost", () => {
-    const usage = extract("codex", "", "done\ntokens used: 500\ntotal cost: $0.42");
-    expect(usage?.totalTokens).toBe(500);
-    expect(usage?.reportedCost).toBeNull();
-    expect(usage?.costCurrency).toBeNull();
+    expect(extract("codex", "", "done\ntokens used: 500\ntotal cost: $0.42")).toBeNull();
   });
 
   test("model-only JSON (configs, fixtures) is not usage", () => {
