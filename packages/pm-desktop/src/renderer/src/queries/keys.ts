@@ -26,6 +26,7 @@ export const qk = {
   githubRepos: ["githubRepos"] as const,
   analyticsEnabled: ["analyticsEnabled"] as const,
   updateStatus: ["updateStatus"] as const,
+  quickCapture: ["quickCapture"] as const,
   projectInit: (dir: string) => ["projectInit", dir] as const,
 } as const;
 
