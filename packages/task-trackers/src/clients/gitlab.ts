@@ -375,17 +375,32 @@ export class GitLabClient {
    * List comments (notes) on an issue (oldest first).
    *
    * System-generated notes (status changes, assignments, label edits) are
-   * filtered out so callers see human comments only.
+   * filtered out per page so callers see human comments only. Pagination runs
+   * until exhausted so dedup checks never miss older comments on busy issues.
    *
    * @param issueIid - Target issue iid.
-   * @returns Up to 100 comment records.
+   * @returns All human comment records.
    * @throws When the GitLab API request fails.
    */
   async listIssueComments(issueIid: number): Promise<GitLabIssueComment[]> {
-    const notes = await this.request<GitLabIssueComment[]>(
-      `${this.projectEndpoint}/issues/${issueIid}/notes?sort=asc&order_by=created_at&per_page=100`,
-    );
-    return notes.filter((note) => !note.system);
+    const comments: GitLabIssueComment[] = [];
+    // Keep per_page fixed: GitLab's `page` offset is relative to per_page, so
+    // shrinking the last request would re-fetch earlier items.
+    const pageSize = 100;
+    let page = 1;
+
+    while (true) {
+      const batch = await this.request<GitLabIssueComment[]>(
+        `${this.projectEndpoint}/issues/${issueIid}/notes?sort=asc&order_by=created_at&per_page=${pageSize}&page=${page}`,
+      );
+      comments.push(...batch.filter((note) => !note.system));
+      if (batch.length < pageSize) {
+        break;
+      }
+      page += 1;
+    }
+
+    return comments;
   }
 
   /**
@@ -407,12 +422,18 @@ export class GitLabClient {
   /**
    * Update an existing issue comment's markdown body.
    *
+   * The Notes API is noteable-scoped, so the request must address both the
+   * issue and the note: `PUT /projects/:id/issues/:iid/notes/:note_id`.
+   *
+   * @param issueIid - Issue iid the comment belongs to.
    * @param commentId - Note id (not the issue iid).
    * @param body - New comment body (markdown).
    * @throws When the GitLab API request fails.
    */
-  async updateIssueComment(commentId: number, body: string): Promise<void> {
-    await this.request(`${this.projectEndpoint}/notes/${commentId}`, "PUT", { body });
+  async updateIssueComment(issueIid: number, commentId: number, body: string): Promise<void> {
+    await this.request(`${this.projectEndpoint}/issues/${issueIid}/notes/${commentId}`, "PUT", {
+      body,
+    });
   }
 
   /**

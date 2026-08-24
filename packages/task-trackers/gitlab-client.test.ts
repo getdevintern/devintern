@@ -168,13 +168,48 @@ describe("GitLabClient", () => {
     expect(comments.map((c) => c.id)).toEqual([2]);
   });
 
-  test("updateIssueComment patches a note by id", async () => {
+  test("listIssueComments paginates until a short page", async () => {
+    const calls = mockFetch((req) => {
+      const page = new URL(req.url).searchParams.get("page");
+      if (page === "1") {
+        return {
+          json: Array.from({ length: 100 }, (_, i) => ({
+            id: i,
+            body: `note ${i}`,
+            system: true,
+            author: null,
+            created_at: "",
+            updated_at: "",
+          })),
+        };
+      }
+      return {
+        json: [
+          {
+            id: 100,
+            body: "Human comment on the second page",
+            system: false,
+            author: { username: "alice" },
+            created_at: "",
+            updated_at: "",
+          },
+        ],
+      };
+    });
+
+    const comments = await makeClient().listIssueComments(3);
+
+    expect(comments.map((c) => c.id)).toEqual([100]);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("updateIssueComment patches a note scoped to its issue", async () => {
     const calls = mockFetch(() => ({ json: {} }));
 
-    await makeClient().updateIssueComment(99, "updated");
+    await makeClient().updateIssueComment(7, 99, "updated");
 
     expect(calls[0].method).toBe("PUT");
-    expect(calls[0].url).toContain("/projects/acme%2Fteam%2Fwebapp/notes/99");
+    expect(calls[0].url).toContain("/projects/acme%2Fteam%2Fwebapp/issues/7/notes/99");
     expect(calls[0].body).toEqual({ body: "updated" });
   });
 
@@ -284,5 +319,9 @@ describe("parseGitLabProject", () => {
     expect(() => parseGitLabProject("")).toThrow(/Invalid GITLAB_PROJECT/);
     expect(() => parseGitLabProject("just-a-name")).toThrow(/Invalid GITLAB_PROJECT/);
     expect(() => parseGitLabProject("https://gitlab.com")).toThrow(/Invalid GITLAB_PROJECT/);
+  });
+
+  test("throws the friendly validation error on malformed percent-escapes", () => {
+    expect(() => parseGitLabProject("acme/%zz")).toThrow(/Invalid GITLAB_PROJECT/);
   });
 });

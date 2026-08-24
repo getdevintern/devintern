@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
 import {
   GitLabTaskTrackerClient,
   parseGitLabIssueReference,
@@ -251,5 +254,104 @@ describe("GitLabTaskTrackerClient estimation", () => {
 
     const found = await adapter.findEstimationComment("123");
     expect(found).toEqual({ commentId: "42", created: "2026-01-03T00:00:00Z" });
+  });
+
+  test("updateEstimationComment patches the note scoped to its issue", async () => {
+    const calls: Array<{ url: string; method: string; body: string }> = [];
+    const adapter = makeAdapter({
+      updateIssueComment: (async (issueIid: number, commentId: number, body: string) => {
+        calls.push({ url: `issues/${issueIid}/notes/${commentId}`, method: "PUT", body });
+      }) as unknown as GitLabClient["updateIssueComment"],
+    });
+
+    await adapter.updateEstimationComment("123", "42", {
+      storyPoints: 3,
+      confidence: "high",
+      reasoning: "small change",
+      risks: [],
+      unclearAreas: [],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("issues/123/notes/42");
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].body).toContain("**Story Points:** 3");
+  });
+});
+
+describe("GitLabTaskTrackerClient security and base URL handling", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function captureFetch(
+    handler: (url: string, headers: Headers) => Response,
+  ): Array<{ url: string; token: string | null }> {
+    const calls: Array<{ url: string; token: string | null }> = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(url), token: headers.get("PRIVATE-TOKEN") });
+      return handler(String(url), headers);
+    }) as typeof fetch;
+    return calls;
+  }
+
+  test("sanitizes base URLs that are missing a protocol", () => {
+    const adapter = new GitLabTaskTrackerClient("tok", "acme/team/webapp", {
+      baseUrl: "gitlab.example.com/",
+    });
+    // @ts-expect-error accessing private field for assertion
+    expect(adapter.baseUrl).toBe("https://gitlab.example.com");
+  });
+
+  test("never sends PRIVATE-TOKEN to off-instance upload links", async () => {
+    const outputDir = mkdtempSync(path.join(tmpdir(), "gitlab-attachments-"));
+    try {
+      const calls = captureFetch(
+        (_url, _headers) => new Response(Buffer.from("attachment-bytes"), { status: 200 }),
+      );
+      const adapter = new GitLabTaskTrackerClient("secret-pat", "acme/team/webapp");
+
+      const result = await adapter.downloadAttachmentsFromContent(
+        [
+          "Internal: https://gitlab.com/acme/team/webapp/uploads/hash/report.png",
+          "Evil: https://evil.example/uploads/x.png",
+        ].join("\n"),
+        outputDir,
+      );
+
+      expect(calls.map((c) => c.url)).toEqual([
+        "https://gitlab.com/acme/team/webapp/uploads/hash/report.png",
+      ]);
+      expect(calls[0].token).toBe("secret-pat");
+      expect([...result.keys()]).toEqual(["report.png"]);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  test("skips malformed upload links without aborting remaining downloads", async () => {
+    const outputDir = mkdtempSync(path.join(tmpdir(), "gitlab-attachments-"));
+    try {
+      const calls = captureFetch(
+        () => new Response(Buffer.from("attachment-bytes"), { status: 200 }),
+      );
+      const adapter = new GitLabTaskTrackerClient("tok", "acme/team/webapp");
+
+      const result = await adapter.downloadAttachmentsFromContent(
+        [
+          "Bad escape: https://gitlab.com/acme/team/webapp/uploads/hash/%zzbroken.png",
+          "Good: https://gitlab.com/acme/team/webapp/uploads/hash/spec%20doc.png",
+        ].join("\n"),
+        outputDir,
+      );
+
+      expect(calls).toHaveLength(1);
+      expect([...result.keys()]).toEqual(["spec doc.png"]);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
   });
 });

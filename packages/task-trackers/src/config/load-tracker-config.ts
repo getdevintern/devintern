@@ -84,7 +84,15 @@ export function parseGitLabProject(value: string): string {
   path = path
     .split("/")
     .filter(Boolean)
-    .map((segment) => decodeURIComponent(segment))
+    .map((segment) => {
+      // Malformed escapes (`%zz`) throw URIError; keep the raw segment so the
+      // validation below reports a friendly error instead.
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
     .join("/");
 
   if (/^\d+$/.test(path)) {

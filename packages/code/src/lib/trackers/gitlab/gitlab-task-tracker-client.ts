@@ -11,7 +11,7 @@
  * Estimation has no native field, so estimation runs in comment-only mode.
  */
 
-import { DEFAULT_GITLAB_BASE_URL, GitLabClient } from "@devintern/task-trackers";
+import { GitLabClient, sanitizeGitlabBaseUrl } from "@devintern/task-trackers";
 import type { GitLabIssue } from "@devintern/task-trackers";
 import type {
   Comment,
@@ -87,7 +87,7 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
     options?: { baseUrl?: string; statusLabels?: string[] },
   ) {
     this.token = token;
-    this.baseUrl = (options?.baseUrl?.trim() || DEFAULT_GITLAB_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = sanitizeGitlabBaseUrl(options?.baseUrl);
     this.gitlabClient = new GitLabClient({ token, projectPath, baseUrl: this.baseUrl });
     this.statusLabels = options?.statusLabels ?? [];
   }
@@ -246,11 +246,22 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   ): Promise<Map<string, string>> {
     const result = existingMap ?? new Map<string, string>();
     const urls = htmlContent.match(GITLAB_ATTACHMENT_URL_REGEX) || [];
+    // Issue bodies are attacker-writable: only same-instance upload links may
+    // be fetched (with the PAT); external hosts are skipped entirely.
+    const instanceOrigin = new URL(this.baseUrl).origin;
 
     for (const url of urls) {
-      const filename = decodeURIComponent(path.basename(new URL(url).pathname));
-      if (!filename || filename === "/" || result.has(filename)) continue;
       try {
+        const parsed = new URL(url);
+        if (parsed.origin !== instanceOrigin) continue;
+        let filename = path.basename(parsed.pathname);
+        try {
+          filename = decodeURIComponent(filename);
+        } catch {
+          // Malformed percent-encoding: skip this link, keep the rest.
+          continue;
+        }
+        if (!filename || filename === "/" || result.has(filename)) continue;
         const response = await fetch(url, {
           headers: { "PRIVATE-TOKEN": this.token },
         });
@@ -356,12 +367,12 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   }
 
   async updateEstimationComment(
-    _taskKey: string,
+    taskKey: string,
     commentId: string,
     result: unknown,
   ): Promise<void> {
     const body = formatEstimationCommentMarkdown(result as EstimationResultLike);
-    await this.gitlabClient.updateIssueComment(Number(commentId), body);
+    await this.gitlabClient.updateIssueComment(this.toIssueIid(taskKey), Number(commentId), body);
   }
 
   // ------------------------------------------------------------------
