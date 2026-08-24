@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, rmSync } from "fs";
+import { mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -102,6 +102,46 @@ describe("AutomationAcquirer", () => {
     expect(content).toContain("# dependency-health");
     expect(content).toContain("Apply one improvement.");
     rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  test("writes task files into the project config dir when launched from a subfolder", () => {
+    const project = join(tmpdir(), `acquirer-sub-${Date.now()}-${Math.random()}`);
+    const subfolder = join(project, "packages", "app");
+    mkdirSync(join(project, ".devintern-code"), { recursive: true });
+    mkdirSync(subfolder, { recursive: true });
+
+    const filePath = writeAutomationTaskFile(
+      {
+        id: "sub-folder",
+        enabled: true,
+        prompt: "work",
+        interval: "1d",
+        intervalMs: 86_400_000,
+      },
+      { cwd: subfolder, env: {}, release() {} },
+    );
+
+    expect(filePath.startsWith(join(project, ".devintern-code", "automations"))).toBe(true);
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  test("falls back to the run cwd's config dir when no parent config exists", () => {
+    const worktree = join(tmpdir(), `acquirer-fallback-${Date.now()}-${Math.random()}`);
+    mkdirSync(worktree, { recursive: true });
+
+    const filePath = writeAutomationTaskFile(
+      {
+        id: "fallback",
+        enabled: true,
+        prompt: "work",
+        interval: "1d",
+        intervalMs: 86_400_000,
+      },
+      { cwd: worktree, env: {}, release() {} },
+    );
+
+    expect(filePath.startsWith(join(worktree, ".devintern-code", "automations"))).toBe(true);
+    rmSync(worktree, { recursive: true, force: true });
   });
 
   test("escalates to SIGKILL when an automation ignores SIGTERM", async () => {

@@ -5,6 +5,7 @@ import type { ChildProcess } from "child_process";
 import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
+import { resolveConfigDir } from "@devintern/utils";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
@@ -238,9 +239,20 @@ export class AutomationAcquirer implements Acquirer {
   }
 }
 
-/** Directory (under the run cwd) that receives one markdown task file per occurrence. */
+/**
+ * Directory that receives one markdown task file per occurrence.
+ *
+ * Resolved like every other durable-state location: the nearest existing
+ * `.devintern-code` found by walking up from the run cwd, so a worker
+ * launched from a subfolder reuses the project's config directory instead
+ * of creating a stray one beside the cwd. Falls back to `<cwd>/.devintern-code`
+ * (e.g. inside disposable worktrees where no parent config exists).
+ */
 export function automationTaskDir(context: AutomationRunContext): string {
-  return join(context.cwd, ".devintern-code", "automations");
+  return join(
+    resolveConfigDir({ configDirName: ".devintern-code", startDir: context.cwd }),
+    "automations",
+  );
 }
 
 /**
