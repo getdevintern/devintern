@@ -28,7 +28,6 @@ import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./st
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
 import { AutomationAcquirer } from "../automation-acquirer";
-import { resolvePmTrackerConfig, validateAutomationProjects } from "../automation-config";
 import type { AutomationConfig } from "../automation-config";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
@@ -116,37 +115,6 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
     return raw.trim().split(/\s+/);
   }
   return workerTaskArgs();
-}
-
-/** Validate ticket automations against the PM configuration in their execution worktree. */
-export async function validateWorkspaceAutomationProjects(
-  automations: AutomationConfig[],
-  config: WorkspaceConfig,
-  workspaceDir: string,
-  repoManager: RepoManagerLike,
-  repoLock?: (repoName: string) => RepoRunLockLike,
-): Promise<void> {
-  for (const automation of automations) {
-    if (automation.action !== "create_ticket" || automation.trackerProject) continue;
-    const context = await resolveWorkspaceAutomationContext(
-      automation,
-      config,
-      workspaceDir,
-      repoManager,
-      repoLock,
-    );
-    if (!context) {
-      throw new Error(`Cannot validate automation "${automation.id}": repository is busy.`);
-    }
-    try {
-      validateAutomationProjects(
-        [automation],
-        await resolvePmTrackerConfig(context.cwd, context.env),
-      );
-    } finally {
-      await context.release();
-    }
-  }
 }
 
 /**
@@ -356,7 +324,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.automations.length > 0) {
     const semanticErrors: string[] = [];
     for (const automation of config.automations) {
-      if (automation.action === "headless" && !automation.repo && config.repos.length !== 1) {
+      if (!automation.repo && config.repos.length !== 1) {
         semanticErrors.push(
           `Automation "${automation.id}" must set repo when the workspace has multiple repositories.`,
         );
@@ -365,12 +333,6 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     if (semanticErrors.length > 0) {
       throw new Error(`Invalid ${configPath}:\n- ${semanticErrors.join("\n- ")}`);
     }
-    await validateWorkspaceAutomationProjects(
-      config.automations,
-      config,
-      workspaceDir,
-      repoManager,
-    );
 
     acquirers.push(
       new AutomationAcquirer({

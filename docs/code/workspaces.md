@@ -56,25 +56,22 @@ labels = ["frontend"]
 [[automations]]
 id = "backend-maintenance"
 enabled = true
-action = "headless"
 interval = "6h"
 repo = "backend"
 prompt = "Inspect the backend and implement one safe maintenance improvement."
 
 [[automations]]
-id = "weekly-web-planning"
+id = "weekly-frontend-cleanup"
 enabled = true
-action = "create_ticket"
 cron = "0 9 * * 1"
 repo = "frontend"
-tracker_project = "WEB"
-prompt = "Draft the highest-value frontend maintenance story."
+prompt = "Review the frontend and clean up one source of recurring noise."
 ```
 
 - `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
-- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. A headless entry must name `repo` when the workspace has more than one repository. Ticket entries may omit it when they only need the shared workspace environment. `tracker_project` overrides the layered repo/default tracker project.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository.
 
 ## Creating a workspace
 

@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rmSync } from "fs";
+import { readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  AUTOMATION_ID_ENV,
+  AUTOMATION_ORIGIN_ENV,
   AutomationAcquirer,
   MAX_TIMER_DELAY_MS,
-  automationInvocation,
   nextAutomationDue,
   spawnAutomationProcess,
+  writeAutomationTaskFile,
 } from "../src/lib/automation-acquirer";
 import { AutomationStateStore } from "../src/lib/automation-state";
 import type { AutomationConfig } from "../src/lib/automation-config";
@@ -27,7 +29,6 @@ describe("AutomationAcquirer", () => {
       id: "i",
       enabled: true,
       prompt: "p",
-      action: "headless",
       interval: "15m",
       intervalMs: 900_000,
     };
@@ -35,7 +36,6 @@ describe("AutomationAcquirer", () => {
       id: "c",
       enabled: true,
       prompt: "p",
-      action: "headless",
       cron: "*/5 * * * *",
     };
     expect(nextAutomationDue(interval, after)).toBe(after + 900_000);
@@ -67,7 +67,6 @@ describe("AutomationAcquirer", () => {
           id: `long-${schedule.cron ? "cron" : "interval"}`,
           enabled: true,
           prompt: "p",
-          action: "headless",
           ...schedule,
         },
       ],
@@ -83,41 +82,32 @@ describe("AutomationAcquirer", () => {
     await acquirer.stop();
   });
 
-  test("passes large invocation prompts through stdin payload instead of argv", () => {
-    const prompt = "x".repeat(3 * 1024 * 1024);
-    const invocation = automationInvocation(
+  test("materializes the prompt as a markdown task file with attribution env", () => {
+    const baseDir = join(tmpdir(), `acquirer-task-${Date.now()}-${Math.random()}`);
+    const context = { cwd: baseDir, env: {}, repo: "api", release() {} };
+    const filePath = writeAutomationTaskFile(
       {
-        id: "large-prompt",
+        id: "dependency-health",
         enabled: true,
-        prompt,
-        action: "headless",
+        prompt: "Inspect dependency health.\nApply one improvement.",
         interval: "1d",
         intervalMs: 86_400_000,
       },
-      { cwd: "/tmp", env: {}, repo: "api", release() {} },
+      context,
     );
 
-    expect(invocation.args).toEqual([process.argv[1], "__automation-run"]);
-    expect(invocation.args.join(" ")).not.toContain(prompt);
-    expect(JSON.parse(invocation.payload)).toMatchObject({ prompt, repo: "api" });
-  });
-
-  test("handles stdin EPIPE when a child exits without reading its payload", async () => {
-    const run = spawnAutomationProcess(
-      process.execPath,
-      ["-e", "process.exit(0)"],
-      "x".repeat(3 * 1024 * 1024),
-      { cwd: process.cwd(), env: process.env },
-    );
-
-    expect(await run.completion).toBe(true);
+    expect(filePath).toContain(join(".devintern-code", "automations", "dependency-health"));
+    expect(filePath.endsWith(".md")).toBe(true);
+    const content = readFileSync(filePath, "utf8");
+    expect(content).toContain("# dependency-health");
+    expect(content).toContain("Apply one improvement.");
+    rmSync(baseDir, { recursive: true, force: true });
   });
 
   test("escalates to SIGKILL when an automation ignores SIGTERM", async () => {
     const run = spawnAutomationProcess(
       process.execPath,
       ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
-      "{}",
       { cwd: process.cwd(), env: process.env, terminationGraceMs: 50 },
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -128,6 +118,15 @@ describe("AutomationAcquirer", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
+  test("completes cleanly when the spawned pipeline exits zero", async () => {
+    const run = spawnAutomationProcess(process.execPath, ["-e", "process.exit(0)"], {
+      cwd: process.cwd(),
+      env: process.env,
+    });
+
+    expect(await run.completion).toBe(true);
+  });
+
   test("disabled entries never receive schedule state", async () => {
     const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
     dbPaths.push(dbPath);
@@ -135,7 +134,6 @@ describe("AutomationAcquirer", () => {
       id: "off",
       enabled: false,
       prompt: "p",
-      action: "headless",
       interval: "1h",
       intervalMs: 3_600_000,
     };
@@ -152,7 +150,7 @@ describe("AutomationAcquirer", () => {
     store.close();
   });
 
-  test("coalesces a missed occurrence to one run", async () => {
+  test("coalesces a missed occurrence to one run through the task pipeline", async () => {
     const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
     dbPaths.push(dbPath);
     let now = 0;
@@ -162,7 +160,6 @@ describe("AutomationAcquirer", () => {
       id: "due",
       enabled: true,
       prompt: "p",
-      action: "headless",
       interval: "15m",
       intervalMs: 900_000,
     };
@@ -198,7 +195,6 @@ describe("AutomationAcquirer", () => {
       id: "slow-context",
       enabled: true,
       prompt: "p",
-      action: "headless",
       interval: "10ms",
       intervalMs: 10,
     };
@@ -250,7 +246,6 @@ describe("AutomationAcquirer", () => {
       id,
       enabled: true,
       prompt: "p",
-      action: "headless",
       interval: "10ms",
       intervalMs: 10,
     }));
@@ -297,7 +292,6 @@ describe("AutomationAcquirer", () => {
       id: "lost-lease",
       enabled: true,
       prompt: "p",
-      action: "headless",
       interval: "10ms",
       intervalMs: 10,
     };
@@ -366,7 +360,6 @@ describe("AutomationAcquirer", () => {
           id: "shutdown",
           enabled: true,
           prompt: "p",
-          action: "headless",
           interval: "1m",
           intervalMs: 60_000,
         },
@@ -401,5 +394,10 @@ describe("AutomationAcquirer", () => {
     finishRelease();
     await stopping;
     expect(stopFinished).toBe(true);
+  });
+
+  test("exports the scheduled-run attribution env marker names", () => {
+    expect(AUTOMATION_ORIGIN_ENV).toBe("DEVINTERN_RUN_ORIGIN");
+    expect(AUTOMATION_ID_ENV).toBe("DEVINTERN_AUTOMATION_ID");
   });
 });

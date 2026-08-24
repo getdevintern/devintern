@@ -47,17 +47,16 @@ default_branch = "main"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 
-# Recurring work is loaded once when the worker starts. Cron uses the worker
-# host timezone; interval values support m, h, and d.
+# Recurring work is loaded once when the worker starts. Each occurrence runs
+# the prompt through the normal task pipeline as a local markdown task.
+# Cron uses the worker host timezone; interval values support m, h, and d.
 #
 # [[automations]]
 # id = "weekday-maintenance"
 # enabled = true
-# action = "headless"         # or "create_ticket"
 # cron = "0 9 * * 1-5"       # exactly one of cron / interval
 # prompt = "Inspect dependency health and fix one safe issue."
-# repo = "backend"            # required for headless in a multi-repo workspace
-# tracker_project = "BACK"    # create_ticket override (optional with a default)
+# repo = "backend"            # required in a multi-repo workspace
 `;
 
 const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or

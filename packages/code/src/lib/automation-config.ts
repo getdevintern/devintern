@@ -2,23 +2,17 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
-import { getProjectKeyEnvVar, loadTrackerConfig } from "@devintern/task-trackers";
-import type { TrackerConfig } from "@devintern/task-trackers";
 
 import { parseToml } from "./workspace/toml";
-
-export type AutomationAction = "headless" | "create_ticket";
 
 export interface AutomationConfig {
   id: string;
   enabled: boolean;
   prompt: string;
-  action: AutomationAction;
   cron?: string;
   interval?: string;
   intervalMs?: number;
   repo?: string;
-  trackerProject?: string;
 }
 
 export const SINGLE_REPO_AUTOMATIONS_PATH = ".devintern-code/automations.toml";
@@ -82,10 +76,6 @@ export function parseAutomationEntries(
     if (typeof enabledValue !== "boolean") errors.push(`${label}.enabled must be a boolean.`);
     const prompt = stringValue("prompt");
     if (!prompt) errors.push(`${label}.prompt is required.`);
-    const actionValue = stringValue("action");
-    if (actionValue && actionValue !== "headless" && actionValue !== "create_ticket") {
-      errors.push(`${label}.action must be "headless" or "create_ticket".`);
-    }
 
     const cron = stringValue("cron");
     const interval = stringValue("interval");
@@ -112,13 +102,11 @@ export function parseAutomationEntries(
     if (repo && options.repoNames && !options.repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
-    const trackerProject = stringValue("tracker_project");
 
     if (
       id &&
       typeof enabledValue === "boolean" &&
       prompt &&
-      (actionValue === "headless" || actionValue === "create_ticket") &&
       Boolean(cron) !== Boolean(interval) &&
       (!interval || intervalMs !== null)
     ) {
@@ -126,12 +114,10 @@ export function parseAutomationEntries(
         id,
         enabled: enabledValue,
         prompt,
-        action: actionValue,
         cron,
         interval,
         intervalMs: intervalMs ?? undefined,
         repo,
-        trackerProject,
       });
     }
   }
@@ -157,74 +143,4 @@ export function parseAutomationConfig(text: string, sourceLabel = SINGLE_REPO_AU
 export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationConfig[] {
   const path = join(baseDir, SINGLE_REPO_AUTOMATIONS_PATH);
   return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
-}
-
-/** Default project/team/board/repository for the selected tracker. */
-export function configuredTrackerProject(
-  tracker: string,
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): string | undefined {
-  const key = getProjectKeyEnvVar(tracker.toLowerCase());
-  return key ? env[key] : undefined;
-}
-
-/** Resolve PM's tracker config using the run environment without changing the worker process. */
-export async function resolvePmTrackerConfig(
-  baseDir: string,
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): Promise<TrackerConfig> {
-  const originalEnv = { ...process.env };
-  const resolutionEnv = Object.fromEntries(
-    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-  );
-  try {
-    for (const key of Object.keys(process.env)) delete process.env[key];
-    Object.assign(process.env, resolutionEnv);
-    return await loadTrackerConfig(".devintern-pm", baseDir);
-  } finally {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-    }
-    Object.assign(process.env, originalEnv);
-  }
-}
-
-/** Default project from the exact tracker configuration PM will use at execution time. */
-function resolvedTrackerProject(config: TrackerConfig): string | undefined {
-  switch (config.backend.type) {
-    case "jira":
-      return config.jira?.defaultProjectKey;
-    case "linear":
-      return config.linear?.defaultTeamKey;
-    case "trello":
-      return config.trello?.defaultBoardId;
-    case "azure-devops":
-      return config.azureDevOps?.defaultProject;
-    case "asana":
-      return config.asana?.defaultProjectGid;
-    case "github":
-      return config.github?.repository;
-    case "markdown":
-      return undefined;
-  }
-}
-
-/** Startup-only semantic validation against PM's resolved tracker configuration. */
-export function validateAutomationProjects(
-  automations: AutomationConfig[],
-  trackerConfig: TrackerConfig,
-): void {
-  const errors = automations
-    .filter(
-      (automation) =>
-        automation.action === "create_ticket" &&
-        !automation.trackerProject &&
-        !resolvedTrackerProject(trackerConfig),
-    )
-    .map(
-      (automation) =>
-        `Automation "${automation.id}" uses create_ticket but has no tracker_project and the tracker has no default project.`,
-    );
-  if (errors.length > 0)
-    throw new Error(`Invalid automation configuration:\n- ${errors.join("\n- ")}`);
 }

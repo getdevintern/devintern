@@ -59,7 +59,6 @@
     "url": "https://github.com/getdevintern/devintern/issues"
   },
   "dependencies": {
-    "@getdevintern/pm": "workspace:*",
     "@types/turndown": "^5.0.5",
     "commander": "^11.0.0",
     "cron-parser": "^5.4.0",

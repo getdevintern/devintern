@@ -10,7 +10,6 @@ const AUTOMATION: AutomationConfig = {
   id: "cleanup",
   enabled: true,
   prompt: "clean up",
-  action: "headless",
   interval: "15m",
   intervalMs: 900_000,
 };

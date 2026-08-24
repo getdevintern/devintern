@@ -1,12 +1,19 @@
 import { randomUUID } from "crypto";
+import { mkdirSync, writeFileSync } from "fs";
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
+import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
+import { workerTaskArgs } from "./task-polling-acquirer";
+
+/** Environment markers the task pipeline reads to attribute scheduled runs. */
+export const AUTOMATION_ORIGIN_ENV = "DEVINTERN_RUN_ORIGIN";
+export const AUTOMATION_ID_ENV = "DEVINTERN_AUTOMATION_ID";
 
 const LEASE_MS = 2 * 60_000;
 const HEARTBEAT_MS = 30_000;
@@ -170,7 +177,7 @@ export class AutomationAcquirer implements Acquirer {
           await context.release();
           continue;
         }
-        console.log(`\n⏰ [automation:${automation.id}] starting ${automation.action}`);
+        console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
           : defaultSpawnRun(automation, context, this.options.terminationGraceMs);
@@ -231,29 +238,35 @@ export class AutomationAcquirer implements Acquirer {
   }
 }
 
-export interface AutomationInvocationPayload {
-  id: string;
-  action: AutomationConfig["action"];
-  prompt: string;
-  trackerProject?: string;
-  repo?: string;
+/** Directory (under the run cwd) that receives one markdown task file per occurrence. */
+export function automationTaskDir(context: AutomationRunContext): string {
+  return join(context.cwd, ".devintern-code", "automations");
 }
 
-/** Build the internal invocation without exposing automation contents in argv. */
-export function automationInvocation(
+/**
+ * Materialize the automation prompt as a local markdown task file so the
+ * regular task pipeline can process it like any other tracker-less task.
+ */
+export function writeAutomationTaskFile(
   automation: AutomationConfig,
   context: AutomationRunContext,
-): { args: string[]; payload: string } {
-  return {
-    args: [process.argv[1] as string, "__automation-run"],
-    payload: JSON.stringify({
-      id: automation.id,
-      action: automation.action,
-      prompt: automation.prompt,
-      trackerProject: automation.trackerProject,
-      repo: context.repo,
-    } satisfies AutomationInvocationPayload),
-  };
+): string {
+  const dir = join(automationTaskDir(context), automation.id);
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filePath = join(dir, `${stamp}.md`);
+  const body = [
+    "---",
+    "type: Task",
+    "---",
+    "",
+    `# ${automation.id}`,
+    "",
+    automation.prompt.trim(),
+    "",
+  ].join("\n");
+  writeFileSync(filePath, body);
+  return filePath;
 }
 
 function defaultSpawnRun(
@@ -261,19 +274,30 @@ function defaultSpawnRun(
   context: AutomationRunContext,
   terminationGraceMs?: number,
 ): SpawnedAutomationRun {
-  const { args, payload } = automationInvocation(automation, context);
-  return spawnAutomationProcess(process.execPath, args, payload, {
-    cwd: context.cwd,
-    env: context.env,
-    terminationGraceMs,
-  });
+  const taskFile = writeAutomationTaskFile(automation, context);
+  const env: Record<string, string | undefined> = {
+    ...context.env,
+    [AUTOMATION_ORIGIN_ENV]: "scheduled",
+    [AUTOMATION_ID_ENV]: automation.id,
+  };
+  return spawnAutomationProcess(
+    process.execPath,
+    [process.argv[1] as string, taskFile, ...workerTaskArgs()],
+    {
+      cwd: context.cwd,
+      env,
+      terminationGraceMs,
+    },
+  );
 }
 
-/** Spawn one isolated automation subprocess and terminate its process tree within a bound. */
+/**
+ * Spawn one isolated automation subprocess (the normal CLI pipeline for the
+ * materialized task file) and terminate its process tree within a bound.
+ */
 export function spawnAutomationProcess(
   executable: string,
   args: string[],
-  payload: string,
   options: {
     cwd: string;
     env: Record<string, string | undefined>;
@@ -284,10 +308,9 @@ export function spawnAutomationProcess(
   const child: ChildProcess = spawn(executable, args, {
     cwd: options.cwd,
     env: options.env,
-    stdio: ["pipe", "inherit", "inherit"],
+    stdio: "inherit",
     detached,
   });
-  let inputFailed = false;
   let terminating = false;
   let exitResult: boolean | undefined;
   let terminationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -330,7 +353,7 @@ export function spawnAutomationProcess(
   };
 
   child.once("close", (code) => {
-    exitResult = code === 0 && !inputFailed;
+    exitResult = code === 0;
     if (!terminating) settle(exitResult);
     else if (!processGroupAlive()) {
       if (terminationTimer) clearTimeout(terminationTimer);
@@ -342,15 +365,6 @@ export function spawnAutomationProcess(
     if (terminationTimer) clearTimeout(terminationTimer);
     settle(false);
   });
-  child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
-    const postExitPipe =
-      error.code === "EPIPE" && (child.exitCode !== null || child.signalCode !== null);
-    if (!postExitPipe) {
-      inputFailed = true;
-      beginTermination();
-    }
-  });
-  child.stdin?.end(payload);
 
   return {
     completion,

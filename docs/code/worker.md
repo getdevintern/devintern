@@ -42,27 +42,24 @@ For a single repository, put recurring work in `.devintern-code/automations.toml
 [[automations]]
 id = "dependency-health"
 enabled = true
-action = "headless"
 interval = "6h"
 prompt = """Inspect dependency health.
 Apply one safe, well-tested maintenance improvement."""
 
 [[automations]]
-id = "weekly-planning"
+id = "weekly-cleanup"
 enabled = true
-action = "create_ticket"
 cron = "0 9 * * 1"
-tracker_project = "ENG"
-prompt = "Review the repository and draft the highest-value maintenance story."
+prompt = "Review the repository and clean up one source of recurring noise."
 ```
 
-Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, `action` (`headless` or `create_ticket`), and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC. `tracker_project` overrides the tracker's configured default project/team/board/repository.
+Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
 Configuration is validated as a group at worker startup and changes require a restart. An automation file is itself a valid event source, so `devintern worker` stays running without `--query` or `--listen` when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
-Scheduled prompts run in a dedicated subprocess through the configured harness and sandbox. `create_ticket` uses the same story-generation engine and tracker backend as `devpm`. The worker's automation license gate applies to both actions.
+Automations are independent of your task tracker: each occurrence materializes the prompt as a local markdown task and runs it through the same pipeline as any other task — planning, implementation, PR creation (`--create-pr` by default), auto-review, run records. The prompt *is* the task; nothing is created in your tracker. Runs are recorded with the `scheduled` origin and the automation id so the dashboard can filter them.
 
-Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed ticket creation. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
+Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
 
 On shutdown the scheduler stops its timer, terminates active automation subprocess groups, waits for them to exit, and leaves their claims recoverable in SQLite.
 

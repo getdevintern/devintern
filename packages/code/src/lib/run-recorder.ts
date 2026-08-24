@@ -311,15 +311,6 @@ export class RunStore {
     );
   }
 
-  /** Attach a ticket created by a scheduled create_ticket action. */
-  setRunTicket(runId: number, ticket: { key: string; url?: string }): void {
-    this.db.run(`UPDATE runs SET ticket_key = ?, ticket_url = ? WHERE id = ?`, [
-      ticket.key,
-      ticket.url ?? null,
-      runId,
-    ]);
-  }
-
   /**
    * Mark a run terminal and record an `outcome` stage row.
    *
@@ -606,16 +597,6 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
-  }
-}
-
-/** Attach a created tracker ticket to the current scheduled run. */
-export function recordRunTicket(ticket: { key: string; url?: string }): void {
-  if (currentStore === null || currentRunId === null) return;
-  try {
-    currentStore.setRunTicket(currentRunId, ticket);
-  } catch (error) {
-    warnOnce("ticket", error);
   }
 }
 
