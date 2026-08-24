@@ -26,12 +26,14 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Environment Variables (.devintern-code/.env):**
 
-- `TASK_TRACKER` - Task tracker type: `jira` (default), `linear`, `github`, `azure-devops`, `asana`, `trello`, or `markdown`
+- `TASK_TRACKER` - Task tracker type: `jira` (default), `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`
 - `ASANA_API_TOKEN` - Asana personal access token (required when `TASK_TRACKER=asana`); optional `ASANA_DEFAULT_PROJECT_GID`, `ASANA_STORY_POINTS_FIELD`
 - `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT` - Azure DevOps credentials (required when `TASK_TRACKER=azure-devops`)
 - `LINEAR_API_KEY` - Linear personal API key (required when `TASK_TRACKER=linear`)
 - `GITHUB_REPO` - Target `owner/repo` for GitHub Issues (required when `TASK_TRACKER=github`; requires `GITHUB_TOKEN`, App credentials cannot substitute)
 - `GITHUB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitHub transitions
+- `GITLAB_TOKEN`, `GITLAB_PROJECT`, `GITLAB_BASE_URL` - GitLab credentials (required when `TASK_TRACKER=gitlab`; base URL optional, defaults to https://gitlab.com)
+- `GITLAB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitLab transitions
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - JIRA credentials
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions

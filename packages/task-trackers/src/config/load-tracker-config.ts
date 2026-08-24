@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { findEnvFile } from "@devintern/utils";
+import { DEFAULT_GITLAB_BASE_URL } from "../clients/gitlab.ts";
 import { getMissingRequiredEnv, isTrackerId } from "./tracker-meta.ts";
 import type { TrackerConfig, TrackerType } from "./types.ts";
 
@@ -41,6 +42,63 @@ function assertRequiredTrackerEnv(backendType: string): void {
  */
 export function sanitizeDomain(domain: string): string {
   return domain.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
+/**
+ * Normalize a GitLab instance URL.
+ *
+ * Unlike Jira domains, GitLab needs the protocol kept (self-hosted instances
+ * may run on plain http). Adds `https://` when no protocol is present and
+ * strips trailing slashes; blank values fall back to
+ * {@link DEFAULT_GITLAB_BASE_URL}.
+ *
+ * @param raw - Raw `GITLAB_BASE_URL` value (may be empty).
+ * @returns Instance root URL suitable for API requests (e.g. `https://gitlab.com`).
+ */
+export function sanitizeGitlabBaseUrl(raw: string | undefined): string {
+  const trimmed = raw?.trim();
+  if (!trimmed) return DEFAULT_GITLAB_BASE_URL;
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return withProtocol.replace(/\/+$/, "");
+}
+
+/**
+ * Normalize a `GITLAB_PROJECT` value into an API project path.
+ *
+ * Accepts `group/repo`, subgroup paths (`group/sub/repo`), numeric project
+ * IDs, and pasted web URLs (`https://host/group/repo/-/issues`). The `/-/`
+ * suffix and everything after it is dropped.
+ *
+ * @param value - Raw `GITLAB_PROJECT` environment variable value.
+ * @returns Project path for API URLs (encoded later by {@link GitLabClient}).
+ * @throws When the value does not identify a project.
+ */
+export function parseGitLabProject(value: string): string {
+  const trimmed = value.trim();
+  // Drop the instance origin from pasted web URLs, then cut at "/-/".
+  let path = trimmed.replace(/^https?:\/\/[^/]+/i, "");
+  const dashIndex = path.indexOf("/-/");
+  if (dashIndex >= 0) {
+    path = path.slice(0, dashIndex);
+  }
+  path = path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => decodeURIComponent(segment))
+    .join("/");
+
+  if (/^\d+$/.test(path)) {
+    return path;
+  }
+
+  if (!/^[\w.-]+(?:\/[\w.-]+)+$/.test(path)) {
+    throw new Error(
+      `Invalid GITLAB_PROJECT "${value}". Expected group/repo (subgroups allowed, ` +
+        "e.g. acme/team/my-app) or a numeric project ID.",
+    );
+  }
+
+  return path;
 }
 
 /**
@@ -148,6 +206,7 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
   let azureDevOpsConfig: TrackerConfig["azureDevOps"];
   let asanaConfig: TrackerConfig["asana"];
   let githubConfig: TrackerConfig["github"];
+  let gitlabConfig: TrackerConfig["gitlab"];
 
   // Markdown keeps MARKDOWN_TASKS_DIR optional here (backends default the path);
   // other trackers validate against TRACKER_META.requiredEnv.
@@ -211,6 +270,14 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
     };
   }
 
+  if (backendType === "gitlab") {
+    gitlabConfig = {
+      token: process.env.GITLAB_TOKEN!,
+      projectPath: parseGitLabProject(process.env.GITLAB_PROJECT!),
+      baseUrl: sanitizeGitlabBaseUrl(process.env.GITLAB_BASE_URL),
+    };
+  }
+
   return {
     backend: backendConfig,
     verbose,
@@ -220,6 +287,7 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
     azureDevOps: azureDevOpsConfig,
     asana: asanaConfig,
     github: githubConfig,
+    gitlab: gitlabConfig,
   };
 }
 

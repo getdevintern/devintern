@@ -15,7 +15,7 @@ dateModified: 2026-08-08
 
 Set `TASK_TRACKER` to choose your PM tool. Defaults to `jira` if not specified.
 
-Supported backends: `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `markdown`
+Supported backends: `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, `markdown`
 
 ```bash
 TASK_TRACKER=jira

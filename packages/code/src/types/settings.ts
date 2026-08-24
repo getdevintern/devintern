@@ -57,6 +57,9 @@ export type AsanaProjectConfig = BaseProjectConfig;
 /** GitHub Issues-specific project configuration (currently uses the common base). */
 export type GitHubProjectConfig = BaseProjectConfig;
 
+/** GitLab-specific project configuration (currently uses the common base). */
+export type GitLabProjectConfig = BaseProjectConfig;
+
 /** Markdown-specific project configuration (currently uses the common base). */
 export type MarkdownProjectConfig = BaseProjectConfig;
 
@@ -102,6 +105,8 @@ export interface ProjectSettings {
   asana?: TrackerSection<AsanaProjectConfig>;
   /** GitHub Issues-specific project configurations */
   github?: TrackerSection<GitHubProjectConfig>;
+  /** GitLab-specific project configurations */
+  gitlab?: TrackerSection<GitLabProjectConfig>;
   /** Markdown-specific project configurations */
   markdown?: TrackerSection<MarkdownProjectConfig>;
 }

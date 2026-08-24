@@ -25,6 +25,15 @@ export type {
 export { GitHubClient } from "./github.ts";
 export type { GitHubIssue, GitHubIssueComment, GitHubLabel, GitHubRepository } from "./github.ts";
 
+export { DEFAULT_GITLAB_BASE_URL, GitLabClient } from "./gitlab.ts";
+export type {
+  GitLabIssue,
+  GitLabIssueComment,
+  GitLabLabel,
+  GitLabProject,
+  GitLabUser,
+} from "./gitlab.ts";
+
 export { LinearClient } from "./linear.ts";
 export type {
   LinearAttachment,

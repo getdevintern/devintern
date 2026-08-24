@@ -142,6 +142,17 @@ export function createGitHubChangeDetector(searchTasks: SearchTasksFn): ChangeDe
 }
 
 /**
+ * GitLab: `updated:>=` qualifier, translated by the client to the
+ * `updated_after` list filter (auto-scoped to the project).
+ */
+export function createGitLabChangeDetector(searchTasks: SearchTasksFn): ChangeDetector {
+  return createQueryChangeDetector("gitlab", searchTasks, (since) => {
+    const iso = new Date(since).toISOString().replace(/\.\d{3}Z$/, "Z");
+    return `updated:>=${iso}`;
+  });
+}
+
+/**
  * Azure DevOps: WIQL on `[System.ChangedDate]`. WIQL date literals are
  * day-precision by default, so the window is the cursor's calendar day (UTC);
  * within an active day this over-reports changes, which only costs an extra
@@ -227,6 +238,8 @@ export function createChangeDetector(
       return searchTasks ? createLinearChangeDetector(searchTasks) : null;
     case "github":
       return searchTasks ? createGitHubChangeDetector(searchTasks) : null;
+    case "gitlab":
+      return searchTasks ? createGitLabChangeDetector(searchTasks) : null;
     case "azure-devops":
       return searchTasks ? createAzureDevOpsChangeDetector(searchTasks) : null;
     case "trello": {

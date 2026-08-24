@@ -43,6 +43,7 @@ export const PM_TRACKER_NAMES: Record<string, string> = {
   "azure-devops": "Azure DevOps",
   asana: "Asana",
   github: "GitHub Issues",
+  gitlab: "GitLab",
   markdown: "Markdown files",
 };
 
@@ -54,6 +55,7 @@ export const PM_TRACKER_DOCS: Record<string, string> = {
   "azure-devops": "https://devintern.com/docs/pm/azure-devops-integration",
   asana: "https://devintern.com/docs/pm/asana-integration",
   github: "https://devintern.com/docs/pm/github-integration",
+  gitlab: "https://devintern.com/docs/pm/gitlab-integration",
 };
 
 /** Per-tracker credential prompts. Env keys match `loadTrackerConfig` and the backends. */
@@ -148,6 +150,30 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
       link: "https://github.com/settings/personal-access-tokens/new",
     },
     { key: "GITHUB_REPO", label: "Target repository", example: "owner/repo" },
+  ],
+  gitlab: [
+    {
+      key: "GITLAB_BASE_URL",
+      label: "GitLab instance URL (press Enter for https://gitlab.com)",
+      example: "https://gitlab.example.com",
+      optional: true,
+      defaultValue: "https://gitlab.com",
+    },
+    {
+      key: "GITLAB_TOKEN",
+      label:
+        "GitLab personal access token (scopes: api, or read_api + write_repository for read/write)",
+      link: (values) => {
+        const host = (values.GITLAB_BASE_URL || "https://gitlab.com").replace(/\/+$/, "");
+        const origin = /^https?:\/\//i.test(host) ? host : `https://${host}`;
+        return `${origin}/-/user_settings/personal_access_tokens?name=DevIntern&scopes=api`;
+      },
+    },
+    {
+      key: "GITLAB_PROJECT",
+      label: "Target project path (subgroups allowed) or numeric project ID",
+      example: "group/sub/repo",
+    },
   ],
   markdown: [
     {

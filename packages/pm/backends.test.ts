@@ -8,6 +8,7 @@ import { TrelloBackend } from "./lib/backends/trello";
 import { AzureDevOpsBackend } from "./lib/backends/azure-devops";
 import { AsanaBackend } from "./lib/backends/asana";
 import { GitHubBackend } from "./lib/backends/github";
+import { GitLabBackend } from "./lib/backends/gitlab";
 import { JiraBackend } from "./lib/backends/jira";
 
 const TEST_DIR = join(getModuleDir(import.meta.url), "tmp-test-tasks");
@@ -1461,6 +1462,118 @@ describe("GitHubBackend", () => {
       expect(calls[0]?.url).toContain("/issues/42/labels");
       expect(calls[0]?.method).toBe("POST");
       expect(JSON.parse(calls[0]!.body!)).toEqual({ labels: ["bug", "backend"] });
+    });
+  });
+});
+
+describe("GitLabBackend", () => {
+  let backend: GitLabBackend;
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    backend = new GitLabBackend({
+      token: "glpat-test",
+      projectPath: "test-org/team/test-repo",
+      baseUrl: "https://gitlab.example.com",
+    });
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockFetch(response: unknown) {
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+  }
+
+  test("should have correct name", () => {
+    expect(backend.name).toBe("GitLab");
+  });
+
+  test("should support issue types", () => {
+    expect(backend.supportsIssueTypes).toBe(true);
+  });
+
+  test("should not support epic linking", () => {
+    expect(backend.supportsEpicLinking).toBe(false);
+  });
+
+  test("should support labels", () => {
+    expect(backend.supportsLabels).toBe(true);
+  });
+
+  test("should not support attachments", () => {
+    expect(backend.supportsAttachments).toBe(false);
+  });
+
+  describe("createTask", () => {
+    test("should create an issue via the GitLab API on the configured instance", async () => {
+      const calls: Array<{ url: string; method?: string; body?: string }> = [];
+      (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method, body: init?.body as string | undefined });
+        return new Response(
+          JSON.stringify({
+            iid: 42,
+            web_url: "https://gitlab.example.com/test-org/team/test-repo/-/issues/42",
+            title: "Add auth",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const result = await backend.createTask("Add auth", "Implement OAuth login", "Story");
+
+      expect(result.key).toBe("42");
+      expect(result.url).toBe("https://gitlab.example.com/test-org/team/test-repo/-/issues/42");
+      expect(calls[0]?.url).toContain(
+        "https://gitlab.example.com/api/v4/projects/test-org%2Fteam%2Ftest-repo/issues",
+      );
+      const body = JSON.parse(calls[0]!.body!);
+      expect(body.labels).toBe("enhancement");
+    });
+  });
+
+  describe("getProjects", () => {
+    test("should return projects keyed by path_with_namespace", async () => {
+      mockFetch([
+        { id: 1, name: "test-repo", path_with_namespace: "test-org/team/test-repo" },
+        { id: 2, name: "other-repo", path_with_namespace: "test-org/other-repo" },
+      ]);
+
+      const projects = await backend.getProjects();
+      expect(projects).toEqual([
+        { key: "test-org/team/test-repo", name: "test-repo" },
+        { key: "test-org/other-repo", name: "other-repo" },
+      ]);
+    });
+  });
+
+  describe("applyLabels", () => {
+    test("should use add_labels so existing labels are kept", async () => {
+      const calls: Array<{ url: string; method?: string; body?: string }> = [];
+      (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method, body: init?.body as string | undefined });
+        return new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await backend.applyLabels("42", ["bug"]);
+
+      expect(calls[0]?.method).toBe("PUT");
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ add_labels: "bug" });
+    });
+
+    test("should throw when taskKey is not a valid issue iid", async () => {
+      expect(backend.applyLabels("not-a-number", ["bug"])).rejects.toThrow(
+        "Invalid issue number: not-a-number",
+      );
     });
   });
 });
