@@ -6,8 +6,18 @@ name: npm release
 #   git tag code-v2.4.1 && git push origin code-v2.4.1   -> publishes @getdevintern/code
 #   git tag pm-v2.4.1 && git push origin pm-v2.4.1       -> publishes @getdevintern/pm
 #
+# Publishing uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret.
+#
+# Required one-time setup per package on npmjs.com:
+#   Package -> Settings -> Trusted Publisher -> GitHub Actions:
+#     Organization/Repository: getdevintern/devintern
+#     Workflow filename: npm-release.yml
+#     Environment: (leave empty)
+# The very first publish of a new package cannot use OIDC (the package must
+# exist before a publisher can be configured) — do that once manually with
+# `bun publish` from the package directory, then configure the above.
+#
 # Required secrets:
-#   NPM_TOKEN         npm automation token with publish rights to both scopes
 #   POSTHOG_API_KEY   PostHog project key, baked into the @getdevintern/code bundle
 # Optional variables:
 #   POSTHOG_HOST      PostHog ingest host (defaults to https://us.i.posthog.com)
@@ -34,6 +44,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write # npm Trusted Publishing (OIDC)
 
 jobs:
   publish:
@@ -91,18 +102,14 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: bun run typecheck
 
-      - name: Configure npm auth
-        run: |
-          mkdir -p ~/.bun
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish
         working-directory: ${{ matrix.dir }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bun publish --access public
+        # Trusted Publishing requires the npm CLI (>= 11.5.1) to perform the
+        # OIDC exchange; bun publish does not support it. Provenance is
+        # attached automatically when publishing via OIDC.
+        run: |
+          npm install -g npm@latest
+          npm publish --access public
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
