@@ -20,6 +20,7 @@ import type { PmInitContext, PmTrackerInfo } from "@getdevintern/pm/init";
 import type { UpdateStatus } from "./auto-update.ts";
 import type { ProjectBindingInfo } from "./project-binding.ts";
 import type { ProjectGitSyncStatus } from "./project-git-sync.ts";
+import type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
 import type { ToolValidation } from "./tool-validation.ts";
 
 export type {
@@ -47,6 +48,8 @@ export {
   projectGitSyncLabel,
   shouldShowUpdateFromRemote,
 } from "./project-git-sync.ts";
+export type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
+export { DEFAULT_QUICK_CAPTURE_ACCELERATOR } from "./quick-capture.ts";
 export type {
   InstalledHarnessSummary,
   RequiredToolId,
@@ -97,6 +100,11 @@ export interface ProjectStatus {
   harnessDisplayName?: string;
   /** Active harness registry id (e.g. `claude-code`), when config loaded. */
   activeHarnessName?: string;
+  /**
+   * Active `AGENT_MODEL` override (harness-specific string), when set in
+   * `.devintern-pm/.env`. Empty/unset means the harness default model.
+   */
+  activeModel?: string;
   /**
    * Installed/valid harnesses offered by the header switcher. Includes the
    * active harness even when PATH detection would miss a custom CLI path.
@@ -405,6 +413,11 @@ export interface PmDesktopApi {
    */
   switchHarness(harnessName: string): Promise<IpcResult<ProjectStatus>>;
   /**
+   * Persist `AGENT_MODEL` (harness-specific string; empty clears) and reload
+   * the session. Open tickets are kept; subsequent agent actions use it.
+   */
+  switchModel(model: string): Promise<IpcResult<ProjectStatus>>;
+  /**
    * Fetch the project remote and fast-forward when clean or PM soft-dirty.
    * Soft-dirty must not block; hard-dirty skips with a clear message.
    */
@@ -427,6 +440,15 @@ export interface PmDesktopApi {
   dismissUpdateError(): Promise<IpcResult<UpdateStatus>>;
   /** Subscribe to auto-update status changes. */
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
+  /** Current Quick Capture registration snapshot (hotkey state + conflict error). */
+  getQuickCaptureStatus(): Promise<IpcResult<QuickCaptureStatus>>;
+  /**
+   * Persist Quick Capture config and (un)register the OS global hotkey.
+   * Returns the resulting status; `error` explains conflicts.
+   */
+  setQuickCaptureSettings(config: QuickCaptureConfig): Promise<IpcResult<QuickCaptureStatus>>;
+  /** Subscribe to Quick Capture invocations from the OS global shortcut. */
+  onQuickCapture(callback: (event: QuickCaptureEvent) => void): () => void;
 }
 
 export const IPC_CHANNELS = {
@@ -470,6 +492,7 @@ export const IPC_CHANNELS = {
   switchTracker: "pm:switch-tracker",
   switchProjectKey: "pm:switch-project-key",
   switchHarness: "pm:switch-harness",
+  switchModel: "pm:switch-model",
   updateProjectFromRemote: "pm:update-project-from-remote",
   agentChunk: "pm:agent-chunk",
   showAbout: "pm:show-about",
@@ -480,4 +503,7 @@ export const IPC_CHANNELS = {
   snoozeUpdate: "pm:snooze-update",
   dismissUpdateError: "pm:dismiss-update-error",
   updateStatus: "pm:update-status",
+  getQuickCaptureStatus: "pm:get-quick-capture-status",
+  setQuickCaptureSettings: "pm:set-quick-capture-settings",
+  quickCapture: "pm:quick-capture",
 } as const;

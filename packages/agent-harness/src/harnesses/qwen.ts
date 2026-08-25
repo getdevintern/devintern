@@ -1,7 +1,7 @@
 /**
  * Qwen Code harness.
  *
- * CLI: qwen --prompt <prompt> [--yolo]
+ * CLI: qwen --prompt <prompt> [--yolo] [--model <model>]
  *
  * Uses `qwen --prompt` (headless mode) for non-interactive scripting.
  *
@@ -22,7 +22,7 @@ export class QwenCodeHarness implements AgentHarness {
   /**
    * Build `qwen` CLI flags for headless (`-p`) execution.
    *
-   * @param options - Supports `skipPermissions` (`--yolo`); model is config-file only.
+   * @param options - Supports `skipPermissions` (`--yolo`) and `model`.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -33,12 +33,9 @@ export class QwenCodeHarness implements AgentHarness {
       args.push("--yolo");
     }
 
-    // Qwen Code does not currently support --model via CLI flag.
-    // Model selection is configured via ~/.qwen/settings.json.
-    // If it adds support in the future, uncomment the following:
-    // if (options.model) {
-    //   args.push("--model", options.model);
-    // }
+    if (options.model) {
+      args.push("--model", options.model);
+    }
 
     // Qwen Code does not currently support --max-turns.
     // If it adds support in the future, uncomment the following:

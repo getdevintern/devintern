@@ -55,7 +55,11 @@ export async function runServe(options: ServeOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  const engine = await createEngine(config, { model: options.model });
+  // loadConfig() has loaded .devintern-pm/.env into process.env, so
+  // AGENT_MODEL from the project config is visible here. The --model flag wins.
+  const engine = await createEngine(config, {
+    model: options.model ?? process.env.AGENT_MODEL,
+  });
   const configDir = resolveConfigDir({ configDirName: ".devintern-pm" });
   const store = await createFileSessionStore(join(configDir, "chat-sessions.json"));
 

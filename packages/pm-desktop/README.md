@@ -17,6 +17,10 @@ The app is not a self-contained agent runtime: **Git** and **at least one suppor
 
 If a required tool is missing, a blocking screen names it and how to install it. **Check again** (or switching back to the app after installing) re-runs the probe — there is no “everything is fine” step when the check passes. Optional extras such as sandbox CLIs are not required for core ticket workflows.
 
+## Quick Capture
+
+Settings → **Quick Capture** registers an OS-level global shortcut (off by default; default binding `Cmd+Alt+Q` on macOS / `Ctrl+Alt+Q` on Windows and Linux, customizable via an in-app recorder). Invoking it from any app focuses or launches the window and opens a fresh ticket workspace as the active tab. Useful clipboard text is prefilled with the source tab inferred (Figma URL → Figma, stack-trace-like text → Error log, otherwise Prompt); empty clipboards land on an empty Prompt field ready to type. Existing tickets and in-flight agent runs are never disturbed. If the binding is taken by another app (or invalid), Settings shows the conflict and how to change it; disabled state never holds a global hotkey. Clipboard contents are read only at invocation time in the main process and are never logged or persisted. Implementation: `src/main/quick-capture.ts` (registration + delivery), `src/shared/quick-capture.ts` (classification/accelerator helpers).
+
 ## App icon
 
 Installer + dock/taskbar icon: `build/icon.png` (1024×1024 RGBA, with transparent rounded corners

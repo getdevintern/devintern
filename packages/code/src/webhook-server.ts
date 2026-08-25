@@ -23,6 +23,8 @@ import {
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
+import { parseEnvInteger } from "./lib/env-integer";
+import { resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
@@ -1263,7 +1265,12 @@ async function runAgentHarnessForReview(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
       const promptContent = readFileSync(promptFile, "utf8");
-      const runOptions = { maxTurns, skipPermissions: true, workingDir: workDir };
+      const runOptions = {
+        maxTurns,
+        skipPermissions: true,
+        workingDir: workDir,
+        model: resolveAgentModel(),
+      };
       const agentArgs = buildHeadlessAgentArgs(harness, promptContent, runOptions);
 
       console.log(`   Command: ${resolvedPath} ${harness.buildArgs(runOptions).join(" ")}`);
@@ -1456,7 +1463,7 @@ export async function startWebhookServer(
   const dbPath = resolveQueueDbPath();
   webhookQueue = new WebhookQueue({
     dbPath,
-    maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
+    maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
     verbose: finalConfig.debug,
     legacyDbPath: LEGACY_DB_PATH,
   });
