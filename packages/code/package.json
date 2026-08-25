@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "Turn tracker tickets into pull requests with any coding agent. Self-hosted, BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
@@ -61,6 +61,7 @@
   "dependencies": {
     "@types/turndown": "^5.0.5",
     "commander": "^11.0.0",
+    "cron-parser": "^5.4.0",
     "dotenv": "^16.3.1",
     "p-queue": "^9.0.1",
     "turndown": "^7.2.0"

@@ -74,6 +74,48 @@ describe("fetchWithRetry", () => {
     expect(attempts).toBe(2);
   });
 
+  test("retries curl-style DNS/connect failures", async () => {
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error("Failed to connect to github.com: Was there a typo in the url or port?");
+      }
+      return new Response("ok", { status: 200 });
+    };
+
+    const response = await fetchWithRetry(
+      "https://example.com/dns",
+      {},
+      { maxRetries: 2, baseDelay: 1, jitter: false },
+    );
+
+    expect(response.status).toBe(200);
+    expect(attempts).toBe(2);
+  });
+
+  test("retries generic fetch failures and timeouts", async () => {
+    for (const message of ["fetch failed", "request timed out after 5000ms"]) {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts === 1) {
+          throw new Error(message);
+        }
+        return new Response("ok", { status: 200 });
+      };
+
+      const response = await fetchWithRetry(
+        "https://example.com/generic",
+        {},
+        { maxRetries: 2, baseDelay: 1, jitter: false },
+      );
+
+      expect(response.status).toBe(200);
+      expect(attempts).toBe(2);
+    }
+  });
+
   test("throws immediately on non-retryable network errors", async () => {
     globalThis.fetch = async () => {
       throw new Error("invalid url format");

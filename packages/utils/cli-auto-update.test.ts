@@ -185,25 +185,32 @@ describe("maybeOfferCliUpdate", () => {
     const dir = tempDir();
     const cachePath = join(dir, "cache.json");
     let installed = false;
+    let prompts = 0;
 
-    const result = await maybeOfferCliUpdate({
+    const base = {
       packageName: "@getdevintern/pm",
       binName: "devpm",
       currentVersion: "2.0.0",
       isInteractive: true,
-      installKind: "bun-global",
+      installKind: "bun-global" as const,
       cachePath,
       checkIntervalMs: 0,
-      confirm: async () => false,
+      confirm: async () => {
+        prompts++;
+        return false;
+      },
       fetchFn: async () => new Response(JSON.stringify({ version: "2.1.0" }), { status: 200 }),
       installFn: async () => {
         installed = true;
         return true;
       },
       log: () => {},
-    });
+      now: () => 5_000,
+    };
 
-    expect(result).toBe("skipped");
+    expect(await maybeOfferCliUpdate(base)).toBe("skipped");
+    expect(await maybeOfferCliUpdate(base)).toBe("skipped");
+    expect(prompts).toBe(1);
     expect(installed).toBe(false);
     const cache = JSON.parse(readFileSync(cachePath, "utf8"));
     expect(cache["@getdevintern/pm"].declinedVersion).toBe("2.1.0");

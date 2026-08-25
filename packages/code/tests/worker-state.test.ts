@@ -105,6 +105,25 @@ describe("WorkerState", () => {
       expect(reopened.listOpenAgentPrs()).toHaveLength(1);
       reopened.close();
     });
+
+    test("closeForeignAgentPrs closes only rows outside the allowlist", () => {
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+      state.recordAgentPr({ repo: "danii1/devintern", prNumber: 199 });
+      state.recordAgentPr({ repo: "danii1/devintern", prNumber: 200 });
+      state.markAgentPrClosed("danii1/devintern", 200);
+
+      const closed = state.closeForeignAgentPrs(["acme/widgets"]);
+      expect(closed).toEqual([{ repo: "danii1/devintern", prNumber: 199 }]);
+      expect(state.listOpenAgentPrs().map((pr) => `${pr.repo}#${pr.prNumber}`)).toEqual([
+        "acme/widgets#1",
+      ]);
+    });
+
+    test("closeForeignAgentPrs is a no-op with an empty allowlist", () => {
+      state.recordAgentPr({ repo: "danii1/devintern", prNumber: 199 });
+      expect(state.closeForeignAgentPrs([])).toEqual([]);
+      expect(state.listOpenAgentPrs()).toHaveLength(1);
+    });
   });
 
   test("shares a database file with the webhook queue", () => {

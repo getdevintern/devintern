@@ -1,7 +1,16 @@
 import { FolderOpen, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ProjectBindingInfo } from "../../../shared/project-binding.ts";
+import type { QuickCaptureConfig } from "../../../shared/quick-capture.ts";
+import {
+  QUICK_CAPTURE_DEFAULT_LABEL,
+  acceleratorFromKeyboardEvent,
+  isValidAcceleratorShape,
+  prettyAccelerator,
+  resolveQuickCaptureAccelerator,
+} from "../../../shared/quick-capture.ts";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,6 +27,7 @@ import { Switch } from "@/components/ui/switch";
 import { qk } from "../queries/keys.ts";
 import { useAnalyticsEnabled } from "../queries/useAnalyticsEnabled.ts";
 import { useGitHubAuthStatus } from "../queries/useGitHubAuthStatus.ts";
+import { useQuickCaptureStatus } from "../queries/useQuickCaptureStatus.ts";
 
 interface AnalyticsSettingsProps {
   /** Current project path (for disk settings). */
@@ -63,9 +73,16 @@ export function AnalyticsSettings({
   const [modelInput, setModelInput] = useState(activeModel ?? "");
   const [savingModel, setSavingModel] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  /** Quick Capture local state: enabled flag + custom binding (null = default). */
+  const [quickCaptureOn, setQuickCaptureOn] = useState(false);
+  const [quickCaptureShortcut, setQuickCaptureShortcut] = useState<string | null>(null);
+  const [quickCaptureSaving, setQuickCaptureSaving] = useState(false);
+  const [quickCaptureActionError, setQuickCaptureActionError] = useState<string | null>(null);
+  const [recordingShortcut, setRecordingShortcut] = useState(false);
 
   const analyticsQuery = useAnalyticsEnabled(open);
   const githubAuthQuery = useGitHubAuthStatus(open);
+  const quickCaptureQuery = useQuickCaptureStatus(open);
   const githubConnected = githubAuthQuery.data?.connected ?? false;
   const githubAuthMethod = githubAuthQuery.data?.method;
   const githubLogin = githubAuthQuery.data?.login;
@@ -85,10 +102,23 @@ export function AnalyticsSettings({
     setConfirmClearToken(false);
     setModelError(null);
     setModelInput(activeModel ?? "");
+    setRecordingShortcut(false);
+    setQuickCaptureActionError(null);
     if (analyticsQuery.data !== undefined) {
       setEnabled(analyticsQuery.data);
     }
   }, [open, analyticsQuery.data, activeModel]);
+
+  // Seed Quick Capture controls from the status snapshot each time it lands.
+  useEffect(() => {
+    if (!open || !quickCaptureQuery.data) return;
+    const status = quickCaptureQuery.data;
+    setQuickCaptureOn(status.enabled);
+    setQuickCaptureShortcut(
+      status.shortcut === resolveQuickCaptureAccelerator(null) ? null : status.shortcut,
+    );
+    setQuickCaptureActionError(status.error ?? null);
+  }, [open, quickCaptureQuery.data]);
 
   const onCheckedChange = (next: boolean) => {
     setLoading(true);
@@ -169,6 +199,49 @@ export function AnalyticsSettings({
       // Refresh the shared auth-status cache (now disconnected).
       void queryClient.invalidateQueries({ queryKey: qk.githubAuthStatus });
     });
+  };
+
+  const defaultAccelerator = resolveQuickCaptureAccelerator(null);
+
+  /** Persist Quick Capture config and mirror the resulting status into local state. */
+  const applyQuickCapture = async (next: QuickCaptureConfig) => {
+    setQuickCaptureSaving(true);
+    setQuickCaptureActionError(null);
+    const result = await window.pm.setQuickCaptureSettings(next);
+    setQuickCaptureSaving(false);
+    if (!result.ok) {
+      setQuickCaptureActionError(result.error.message);
+      return;
+    }
+    queryClient.setQueryData(qk.quickCapture, result.value);
+    setQuickCaptureOn(result.value.enabled);
+    setQuickCaptureShortcut(
+      result.value.shortcut === defaultAccelerator ? null : result.value.shortcut,
+    );
+    if (result.value.error) setQuickCaptureActionError(result.value.error);
+  };
+
+  const onQuickCaptureToggle = (next: boolean) => {
+    void applyQuickCapture({ enabled: next, shortcut: quickCaptureShortcut });
+  };
+
+  const onRecordedShortcutKey = (event: ReactKeyboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      setRecordingShortcut(false);
+      return;
+    }
+    const accelerator = acceleratorFromKeyboardEvent({
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+    });
+    if (!accelerator || !isValidAcceleratorShape(accelerator)) return;
+    setRecordingShortcut(false);
+    void applyQuickCapture({ enabled: true, shortcut: accelerator });
   };
 
   return (
@@ -308,6 +381,82 @@ export function AnalyticsSettings({
             </div>
           </>
         ) : null}
+
+        <Separator />
+        <div className="space-y-3 py-1" data-testid="settings-quick-capture">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label htmlFor="quick-capture-enabled" className="text-sm text-foreground">
+                Quick Capture
+              </Label>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Global shortcut that opens a fresh ticket workspace from any app, prefilled from
+                your clipboard. Default {QUICK_CAPTURE_DEFAULT_LABEL}. Available on macOS, Windows,
+                and Linux.
+              </p>
+            </div>
+            <Switch
+              id="quick-capture-enabled"
+              checked={quickCaptureOn}
+              disabled={quickCaptureSaving}
+              onCheckedChange={onQuickCaptureToggle}
+            />
+          </div>
+          {quickCaptureOn ? (
+            recordingShortcut ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                autoFocus
+                data-testid="quick-capture-recording"
+                onKeyDown={onRecordedShortcutKey}
+                onBlur={() => setRecordingShortcut(false)}
+              >
+                Press a key combination… (Esc to cancel)
+              </Button>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className="rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs"
+                  data-testid="quick-capture-current"
+                >
+                  {prettyAccelerator(
+                    resolveQuickCaptureAccelerator(quickCaptureShortcut),
+                    /Mac|iPhone|iPad/i.test(navigator.userAgent),
+                  )}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={quickCaptureSaving}
+                  data-testid="quick-capture-change"
+                  onClick={() => setRecordingShortcut(true)}
+                >
+                  Change…
+                </Button>
+                {quickCaptureShortcut ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={quickCaptureSaving}
+                    data-testid="quick-capture-use-default"
+                    onClick={() => void applyQuickCapture({ enabled: true, shortcut: null })}
+                  >
+                    Use default
+                  </Button>
+                ) : null}
+              </div>
+            )
+          ) : null}
+          {quickCaptureActionError ? (
+            <p className="text-xs text-destructive" data-testid="quick-capture-error">
+              {quickCaptureActionError}
+            </p>
+          ) : null}
+        </div>
 
         {diskPath ? (
           <>

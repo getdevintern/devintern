@@ -241,7 +241,61 @@ To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` e
 DEVINTERN_VERBOSE=1
 ```
 
-This logs every API request, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+
+## Error Reporting
+
+The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+
+```bash
+SENTRY_DISABLED=1
+```
+
+Set this in your shell environment or in `.devintern-code/.env`.
+
+## Anonymous Usage Analytics
+
+The CLI sends one anonymous usage event per run to DevIntern's PostHog project so we can understand popularity and which features are used. It never sends task content, code, repository names, file paths, or credentials — only:
+
+- CLI version, OS, architecture
+- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
+- Whether the session runs in CI
+
+A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`. Analytics are disabled automatically when running from source. To opt out, either:
+
+```bash
+# Shell or .devintern-code/.env
+DEVINTERN_TELEMETRY_DISABLED=1
+```
+
+or set in `.devintern-code/settings.json`:
+
+```json
+{
+  "analytics": { "enabled": false }
+}
+```
+
+See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+
+## Readiness Check
+
+Run `devintern doctor` for a one-screen answer to "is everything set up?":
+
+```bash
+devintern doctor
+```
+
+It checks, in order:
+
+- **Bun runtime** and **Git** availability
+- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
+- **DevIntern sign-in**: local session validity (`devintern login` when missing)
+- **License**: entitlement status when signed in (only needed for unattended automation)
+
+Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
 ## Output Directory
 
@@ -545,6 +599,16 @@ On startup, a globally installed `devintern` checks the npm registry (at most on
 | Opt-in auto-install (including non-interactive)     | `DEVINTERN_AUTO_UPDATE=1`                                                                               |
 
 Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
+
+To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
+
+```bash
+bun install -g @getdevintern/code@latest
+# or
+npm install -g @getdevintern/code@latest
+```
+
+Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
 
 ## Troubleshooting
 

@@ -1,7 +1,7 @@
 {
   "name": "@devintern/pm-desktop",
   "productName": "DevIntern PM",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "private": true,
   "description": "Desktop app for @devintern/pm — multi-ticket AI task creation for your tracker.",
   "author": "DevIntern <hello@getdevintern.com>",
@@ -36,6 +36,7 @@
     "@devintern/utils": "workspace:*",
     "@getdevintern/pm": "workspace:*",
     "@mdxeditor/editor": "^4.2.0",
+    "@sentry/node": "10.70.0",
     "@tanstack/react-query": "^5.101.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

@@ -2,12 +2,31 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-22
+
+The onboarding release: `devintern doctor`, an extended init wizard with post-setup checks, first-run rescue when running a task in an unconfigured project, and upgrade-in-place for existing setups.
+
+### Added
+
+- **`devintern doctor` readiness command**: shared readiness checks (Bun, git, agent CLI, tracker credentials, sign-in session, license entitlement) printed as a checklist with fix hints per failing row; exits non-zero so scripts and CI can gate on it
+- **Extended init wizard onboarding**: interactive `devintern init` now finishes with post-setup — agent CLI detection (install hint when none), an inline sign-in offer, and a readiness summary over the freshly written config
+- **First-run guided setup**: running `devintern <TASK-KEY>` in an unconfigured project no longer dies with a list of missing env vars — in an interactive terminal it offers the init wizard inline, reloads the environment after setup completes, and proceeds with the run (non-interactive sessions keep the old error path)
+- **Init upgrade flow**: re-running `devintern init` over an existing configuration now offers to update the current tracker's credentials (stored values become Enter-to-keep defaults), switch trackers (GitHub PR token carries over), or exit; changes are merged into `.env` while preserving comments, custom vars, and skipped optionals
+- **Zero-account markdown tracker leads the init menu**: markdown files need no credentials, so they appear first with a "quickest way to try" hint, letting evaluators reach a first successful run without wiring up Jira/GitHub
+- **`AGENT_MODEL` applies to every agent spawn**: implementation runs, plan-implementation retries, webhook reviews, review addressing, the auto-review loop, git hook fixes, and analysis spawns all honor the configured model
+- **Sentry error tracking**: crash and unhandled-error reporting via a baked-in DevIntern DSN; opt out with `SENTRY_DISABLED=1`
+
 ### Fixed
 
 - **Hook-fix verification after a successful push**: if HEAD already matches `origin/<branch>`, skip the pre-push `--dry-run` (and the follow-up no-op `git push`). Re-running the hook suite can flake — a 30s CLI test timeout previously aborted PR creation for a branch that was already on the remote, with a misleading "didn't amend" error
 - **CLI argument tests no longer hang on a live tracker host**: parse-only CLI tests point Jira, Linear, and Trello traffic at a closed local port and disable fetch retries (`DEVINTERN_FETCH_MAX_RETRIES=0`), so a slow remote lookup cannot burn the 30s bun timeout and fail pre-push
 - **Default branch detection**: repository automations now ask the remote for its authoritative default branch before checkout or fetch operations, avoiding failed `master` attempts for repositories whose default is `main` (and supporting custom default branch names). Cached `origin/HEAD` remains an offline fallback. An explicit `--pr-target-branch master` (or `main`) that is missing on the remote now falls back the same way, so copied cron examples no longer `git fetch` a doomed ref before switching to the real default
 - **Structured agent responses**: feasibility checks now accept the valid bare JSON commonly returned by Codex instead of requiring a Markdown code fence. Feasibility, estimation, and auto-review share brace-aware extraction that also tolerates narration and ignores unrelated braces in prose
+- **False max-turns / usage-limit detection in Codex output**: turn-limit diagnostics are matched as complete lines and harnesses that cannot pass `--max-turns` are skipped, so Codex tool transcripts quoting this repo's own source no longer classify runs as exhausted
+- **Jira comments posted as ADF**: markdown comment bodies are converted to Atlassian Document Format before posting, so formatting renders correctly instead of appearing as raw text
+- **Failure feedback on the ticket**: timeouts, usage limits, and SIGTERM/SIGINT used to leave the task stranded In Progress with no PR and no feedback; a comment now explains what happened and the ticket moves back to To Do so the next scheduled run can retry it
+- **`.devintern-code` scaffolds at the repository root**: running the init wizard from a subdirectory of a monorepo created the config folder inside that subdirectory; it now resolves against the enclosing git root
+- **Incomplete setups keep guiding init**: an existing `.devintern-code` folder without a `.env` used to make both the wizard and scaffold refuse outright; they now complete the folder in place (credentials are never overwritten)
 
 ## [2.3.2] - 2026-08-18
 

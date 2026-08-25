@@ -40,7 +40,7 @@ describe("dashboard API", () => {
     store: RunStore,
     options: {
       taskKey?: string;
-      origin?: "task" | "pr_mention";
+      origin?: "task" | "pr_mention" | "scheduled";
       harness?: string;
       status?: "succeeded" | "failed" | "escalated" | "abandoned" | "deferred";
       prUrl?: string;
@@ -66,15 +66,16 @@ describe("dashboard API", () => {
     seedRun(store, { taskKey: "PROJ-1", status: "succeeded" });
     seedRun(store, { taskKey: "PROJ-2", status: "failed" });
     seedRun(store, { origin: "pr_mention", status: "succeeded" });
+    seedRun(store, { origin: "scheduled", status: "succeeded" });
     store.close();
 
     const all = handleRuns(data, new URLSearchParams());
     expect(all.status).toBe(200);
-    expect((all.body as { total: number }).total).toBe(3);
+    expect((all.body as { total: number }).total).toBe(4);
 
     const paged = handleRuns(data, new URLSearchParams("limit=2&offset=2"));
-    expect((paged.body as { runs: unknown[] }).runs.length).toBe(1);
-    expect((paged.body as { total: number }).total).toBe(3);
+    expect((paged.body as { runs: unknown[] }).runs.length).toBe(2);
+    expect((paged.body as { total: number }).total).toBe(4);
 
     const failed = handleRuns(data, new URLSearchParams("status=failed"));
     const failedBody = failed.body as { runs: { taskKey?: string }[]; total: number };
@@ -83,6 +84,9 @@ describe("dashboard API", () => {
 
     const mentions = handleRuns(data, new URLSearchParams("origin=pr_mention"));
     expect((mentions.body as { total: number }).total).toBe(1);
+
+    const scheduled = handleRuns(data, new URLSearchParams("origin=scheduled"));
+    expect((scheduled.body as { total: number }).total).toBe(1);
 
     const byKey = handleRuns(data, new URLSearchParams("taskKey=PROJ-1"));
     expect((byKey.body as { total: number }).total).toBe(1);
