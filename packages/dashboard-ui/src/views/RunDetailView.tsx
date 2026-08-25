@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
 
+import { RunResult } from "@/components/RunResult";
 import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
 import { StageDetailFields } from "@/components/StageDetailFields";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Markdown } from "@/lib/markdown";
 import { usePoll } from "@/lib/api";
 import type { RunDetailResponse, RunStageRecord } from "@/lib/api";
+import { formatRunOrigin } from "@/lib/run-origin";
 import { parseStageDetail } from "@/lib/stage-detail";
 import { formatDuration, formatTime } from "@/lib/utils";
 
@@ -118,6 +120,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-semibold">
                   {data.run.taskKey ??
+                    data.run.automationId ??
                     (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)}
                 </h2>
                 <StatusBadge status={data.run.status} />
@@ -127,10 +130,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               ) : null}
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-              <MetaItem
-                label="Origin"
-                value={data.run.origin === "task" ? "tracker task" : "PR mention"}
-              />
+              <MetaItem label="Origin" value={formatRunOrigin(data.run.origin)} />
               <MetaItem label="Tracker" value={data.run.tracker ?? "–"} />
               <MetaItem label="Harness" value={data.run.harness ?? "–"} />
               <MetaItem
@@ -143,24 +143,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                   )
                 }
               />
-              <MetaItem
-                label="PR"
-                value={
-                  data.run.prUrl ? (
-                    <a
-                      href={data.run.prUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-primary hover:underline"
-                    >
-                      #{data.run.prNumber ?? "PR"}
-                      <ExternalLink className="size-3" />
-                    </a>
-                  ) : (
-                    "–"
-                  )
-                }
-              />
+              <MetaItem label="Result" value={<RunResult run={data.run} />} />
               <MetaItem
                 label="Duration"
                 value={

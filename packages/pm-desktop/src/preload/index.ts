@@ -10,15 +10,21 @@ import type {
   AttachmentRef,
   GitHubOAuthPrompt,
   PmDesktopApi,
+  QuickCaptureEvent,
   UpdateStatus,
 } from "../shared/ipc-contract.ts";
+import { createQuickCaptureLatch } from "./quick-capture-latch.ts";
 import { createShowAboutLatch } from "./show-about-latch.ts";
 
 const showAboutLatch = createShowAboutLatch();
+const quickCaptureLatch = createQuickCaptureLatch();
 
-// Capture early show-about events that arrive before any renderer subscriber.
+// Capture early events that arrive before any renderer subscriber.
 ipcRenderer.on(IPC_CHANNELS.showAbout, () => {
   showAboutLatch.noteEvent();
+});
+ipcRenderer.on(IPC_CHANNELS.quickCapture, (_event, payload: QuickCaptureEvent) => {
+  quickCaptureLatch.noteEvent(payload);
 });
 
 const api: PmDesktopApi = {
@@ -115,6 +121,19 @@ const api: PmDesktopApi = {
       callback(payload);
     ipcRenderer.on(IPC_CHANNELS.updateStatus, listener);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.updateStatus, listener);
+  },
+  getQuickCaptureStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getQuickCaptureStatus),
+  setQuickCaptureSettings: (config) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setQuickCaptureSettings, config),
+  onQuickCapture: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: QuickCaptureEvent) =>
+      callback(payload);
+    const unsubscribeLatch = quickCaptureLatch.subscribe(callback);
+    ipcRenderer.on(IPC_CHANNELS.quickCapture, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.quickCapture, listener);
+      unsubscribeLatch();
+    };
   },
 };
 

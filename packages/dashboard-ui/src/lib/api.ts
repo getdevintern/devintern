@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type RunOrigin = "task" | "pr_mention";
+export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled";
 
 export type RunStatus =
   | "in_progress"
@@ -36,6 +36,9 @@ export interface RunUsage {
 export interface RunRecord {
   id: number;
   origin: RunOrigin;
+  automationId?: string;
+  ticketKey?: string;
+  ticketUrl?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;

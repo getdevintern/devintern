@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ABOUT_VERSION_UNAVAILABLE, AboutDialog } from "./components/AboutDialog.tsx";
-import { ComposerForm, initialComposerValues } from "./components/ComposerForm.tsx";
-import type { ComposerValues } from "./components/ComposerForm.tsx";
+import { ComposerForm } from "./components/ComposerForm.tsx";
 import { NoTicketsEmptyState } from "./components/NoTicketsEmptyState.tsx";
 import { OutputPanel } from "./components/OutputPanel.tsx";
 import { ConnectGitHubDialog } from "./components/ConnectGitHubDialog.tsx";
@@ -24,7 +23,6 @@ import {
 } from "@/components/ui/dialog";
 import {
   DEFAULT_ISSUE_TYPES,
-  getDefaultIssueType,
   issueTypeIfNeedsReset,
   resolveIssueTypes,
 } from "./lib/issue-types.ts";
@@ -40,7 +38,9 @@ import { useLabels } from "./queries/useLabels.ts";
 import { useRecentProjects } from "./queries/useRecentProjects.ts";
 import { useToolValidation } from "./queries/useToolValidation.ts";
 import { isBusy } from "./state/app-store.ts";
+import { defaultComposerForProject } from "./state/composer-values.ts";
 import { useProjectStore } from "./state/project-store.ts";
+import { handleQuickCaptureEvent } from "./state/quick-capture-handler.ts";
 import {
   useActiveTicket,
   useAnyTicketBusy,
@@ -76,16 +76,6 @@ function queryErrorMessage(error: unknown): string {
   return "Unknown error";
 }
 
-function defaultComposerForProject(status: ProjectStatus, issueTypes: string[]): ComposerValues {
-  const types = resolveIssueTypes(issueTypes);
-  return {
-    ...initialComposerValues,
-    sourceContent: { ...initialComposerValues.sourceContent },
-    projectKey: status.defaultProjectKey ?? "",
-    issueType: getDefaultIssueType(types),
-  };
-}
-
 export function App() {
   const status = useProjectStore((s) => s.status);
   const loadingProject = useProjectStore((s) => s.loadingProject);
@@ -117,6 +107,11 @@ export function App() {
   );
   /** In-app setup wizard for unconfigured / misconfigured projects. */
   const [setupOpen, setSetupOpen] = useState(false);
+  /**
+   * Bumped on every Quick Capture invocation so the composer focuses its
+   * source editor (capture lands ready-to-type).
+   */
+  const [composerFocusToken, setComposerFocusToken] = useState(0);
   /** Post-init tracker settings wizard (add / reconfigure a tracker). */
   const [trackerSettingsOpen, setTrackerSettingsOpen] = useState(false);
   /** Connect a GitHub repository → managed clone dialog. */
@@ -133,6 +128,19 @@ export function App() {
   useEffect(() => {
     return window.pm.onShowAbout(() => {
       setAboutOpen(true);
+    });
+  }, []);
+
+  // Quick Capture: OS global shortcut → focus app + open a fresh ticket
+  // workspace prefilled from the clipboard. Existing tickets and running
+  // streams are untouched (a new tab is opened; nothing is closed). The
+  // wiring itself lives in state/quick-capture-handler.ts (unit-tested).
+  useEffect(() => {
+    return window.pm.onQuickCapture((event) => {
+      if (handleQuickCaptureEvent(event)) {
+        // The fresh workspace landed ready-to-type: focus its source editor.
+        setComposerFocusToken((token) => token + 1);
+      }
     });
   }, []);
 
@@ -855,6 +863,7 @@ export function App() {
                 labelsError={labelsError}
                 labelsTruncated={labelsTruncated}
                 onRetryLabels={retryLabels}
+                focusEditorSignal={composerFocusToken}
               />
               {/* key remounts local edit-prompt state when switching tickets */}
               <OutputPanel

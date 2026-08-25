@@ -17,6 +17,33 @@ export interface PRResult {
   message: string;
 }
 
+/**
+ * Match PR-creation failures worth retrying: DNS/connect failures, timeouts,
+ * and other transport-level errors. Deliberately conservative so API-level
+ * validation errors (401/404/422 "Validation Failed", etc.) fail fast.
+ */
+export function isTransientPrFailure(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("typo in the url or port") ||
+    m.includes("fetch failed") ||
+    m.includes("network") ||
+    m.includes("socket hang up") ||
+    m.includes("epipe") ||
+    m.includes("econnreset") ||
+    m.includes("econnrefused") ||
+    m.includes("econnaborted") ||
+    m.includes("etimedout") ||
+    m.includes("timed out") ||
+    m.includes("timeout") ||
+    m.includes("enotfound") ||
+    m.includes("eai_again") ||
+    m.includes("unable to connect") ||
+    m.includes("unable to resolve") ||
+    m.includes("getaddrinfo")
+  );
+}
+
 export abstract class PRClient {
   protected token: string;
   protected baseUrl: string;
@@ -135,6 +162,22 @@ export class GitHubPRClient extends PRClient {
         const errorData = (await response
           .json()
           .catch(() => ({ message: "Unknown error" }))) as any;
+
+        // Idempotency: if the create request reached GitHub but the response
+        // was lost and retried, GitHub rejects the duplicate with 422. Treat a
+        // PR that already exists for this branch as success so the run can
+        // proceed to status transitions instead of leaving the ticket stuck.
+        if (response.status === 422) {
+          const existingUrl = await this.findExistingPrUrl(owner, repo, prInfo.sourceBranch);
+          if (existingUrl) {
+            return {
+              success: true,
+              url: existingUrl,
+              message: `Pull request already exists: ${existingUrl}`,
+            };
+          }
+        }
+
         return {
           success: false,
           message: `GitHub PR creation failed: ${errorData.message || response.statusText}`,
@@ -152,6 +195,37 @@ export class GitHubPRClient extends PRClient {
         success: false,
         message: `GitHub PR creation failed: ${(error as Error).message}`,
       };
+    }
+  }
+
+  /**
+   * Look up an open PR for the given head branch.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param headBranch - Head/feature branch name
+   * @returns The existing PR's html_url, or null when none is found
+   */
+  private async findExistingPrUrl(
+    owner: string,
+    repo: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    try {
+      const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls?head=${owner}:${headBranch}&state=open&per_page=1`;
+      const response = await Utils.fetchWithRetry(url, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "devintern",
+        },
+      });
+      if (!response.ok) return null;
+      const pulls = (await response.json()) as Array<{ html_url?: string }>;
+      const match = pulls.find((pr) => pr.html_url);
+      return match?.html_url ?? null;
+    } catch {
+      return null;
     }
   }
 }
@@ -358,6 +432,46 @@ export class PRManager {
       repository: repoInfo.repository,
     };
 
+    // A transient network blip between push and PR creation used to leave the
+    // branch pushed but no PR and the ticket stuck In Progress (e.g. DNS
+    // failures surfacing as "Was there a typo in the url or port?"). Retry
+    // transport-level failures with backoff; idempotency for duplicate creates
+    // is handled by GitHubPRClient's 422 already-exists lookup.
+    const maxAttempts = 3;
+    let result: PRResult = {
+      success: false,
+      message: "PR creation was not attempted",
+    };
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      result = await this.dispatchCreatePullRequest(prInfo, repoInfo);
+      if (result.success || !isTransientPrFailure(result.message)) {
+        return result;
+      }
+      if (attempt < maxAttempts) {
+        const delayMs = 2000 * 2 ** (attempt - 1);
+        console.warn(
+          `⚠️  Transient failure creating PR (${result.message}); retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Dispatch PR creation to the platform-specific client.
+   *
+   * @param prInfo - Assembled PR metadata
+   * @param repoInfo - Detected platform and repository slug
+   */
+  private async dispatchCreatePullRequest(
+    prInfo: PRInfo,
+    repoInfo: {
+      platform: "github" | "bitbucket" | "unknown";
+      repository: string;
+      workspace?: string;
+    },
+  ): Promise<PRResult> {
     if (repoInfo.platform === "github") {
       // Use existing client with personal token
       if (this.githubClient) {
