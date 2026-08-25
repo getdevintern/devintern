@@ -13,6 +13,11 @@
  *    the PR (once per tick per PR), which fetches unaddressed comments,
  *    runs the agent, pushes, and replies.
  *
+ * Base sync eligibility comes from GitHub's own `mergeable_state` ("dirty"
+ * or "behind"), not from ancestry checks against the API-reported base
+ * SHA — that field can lag the real branch tip for days and would both
+ * skip eligible PRs forever and loop ineligible ones.
+ *
  * Review/comment ids dedupe via `processed_events`, so webhook redeliveries
  * or window overlap never double-run. ETags and comment cursors persist per
  * PR in `cursors`.
@@ -70,8 +75,6 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
-  /** Whether the PR head contains the current base SHA; null means unavailable. */
-  isBaseIncluded?(repo: string, baseSha: string, headSha: string): Promise<boolean | null>;
 }
 
 export interface ReviewPollingAcquirerOptions {
@@ -342,10 +345,6 @@ export class ReviewPollingAcquirer implements Acquirer {
   private options: ReviewPollingAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
-  private comparisonCache = new Map<
-    string,
-    { baseSha: string; headSha: string; included: boolean }
-  >();
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
@@ -500,9 +499,13 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
     const { github, queue, resolveConflicts, runStore } = this.options;
-    if (!resolveConflicts || !github.isBaseIncluded) return;
+    if (!resolveConflicts) return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
-    const externalId = `base-sync:${repo}#${prNumber}:${pr.base.sha}`;
+
+    // The event key includes the head SHA so that new commits on the branch
+    // (e.g. after a failed attempt was exhausted) open a fresh event without
+    // waiting for the API-reported base SHA to move.
+    const externalId = this.baseSyncExternalId(repo, prNumber, pr.base.sha, pr.head.sha);
     if (pr.head.repo?.full_name && pr.head.repo.full_name.toLowerCase() !== repo.toLowerCase()) {
       if (!queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) {
         queue.observeBaseSyncEvent({
@@ -516,11 +519,14 @@ export class ReviewPollingAcquirer implements Acquirer {
       }
       return;
     }
-    // GitHub reports unknown while recomputing mergeability after a push.
-    if (!pr.mergeable_state || pr.mergeable_state === "unknown") return;
 
-    const included = await this.isBaseIncluded(repo, prNumber, pr.base.sha, pr.head.sha);
-    if (included === null || included) return;
+    // GitHub's own mergeability verdict is the source of truth: "dirty"
+    // means conflicting with the base, "behind" means mergeable but not up
+    // to date. Ancestry checks against the API-reported base.sha are not
+    // usable here — the field can lag the real branch tip for days, which
+    // makes branches cut from newer main look "already included" and skips
+    // them forever. "unknown" just means GitHub is recomputing after a push.
+    if (pr.mergeable_state !== "dirty" && pr.mergeable_state !== "behind") return;
 
     if (queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) return;
     const now = this.options.now?.() ?? Date.now();
@@ -548,7 +554,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     ) {
       if (fresh?.state === "open" && fresh.head?.sha && fresh.base?.sha) {
         queue.observeBaseSyncEvent({
-          externalId: `base-sync:${repo}#${prNumber}:${fresh.base.sha}`,
+          externalId: this.baseSyncExternalId(repo, prNumber, fresh.base.sha, fresh.head.sha),
           repo,
           prNumber,
           baseSha: fresh.base.sha,
@@ -558,9 +564,12 @@ export class ReviewPollingAcquirer implements Acquirer {
       }
       return;
     }
-    const stillMissing = await this.isBaseIncluded(repo, prNumber, fresh.base.sha, fresh.head.sha);
-    if (stillMissing === null || stillMissing) {
-      if (stillMissing) queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+    // Mergeability resolved itself while we waited (someone else synced the
+    // branch): nothing left to do.
+    if (fresh.mergeable_state === "unknown" || !fresh.mergeable_state) return;
+    if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
+      this.deferCounts.delete(externalId);
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return;
     }
 
@@ -633,38 +642,15 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  private async isBaseIncluded(
-    repo: string,
-    prNumber: number,
-    baseSha: string,
-    headSha: string,
-  ): Promise<boolean | null> {
-    const compare = this.options.github.isBaseIncluded;
-    if (!compare) return null;
-    const key = this.prKey(repo, prNumber);
-    const cached = this.comparisonCache.get(key);
-    if (cached?.baseSha === baseSha && cached.headSha === headSha) return cached.included;
-    let included: boolean | null;
-    try {
-      included = await compare(repo, baseSha, headSha);
-    } catch (error) {
-      if (this.options.verbose) {
-        console.warn(
-          `   [${this.name}] ${repo}#${prNumber}: base comparison unavailable: ${(error as Error).message}`,
-        );
-      }
-      return null;
-    }
-    if (included !== null) this.comparisonCache.set(key, { baseSha, headSha, included });
-    return included;
-  }
-
   private prKey(repo: string, prNumber: number): string {
     return `${repo.toLowerCase()}#${prNumber}`;
   }
 
+  private baseSyncExternalId(repo: string, prNumber: number, baseSha: string, headSha: string) {
+    return `base-sync:${repo}#${prNumber}:${baseSha}:${headSha}`;
+  }
+
   private clearPrCache(key: string): void {
     this.prCache.delete(key);
-    this.comparisonCache.delete(key);
   }
 }

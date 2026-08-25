@@ -813,15 +813,6 @@ if (process.argv[2] === "init") {
               );
               return result.data ?? [];
             },
-            isBaseIncluded: async (repo, baseSha, headSha) => {
-              const result = await gh.conditionalGet<{ status: string }>(
-                `/repos/${repo}/compare/${baseSha}...${headSha}`,
-                ownerOf(repo),
-                nameOf(repo),
-              );
-              const status = result.data?.status;
-              return status ? status === "ahead" || status === "identical" : null;
-            },
           },
           addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
           resolveConflicts: (repo, n, expected) =>

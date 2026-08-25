@@ -49,7 +49,6 @@ describe("ReviewPollingAcquirer", () => {
     seenSince?: string;
     seenPrEtag?: string;
     seenReviewsEtag?: string;
-    comparisonCalls?: number;
   }
 
   function makeAcquirer(
@@ -99,10 +98,6 @@ describe("ReviewPollingAcquirer", () => {
         async fetchReviewCommentsSince(_repo, _n, sinceIso) {
           gh.seenSince = sinceIso;
           return gh.comments;
-        },
-        async isBaseIncluded() {
-          gh.comparisonCalls = (gh.comparisonCalls ?? 0) + 1;
-          return gh.baseIncluded ?? true;
         },
       },
       addressPr: async (repo, n) => {
@@ -219,7 +214,7 @@ describe("ReviewPollingAcquirer", () => {
     expect(gh.seenReviewsEtag).toBe('W/"rev-1"');
   });
 
-  test("removes PR and comparison caches when a watched PR closes", async () => {
+  test("clears the PR cache when a watched PR closes so re-watching hydrates fresh", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
       prState: "open",
@@ -233,7 +228,7 @@ describe("ReviewPollingAcquirer", () => {
     const { acquirer } = makeAcquirer(gh);
 
     await acquirer.tick();
-    expect(gh.comparisonCalls).toBe(1);
+    expect(gh.seenPrEtag).toBeUndefined();
 
     gh.prState = "closed";
     await acquirer.tick();
@@ -243,29 +238,6 @@ describe("ReviewPollingAcquirer", () => {
     await acquirer.tick();
 
     expect(gh.seenPrEtag).toBeUndefined();
-    expect(gh.comparisonCalls).toBe(2);
-  });
-
-  test("retains only the current comparison pair for each PR", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      mergeableState: "clean",
-      headSha: "head1",
-      baseSha: "base1",
-      baseIncluded: true,
-      reviews: [],
-      comments: [],
-    };
-    const { acquirer } = makeAcquirer(gh);
-
-    await acquirer.tick();
-    gh.baseSha = "base2";
-    await acquirer.tick();
-    gh.baseSha = "base1";
-    await acquirer.tick();
-
-    expect(gh.comparisonCalls).toBe(3);
   });
 
   test("multiple new signals on one PR trigger a single address run per tick", async () => {
@@ -335,12 +307,10 @@ describe("ReviewPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(resolved).toEqual(["acme/widgets#42"]);
-    expect(gh.comparisonCalls).toBe(1);
 
     // Same SHAs on the next tick: no second attempt.
     await acquirer.tick();
     expect(resolved).toHaveLength(1);
-    expect(gh.comparisonCalls).toBe(1);
 
     // Base moved again while still conflicting: retry.
     gh.baseSha = "base2";
@@ -348,31 +318,57 @@ describe("ReviewPollingAcquirer", () => {
     expect(resolved).toHaveLength(2);
   });
 
-  test("a cleanly-behind PR triggers while unknown mergeability defers", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      mergeableState: "clean",
-      headSha: "head1",
-      baseSha: "base1",
-      baseIncluded: false,
-      reviews: [],
-      comments: [],
-    };
-    const { acquirer, resolved } = makeAcquirer(gh);
+  test("every conflicting watched PR is synced in the same tick, not just one", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 3 });
+
+    const resolved: string[] = [];
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      quietPeriodSeconds: 0,
+      workerState,
+      queue,
+      github: {
+        async fetchPr(_repo, n) {
+          return {
+            data: {
+              state: "open",
+              // All three conflict with their base; a stale API-reported
+              // base SHA must not make any of them look "already included".
+              mergeable_state: "dirty",
+              head: {
+                sha: `head${n}`,
+                ref: "agent/task",
+                repo: { full_name: "acme/widgets" },
+              },
+              base: { sha: "stale-base-sha", ref: "main" },
+            },
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return { data: [], notModified: false };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+      },
+      addressPr: async () => true,
+      resolveConflicts: async (_repo, n) => {
+        resolved.push(`acme/widgets#${n}`);
+        return { outcome: "resolved", message: "pushed" };
+      },
+    });
+
     await acquirer.tick();
 
-    expect(resolved).toEqual(["acme/widgets#42"]);
-
-    gh.baseSha = "base2";
-    gh.mergeableState = undefined;
-    await acquirer.tick();
-    expect(resolved).toHaveLength(1);
+    expect(resolved.sort()).toEqual(["acme/widgets#1", "acme/widgets#2", "acme/widgets#3"]);
   });
 
-  test("a head that already contains the base does not trigger", async () => {
+  test("clean or unknown mergeability does not trigger; dirty and behind do", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const { acquirer, resolved } = makeAcquirer({
+    const gh: FakeGitHubState = {
       prState: "open",
       mergeableState: "clean",
       headSha: "head1",
@@ -380,57 +376,19 @@ describe("ReviewPollingAcquirer", () => {
       baseIncluded: true,
       reviews: [],
       comments: [],
-    });
+    };
+    const { acquirer, resolved } = makeAcquirer(gh);
     await acquirer.tick();
     expect(resolved).toEqual([]);
-  });
 
-  test("a failed base comparison does not prevent addressing new review feedback", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const addressed: string[] = [];
-    const acquirer = new ReviewPollingAcquirer({
-      intervalSeconds: 60,
-      workerState,
-      queue,
-      github: {
-        async fetchPr() {
-          return {
-            data: {
-              state: "open",
-              mergeable_state: "dirty",
-              head: {
-                sha: "head1",
-                ref: "agent/task",
-                repo: { full_name: "acme/widgets" },
-              },
-              base: { sha: "base1", ref: "main" },
-            },
-            notModified: false,
-          };
-        },
-        async fetchReviews() {
-          return {
-            data: [{ id: 1, state: "changes_requested", user: human }],
-            notModified: false,
-          };
-        },
-        async fetchReviewCommentsSince() {
-          return [];
-        },
-        async isBaseIncluded() {
-          throw new Error("compare unavailable");
-        },
-      },
-      addressPr: async (repo, n) => {
-        addressed.push(`${repo}#${n}`);
-        return true;
-      },
-      resolveConflicts: async () => ({ outcome: "clean", message: "merged" }),
-    });
-
+    // GitHub recomputing after a push: wait.
+    gh.mergeableState = "unknown";
     await acquirer.tick();
+    expect(resolved).toEqual([]);
 
-    expect(addressed).toEqual(["acme/widgets#42"]);
+    gh.mergeableState = "behind";
+    await acquirer.tick();
+    expect(resolved).toEqual(["acme/widgets#42"]);
   });
 
   test("a fork PR is terminally skipped without invoking the resolver", async () => {
@@ -459,9 +417,6 @@ describe("ReviewPollingAcquirer", () => {
         async fetchReviewCommentsSince() {
           return [];
         },
-        async isBaseIncluded() {
-          return false;
-        },
       },
       addressPr: async () => true,
       resolveConflicts: async (repo, n) => {
@@ -471,7 +426,9 @@ describe("ReviewPollingAcquirer", () => {
     });
     await acquirer.tick();
     expect(resolved).toEqual([]);
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
+      true,
+    );
   });
 
   test("failed attempts persist across restart and stop at the configured limit", async () => {
@@ -494,7 +451,7 @@ describe("ReviewPollingAcquirer", () => {
     ];
     let made = makeAcquirer(gh, { resolveResults: failures });
     await made.acquirer.tick();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(1);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.attempts).toBe(1);
 
     // Reopening all stores models a worker restart; attempts must survive.
     workerState.close();
@@ -505,8 +462,10 @@ describe("ReviewPollingAcquirer", () => {
     await made.acquirer.tick();
     await made.acquirer.tick();
     expect(made.resolved).toHaveLength(1);
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(2);
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.attempts).toBe(2);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
+      true,
+    );
   });
 
   test("recent and changing heads defer without consuming attempts", async () => {
@@ -528,7 +487,9 @@ describe("ReviewPollingAcquirer", () => {
     now += 11_000;
     gh.headSha = "head2";
     await made.acquirer.tick();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
+    // A moved head supersedes the old pending event with a fresh one.
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head2")?.attempts).toBe(0);
     expect(made.resolved).toEqual([]);
 
     now += 11_000;
@@ -550,14 +511,14 @@ describe("ReviewPollingAcquirer", () => {
     };
     const made = makeAcquirer(gh, { quietPeriodSeconds: 10, now: () => now });
     await made.acquirer.tick();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.status).toBe("pending");
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe("pending");
 
     now += 5_000;
     gh.baseSha = "base2";
     await made.acquirer.tick();
 
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")).toBeNull();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base2")?.status).toBe("pending");
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base2:head1")?.status).toBe("pending");
     expect(made.resolved).toEqual([]);
   });
 
@@ -578,8 +539,10 @@ describe("ReviewPollingAcquirer", () => {
       },
     );
     await made.acquirer.tick();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(false);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.attempts).toBe(0);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
+      false,
+    );
   });
 
   test("repeated defers eventually exhaust the event instead of retrying forever", async () => {
@@ -604,13 +567,17 @@ describe("ReviewPollingAcquirer", () => {
 
     await made.acquirer.tick();
     await made.acquirer.tick();
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(false);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
+      false,
+    );
 
     // Third consecutive defer exhausts the event terminally.
     await made.acquirer.tick();
     expect(made.resolved).toHaveLength(3);
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.status).toBe("failed");
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
+      true,
+    );
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe("failed");
 
     // A terminal defer means later ticks do not re-run the resolver at all.
     await made.acquirer.tick();
@@ -659,9 +626,6 @@ describe("ReviewPollingAcquirer", () => {
         async fetchReviewCommentsSince() {
           return [];
         },
-        async isBaseIncluded() {
-          return false;
-        },
       },
       addressPr: async () => true,
       resolveConflicts: async (repo, n) => {
@@ -671,7 +635,10 @@ describe("ReviewPollingAcquirer", () => {
     });
     await acquirer.tick();
     expect(resolved).toEqual([]);
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.attempts).toBe(0);
+    // The head race observed a new head; the stale event was superseded and
+    // the fresh one stays pending without consuming an attempt.
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head2")?.attempts).toBe(0);
   });
 
   test("automatic attempts record origin, metadata, attempt, and terminal reason", async () => {
