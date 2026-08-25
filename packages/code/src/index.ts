@@ -773,6 +773,15 @@ if (process.argv[2] === "init") {
       const ownerOf = (repo: string) => repo.split("/")[0] as string;
       const nameOf = (repo: string) => repo.split("/")[1] as string;
 
+      // This checkout's GitHub slug scopes review polling to the agent PRs
+      // of this project; registry rows for any other repo are stale (e.g.
+      // left behind by a rename/transfer) and get auto-unwatched at start.
+      const repoSlug =
+        process.env.GITHUB_REPO ||
+        (await new PRManager()
+          .detectRepository()
+          .then((r) => (r.platform === "github" ? r.repository : "")));
+
       acquirers.push(
         new ReviewPollingAcquirer({
           intervalSeconds,
@@ -820,6 +829,7 @@ if (process.argv[2] === "init") {
             }),
           quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
           runStore: new RunStore(dbPath),
+          allowedRepos: repoSlug ? [repoSlug] : undefined,
           verbose,
         }),
       );
@@ -828,11 +838,6 @@ if (process.argv[2] === "init") {
       // since-cursor requests per tick). Permission + mention gates apply in
       // the shared review pipeline; fork PRs without maintainer_can_modify
       // are skipped with an explanatory comment.
-      const repoSlug =
-        process.env.GITHUB_REPO ||
-        (await new PRManager()
-          .detectRepository()
-          .then((r) => (r.platform === "github" ? r.repository : "")));
       if (repoSlug) {
         const { MentionSweepAcquirer } = await import("./lib/mention-sweep-acquirer");
         const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
