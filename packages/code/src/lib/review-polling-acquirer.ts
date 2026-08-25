@@ -427,7 +427,7 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   /** Poll a single PR; triggers at most one address-review run. */
   private async pollPr(repo: string, prNumber: number, watchedSinceMs: number): Promise<void> {
-    const { workerState, queue, github, addressPr, resolveConflicts, verbose } = this.options;
+    const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs.
     const prSource = `github:pr:${repo}#${prNumber}`;
@@ -509,9 +509,6 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
 
     if (!actionable) {
-      if (verbose) {
-        console.log(`   [${this.name}] ${repo}#${prNumber}: no new feedback`);
-      }
       return;
     }
 
