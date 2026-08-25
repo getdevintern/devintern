@@ -80,6 +80,46 @@ describe("extractJsonPayload", () => {
     });
   });
 
+  test("ignores a stray extra closing brace after the object (grok)", () => {
+    const raw = 'Narration.{"summary": "S", "description": "D.\\n"}\n}';
+    expect(extractJsonPayload(raw, isStory, "missing fields")).toEqual({
+      summary: "S",
+      description: "D.\n",
+    });
+  });
+
+  test("tolerates literal \\n junk between the final value and the closing brace (grok)", () => {
+    const raw = 'Narration.{"summary": "S", "description": "D."\\n}';
+    expect(extractJsonPayload(raw, isStory, "missing fields")).toEqual({
+      summary: "S",
+      description: "D.",
+    });
+  });
+
+  test("escapes unescaped double quotes inside string values (opencode)", () => {
+    const raw = [
+      "```json",
+      "{",
+      '  "summary": "S",',
+      '  "description": "A legacy "cwd" mode mutates the repo.',
+      "",
+      "Second paragraph with an inner ``` fence.",
+      "```",
+      '"auto-detect is fragile"',
+      "```",
+      "",
+      "- [ ] Done",
+      '"',
+      "}",
+      "```",
+    ].join("\n");
+    expect(extractJsonPayload(raw, isStory, "missing fields")).toEqual({
+      summary: "S",
+      description:
+        'A legacy "cwd" mode mutates the repo.\n\nSecond paragraph with an inner ``` fence.\n```\n"auto-detect is fragile"\n```\n\n- [ ] Done\n',
+    });
+  });
+
   test("throws parse-failed with raw output in detail for garbage", () => {
     let caught: unknown;
     try {
