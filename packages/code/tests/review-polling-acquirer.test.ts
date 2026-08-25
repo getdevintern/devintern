@@ -61,6 +61,7 @@ describe("ReviewPollingAcquirer", () => {
       runStore?: RunStore;
       quietPeriodSeconds?: number;
       now?: () => number;
+      allowedRepos?: string[];
     } = {},
   ) {
     const addressed: string[] = [];
@@ -111,6 +112,7 @@ describe("ReviewPollingAcquirer", () => {
       quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
       runStore: options.runStore,
       now: options.now,
+      allowedRepos: options.allowedRepos,
     });
     return { acquirer, addressed, resolved };
   }
@@ -669,6 +671,38 @@ describe("ReviewPollingAcquirer", () => {
     });
     expect(run?.harness).toBeTruthy();
     runStore.close();
+  });
+
+  test("start() unwatches open rows for repos outside allowedRepos", async () => {
+    workerState.recordAgentPr({ repo: "getdevintern/devintern", prNumber: 45 });
+    workerState.recordAgentPr({ repo: "danii1/devintern", prNumber: 199 });
+    const { acquirer, addressed } = makeAcquirer(
+      { prState: "open", reviews: [], comments: [] },
+      { allowedRepos: ["getdevintern/devintern"] },
+    );
+
+    await acquirer.start();
+    acquirer.stop();
+    expect(addressed).toEqual([]);
+    expect(workerState.listOpenAgentPrs().map((pr) => `${pr.repo}#${pr.prNumber}`)).toEqual([
+      "getdevintern/devintern#45",
+    ]);
+  });
+
+  test("tick skips foreign repos when allowedRepos is set", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "danii1/devintern", prNumber: 199 });
+    const { acquirer, addressed } = makeAcquirer(
+      {
+        prState: "open",
+        reviews: [{ id: 1, state: "changes_requested", user: human }],
+        comments: [],
+      },
+      { allowedRepos: ["acme/widgets"] },
+    );
+
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
   });
 });
 

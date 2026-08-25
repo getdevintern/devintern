@@ -505,6 +505,7 @@ async function buildFleetEventAcquirers(options: {
         resolveConflicts,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore,
+        allowedRepos: slugs,
         verbose,
       }),
     );
