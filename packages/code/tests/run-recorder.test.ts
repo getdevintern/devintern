@@ -37,6 +37,34 @@ describe("RunStore", () => {
     expect(run?.finishedAt).toBeUndefined();
   });
 
+  test("reapOrphanedRuns fails only in_progress runs, terminal runs stay untouched", () => {
+    const orphan = store.createRun({ origin: "conflict_resolution" });
+    const finished = store.createRun({ origin: "task", taskKey: "PROJ-2" });
+    store.finishRun(finished, "succeeded", "done");
+
+    const reaped = store.reapOrphanedRuns();
+    expect(reaped).toBe(1);
+
+    const orphanRun = store.getRun(orphan);
+    expect(orphanRun?.status).toBe("failed");
+    expect(orphanRun?.outcomeReason).toContain("orphaned");
+    expect(orphanRun?.finishedAt).toBeDefined();
+
+    // Terminal rows are not modified by a second sweep.
+    expect(store.reapOrphanedRuns()).toBe(0);
+    expect(store.getRun(finished)?.status).toBe("succeeded");
+  });
+
+  test("a late finishRun from an outlived subprocess wins over the reap", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    store.reapOrphanedRuns();
+    store.finishRun(id, "succeeded", "late completion");
+
+    const run = store.getRun(id);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBe("late completion");
+  });
+
   test("pr_mention runs have no task key", () => {
     const id = store.createRun({ origin: "pr_mention", repo: "acme/widgets", prNumber: 42 });
 

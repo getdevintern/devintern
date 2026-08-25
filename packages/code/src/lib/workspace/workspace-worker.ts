@@ -468,6 +468,13 @@ async function buildFleetEventAcquirers(options: {
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
     const { RunStore } = await import("../run-recorder");
+    const runStore = new RunStore(state.dbPath);
+    const reapedRuns = runStore.reapOrphanedRuns();
+    if (reapedRuns > 0) {
+      console.warn(
+        `⚠️  Marked ${reapedRuns} in-progress run(s) as failed: previous worker exited before they finished`,
+      );
+    }
     acquirers.push(
       new ReviewPollingAcquirer({
         intervalSeconds,
@@ -493,20 +500,11 @@ async function buildFleetEventAcquirers(options: {
             );
             return result.data ?? [];
           },
-          isBaseIncluded: async (repo, baseSha, headSha) => {
-            const result = await gh.conditionalGet<{ status: string }>(
-              `/repos/${repo}/compare/${baseSha}...${headSha}`,
-              ownerOf(repo),
-              nameOf(repo),
-            );
-            const status = result.data?.status;
-            return status ? status === "ahead" || status === "identical" : null;
-          },
         },
         addressPr,
         resolveConflicts,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
-        runStore: new RunStore(state.dbPath),
+        runStore,
         allowedRepos: slugs,
         verbose,
       }),

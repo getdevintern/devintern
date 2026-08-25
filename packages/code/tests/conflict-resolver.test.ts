@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execSync } from "child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -257,14 +257,17 @@ describe("resolveConflictsOnPr", () => {
     });
   });
 
-  test("defers when the remote base changes during worktree preparation", async () => {
+  test("merges the actual fetched base tip when the reported base sha is stale", async () => {
+    // GitHub can report a stale `base.sha` long after the branch advanced.
+    // The resolver must sync to the real origin/main tip, not defer forever
+    // against the reported SHA.
     const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
-    const expectedBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    const staleBaseSha = git(seedDir, "rev-parse origin/main").trim();
     const result = await resolveConflictsOnPr(PR_URL, {
       cwd: repoDir,
       noComment: true,
       expectedHeadSha,
-      expectedBaseSha,
+      expectedBaseSha: staleBaseSha,
       fetchPr: async () => {
         git(seedDir, "checkout main");
         writeFileSync(join(seedDir, "base-race.txt"), "moved\n");
@@ -277,15 +280,25 @@ describe("resolveConflictsOnPr", () => {
             sha: expectedHeadSha,
             repo: { full_name: "acme/widgets" },
           },
-          base: { ref: "main", sha: expectedBaseSha },
+          base: { ref: "main", sha: staleBaseSha },
         });
+      },
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
       },
     });
 
-    expect(result).toEqual({
-      outcome: "deferred",
-      message: "PR base changed during worktree preparation",
-    });
+    expect(result.outcome).toBe("resolved");
+
+    // The pushed branch contains the new base commit (base-race.txt), i.e. it
+    // caught up with the actual tip rather than the stale reported sha.
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-verify-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(existsSync(join(shipped, "clone", "base-race.txt"))).toBe(true);
+    rmSync(shipped, { recursive: true, force: true });
   });
 
   test("defers when the remote head changes after preparation but before push", async () => {
