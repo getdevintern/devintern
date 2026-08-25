@@ -138,14 +138,17 @@ function resolveTimeoutMs(overrideMs?: number): number {
 /** Kill a spawned process and (best-effort) its whole process group. */
 function killProcessTree(child: ReturnType<typeof spawn>): void {
   if (child.pid === undefined) return;
+  // The child is spawned detached, so it leads its own process group;
+  // the negative pid signals every descendant (e.g. agent harnesses).
   try {
-    // The child is spawned detached, so it leads its own process group;
-    // the negative pid signals every descendant (e.g. agent harnesses).
     process.kill(-child.pid, "SIGTERM");
   } catch {
     child.kill("SIGTERM");
   }
-  setTimeout(() => {
+  // If the SIGTERM already finished the child, cancel the deferred SIGKILL:
+  // by then the pid/pgid may have been recycled for an unrelated process, and
+  // signalling that would kill a bystander (e.g. under heavy test-suite churn).
+  const sigkillTimer = setTimeout(() => {
     try {
       process.kill(-child.pid!, "SIGKILL");
     } catch {
@@ -156,6 +159,7 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
       }
     }
   }, 5_000).unref();
+  child.once("close", () => clearTimeout(sigkillTimer));
 }
 
 /** Serialize automatic pipelines that target the same PR worktree. */
