@@ -95,6 +95,13 @@ export interface ReviewPollingAcquirerOptions {
   runStore?: Pick<RunStore, "createRun" | "finishRun">;
   harness?: string;
   now?: () => number;
+  /**
+   * Repo slugs (`owner/repo`) this worker manages. Open registry rows for
+   * any other repo (e.g. left behind after a rename/transfer) are
+   * auto-unwatched at startup and skipped on every tick. Omit to watch the
+   * whole registry (previous behavior).
+   */
+  allowedRepos?: string[];
   verbose?: boolean;
 }
 
@@ -285,6 +292,16 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    // Drop stale registry rows for repos this worker no longer manages
+    // (e.g. after a rename/transfer) so they never hit the API again.
+    const { allowedRepos, workerState } = this.options;
+    if (allowedRepos && allowedRepos.length > 0) {
+      for (const pr of workerState.closeForeignAgentPrs(allowedRepos)) {
+        console.log(
+          `🧹 [${this.name}] ${pr.repo}#${pr.prNumber} is not part of this project; unwatching`,
+        );
+      }
+    }
     console.log(
       `🔎 Polling reviews on agent PRs every ${this.options.intervalSeconds}s ` +
         `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
@@ -309,12 +326,18 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
+      const allowedRepos = this.options.allowedRepos;
       const watchedPrs = this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
       for (const pr of watchedPrs) {
+        // Defensive: rows registered mid-run for a foreign repo (or when
+        // startup pruning could not run) are skipped, never acted on.
+        if (allowedRepos && allowedRepos.length > 0 && !allowedRepos.includes(pr.repo)) {
+          continue;
+        }
         try {
           await this.pollPr(pr.repo, pr.prNumber, pr.createdAt);
         } catch (error) {
