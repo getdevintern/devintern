@@ -26,7 +26,7 @@ class FakeStdin extends EventEmitter {
 /** Polls until a condition becomes true.
  *  Using polling for state transitions eliminates flakiness from fixed timeouts under CI load or CPU contention.
  */
-const waitFor = (condition: () => boolean, { timeout = 2000, interval = 10 } = {}) =>
+const waitFor = (condition: () => boolean, { timeout = 2000, interval = 5 } = {}) =>
   new Promise<void>((resolve, reject) => {
     const start = Date.now();
     const check = () => {
@@ -89,7 +89,7 @@ describe("runInteractiveMode", () => {
 
     // Type an edit and submit to transition to regenerating
     stdin.write("refine");
-    await sleep(30);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "regenerating");
     expect(handle.getStep()).toBe("regenerating");
@@ -163,13 +163,13 @@ describe("runInteractiveMode", () => {
     // Simulate an orchestrator pushing previewData without a step change.
     // This buffers the data so the preview is not rewritten mid-typing.
     handle.updatePreviewData("Buffered Summary", "Buffered Description");
-    await sleep(30);
+    await sleep(5);
 
     // Trigger an internal re-render by typing a character in the prompt.
     // With the bug (clearing buffer whenever nextStep === 'edit-prompt'),
     // this re-render would discard the buffered data.
     stdin.write("x");
-    await sleep(30);
+    await sleep(5);
 
     // Still in edit-prompt
     expect(handle.getStep()).toBe("edit-prompt");
@@ -217,7 +217,7 @@ describe("runInteractiveMode", () => {
 
     const editPromise = handle.waitForEdit();
     stdin.write("Make it shorter");
-    await sleep(30);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "regenerating");
 
@@ -239,7 +239,7 @@ describe("runInteractiveMode", () => {
     // Type "Make it shorter" and submit with Enter
     for (const char of "Make it shorter") {
       stdin.write(char);
-      await sleep(30);
+      await sleep(2);
     }
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "regenerating");
@@ -262,7 +262,7 @@ describe("runInteractiveMode", () => {
 
     // Esc is intentional no-op on preview (orchestrator holds waitForCompletion/waitForEdit).
     stdin.write("\x1b");
-    await sleep(50);
+    await sleep(20);
 
     expect(handle.getStep()).toBe("preview");
     expect(handle.getPreviewData()).toEqual({
@@ -279,7 +279,7 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "edit-prompt");
 
     stdin.write("partial edit text");
-    await sleep(30);
+    await sleep(5);
     stdin.write("\x1b");
 
     await waitFor(() => handle.getStep() === "preview");
@@ -297,7 +297,7 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "edit-prompt");
 
     handle.updatePreviewData("Buffered Title", "Buffered body");
-    await sleep(30);
+    await sleep(5);
 
     stdin.write("\x1b");
     await waitFor(
@@ -315,7 +315,7 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "generating");
 
     stdin.write("\x1b");
-    await sleep(50);
+    await sleep(20);
 
     expect(handle.getStep()).toBe("generating");
   });
@@ -328,12 +328,12 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "edit-prompt");
 
     stdin.write("change it");
-    await sleep(30);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "regenerating");
 
     stdin.write("\x1b");
-    await sleep(50);
+    await sleep(20);
     expect(handle.getStep()).toBe("regenerating");
   });
 
@@ -344,7 +344,7 @@ describe("runInteractiveMode", () => {
     await waitFor(() => handle.getStep() === "generating");
 
     stdin.write("\r");
-    await sleep(50);
+    await sleep(20);
     expect(handle.getStep()).toBe("generating");
   });
 
@@ -514,7 +514,7 @@ describe("Esc config-step chain with skipped steps", () => {
     stdin.write("3");
     await waitFor(() => handle.getStep() === "source-input");
     stdin.write("requirements text");
-    await sleep(20);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "custom");
     stdin.write("\r");
@@ -540,7 +540,7 @@ describe("Esc config-step chain with skipped steps", () => {
     stdin.write("3");
     await waitFor(() => handle.getStep() === "source-input");
     stdin.write("req");
-    await sleep(20);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "custom");
     stdin.write("\r");
@@ -564,7 +564,7 @@ describe("Esc config-step chain with skipped steps", () => {
     stdin.write("3");
     await waitFor(() => handle.getStep() === "source-input");
     stdin.write("req");
-    await sleep(20);
+    await sleep(5);
     stdin.write("\r");
     await waitFor(() => handle.getStep() === "custom");
     stdin.write("\r");
@@ -669,7 +669,7 @@ describe("runInteractiveMode harness step (Ctrl+G)", () => {
 
     // Pressing Ctrl+G while in "done" should be a no-op.
     stdin.write("\x07");
-    await sleep(50);
+    await sleep(20);
     expect(handle.getStep()).toBe("done");
   });
 
@@ -681,7 +681,7 @@ describe("runInteractiveMode harness step (Ctrl+G)", () => {
 
     // Out-of-range number is ignored.
     stdin.write("9");
-    await sleep(50);
+    await sleep(20);
     expect(handle.getStep()).toBe("harness");
   });
 
@@ -695,7 +695,7 @@ describe("runInteractiveMode harness step (Ctrl+G)", () => {
     expect(handle.getStep()).toBe("source-type");
 
     stdin.write("\x07");
-    await sleep(50);
+    await sleep(20);
     expect(handle.getStep()).toBe("source-type");
   });
 

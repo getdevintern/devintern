@@ -2,8 +2,8 @@
  * Test suite for git worktree utilities
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
@@ -12,7 +12,48 @@ import { execSync } from "child_process";
 describe("Git Worktree Utilities - Single Reusable Worktree", () => {
   let testDir: string;
   let repoDir: string;
+  let templateDir: string;
+  let templateRepo: string;
   let originalWorktreeEnv: string | undefined;
+
+  beforeAll(() => {
+    // Build the fixture repository once; each test copies it into its own
+    // unique temp directory, which preserves isolation while avoiding
+    // replaying the git command sequence for every test.
+    templateDir = mkdtempSync(join(tmpdir(), "worktree-template-"));
+    templateRepo = join(templateDir, "test-repo");
+    mkdirSync(templateRepo, { recursive: true });
+
+    // Initialize git repo
+    execSync("git init", { cwd: templateRepo });
+    execSync("git config user.email 'test@test.com'", { cwd: templateRepo });
+    execSync("git config user.name 'Test User'", { cwd: templateRepo });
+
+    // Create initial commit
+    writeFileSync(join(templateRepo, "README.md"), "# Test Repo\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Initial commit'", { cwd: templateRepo });
+
+    // Create a feature branch
+    execSync("git checkout -b feature/test-branch", { cwd: templateRepo });
+    writeFileSync(join(templateRepo, "feature.txt"), "Feature content\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Add feature'", { cwd: templateRepo });
+    execSync("git checkout main || git checkout master", { cwd: templateRepo });
+
+    // Create another branch
+    execSync("git checkout -b feature/another-branch", { cwd: templateRepo });
+    writeFileSync(join(templateRepo, "another.txt"), "Another content\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Add another'", { cwd: templateRepo });
+    execSync("git checkout main || git checkout master", { cwd: templateRepo });
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(templateDir, { recursive: true, force: true });
+    } catch {}
+  });
 
   beforeEach(async () => {
     // Create unique test directory for each test to enable parallel execution
@@ -29,33 +70,9 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     originalWorktreeEnv = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(testDir, "review-worktree");
 
-    // Create a test git repository
+    // Copy the pre-built template repository into this test's directory
     repoDir = join(testDir, "test-repo");
-    mkdirSync(repoDir, { recursive: true });
-
-    // Initialize git repo
-    execSync("git init", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test User'", { cwd: repoDir });
-
-    // Create initial commit
-    writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
-
-    // Create a feature branch
-    execSync("git checkout -b feature/test-branch", { cwd: repoDir });
-    writeFileSync(join(repoDir, "feature.txt"), "Feature content\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Add feature'", { cwd: repoDir });
-    execSync("git checkout main || git checkout master", { cwd: repoDir });
-
-    // Create another branch
-    execSync("git checkout -b feature/another-branch", { cwd: repoDir });
-    writeFileSync(join(repoDir, "another.txt"), "Another content\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Add another'", { cwd: repoDir });
-    execSync("git checkout main || git checkout master", { cwd: repoDir });
+    cpSync(templateRepo, repoDir, { recursive: true });
 
     // Create .devintern-code directory
     mkdirSync(join(repoDir, ".devintern-code"), { recursive: true });
@@ -241,7 +258,59 @@ describe("Git Worktree with Origin Remote", () => {
   let testDir: string;
   let repoDir: string;
   let bareDir: string;
+  let templateDir: string;
+  let templateRepo: string;
+  let templateBare: string;
   let originalWorktreeEnv: string | undefined;
+
+  beforeAll(() => {
+    // Build the fixture repositories once; each test copies them into its own
+    // unique temp directory, preserving isolation while avoiding replaying
+    // the git command sequence (including pushes) for every test.
+    templateDir = mkdtempSync(join(tmpdir(), "worktree-origin-template-"));
+    templateBare = join(templateDir, "bare-origin");
+    templateRepo = join(templateDir, "test-repo");
+    mkdirSync(templateBare, { recursive: true });
+    mkdirSync(templateRepo, { recursive: true });
+
+    // Create bare repo to serve as origin
+    execSync("git init --bare", { cwd: templateBare });
+
+    execSync("git init", { cwd: templateRepo });
+    execSync("git config user.email 'test@test.com'", { cwd: templateRepo });
+    execSync("git config user.name 'Test User'", { cwd: templateRepo });
+
+    // Create initial commit and push to origin
+    writeFileSync(join(templateRepo, "README.md"), "# Test Repo\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Initial commit'", { cwd: templateRepo });
+    execSync(`git remote add origin ${templateBare}`, { cwd: templateRepo });
+    execSync("git push -u origin master", { cwd: templateRepo });
+
+    // Create feature branch and push
+    execSync("git checkout -b feature/test-branch", { cwd: templateRepo });
+    writeFileSync(join(templateRepo, "feature.txt"), "Feature content\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Add feature'", { cwd: templateRepo });
+    execSync("git push -u origin feature/test-branch", { cwd: templateRepo });
+
+    // Create another feature branch and push
+    execSync("git checkout master", { cwd: templateRepo });
+    execSync("git checkout -b feature/another-branch", { cwd: templateRepo });
+    writeFileSync(join(templateRepo, "another.txt"), "Another content\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Add another'", { cwd: templateRepo });
+    execSync("git push -u origin feature/another-branch", { cwd: templateRepo });
+
+    // Return to master
+    execSync("git checkout master", { cwd: templateRepo });
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(templateDir, { recursive: true, force: true });
+    } catch {}
+  });
 
   beforeEach(async () => {
     testDir = join(
@@ -255,43 +324,13 @@ describe("Git Worktree with Origin Remote", () => {
     originalWorktreeEnv = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(testDir, "review-worktree");
 
-    // Create bare repo to serve as origin
+    // Copy the pre-built bare origin and working repo into this test's
+    // directory, then re-point the remote at the copied origin
     bareDir = join(testDir, "bare-origin");
-    mkdirSync(bareDir, { recursive: true });
-    execSync("git init --bare", { cwd: bareDir });
-
-    // Create test repo
     repoDir = join(testDir, "test-repo");
-    mkdirSync(repoDir, { recursive: true });
-
-    execSync("git init", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test User'", { cwd: repoDir });
-
-    // Create initial commit and push to origin
-    writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
-    execSync(`git remote add origin ${bareDir}`, { cwd: repoDir });
-    execSync("git push -u origin master", { cwd: repoDir });
-
-    // Create feature branch and push
-    execSync("git checkout -b feature/test-branch", { cwd: repoDir });
-    writeFileSync(join(repoDir, "feature.txt"), "Feature content\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Add feature'", { cwd: repoDir });
-    execSync("git push -u origin feature/test-branch", { cwd: repoDir });
-
-    // Create another feature branch and push
-    execSync("git checkout master", { cwd: repoDir });
-    execSync("git checkout -b feature/another-branch", { cwd: repoDir });
-    writeFileSync(join(repoDir, "another.txt"), "Another content\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Add another'", { cwd: repoDir });
-    execSync("git push -u origin feature/another-branch", { cwd: repoDir });
-
-    // Return to master
-    execSync("git checkout master", { cwd: repoDir });
+    cpSync(templateBare, bareDir, { recursive: true });
+    cpSync(templateRepo, repoDir, { recursive: true });
+    execSync(`git remote set-url origin ${bareDir}`, { cwd: repoDir });
   });
 
   afterEach(() => {

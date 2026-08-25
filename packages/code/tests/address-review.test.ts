@@ -1,10 +1,30 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
+
+// Async so tests in describe.concurrent can overlap their subprocesses.
+async function runAddressReviewCLI(
+  args: string[],
+  options: { cwd: string; env?: Record<string, string> },
+): Promise<{ stdout: string; stderr: string; status: number }> {
+  const proc = Bun.spawn({
+    cmd: ["bun", CLI_PATH, "address-review", ...args],
+    cwd: options.cwd,
+    env: { ...process.env, ...options.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited.then((code) => code ?? 0),
+  ]);
+  return { stdout, stderr, status };
+}
 
 /**
  * Extract Agent's summary from its output.
@@ -207,152 +227,143 @@ The changes have been committed and are ready for review.
   });
 });
 
-describe("Address Review - Worktree Integration", () => {
-  let testDir: string;
+// Create a throwaway git repo with an initial commit and a test branch.
+// Single shell call: spawning git once keeps the suite fast.
+function makeTestRepo(): string {
+  const testDir = join(
+    tmpdir(),
+    `address-review-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+  );
+  mkdirSync(testDir, { recursive: true });
+  writeFileSync(join(testDir, "README.md"), "# Test Repo\n");
+  writeFileSync(join(testDir, "test.txt"), "test content\n");
+  const setup = [
+    "git init",
+    "git config user.name 'Test User'",
+    "git config user.email 'test@example.com'",
+    "git add .",
+    "git commit -m 'Initial commit'",
+    "git checkout -b test-branch",
+    "git add .",
+    "git commit -m 'Test commit'",
+  ].join(" && ");
+  spawnSync("sh", ["-c", setup], { cwd: testDir });
+  return testDir;
+}
 
-  beforeEach(() => {
-    // Create unique temp directory for this test run
-    testDir = join(
-      tmpdir(),
-      `address-review-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-    );
-    mkdirSync(testDir, { recursive: true });
+function makeTestDir(): string {
+  const testDir = join(
+    tmpdir(),
+    `address-review-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+  );
+  mkdirSync(testDir, { recursive: true });
+  return testDir;
+}
 
-    // Initialize git repo
-    spawnSync("git", ["init"], { cwd: testDir });
-    spawnSync("git", ["config", "user.name", "Test User"], { cwd: testDir });
-    spawnSync("git", ["config", "user.email", "test@example.com"], {
-      cwd: testDir,
-    });
+function cleanupDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    // Ignore cleanup errors
+  }
+}
 
-    // Create initial commit
-    writeFileSync(join(testDir, "README.md"), "# Test Repo\n");
-    spawnSync("git", ["add", "."], { cwd: testDir });
-    spawnSync("git", ["commit", "-m", "Initial commit"], { cwd: testDir });
-
-    // Create a test branch
-    spawnSync("git", ["checkout", "-b", "test-branch"], { cwd: testDir });
-    writeFileSync(join(testDir, "test.txt"), "test content\n");
-    spawnSync("git", ["add", "."], { cwd: testDir });
-    spawnSync("git", ["commit", "-m", "Test commit"], { cwd: testDir });
-  });
-
-  afterEach(() => {
-    // Clean up temp directory
+describe.concurrent("Address Review - Worktree Integration", () => {
+  test("should attempt to prepare review worktree when processing PR", async () => {
+    const testDir = makeTestRepo();
     try {
-      rmSync(testDir, { recursive: true, force: true });
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-  });
-
-  test("should attempt to prepare review worktree when processing PR", () => {
-    const result = spawnSync(
-      "bun",
-      [
-        CLI_PATH,
-        "address-review",
-        "https://github.com/test/repo/pull/123",
-        "--no-push",
-        "--no-reply",
-      ],
-      {
-        encoding: "utf8",
-        timeout: 15000,
-        cwd: testDir,
-        env: {
-          ...process.env,
-          // Mock credentials - will fail auth but that's expected
-          GITHUB_TOKEN: "test-token",
-          // Keep token-first path; inherited App creds can change failure modes.
-          GITHUB_APP_ID: "",
-          GITHUB_APP_PRIVATE_KEY_PATH: "",
-          GITHUB_APP_PRIVATE_KEY_BASE64: "",
+      const result = await runAddressReviewCLI(
+        ["https://github.com/test/repo/pull/123", "--no-push", "--no-reply"],
+        {
+          cwd: testDir,
+          env: {
+            // Mock credentials - will fail auth but that's expected
+            GITHUB_TOKEN: "test-token",
+            // Keep token-first path; inherited App creds can change failure modes.
+            GITHUB_APP_ID: "",
+            GITHUB_APP_PRIVATE_KEY_PATH: "",
+            GITHUB_APP_PRIVATE_KEY_BASE64: "",
+          },
         },
-      },
-    );
+      );
 
-    // The command will fail because of bad credentials, but we can verify it:
-    // 1. Successfully parsed the PR URL
-    // 2. Attempted to fetch PR details (which failed at GitHub API, not earlier)
-    const output = result.stdout + result.stderr;
+      // The command will fail because of bad credentials, but we can verify it:
+      // 1. Successfully parsed the PR URL
+      // 2. Attempted to fetch PR details (which failed at GitHub API, not earlier)
+      const output = result.stdout + result.stderr;
 
-    // Check that it at least got to the GitHub API step (not worktree yet due to auth failure)
-    expect(output).toContain("Parsing PR URL");
-    expect(output).toContain("Fetching PR details");
+      // Check that it at least got to the GitHub API step (not worktree yet due to auth failure)
+      expect(output).toContain("Parsing PR URL");
+      expect(output).toContain("Fetching PR details");
 
-    // Fail at the GitHub API step (auth or transient network) — proves we got past arg parsing.
-    expect(output).toMatch(
-      /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ECONNREFUSED|fetch failed/i,
-    );
+      // Fail at the GitHub API step (auth or transient network) — proves we got past arg parsing.
+      expect(output).toMatch(
+        /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ECONNREFUSED|fetch failed/i,
+      );
 
-    // Command should exit with non-zero status due to API failure
-    expect(result.status).not.toBe(0);
+      // Command should exit with non-zero status due to API failure
+      expect(result.status).not.toBe(0);
+    } finally {
+      cleanupDir(testDir);
+    }
   }, 20000);
 
-  test("should use review worktree path in error messages", () => {
-    const result = spawnSync(
-      "bun",
-      [
-        CLI_PATH,
-        "address-review",
-        "https://github.com/test/repo/pull/123",
-        "--verbose",
-        "--no-push",
-        "--no-reply",
-      ],
-      {
-        encoding: "utf8",
-        timeout: 10000,
-        cwd: testDir,
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: "test-token",
+  test("should use review worktree path in error messages", async () => {
+    const testDir = makeTestRepo();
+    try {
+      const result = await runAddressReviewCLI(
+        ["https://github.com/test/repo/pull/123", "--verbose", "--no-push", "--no-reply"],
+        {
+          cwd: testDir,
+          env: {
+            GITHUB_TOKEN: "test-token",
+          },
         },
-      },
-    );
+      );
 
-    const output = result.stdout + result.stderr;
+      const output = result.stdout + result.stderr;
 
-    // Should mention the worktree path if verbose
-    if (output.includes("verbose") || output.includes("Preparing")) {
-      // The output should reference /tmp/devintern-review-worktree/ somewhere
-      expect(output).toMatch(/review-worktree/i);
+      // Should mention the worktree path if verbose
+      if (output.includes("verbose") || output.includes("Preparing")) {
+        // The output should reference /tmp/devintern-review-worktree/ somewhere
+        expect(output).toMatch(/review-worktree/i);
+      }
+    } finally {
+      cleanupDir(testDir);
     }
   });
 
-  test("address-review command should accept required parameters", () => {
-    const result = spawnSync("bun", [CLI_PATH, "address-review", "--help"], {
-      encoding: "utf8",
-      timeout: 5000,
-      cwd: testDir,
-    });
+  test("address-review command should accept required parameters", async () => {
+    const testDir = makeTestRepo();
+    try {
+      const result = await runAddressReviewCLI(["--help"], { cwd: testDir });
 
-    expect(result.stdout).toContain("address-review");
-    expect(result.stdout).toContain("pr-url");
-    expect(result.stdout).toContain("--no-push");
-    expect(result.stdout).toContain("--no-reply");
-    expect(result.status).toBe(0);
+      expect(result.stdout).toContain("address-review");
+      expect(result.stdout).toContain("pr-url");
+      expect(result.stdout).toContain("--no-push");
+      expect(result.stdout).toContain("--no-reply");
+      expect(result.status).toBe(0);
+    } finally {
+      cleanupDir(testDir);
+    }
   });
 
-  test("address-review should error on invalid PR URL", () => {
-    const result = spawnSync(
-      "bun",
-      [CLI_PATH, "address-review", "not-a-valid-url", "--no-push", "--no-reply"],
-      {
-        encoding: "utf8",
-        timeout: 10000,
+  test("address-review should error on invalid PR URL", async () => {
+    const testDir = makeTestRepo();
+    try {
+      const result = await runAddressReviewCLI(["not-a-valid-url", "--no-push", "--no-reply"], {
         cwd: testDir,
         env: {
-          ...process.env,
           GITHUB_TOKEN: "test-token",
         },
-      },
-    );
+      });
 
-    const output = result.stdout + result.stderr;
-    expect(output).toMatch(/Invalid.*PR URL|github\.com/i);
-    expect(result.status).not.toBe(0);
+      const output = result.stdout + result.stderr;
+      expect(output).toMatch(/Invalid.*PR URL|github\.com/i);
+      expect(result.status).not.toBe(0);
+    } finally {
+      cleanupDir(testDir);
+    }
   });
 
   test("worktree should be clean after processing (no uncommitted changes)", () => {
@@ -375,126 +386,147 @@ describe("Address Review - Worktree Integration", () => {
   });
 
   test("worktree directory should be in tmp and isolated from main repo", () => {
-    // Verify that the review-worktree is in /tmp and not in the main repo
-    const worktreePath = "/tmp/devintern-review-worktree";
+    const testDir = makeTestDir();
+    try {
+      // Verify that the review-worktree is in /tmp and not in the main repo
+      const worktreePath = "/tmp/devintern-review-worktree";
 
-    // Worktree should be outside the main repo (in /tmp)
-    expect(worktreePath).toMatch(/^\/tmp\//);
-    expect(worktreePath).not.toContain(testDir);
+      // Worktree should be outside the main repo (in /tmp)
+      expect(worktreePath).toMatch(/^\/tmp\//);
+      expect(worktreePath).not.toContain(testDir);
+    } finally {
+      cleanupDir(testDir);
+    }
   });
 
   test("worktree should handle branch switching correctly", () => {
     // This test verifies the worktree path is isolated and not in the main repo
-    const worktreePath = "/tmp/devintern-review-worktree";
+    const testDir = makeTestRepo();
+    try {
+      const worktreePath = "/tmp/devintern-review-worktree";
 
-    // Create a second test branch
-    spawnSync("git", ["checkout", "main"], { cwd: testDir });
-    spawnSync("git", ["checkout", "-b", "test-branch-2"], { cwd: testDir });
-    writeFileSync(join(testDir, "test2.txt"), "test content 2\n");
-    spawnSync("git", ["add", "."], { cwd: testDir });
-    spawnSync("git", ["commit", "-m", "Second test commit"], { cwd: testDir });
+      // Create a second test branch
+      spawnSync("git", ["checkout", "main"], { cwd: testDir });
+      spawnSync("git", ["checkout", "-b", "test-branch-2"], { cwd: testDir });
+      writeFileSync(join(testDir, "test2.txt"), "test content 2\n");
+      spawnSync("git", ["add", "."], { cwd: testDir });
+      spawnSync("git", ["commit", "-m", "Second test commit"], { cwd: testDir });
 
-    // The worktree is shared globally across all tests and repos,
-    // so we just verify the path is correct and isolated
-    expect(worktreePath).toBe("/tmp/devintern-review-worktree");
-    expect(worktreePath).not.toContain(testDir);
+      // The worktree is shared globally across all tests and repos,
+      // so we just verify the path is correct and isolated
+      expect(worktreePath).toBe("/tmp/devintern-review-worktree");
+      expect(worktreePath).not.toContain(testDir);
+    } finally {
+      cleanupDir(testDir);
+    }
   });
 
   test("worktree should not interfere with main repository state", () => {
     // Verify main repo stays on its current branch even after worktree operations
-    const originalBranch = spawnSync("git", ["branch", "--show-current"], {
-      cwd: testDir,
-      encoding: "utf8",
-    }).stdout.trim();
-
-    // Run a command that would use the worktree (will fail but that's OK)
-    spawnSync(
-      "bun",
-      [
-        CLI_PATH,
-        "address-review",
-        "https://github.com/test/repo/pull/123",
-        "--no-push",
-        "--no-reply",
-      ],
-      {
+    const testDir = makeTestRepo();
+    try {
+      const originalBranch = spawnSync("git", ["branch", "--show-current"], {
         cwd: testDir,
         encoding: "utf8",
-        timeout: 10000,
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: "test-token",
+      }).stdout.trim();
+
+      // Run a command that would use the worktree (will fail but that's OK)
+      spawnSync(
+        "bun",
+        [
+          CLI_PATH,
+          "address-review",
+          "https://github.com/test/repo/pull/123",
+          "--no-push",
+          "--no-reply",
+        ],
+        {
+          cwd: testDir,
+          encoding: "utf8",
+          timeout: 10000,
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: "test-token",
+          },
         },
-      },
-    );
+      );
 
-    // Main repo should still be on the same branch
-    const currentBranch = spawnSync("git", ["branch", "--show-current"], {
-      cwd: testDir,
-      encoding: "utf8",
-    }).stdout.trim();
+      // Main repo should still be on the same branch
+      const currentBranch = spawnSync("git", ["branch", "--show-current"], {
+        cwd: testDir,
+        encoding: "utf8",
+      }).stdout.trim();
 
-    expect(currentBranch).toBe(originalBranch);
+      expect(currentBranch).toBe(originalBranch);
+    } finally {
+      cleanupDir(testDir);
+    }
   });
 
   test("worktree should isolate changes from main repository", () => {
-    const worktreePath = "/tmp/devintern-review-worktree";
+    const testDir = makeTestDir();
+    try {
+      const worktreePath = "/tmp/devintern-review-worktree";
 
-    // Create a file in main repo
-    const mainRepoFile = join(testDir, "main-repo-file.txt");
-    writeFileSync(mainRepoFile, "main repo content\n");
+      // Create a file in main repo
+      const mainRepoFile = join(testDir, "main-repo-file.txt");
+      writeFileSync(mainRepoFile, "main repo content\n");
 
-    // Verify worktree and main repo are separate directories
-    // (worktrees are separate working directories that isolate changes)
-    expect(worktreePath).not.toBe(testDir);
+      // Verify worktree and main repo are separate directories
+      // (worktrees are separate working directories that isolate changes)
+      expect(worktreePath).not.toBe(testDir);
 
-    // The worktree is shared globally across all tests and repos,
-    // so we just verify the path is isolated from the test directory
-    expect(worktreePath).toMatch(/^\/tmp\//);
-    expect(worktreePath).not.toContain(testDir);
-
-    // Clean up
-    if (existsSync(mainRepoFile)) {
-      rmSync(mainRepoFile);
+      // The worktree is shared globally across all tests and repos,
+      // so we just verify the path is isolated from the test directory
+      expect(worktreePath).toMatch(/^\/tmp\//);
+      expect(worktreePath).not.toContain(testDir);
+    } finally {
+      // Clean up
+      cleanupDir(testDir);
     }
   });
 
   test("worktree should have proper remote tracking configured", () => {
-    const worktreePath = "/tmp/devintern-review-worktree";
+    const testDir = makeTestRepo();
+    try {
+      const worktreePath = "/tmp/devintern-review-worktree";
 
-    // Create a branch and set up remote tracking manually for testing
-    spawnSync("git", ["checkout", "-b", "tracking-test"], { cwd: testDir });
-    writeFileSync(join(testDir, "tracking-test.txt"), "tracking test\n");
-    spawnSync("git", ["add", "."], { cwd: testDir });
-    spawnSync("git", ["commit", "-m", "Tracking test commit"], {
-      cwd: testDir,
-    });
+      // Create a branch and set up remote tracking manually for testing
+      spawnSync("git", ["checkout", "-b", "tracking-test"], { cwd: testDir });
+      writeFileSync(join(testDir, "tracking-test.txt"), "tracking test\n");
+      spawnSync("git", ["add", "."], { cwd: testDir });
+      spawnSync("git", ["commit", "-m", "Tracking test commit"], {
+        cwd: testDir,
+      });
 
-    // If worktree exists and is a git directory
-    if (existsSync(worktreePath) && existsSync(join(worktreePath, ".git"))) {
-      // Check that the branch has upstream configured
-      const upstreamResult = spawnSync(
-        "git",
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        {
-          cwd: worktreePath,
-          encoding: "utf8",
-        },
-      );
+      // If worktree exists and is a git directory
+      if (existsSync(worktreePath) && existsSync(join(worktreePath, ".git"))) {
+        // Check that the branch has upstream configured
+        const upstreamResult = spawnSync(
+          "git",
+          ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+          {
+            cwd: worktreePath,
+            encoding: "utf8",
+          },
+        );
 
-      // If there's an upstream, it should be in the format origin/branch-name
-      if (upstreamResult.status === 0 && upstreamResult.stdout.trim()) {
-        expect(upstreamResult.stdout.trim()).toMatch(/^origin\//);
+        // If there's an upstream, it should be in the format origin/branch-name
+        if (upstreamResult.status === 0 && upstreamResult.stdout.trim()) {
+          expect(upstreamResult.stdout.trim()).toMatch(/^origin\//);
+        }
+        // If no upstream is set, that's also fine - we just can't test it
       }
-      // If no upstream is set, that's also fine - we just can't test it
+      // If worktree doesn't exist yet, test passes
+    } finally {
+      cleanupDir(testDir);
     }
-    // If worktree doesn't exist yet, test passes
   });
 
   test("worktree should not have any untracked files after processing", () => {
+    // If worktree exists, verify no untracked files are left behind
     const worktreePath = "/tmp/devintern-review-worktree";
 
-    // If worktree exists, verify no untracked files are left behind
     if (existsSync(worktreePath)) {
       const statusResult = spawnSync("git", ["status", "--porcelain"], {
         cwd: worktreePath,

@@ -51,39 +51,43 @@ describe("resolveConflictsOnPr", () => {
     testDir = mkdtempSync(join(tmpdir(), "devintern-conflict-"));
     process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(testDir, "review-worktree");
 
-    // Bare origin with main + a conflicting feature branch.
+    // Bare origin with main + a conflicting feature branch, plus the worker's
+    // source checkout. One shell call keeps per-test git spawn overhead low.
+    const script = [
+      "set -e",
+      "git init --bare origin.git",
+      "git clone -q origin.git seed",
+      "cd seed",
+      "git config user.email test@test.com",
+      "git config user.name Test",
+      "printf 'hello\\n' > greeting.txt",
+      "git add .",
+      "git commit -qm init",
+      "git branch -M main",
+      "git push -qu origin main",
+      // Feature branch edits the same line one way...
+      "git checkout -qb feature/change",
+      "printf 'hello from the branch\\n' > greeting.txt",
+      "git add .",
+      "git commit -qm 'branch change'",
+      "git push -qu origin feature/change",
+      // ...and main moves the other way.
+      "git checkout -q main",
+      "printf 'hello from main\\n' > greeting.txt",
+      "git add .",
+      "git commit -qm 'main change'",
+      "git push -q origin main",
+      // The worker's source checkout (what cwd points at).
+      "cd ..",
+      "git clone -q origin.git checkout",
+      "git -C checkout config user.email worker@test.com",
+      "git -C checkout config user.name Worker",
+    ].join("\n");
+    execSync(script, { cwd: testDir, encoding: "utf8", stdio: "ignore" });
+
     originDir = join(testDir, "origin.git");
-    execSync(`git init --bare ${originDir}`);
-
-    seedDir = join(testDir, "seed");
-    execSync(`git clone ${originDir} ${seedDir}`, { stdio: "ignore" });
-    git(seedDir, "config user.email test@test.com");
-    git(seedDir, "config user.name Test");
-    writeFileSync(join(seedDir, "greeting.txt"), "hello\n");
-    git(seedDir, "add .");
-    git(seedDir, 'commit -m "init"');
-    git(seedDir, "branch -M main");
-    git(seedDir, "push -u origin main");
-
-    // Feature branch edits the same line one way...
-    git(seedDir, "checkout -b feature/change");
-    writeFileSync(join(seedDir, "greeting.txt"), "hello from the branch\n");
-    git(seedDir, "add .");
-    git(seedDir, 'commit -m "branch change"');
-    git(seedDir, "push -u origin feature/change");
-
-    // ...and main moves the other way.
-    git(seedDir, "checkout main");
-    writeFileSync(join(seedDir, "greeting.txt"), "hello from main\n");
-    git(seedDir, "add .");
-    git(seedDir, 'commit -m "main change"');
-    git(seedDir, "push origin main");
-
-    // The worker's source checkout (what cwd points at).
     repoDir = join(testDir, "checkout");
-    execSync(`git clone ${originDir} ${repoDir}`, { stdio: "ignore" });
-    git(repoDir, "config user.email worker@test.com");
-    git(repoDir, "config user.name Worker");
+    seedDir = join(testDir, "seed");
   });
 
   afterEach(() => {
