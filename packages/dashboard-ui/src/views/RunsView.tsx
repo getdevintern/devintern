@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/table";
 import { usePoll } from "@/lib/api";
 import type { RunOrigin, RunStatus, RunsResponse } from "@/lib/api";
+import { formatRunOrigin } from "@/lib/run-origin";
 import { formatDuration, formatTime } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
@@ -28,7 +29,13 @@ const STATUS_FILTERS: (RunStatus | "all")[] = [
   "deferred",
   "abandoned",
 ];
-const ORIGIN_FILTERS: (RunOrigin | "all")[] = ["all", "task", "pr_mention", "scheduled"];
+const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
+  "all",
+  "task",
+  "pr_mention",
+  "conflict_resolution",
+  "scheduled",
+];
 
 /** Paginated, filterable list of worker runs. */
 export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
@@ -63,6 +70,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
         <FilterGroup
           options={ORIGIN_FILTERS}
           value={origin}
+          formatLabel={(option) => (option === "all" ? "all" : formatRunOrigin(option))}
           onChange={(next) => {
             setOrigin(next);
             setPage(0);
@@ -105,11 +113,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                       (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)}
                   </TableCell>
                   <TableCell className="px-4 py-2.5 text-muted-foreground">
-                    {run.origin === "task"
-                      ? "task"
-                      : run.origin === "scheduled"
-                        ? "scheduled"
-                        : "PR mention"}
+                    {formatRunOrigin(run.origin)}
                   </TableCell>
                   <TableCell className="px-4 py-2.5 text-muted-foreground">
                     {run.harness ?? "–"}

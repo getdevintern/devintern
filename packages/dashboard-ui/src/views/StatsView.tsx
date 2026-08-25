@@ -11,10 +11,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { usePoll } from "@/lib/api";
-import type { StatsResponse } from "@/lib/api";
+import type { RunOrigin, StatsResponse } from "@/lib/api";
+import { formatRunOrigin } from "@/lib/run-origin";
 import { formatDuration, formatRate } from "@/lib/utils";
 
 const WINDOWS = ["7d", "30d", "90d", "all"] as const;
+const RUN_ORIGINS: RunOrigin[] = ["task", "pr_mention", "conflict_resolution", "scheduled"];
 
 /** Hand-rolled SVG bar chart of runs per week (keeps dependencies minimal). */
 function WeeklyBars({ weeks }: { weeks: { weekStart: string; count: number }[] }) {
@@ -81,7 +83,10 @@ export function StatsView() {
             <StatTile
               label="Runs"
               value={stats.totals.runs}
-              hint={`${stats.byOrigin.task} task${stats.byOrigin.task === 1 ? "" : "s"}, ${stats.byOrigin.pr_mention} PR mention${stats.byOrigin.pr_mention === 1 ? "" : "s"}, ${stats.byOrigin.scheduled} scheduled`}
+              hint={RUN_ORIGINS.map((origin) => {
+                const count = stats.byOrigin[origin];
+                return `${count} ${formatRunOrigin(origin)}${count === 1 ? "" : "s"}`;
+              }).join(", ")}
             />
             <StatTile
               label="Success rate"

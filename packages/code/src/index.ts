@@ -85,6 +85,7 @@ import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
+import { parseEnvInteger } from "./lib/env-integer";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
@@ -639,6 +640,12 @@ if (process.argv[2] === "init") {
         console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
         console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
         console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
+        console.log(
+          "  WORKER_BASE_SYNC_QUIET_SECONDS Stable-head window before PR base sync (default: 30)",
+        );
+        console.log(
+          "  WEBHOOK_MAX_RETRIES Retry limit for queued and PR base-sync work (default: 3)",
+        );
         console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
         process.exit(0);
       }
@@ -761,6 +768,7 @@ if (process.argv[2] === "init") {
       const { ReviewPollingAcquirer, runAddressReviewViaCli, runResolveConflictsViaCli } =
         await import("./lib/review-polling-acquirer");
       const { GitHubReviewsClient } = await import("./lib/github-reviews");
+      const { RunStore } = await import("./lib/run-recorder");
       const gh = new GitHubReviewsClient({ preferAppAuth: true });
       const ownerOf = (repo: string) => repo.split("/")[0] as string;
       const nameOf = (repo: string) => repo.split("/")[1] as string;
@@ -769,7 +777,11 @@ if (process.argv[2] === "init") {
         new ReviewPollingAcquirer({
           intervalSeconds,
           workerState: new WorkerState(dbPath),
-          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
+          queue: new WebhookQueue({
+            dbPath,
+            legacyDbPath: LEGACY_DB_PATH,
+            maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
+          }),
           github: {
             fetchPr: (repo, n, etag) =>
               gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
@@ -790,9 +802,24 @@ if (process.argv[2] === "init") {
               );
               return result.data ?? [];
             },
+            isBaseIncluded: async (repo, baseSha, headSha) => {
+              const result = await gh.conditionalGet<{ status: string }>(
+                `/repos/${repo}/compare/${baseSha}...${headSha}`,
+                ownerOf(repo),
+                nameOf(repo),
+              );
+              const status = result.data?.status;
+              return status ? status === "ahead" || status === "identical" : null;
+            },
           },
           addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
-          resolveConflicts: (repo, n) => runResolveConflictsViaCli(repo, n),
+          resolveConflicts: (repo, n, expected) =>
+            runResolveConflictsViaCli(repo, n, {
+              expectedHeadSha: expected.headSha,
+              expectedBaseSha: expected.baseSha,
+            }),
+          quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+          runStore: new RunStore(dbPath),
           verbose,
         }),
       );
@@ -1269,10 +1296,16 @@ if (process.argv[2] === "init") {
     let prUrl: string | undefined;
     let noPush = false;
     let verbose = false;
+    let expectedHeadSha: string | undefined;
+    let expectedBaseSha: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
         noPush = true;
+      } else if (args[i] === "--expected-head") {
+        expectedHeadSha = args[++i];
+      } else if (args[i] === "--expected-base") {
+        expectedBaseSha = args[++i];
       } else if (args[i] === "-v" || args[i] === "--verbose") {
         verbose = true;
       } else if (args[i] === "--help" || args[i] === "-h") {
@@ -1305,14 +1338,24 @@ if (process.argv[2] === "init") {
 
     const { resolveConflictsOnPr } = await import("./lib/conflict-resolver");
     try {
-      const result = await resolveConflictsOnPr(prUrl, { noPush, verbose });
+      const result = await resolveConflictsOnPr(prUrl, {
+        noPush,
+        verbose,
+        expectedHeadSha,
+        expectedBaseSha,
+      });
+      const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
+      if (Number.isInteger(resultFd) && resultFd >= 3) {
+        const { writeSync } = await import("fs");
+        writeSync(resultFd, `${JSON.stringify(result)}\n`);
+      }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
       }
-      process.exit(result.outcome === "failed" ? 1 : 0);
+      process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
       console.error(`❌ Error: ${(error as Error).message}`);
-      process.exit(1);
+      process.exitCode = 1;
     }
   })();
 } else if (process.argv[2] === "login") {

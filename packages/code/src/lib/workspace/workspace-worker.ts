@@ -11,6 +11,7 @@
 import { join } from "path";
 
 import { LockManager } from "../lock-manager";
+import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
@@ -436,6 +437,7 @@ async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetResolveConflicts,
     createFleetMentionHandler,
     createFleetTaskEvaluator,
     fleetGitHubSlugs,
@@ -459,11 +461,13 @@ async function buildFleetEventAcquirers(options: {
       verbose,
     };
     const addressPr = createFleetAddressPr(eventDeps);
+    const resolveConflicts = createFleetResolveConflicts(eventDeps);
     const handleMention = createFleetMentionHandler(eventDeps);
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
+    const { RunStore } = await import("../run-recorder");
     acquirers.push(
       new ReviewPollingAcquirer({
         intervalSeconds,
@@ -489,8 +493,20 @@ async function buildFleetEventAcquirers(options: {
             );
             return result.data ?? [];
           },
+          isBaseIncluded: async (repo, baseSha, headSha) => {
+            const result = await gh.conditionalGet<{ status: string }>(
+              `/repos/${repo}/compare/${baseSha}...${headSha}`,
+              ownerOf(repo),
+              nameOf(repo),
+            );
+            const status = result.data?.status;
+            return status ? status === "ahead" || status === "identical" : null;
+          },
         },
         addressPr,
+        resolveConflicts,
+        quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+        runStore: new RunStore(state.dbPath),
         verbose,
       }),
     );

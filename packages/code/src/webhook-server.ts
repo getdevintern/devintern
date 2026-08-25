@@ -23,6 +23,7 @@ import {
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
+import { parseEnvInteger } from "./lib/env-integer";
 import { resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
 import { GitHubAppAuth } from "./lib/github-app-auth";
@@ -1462,7 +1463,7 @@ export async function startWebhookServer(
   const dbPath = resolveQueueDbPath();
   webhookQueue = new WebhookQueue({
     dbPath,
-    maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || "3", 10),
+    maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
     verbose: finalConfig.debug,
     legacyDbPath: LEGACY_DB_PATH,
   });

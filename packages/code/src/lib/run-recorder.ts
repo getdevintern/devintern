@@ -15,7 +15,7 @@
 import { Database } from "bun:sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention" | "scheduled";
+export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled";
 
 export type RunStatus =
   | "in_progress"
@@ -51,6 +51,8 @@ export interface RunMeta {
   repo?: string;
   prNumber?: number;
   automationId?: string;
+  /** Explicit attempt for non-task durable events. */
+  attempt?: number;
 }
 
 export interface RunRecord extends RunMeta {
@@ -235,7 +237,7 @@ export class RunStore {
    * @returns The new run id
    */
   createRun(meta: RunMeta): number {
-    const attempt = meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null;
+    const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
       `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number,
        automation_id, status, started_at, attempt)
@@ -426,7 +428,12 @@ export class RunStore {
       escalated: 0,
       abandoned: 0,
     };
-    const byOrigin: Record<RunOrigin, number> = { task: 0, pr_mention: 0, scheduled: 0 };
+    const byOrigin: Record<RunOrigin, number> = {
+      task: 0,
+      pr_mention: 0,
+      conflict_resolution: 0,
+      scheduled: 0,
+    };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
