@@ -773,6 +773,17 @@ if (process.argv[2] === "init") {
       const ownerOf = (repo: string) => repo.split("/")[0] as string;
       const nameOf = (repo: string) => repo.split("/")[1] as string;
 
+      // Any run still in_progress predates this process: the previous worker
+      // was killed or crashed mid-run. Mark those failed so the dashboard and
+      // stats do not show phantom active runs forever.
+      const runStore = new RunStore(dbPath);
+      const reapedRuns = runStore.reapOrphanedRuns();
+      if (reapedRuns > 0) {
+        console.warn(
+          `⚠️  Marked ${reapedRuns} in-progress run(s) as failed: previous worker exited before they finished`,
+        );
+      }
+
       acquirers.push(
         new ReviewPollingAcquirer({
           intervalSeconds,
@@ -819,7 +830,7 @@ if (process.argv[2] === "init") {
               expectedBaseSha: expected.baseSha,
             }),
           quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
-          runStore: new RunStore(dbPath),
+          runStore,
           verbose,
         }),
       );

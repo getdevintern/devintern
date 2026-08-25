@@ -20,6 +20,7 @@
 
 import { spawn } from "child_process";
 
+import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
@@ -103,6 +104,50 @@ const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
 const prRunTails = new Map<string, Promise<void>>();
 
+/**
+ * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
+ * before it is exhausted. Defers do not consume attempts (they model benign
+ * branch movement), so without a cap a deterministic defer would retry
+ * silently on every poll tick forever.
+ */
+const MAX_CONSECUTIVE_DEFERS = 3;
+
+/** Default wall-clock budget for one resolve-conflicts subprocess. */
+export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Resolver subprocess budget; `WORKER_RESOLVE_TIMEOUT_SECONDS` overrides (0 disables). */
+function resolveTimeoutMs(overrideMs?: number): number {
+  if (overrideMs !== undefined) return overrideMs;
+  return (
+    parseEnvInteger("WORKER_RESOLVE_TIMEOUT_SECONDS", DEFAULT_RESOLVE_TIMEOUT_MS / 1000, {
+      min: 0,
+    }) * 1000
+  );
+}
+
+/** Kill a spawned process and (best-effort) its whole process group. */
+function killProcessTree(child: ReturnType<typeof spawn>): void {
+  if (child.pid === undefined) return;
+  try {
+    // The child is spawned detached, so it leads its own process group;
+    // the negative pid signals every descendant (e.g. agent harnesses).
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  setTimeout(() => {
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }, 5_000).unref();
+}
+
 /** Serialize automatic pipelines that target the same PR worktree. */
 async function serializePrRun<T>(
   repo: string,
@@ -161,6 +206,8 @@ export function runResolveConflictsViaCli(
     env?: Record<string, string | undefined>;
     expectedHeadSha?: string;
     expectedBaseSha?: string;
+    /** Hard wall-clock budget; defaults to `WORKER_RESOLVE_TIMEOUT_SECONDS` (30min). */
+    timeoutMs?: number;
     /** Override the CLI entrypoint and output handling (subprocess tests). */
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
@@ -180,6 +227,7 @@ function runResolveSubcommand(
   opts: {
     cwd?: string;
     env?: Record<string, string | undefined>;
+    timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
   },
@@ -189,16 +237,31 @@ function runResolveSubcommand(
     let result: AutomaticResolveResult | null = null;
     let resultOutput = "";
     let resultOverflow = false;
+    let timedOut = false;
     const maxResultBytes = 64 * 1024;
+    // Detached so the whole process group (agent harnesses included) can be
+    // signalled on timeout.
     const child = spawn(
       process.execPath,
       [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
       {
+        detached: true,
         stdio: ["inherit", opts.outputStdio ?? "inherit", opts.outputStdio ?? "inherit", "pipe"],
         cwd: opts.cwd,
         env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
       },
     );
+    const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            console.warn(
+              `⏱️  resolve-conflicts for ${prUrl} exceeded ${Math.round(timeoutMs / 1000)}s; killing`,
+            );
+            killProcessTree(child);
+          }, timeoutMs)
+        : null;
     child.stdio[3]?.on("data", (chunk: Buffer) => {
       if (resultOverflow) return;
       if (Buffer.byteLength(resultOutput) + chunk.byteLength > maxResultBytes) {
@@ -209,6 +272,11 @@ function runResolveSubcommand(
       resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        resolve({ outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` });
+        return;
+      }
       if (!resultOverflow) {
         for (const line of resultOutput.trimEnd().split("\n")) {
           try {
@@ -238,9 +306,10 @@ function runResolveSubcommand(
         },
       );
     });
-    child.on("error", (error) =>
-      resolve({ outcome: "failed", message: `failed to spawn resolver: ${error.message}` }),
-    );
+    child.on("error", (error) => {
+      if (timer) clearTimeout(timer);
+      resolve({ outcome: "failed", message: `failed to spawn resolver: ${error.message}` });
+    });
   });
 }
 
@@ -278,6 +347,8 @@ export class ReviewPollingAcquirer implements Acquirer {
     { baseSha: string; headSha: string; included: boolean }
   >();
   private prCache = new Map<string, PolledPr>();
+  /** Consecutive `deferred` resolver outcomes per base-sync event. */
+  private deferCounts = new Map<string, number>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -521,10 +592,27 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
     const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
     if (terminal) {
+      this.deferCounts.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
     } else if (result.outcome === "deferred") {
-      queue.deferBaseSyncAttempt(externalId);
+      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
+      this.deferCounts.set(externalId, defers);
+      console.warn(
+        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
+          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
+      );
+      if (defers >= MAX_CONSECUTIVE_DEFERS) {
+        console.warn(
+          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
+            `the head or base moves again`,
+        );
+        this.deferCounts.delete(externalId);
+        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+      } else {
+        queue.deferBaseSyncAttempt(externalId);
+      }
     } else {
+      console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
       const exhausted = queue.failBaseSyncEvent(externalId, result.message);
       if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
     }

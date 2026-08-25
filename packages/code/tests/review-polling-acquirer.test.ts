@@ -582,6 +582,51 @@ describe("ReviewPollingAcquirer", () => {
     expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(false);
   });
 
+  test("repeated defers eventually exhaust the event instead of retrying forever", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "behind",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    const made = makeAcquirer(gh, {
+      resolveResults: [
+        { outcome: "deferred", message: "stale sha one" },
+        { outcome: "deferred", message: "stale sha two" },
+        { outcome: "deferred", message: "stale sha three" },
+        { outcome: "clean", message: "must not run" },
+      ],
+    });
+
+    await made.acquirer.tick();
+    await made.acquirer.tick();
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(false);
+
+    // Third consecutive defer exhausts the event terminally.
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(3);
+    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1")).toBe(true);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1")?.status).toBe("failed");
+
+    // A terminal defer means later ticks do not re-run the resolver at all.
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(3);
+
+    // The base moving again opens a fresh event.
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([
+      "acme/widgets#42",
+      "acme/widgets#42",
+      "acme/widgets#42",
+      "acme/widgets#42",
+    ]);
+  });
+
   test("a head race during pre-run revalidation stays pending without an attempt", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     let fetches = 0;
@@ -672,7 +717,8 @@ const fd = Number(process.env.DEVINTERN_RESULT_FD);
 if (behavior === "large") process.stdout.write("x".repeat(2 * 1024 * 1024));
 if (behavior === "spoof") console.log('DEVINTERN_RESOLVE_RESULT={"outcome":"failed","message":"spoof"}');
 if (behavior === "malformed") writeSync(fd, "not-json\\n");
-if (behavior !== "malformed" && behavior !== "deferred-fallback") {
+if (behavior === "hang") setInterval(() => {}, 60_000);
+if (behavior !== "malformed" && behavior !== "deferred-fallback" && behavior !== "hang") {
   const outcome = behavior === "deferred" ? "deferred" : "clean";
   writeSync(fd, JSON.stringify({ outcome, message: behavior }) + "\\n");
 }
@@ -699,6 +745,21 @@ process.exitCode = behavior === "deferred" || behavior === "deferred-fallback" ?
         outcome: "failed",
         message: "resolver exited with code 1",
       });
+
+      // A hung subprocess is killed at the configured budget.
+      const hung = await Promise.race([
+        runResolveConflictsViaCli("acme/widgets", 6, {
+          entrypoint: fixture,
+          outputStdio: "ignore",
+          timeoutMs: 300,
+          env: { ...process.env, RESULT_BEHAVIOR: "hang" },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout not enforced")), 15_000),
+        ),
+      ]);
+      expect(hung.outcome).toBe("failed");
+      expect(hung.message).toContain("timed out");
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
