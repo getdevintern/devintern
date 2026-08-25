@@ -929,12 +929,13 @@ export class Utils {
   /**
    * Push the current branch to `origin`, setting upstream on first push.
    *
-   * @param options - Verbose logging and working directory
+   * @param options - Push safety, verbose logging, and working directory
    */
   static async pushCurrentBranch(options?: {
     verbose?: boolean;
     cwd?: string;
     expectedBranch?: string;
+    expectedRemoteSha?: string;
   }): Promise<{
     success: boolean;
     message: string;
@@ -943,6 +944,7 @@ export class Utils {
     const verbose = options?.verbose ?? false;
     const cwd = options?.cwd;
     const expectedBranch = options?.expectedBranch;
+    const expectedRemoteSha = options?.expectedRemoteSha;
 
     try {
       // Get current branch name (from the specified working directory)
@@ -975,6 +977,19 @@ export class Utils {
         };
       }
 
+      if (expectedRemoteSha) {
+        const descendant = await Utils.executeGitCommand(
+          ["merge-base", "--is-ancestor", expectedRemoteSha, "HEAD"],
+          { cwd },
+        );
+        if (!descendant.success) {
+          return {
+            success: false,
+            message: `Refusing to push: HEAD is not descended from expected remote commit '${expectedRemoteSha}'.`,
+          };
+        }
+      }
+
       // If the agent (or a previous attempt) already published this exact
       // commit, do not invoke `git push`. A no-op push still runs pre-push
       // hooks, and a flaky hook (e.g. a 30s test timeout) would abort PR
@@ -1002,9 +1017,12 @@ export class Utils {
       );
 
       let pushResult;
-      if (remoteBranchExists.success && remoteBranchExists.output.trim()) {
+      if (expectedRemoteSha || (remoteBranchExists.success && remoteBranchExists.output.trim())) {
         // Remote branch exists, just push
-        pushResult = await Utils.executeGitCommand(["push", "origin", currentBranch], {
+        const lease = expectedRemoteSha
+          ? [`--force-with-lease=refs/heads/${currentBranch}:${expectedRemoteSha}`]
+          : [];
+        pushResult = await Utils.executeGitCommand(["push", ...lease, "origin", currentBranch], {
           verbose,
           cwd,
         });

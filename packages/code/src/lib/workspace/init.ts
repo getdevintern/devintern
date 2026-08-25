@@ -62,6 +62,17 @@ default_branch = "main"
 #   owned_paths = ["src/checkout/**"]          # paths this repo owns
 #   depends_on = ["backend"]                   # code-level dependencies
 # branch_prefix = "task"                       # feature-branch convention (default "feature")
+
+# Recurring work is loaded once when the worker starts. Each occurrence runs
+# the prompt through the normal task pipeline as a local markdown task.
+# Cron uses the worker host timezone; interval values support m, h, and d.
+#
+# [[automations]]
+# id = "weekday-maintenance"
+# enabled = true
+# cron = "0 9 * * 1-5"       # exactly one of cron / interval
+# prompt = "Inspect dependency health and fix one safe issue."
+# repo = "backend"            # required in a multi-repo workspace
 `;
 
 const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or

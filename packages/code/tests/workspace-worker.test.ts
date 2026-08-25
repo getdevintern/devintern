@@ -5,7 +5,11 @@ import { tmpdir } from "os";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
-import { createWorkspaceTaskAcquirer, fleetTaskArgs } from "../src/lib/workspace/workspace-worker";
+import {
+  createWorkspaceTaskAcquirer,
+  fleetTaskArgs,
+  resolveWorkspaceAutomationContext,
+} from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
@@ -345,5 +349,61 @@ labels = ["backend"]
     expect(skips).toHaveLength(1);
     expect(skips[0]?.reason).toBe("unplanned");
     expect(skips[0]?.candidates).toEqual(["backend", "shared-config"]);
+  });
+});
+
+describe("resolveWorkspaceAutomationContext", () => {
+  test("does not prepare the repository when its run lock is unavailable", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+      () => ({
+        acquire: () => ({ success: false, message: "busy" }),
+        release() {},
+      }),
+    );
+
+    expect(context).toBeNull();
+    expect(repoManager.calls).toEqual([]);
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("pins occurrence task files to the workspace home", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.taskFileDir).toBe(join(workspaceDir, "automations"));
+    expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
+    rmSync(workspaceDir, { recursive: true, force: true });
   });
 });

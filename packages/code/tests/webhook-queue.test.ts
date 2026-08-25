@@ -138,6 +138,28 @@ describe("WebhookQueue", () => {
       expect(queue.cleanupProcessedEvents(-1)).toBe(2);
       expect(queue.hasProcessed("github", "fresh-id")).toBe(false);
     });
+
+    test("cleanup removes terminal base-sync rows but preserves pending work", () => {
+      const observe = (externalId: string) =>
+        queue.observeBaseSyncEvent({
+          externalId,
+          repo: "acme/widgets",
+          prNumber: 42,
+          baseSha: externalId,
+          headSha: "head1",
+        });
+      observe("completed");
+      queue.completeBaseSyncEvent("github:base-sync", "completed");
+      observe("exhausted");
+      queue.exhaustBaseSyncEvent("github:base-sync", "exhausted", "retry limit reached");
+      observe("pending");
+
+      queue.cleanupProcessedEvents(-1);
+
+      expect(queue.getBaseSyncEvent("completed")).toBeNull();
+      expect(queue.getBaseSyncEvent("exhausted")).toBeNull();
+      expect(queue.getBaseSyncEvent("pending")?.status).toBe("pending");
+    });
   });
 
   describe("legacy database migration", () => {

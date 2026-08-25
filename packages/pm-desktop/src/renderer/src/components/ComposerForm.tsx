@@ -1,5 +1,5 @@
 import { Paperclip, Sparkles, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -53,6 +53,11 @@ interface ComposerFormProps {
   labelsError: string | null;
   labelsTruncated?: boolean;
   onRetryLabels?: () => void;
+  /**
+   * Increment to move keyboard focus into the source editor (Quick Capture
+   * opens a fresh ticket ready to type). The initial value is ignored.
+   */
+  focusEditorSignal?: number;
 }
 
 export function ComposerForm({
@@ -64,6 +69,7 @@ export function ComposerForm({
   labelsError,
   labelsTruncated = false,
   onRetryLabels,
+  focusEditorSignal = 0,
 }: ComposerFormProps) {
   const status = useProjectStore((s) => s.status);
   const activeTicket = useActiveTicket();
@@ -71,9 +77,28 @@ export function ComposerForm({
   const patchComposer = useTicketWorkspacesStore((s) => s.patchComposer);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  // Quick Capture focus hand-off: on a signal change, focus whichever source
+  // editor matches the active tab. Source type is read via ref so switching
+  // tabs later does not steal focus. The baseline starts at 0 (not the current
+  // prop) so a capture that opens the very first ticket still focuses on mount.
+  const promptAreaRef = useRef<HTMLTextAreaElement>(null);
+  const figmaInputRef = useRef<HTMLInputElement>(null);
+  const lastFocusSignal = useRef(0);
+  const sourceTypeRef = useRef<SourceType>("prompt");
+  useEffect(() => {
+    if (focusEditorSignal === lastFocusSignal.current) return;
+    lastFocusSignal.current = focusEditorSignal;
+    if (sourceTypeRef.current === "figma") {
+      figmaInputRef.current?.focus();
+    } else {
+      promptAreaRef.current?.focus();
+    }
+  }, [focusEditorSignal]);
   // ComposerForm only mounts when a ticket is active, but guard defensively.
   if (!status || !activeTicket) return null;
   const values = activeTicket.composer;
+  sourceTypeRef.current = values.sourceType;
   const onChange = (patch: Partial<ComposerValues>) => patchComposer(activeTicket.id, patch);
 
   const activeTab = SOURCE_TABS.find((t) => t.type === values.sourceType)!;
@@ -138,6 +163,7 @@ export function ComposerForm({
 
       {values.sourceType === "figma" ? (
         <Input
+          ref={figmaInputRef}
           placeholder={activeTab.placeholder}
           value={content}
           onChange={(e) =>
@@ -159,6 +185,7 @@ export function ComposerForm({
           }}
         >
           <Textarea
+            ref={promptAreaRef}
             className="min-h-36 font-mono text-xs/relaxed"
             placeholder={activeTab.placeholder}
             value={content}

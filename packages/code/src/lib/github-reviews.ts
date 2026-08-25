@@ -33,6 +33,7 @@ export interface PullRequestInfo {
   };
   base: {
     ref: string;
+    sha: string;
   };
   html_url: string;
   /** Whether maintainers may push to a fork PR's branch. */
