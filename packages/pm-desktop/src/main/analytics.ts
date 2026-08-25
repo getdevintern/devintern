@@ -20,6 +20,7 @@ export type AnalyticsEvent =
   | "story_decomposed"
   | "task_created"
   | "analytics_opt_out"
+  | "quick_capture_invoked"
   | "update_available"
   | "update_downloaded"
   | "update_applied"

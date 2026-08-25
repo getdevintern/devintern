@@ -69,6 +69,12 @@ export interface TrackerSection<T = BaseProjectConfig> {
   };
 }
 
+/** Anonymous usage analytics preferences. */
+export interface AnalyticsSettings {
+  /** Set to false to disable anonymous usage analytics for this project. */
+  enabled?: boolean;
+}
+
 /**
  * Per-project configuration settings.
  *
@@ -80,6 +86,9 @@ export interface TrackerSection<T = BaseProjectConfig> {
  * honored for JIRA when no `jira` section exists.
  */
 export interface ProjectSettings {
+  /** Anonymous usage analytics preferences. */
+  analytics?: AnalyticsSettings;
+
   /**
    * Legacy project configurations (backward compatible).
    *

@@ -11,7 +11,8 @@
  * gating of its own.
  */
 
-import { runAddressReviewViaCli } from "../review-polling-acquirer";
+import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
+import type { AutomaticResolveResult } from "../review-polling-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -36,6 +37,8 @@ export interface FleetEventDeps {
     prNumber: number,
     opts: { cwd: string; env: Record<string, string | undefined> },
   ) => Promise<boolean>;
+  /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
+  runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
 }
 
@@ -97,6 +100,33 @@ export function createFleetAddressPr(
       return runInBase();
     }
     return deps.scheduler.schedule<boolean>(repo.name, { label: `${slug}#${prNumber}` }, runInBase);
+  };
+}
+
+/** Build the fleet base-sync runner using the same per-repo checkout/env as reviews. */
+export function createFleetResolveConflicts(
+  deps: FleetEventDeps,
+): (
+  slug: string,
+  prNumber: number,
+  expected: { headSha: string; baseSha: string },
+) => Promise<AutomaticResolveResult> {
+  const { config, workspaceDir, repoManager } = deps;
+  const runResolve = deps.runResolve ?? runResolveConflictsViaCli;
+  return async (slug, prNumber, expected) => {
+    const repo = repoBySlug(config, slug);
+    if (!repo) {
+      return { outcome: "skipped", message: "repository is not configured in this workspace" };
+    }
+    await repoManager.ensureBareClone(repo);
+    await repoManager.fetch(repo.name);
+    const base = await repoManager.ensureBaseWorktree(repo);
+    return runResolve(slug, prNumber, {
+      cwd: base,
+      env: buildRepoEnv(repo, workspaceDir),
+      expectedHeadSha: expected.headSha,
+      expectedBaseSha: expected.baseSha,
+    });
   };
 }
 

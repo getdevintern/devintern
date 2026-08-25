@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, per-task worktrees, and opt-in parallel execution across repos"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-22
+dateModified: 2026-08-24
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -56,12 +56,35 @@ project = "BACK"
 repo = "frontend"
 project = "WEB"
 labels = ["frontend"]
+
+[[automations]]
+id = "backend-maintenance"
+enabled = true
+interval = "6h"
+repo = "backend"
+prompt = "Inspect the backend and implement one safe maintenance improvement."
+
+[[automations]]
+id = "weekly-frontend-cleanup"
+enabled = true
+cron = "0 9 * * 1"
+repo = "frontend"
+prompt = "Review the frontend and clean up one source of recurring noise."
 ```
 
 - `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[workspace].parallel_across_repos` must be `true` or `false`; `[workspace].max_concurrency` must be a positive whole number (`1`, `2`, …). Invalid values fail startup with a clear message.
+
+### How workspace automations differ from single-repo ones
+
+The scheduling is identical; only where the work runs changes:
+
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`.
+- It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
+- Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 
 ## Parallel execution across repositories
 
@@ -131,7 +154,7 @@ devintern worker --workspace /path/to/workspace.toml
 devintern worker --no-workspace   # force single-repo mode in the current repo
 ```
 
-The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode.
+The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
 
 One systemd unit runs the whole fleet:
 
@@ -153,7 +176,7 @@ WantedBy=multi-user.target
 
 With GitHub credentials in the workspace `.env`, the fleet worker also reacts to PR activity across every GitHub repo in the workspace:
 
-- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically.
+- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed.
 - **Relay (instant events)**: set `WORKER_RELAY_URL` and `LICENSE_KEY` in the workspace `.env`. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Events for repositories not in the workspace are ignored.
 

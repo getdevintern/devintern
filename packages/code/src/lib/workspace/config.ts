@@ -1,6 +1,8 @@
 import { readFileSync } from "fs";
 
 import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
+import { parseAutomationEntries } from "../automation-config";
+import type { AutomationConfig } from "../automation-config";
 import { parseToml } from "./toml";
 
 /** Workspace-wide settings from the `[workspace]` table. */
@@ -66,6 +68,7 @@ export interface WorkspaceConfig {
   defaults: WorkspaceDefaults;
   repos: RepoConfig[];
   routing: RoutingRule[];
+  automations: AutomationConfig[];
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
@@ -301,6 +304,12 @@ export function parseWorkspaceConfig(
     routing.push(rule);
   }
 
+  const automationResult = parseAutomationEntries(document.automations, {
+    sourceLabel,
+    repoNames,
+  });
+  errors.push(...automationResult.errors);
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
@@ -310,6 +319,7 @@ export function parseWorkspaceConfig(
     defaults,
     repos,
     routing,
+    automations: automationResult.automations,
   };
 }
 

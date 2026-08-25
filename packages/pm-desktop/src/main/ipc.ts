@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from "electron";
+import { BrowserWindow, app, clipboard, dialog, globalShortcut, ipcMain, shell } from "electron";
 import { MAX_ATTACHMENTS, attachmentExtensionError } from "@getdevintern/pm/attachments";
 import { EngineError } from "@getdevintern/pm/engine";
 import type { EngineCallEvents } from "@getdevintern/pm/engine";
@@ -26,6 +26,7 @@ import type {
   GenerateStoryRequest,
   InitializeProjectRequest,
   IpcResult,
+  QuickCaptureConfig,
   SubtaskDraft,
   SubtaskOutcome,
   UpdateProjectTrackerRequest,
@@ -53,6 +54,11 @@ import { connectManagedGitHubRepo } from "./managed-clone.ts";
 import { listProjectBindings } from "./project-bindings.ts";
 import { persistTrackerCredentials, readProjectEnv } from "./project-env.ts";
 import { removeConnectedProject } from "./remove-connected-project.ts";
+import {
+  getQuickCaptureStatus,
+  initQuickCapture,
+  setQuickCaptureSettings,
+} from "./quick-capture.ts";
 import {
   beginAgentRequest,
   detectGitRepository,
@@ -141,7 +147,20 @@ async function withAgentRequest<T>(requestId: string, run: () => Promise<T>): Pr
   }
 }
 
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers(options?: {
+  /** Window factory for Quick Capture when no live window exists yet. */
+  createWindow?: () => BrowserWindow;
+}): void {
+  // Quick Capture ports: the global shortcut may fire while no window exists
+  // (macOS background, closed window), so main owns creation + focus.
+  initQuickCapture({
+    globalShortcut,
+    readClipboardText: () => clipboard.readText(),
+    getWindow: () => BrowserWindow.getAllWindows().find((window) => !window.isDestroyed()),
+    createWindow: options?.createWindow,
+    activateApp: () => app.focus({ steal: true }),
+  });
+
   handle(IPC_CHANNELS.chooseProjectDir, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     // Electron 43+ opens Downloads when defaultPath is omitted; seed from
@@ -658,6 +677,20 @@ export function registerIpcHandlers(): void {
   handle(IPC_CHANNELS.snoozeUpdate, async () => snoozeUpdate());
 
   handle(IPC_CHANNELS.dismissUpdateError, async () => dismissUpdateError());
+
+  handle(IPC_CHANNELS.getQuickCaptureStatus, async () => {
+    return getQuickCaptureStatus();
+  });
+
+  handle(IPC_CHANNELS.setQuickCaptureSettings, async (_event, config: QuickCaptureConfig) => {
+    if (!config || typeof config !== "object") {
+      throw Object.assign(new Error("Invalid Quick Capture settings."), { code: "invalid_input" });
+    }
+    if (typeof config.enabled !== "boolean") {
+      throw Object.assign(new Error("Invalid Quick Capture settings."), { code: "invalid_input" });
+    }
+    return setQuickCaptureSettings(config);
+  });
 
   // Push status changes to all renderer windows (progress, available, errors).
   subscribeUpdateStatus((status) => {

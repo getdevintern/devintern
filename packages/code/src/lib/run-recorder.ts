@@ -19,7 +19,7 @@ import {
   resolveQueueDbPath,
 } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention";
+export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled";
 
 export type RunStatus =
   | "in_progress"
@@ -54,6 +54,9 @@ export interface RunMeta {
   branch?: string;
   repo?: string;
   prNumber?: number;
+  automationId?: string;
+  /** Explicit attempt for non-task durable events. */
+  attempt?: number;
 }
 
 export interface RunRecord extends RunMeta {
@@ -61,6 +64,8 @@ export interface RunRecord extends RunMeta {
   /** 1-based attempt number for the task (null-ish for pr_mention runs). */
   attempt?: number;
   prUrl?: string;
+  ticketKey?: string;
+  ticketUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
   startedAt: number;
@@ -186,7 +191,10 @@ export class RunStore {
         outcome_reason TEXT,
         started_at INTEGER NOT NULL,
         finished_at INTEGER,
-        attempt INTEGER
+        attempt INTEGER,
+        automation_id TEXT,
+        ticket_key TEXT,
+        ticket_url TEXT
       )
     `);
 
@@ -195,6 +203,16 @@ export class RunStore {
     if (!columns.some((c) => c.name === "attempt")) {
       this.db.run("ALTER TABLE runs ADD COLUMN attempt INTEGER");
     }
+    if (!columns.some((c) => c.name === "automation_id")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN automation_id TEXT");
+    }
+    if (!columns.some((c) => c.name === "ticket_key")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN ticket_key TEXT");
+    }
+    if (!columns.some((c) => c.name === "ticket_url")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN ticket_url TEXT");
+    }
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_runs_task_key ON runs(task_key)
@@ -224,10 +242,11 @@ export class RunStore {
    * @returns The new run id
    */
   createRun(meta: RunMeta): number {
-    const attempt = meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null;
+    const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
-      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number,
+       automation_id, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -236,6 +255,7 @@ export class RunStore {
         meta.branch ?? null,
         meta.repo ?? null,
         meta.prNumber ?? null,
+        meta.automationId ?? null,
         Date.now(),
         attempt,
       ],
@@ -413,7 +433,12 @@ export class RunStore {
       escalated: 0,
       abandoned: 0,
     };
-    const byOrigin: Record<RunOrigin, number> = { task: 0, pr_mention: 0 };
+    const byOrigin: Record<RunOrigin, number> = {
+      task: 0,
+      pr_mention: 0,
+      conflict_resolution: 0,
+      scheduled: 0,
+    };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
@@ -423,7 +448,7 @@ export class RunStore {
 
     for (const row of rows) {
       byStatus[row.status] += 1;
-      byOrigin[row.origin] += 1;
+      byOrigin[row.origin] = (byOrigin[row.origin] ?? 0) + 1;
 
       const week = weekStartIso(row.started_at);
       weekCounts.set(week, (weekCounts.get(week) ?? 0) + 1);
@@ -507,6 +532,9 @@ export class RunStore {
       startedAt: row.started_at as number,
       finishedAt: (row.finished_at as number | null) ?? undefined,
       attempt: (row.attempt as number | null) ?? undefined,
+      automationId: (row.automation_id as string | null) ?? undefined,
+      ticketKey: (row.ticket_key as string | null) ?? undefined,
+      ticketUrl: (row.ticket_url as string | null) ?? undefined,
     };
   }
 

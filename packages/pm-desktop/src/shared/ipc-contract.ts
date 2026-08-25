@@ -20,6 +20,7 @@ import type { PmInitContext, PmTrackerInfo } from "@getdevintern/pm/init";
 import type { UpdateStatus } from "./auto-update.ts";
 import type { ProjectBindingInfo } from "./project-binding.ts";
 import type { ProjectGitSyncStatus } from "./project-git-sync.ts";
+import type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
 import type { ToolValidation } from "./tool-validation.ts";
 
 export type {
@@ -47,6 +48,8 @@ export {
   projectGitSyncLabel,
   shouldShowUpdateFromRemote,
 } from "./project-git-sync.ts";
+export type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
+export { DEFAULT_QUICK_CAPTURE_ACCELERATOR } from "./quick-capture.ts";
 export type {
   InstalledHarnessSummary,
   RequiredToolId,
@@ -437,6 +440,15 @@ export interface PmDesktopApi {
   dismissUpdateError(): Promise<IpcResult<UpdateStatus>>;
   /** Subscribe to auto-update status changes. */
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
+  /** Current Quick Capture registration snapshot (hotkey state + conflict error). */
+  getQuickCaptureStatus(): Promise<IpcResult<QuickCaptureStatus>>;
+  /**
+   * Persist Quick Capture config and (un)register the OS global hotkey.
+   * Returns the resulting status; `error` explains conflicts.
+   */
+  setQuickCaptureSettings(config: QuickCaptureConfig): Promise<IpcResult<QuickCaptureStatus>>;
+  /** Subscribe to Quick Capture invocations from the OS global shortcut. */
+  onQuickCapture(callback: (event: QuickCaptureEvent) => void): () => void;
 }
 
 export const IPC_CHANNELS = {
@@ -491,4 +503,7 @@ export const IPC_CHANNELS = {
   snoozeUpdate: "pm:snooze-update",
   dismissUpdateError: "pm:dismiss-update-error",
   updateStatus: "pm:update-status",
+  getQuickCaptureStatus: "pm:get-quick-capture-status",
+  setQuickCaptureSettings: "pm:set-quick-capture-settings",
+  quickCapture: "pm:quick-capture",
 } as const;
