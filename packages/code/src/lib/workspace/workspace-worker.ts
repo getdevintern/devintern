@@ -382,7 +382,7 @@ export interface RunWorkspaceWorkerOptions {
  * across repos up to `[workspace].max_concurrency` when
  * `[workspace].parallel_across_repos` is enabled.
  *
- * The caller has already passed the license and team-automation gates.
+ * The caller has already passed the license gate.
  */
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const workspaceDir = resolveWorkspaceDir();

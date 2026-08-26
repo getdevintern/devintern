@@ -9,6 +9,7 @@
 
 ### Changed
 
+- **Workspace (multi-repo) mode no longer requires a Team subscription**: any valid automation entitlement — including the Supporter one-time license (`solo-automation`) — now runs `devintern worker` in workspace mode, matching published pricing where Supporter covers automation across your own repos. The team-tier gate was removed after the existing automation license check; unlicensed and invalid-license runs still fail as before, and grace-window cached solo entitlements now qualify too.
 - **Graceful worker shutdown drains the fleet**: on SIGINT/SIGTERM the worker stops acquiring events, cancels queued-but-unstarted tasks **with their dedupe marks rolled back** (they re-enter on the next start instead of being silently skipped), awaits in-flight runs so every per-repo lock is released cleanly, closes shared SQLite handles, then releases the workspace lock. A second signal exits immediately if a run appears hung; interrupted runs recover through the normal incomplete-attempt machinery
 - **Central state database uses WAL**: `queue.db` connections (webhook queue, worker state, run records, routing skips, fleet activity) now enable WAL journaling, a busy timeout, and NORMAL sync so concurrent fleet runs read and write history without `SQLITE_BUSY` failures; `WebhookQueue.removeProcessed` rolls back dedupe marks for accepted-but-cancelled work
 

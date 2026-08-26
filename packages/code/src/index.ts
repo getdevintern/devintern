@@ -22,7 +22,7 @@ import {
   requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense, requireTeamAutomation } from "@devintern/license-check";
+import { checkLicense, requireLicense } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -618,7 +618,7 @@ if (process.argv[2] === "init") {
         console.log("                      (same query language as batch --query runs)");
         console.log("  --workspace [path]  Fleet mode: serve every repo in the workspace");
         console.log("                      (~/.devintern/workspace.toml, or the given path).");
-        console.log("                      Auto-enabled when a workspace exists; team tier.");
+        console.log("                      Auto-enabled when a workspace exists.");
         console.log("  --no-workspace      Ignore an existing workspace; single-repo mode");
         console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
         console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
@@ -664,12 +664,11 @@ if (process.argv[2] === "init") {
 
     // Workspace (fleet) mode: one daemon serves every repo in the workspace.
     // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
-    // unless --no-workspace. Team-tier capability.
+    // unless --no-workspace.
     {
       const { hasWorkspace } = await import("./lib/workspace/paths");
       const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
       if (workspaceMode && !listen) {
-        requireTeamAutomation(licenseResult);
         const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
         await runWorkspaceWorker({
           workspacePath,

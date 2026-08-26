@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -268,6 +268,34 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(output).not.toMatch(/unknown option/i);
     expect(result.stdout).toContain("Processing");
     expect(result.stdout).toContain("TEST-123");
+  });
+
+  test("worker --workspace starts without a team-tier license", async () => {
+    // Empty workspace: getting past the license gate lands on the
+    // "No repos configured" startup error instead of a tier upgrade wall.
+    const wsDir = join(
+      tmpdir(),
+      `cli-ws-gate-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(wsDir, { recursive: true });
+    const configPath = join(wsDir, "workspace.toml");
+    writeFileSync(configPath, '[defaults]\ntracker = "markdown"\ntask_query = "status=todo"\n');
+
+    try {
+      const result = await runCLI(["worker", "--workspace", configPath]);
+      expect(result.timedOut).toBe(false);
+      const output = result.stdout + result.stderr;
+      expect(output).not.toContain("team automation subscription");
+      expect(output).not.toContain("single-repo automation only");
+      expect(output).toContain("No repos configured");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      try {
+        rmSync(wsDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   });
 });
 
