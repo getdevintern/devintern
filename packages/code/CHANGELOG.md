@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Workspace (multi-repo) mode no longer requires a Team subscription**: any valid automation entitlement — including the Supporter one-time license (`solo-automation`) — now runs `devintern worker` in workspace mode, matching published pricing where Supporter covers automation across your own repos. The team-tier gate was removed after the existing automation license check; unlicensed and invalid-license runs still fail as before, and grace-window cached solo entitlements now qualify too.
+
 ### Fixed
 
 - **Jira and Azure DevOps worker pickup no longer sticks after the first attempt**: the worker dedupes ready tasks by `(key, updated)`. Jira enhanced JQL search (`GET /rest/api/3/search/jql`) omitted `fields`, and Azure WIQL search batch-fetched titles without `System.ChangedDate`, so both recorded an empty stamp and never retried after a failed run — even when the ticket was edited. Jira search now requests `updated` (and the other issue fields used for routing); Azure search now fetches `System.ChangedDate`. The worker also logs when every matching task is skipped as already processed, and warns when search results have no update stamp, so this is visible in the worker log instead of looking like the poller is idle.
