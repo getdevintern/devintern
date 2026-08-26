@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Turn tracker tickets into pull requests with any coding agent. Self-hosted, BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
