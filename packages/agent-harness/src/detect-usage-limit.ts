@@ -44,9 +44,19 @@ const USAGE_LIMIT_PATTERNS = [
   // Keep subscription messages anchored to the whole line. Codex writes its
   // tool transcript to stderr, so a substring match also sees source such as
   // `super("Agent usage limit reached")` as though it were a CLI diagnostic.
-  /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
-  /^(?:error:\s*)?you have reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
-  /^(?:error:\s*)?(?:(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|opus|sonnet|fable 5|usage credit|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:error:\s*)?you(?: have|(?:'|’)ve) reached your (?:usage|session|account|weekly|monthly|fast|opus|sonnet|fable 5|usage credit) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:error:\s*)?(?:(?:usage|session|account|fast|opus|sonnet|fable 5|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  // Claude Code 2.1.218 exports these as USAGE_LIMIT_ERROR_PREFIXES.
+  /^(?:error:\s*)?(?:you(?:'|’)re out of (?:usage credits|extra usage)|your org is out of usage\s*·\s*(?:add funds to continue|contact your admin)|your seat type doesn(?:'|’)t include usage credits|your usage allocation has been disabled by your admin|your group(?:'|’)s usage limit is set to \$0)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  // Codex UsageLimitReachedError variants. Keep these whole-line anchored:
+  // Codex writes its complete tool transcript to stderr.
+  /^you(?:'|’)ve hit your usage limit\.\s+(?:(?:upgrade to (?:pro|plus)|visit https:\/\/chatgpt\.com\/codex\/settings\/usage|contact your admin)\b[^\n]*?)(?:or\s+)?try again at\s+[^\n.]+[.]?$/i,
+  /^you(?:'|’)ve hit your usage limit for [^.]+\.\s+switch to another model now, or try again at\s+[^\n.]+[.]?$/i,
+  /^your workspace is out of credits\.\s+(?:add credits to continue|ask your workspace owner to add credits)[.]?$/i,
+  /^you hit your spend cap set in your workspace\.\s+(?:increase your spend cap to continue|ask your workspace owner to increase the spend cap)[.]?$/i,
+  /^quota exceeded\.\s+check your plan and billing details[.]?$/i,
+  /^to use codex with your chatgpt plan, upgrade to plus\b[^\n]*$/i,
 ] as const;
 
 // These are intentionally evaluated line-by-line and only when the line looks
