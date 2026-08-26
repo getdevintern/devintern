@@ -39,6 +39,12 @@ export interface RepoConfig {
   defaultBranch?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
+  /**
+   * Extend automatic base sync to this repo's open, non-draft PRs authored
+   * by team members (`WORKER_BASE_SYNC_TEAM_PRS` equivalent). Requires a
+   * sandboxed agent; off by default.
+   */
+  syncTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
 }
@@ -287,6 +293,7 @@ export function parseWorkspaceConfig(
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
       envFile: readString(table, "env_file", label, errors),
+      syncTeamPrs: readOptionalBoolean(table, "sync_team_prs", label, errors),
       env: readEnvTable(table, label, errors),
     });
   }

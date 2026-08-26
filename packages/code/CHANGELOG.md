@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in base sync for teammates' open PRs (`WORKER_BASE_SYNC_TEAM_PRS`, fleet: `sync_team_prs` per repo)**: setting it extends the worker's automatic merge-conflict/base-behind sync from just the agent's own PRs to open, non-draft PRs authored by the repository's own team (`author_association` OWNER/MEMBER/COLLABORATOR/MAINTAIN) — useful when teammates' long-lived branches fall behind their base. Enabling it requires `AGENT_SANDBOX`: the worker refuses to start otherwise. Outside contributors and fork PRs are never auto-synced; discovery uses ETag-cached open-PR list polling (rate-limit friendly, first 100 open PRs per repo); review feedback stays an own-PR feature; every foreign sync is logged and recorded as a `conflict_resolution` run. Default remains off
+
 ### Changed
 
 - **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars

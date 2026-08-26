@@ -48,6 +48,7 @@ default_branch = "main"
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
+# sync_team_prs = true       # also base-sync teammates' open PRs (needs AGENT_SANDBOX)
 #
 # [[routing.rules]]
 # repo = "backend"
