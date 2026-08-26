@@ -22,18 +22,24 @@ export interface WorkspaceSettings {
    * Ignored (and validated anyway) while `parallel_across_repos` is false.
    */
   maxConcurrency?: number;
+  /** Serve the local observability dashboard from the worker process. */
+  dashboard: boolean;
+  /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
+  dashboardPort?: number;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
 export interface WorkspaceDefaults {
   /** Tracker driving the fleet query (must support polling). */
   tracker: string;
-  /** Tracker query the worker polls with (`WORKER_TASK_QUERY` equivalent). */
+  /** Tracker query the worker polls with. */
   taskQuery?: string;
-  /** Extra per-task CLI flags (`WORKER_TASK_ARGS` equivalent). */
+  /** Extra per-task CLI flags (default `--create-pr`). */
   workerTaskArgs?: string;
   /** Fallback default branch for repos that do not set one. */
   defaultBranch?: string;
+  /** Seconds between tracker poll ticks. */
+  pollIntervalSeconds: number;
 }
 
 /** One managed repository from a `[[repos]]` entry. */
@@ -72,6 +78,8 @@ export interface WorkspaceConfig {
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
+export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
+export const DEFAULT_DASHBOARD = true;
 
 /**
  * Safe default cap on concurrent fleet runs when
@@ -147,6 +155,45 @@ function readStringList(
   return (value as string[]).map((item) => item.trim());
 }
 
+function readOptionalBoolean(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+): boolean | undefined {
+  const value = table[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    errors.push(`${label}.${key} must be a boolean.`);
+    return undefined;
+  }
+  return value;
+}
+
+function readOptionalInteger(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+  bounds: { min: number; max?: number; message: string },
+): number | undefined {
+  const value = table[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < bounds.min) {
+    errors.push(bounds.message);
+    return undefined;
+  }
+  if (bounds.max !== undefined && value > bounds.max) {
+    errors.push(bounds.message);
+    return undefined;
+  }
+  return value;
+}
+
 function readEnvTable(
   table: Record<string, unknown>,
   label: string,
@@ -190,15 +237,24 @@ export function parseWorkspaceConfig(
   const errors: string[] = [];
 
   const workspaceTable = asTable(document.workspace, "[workspace]", errors);
-  const ttlValue = workspaceTable.worktrees_ttl_days;
-  let worktreesTtlDays = DEFAULT_WORKTREES_TTL_DAYS;
-  if (ttlValue !== undefined && ttlValue !== null) {
-    if (typeof ttlValue !== "number" || !Number.isInteger(ttlValue) || ttlValue < 1) {
-      errors.push("[workspace].worktrees_ttl_days must be a positive integer.");
-    } else {
-      worktreesTtlDays = ttlValue;
-    }
-  }
+  const worktreesTtlDays =
+    readOptionalInteger(workspaceTable, "worktrees_ttl_days", "[workspace]", errors, {
+      min: 1,
+      message: "[workspace].worktrees_ttl_days must be a positive integer.",
+    }) ?? DEFAULT_WORKTREES_TTL_DAYS;
+  const dashboard =
+    readOptionalBoolean(workspaceTable, "dashboard", "[workspace]", errors) ?? DEFAULT_DASHBOARD;
+  const dashboardPort = readOptionalInteger(
+    workspaceTable,
+    "dashboard_port",
+    "[workspace]",
+    errors,
+    {
+      min: 1,
+      max: 65535,
+      message: "[workspace].dashboard_port must be an integer between 1 and 65535.",
+    },
+  );
 
   const parallelValue = workspaceTable.parallel_across_repos;
   let parallelAcrossRepos = false;
@@ -239,6 +295,11 @@ export function parseWorkspaceConfig(
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
+    pollIntervalSeconds:
+      readOptionalInteger(defaultsTable, "poll_interval", "[defaults]", errors, {
+        min: 1,
+        message: "[defaults].poll_interval must be a positive integer (seconds).",
+      }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
   };
   if (!tracker) {
     errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
@@ -315,7 +376,7 @@ export function parseWorkspaceConfig(
   }
 
   return {
-    workspace: { worktreesTtlDays, parallelAcrossRepos, maxConcurrency },
+    workspace: { worktreesTtlDays, parallelAcrossRepos, maxConcurrency, dashboard, dashboardPort },
     defaults,
     repos,
     routing,

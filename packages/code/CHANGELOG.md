@@ -11,6 +11,15 @@
 
 - **Graceful worker shutdown drains the fleet**: on SIGINT/SIGTERM the worker stops acquiring events, cancels queued-but-unstarted tasks **with their dedupe marks rolled back** (they re-enter on the next start instead of being silently skipped), awaits in-flight runs so every per-repo lock is released cleanly, closes shared SQLite handles, then releases the workspace lock. A second signal exits immediately if a run appears hung; interrupted runs recover through the normal incomplete-attempt machinery
 - **Central state database uses WAL**: `queue.db` connections (webhook queue, worker state, run records, routing skips, fleet activity) now enable WAL journaling, a busy timeout, and NORMAL sync so concurrent fleet runs read and write history without `SQLITE_BUSY` failures; `WebhookQueue.removeProcessed` rolls back dedupe marks for accepted-but-cancelled work
+- **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars
+- **Worker dashboard is on by default**: `devintern worker` serves localhost:4400 unless `[workspace].dashboard = false`; dashboard startup failures no longer stop task processing
+- **Worker CLI is toml-backed**: query, poll interval, per-task flags, dashboard on/off, and dashboard port live in `workspace.toml`. `--query`, `--interval`, `--ui` / `--no-ui`, `--ui-port`, `--sandbox`, and the `WORKER_TASK_QUERY` / `WORKER_TASK_ARGS` / `WORKER_POLL_INTERVAL` env vars are removed from `devintern worker`. `--help` no longer lists operational env vars
+- **Direct webhooks have a dedicated command**: `devintern webhook serve` is the advanced repo-local listener. The legacy `devintern worker --listen`, `devintern serve`, `--no-workspace`, and cwd worker modes are removed; `devintern worker` now always requires a workspace
+
+### Fixed
+
+- **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
+- **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
 
 ## [2.5.0] - 2026-08-26
 
