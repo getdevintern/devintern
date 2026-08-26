@@ -100,7 +100,7 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
         status: "",
         reporter: "Unknown",
         created: "",
-        updated: "",
+        updated: item.changedDate || "",
         labels: [],
         components: [],
         fixVersions: [],
