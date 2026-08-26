@@ -44,7 +44,7 @@ Success and escalation rates are computed over finished runs only. Run duration 
 
 The dashboard has no authentication. It binds to localhost by default; binding to another host means anyone who can reach that address can read your run history, so keep it on your own machine or behind something that handles access for you.
 
-With `devintern worker`, use `--ui-port` to change the dashboard port or `--no-ui` to disable it (the worker's own `--port` belongs to the webhook listener). A dashboard startup failure is reported but does not stop task processing.
+With `devintern worker`, set `[workspace].dashboard = false` to disable the embedded dashboard or `[workspace].dashboard_port` to change its port. A dashboard startup failure is reported but does not stop task processing.
 
 ## JSON API
 

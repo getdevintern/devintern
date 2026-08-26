@@ -26,6 +26,9 @@ const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo lis
 [workspace]
 # Days before a leftover (failed-run) task worktree is swept.
 worktrees_ttl_days = 7
+# Local observability dashboard (http://localhost:4400). Set false to disable.
+dashboard = true
+# dashboard_port = 4400
 
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, azure-devops,
@@ -35,6 +38,8 @@ tracker = "jira"
 # task_query = "sprint in openSprints() AND labels = devintern"
 # Extra CLI flags per task run.
 worker_task_args = "--create-pr"
+# Seconds between tracker polls.
+poll_interval = 60
 default_branch = "main"
 
 # Add repos with \`devintern workspace import\` (run inside each repo), or by

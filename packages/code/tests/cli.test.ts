@@ -119,17 +119,25 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  test("should omit removed single-repo flags from worker help", async () => {
+  test("should omit removed flags and env vars from worker help", async () => {
     const result = await runCLI(["worker", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: devintern worker");
+    expect(result.stdout).toContain("--workspace <path>");
+    expect(result.stdout).toContain("workspace.toml");
     expect(result.stdout).not.toContain("--listen");
     expect(result.stdout).not.toContain("--no-workspace");
     expect(result.stdout).not.toContain("--host");
     expect(result.stdout).not.toContain("--port");
-    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("--no-ui");
+    expect(result.stdout).not.toContain("--query");
+    expect(result.stdout).not.toContain("Environment variables:");
+    expect(result.stdout).not.toContain("WORKER_TASK_QUERY");
+    expect(result.stdout).not.toContain("WORKER_POLL_INTERVAL");
   });
 
-  test("should reject removed single-repo worker flags", async () => {
-    for (const flag of ["--listen", "--no-workspace", "--port", "--host"]) {
+  test("should reject removed worker flags", async () => {
+    for (const flag of ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"]) {
       const result = await runCLI(["worker", flag]);
       expect(result.stderr).toContain(`${flag} has been removed from devintern worker`);
       expect(result.exitCode).toBe(1);
@@ -303,6 +311,19 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(output).not.toMatch(/unknown option/i);
     expect(result.stdout).toContain("Processing");
     expect(result.stdout).toContain("TEST-123");
+  });
+
+  test("worker --query points at workspace.toml", async () => {
+    const result = await runCLI(["worker", "--query", "status=todo"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("has been removed");
+    expect(result.stderr).toContain("[defaults].task_query");
+  });
+
+  test("worker --workspace requires a path", async () => {
+    const result = await runCLI(["worker", "--workspace"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--workspace requires a path");
   });
 
   test("worker requires a workspace", async () => {

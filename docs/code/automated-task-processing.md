@@ -10,7 +10,7 @@ dateModified: 2026-08-19
 
 Run @devintern/code without manual intervention.
 
-> **Recommended: the worker daemon.** `devintern worker --query "<ready-tasks query>"` replaces timer and cron wiring with a single long-running process: it polls your tracker, runs ready tasks, and watches the agent's PRs for review feedback, with persistent cursors and crash-safe state. One systemd `.service` (no `.timer` needed), or just a terminal. See the [Worker Daemon guide](./worker.md).
+> **Recommended: the worker daemon.** `devintern worker` replaces timer and cron wiring with a single long-running process: it polls your tracker, runs ready tasks, and watches the agent's PRs for review feedback, with persistent cursors and crash-safe state. One systemd `.service` (no `.timer` needed), or just a terminal. See the [Worker Daemon guide](./worker.md).
 
 The scheduled one-shot approach below still works everywhere and remains useful when you prefer runs at fixed times (for example, only at night) rather than a resident process. On modern Linux servers the recommended scheduler is **systemd timers**: structured logs via `journalctl`, restart-on-failure semantics, and no root crontab access required. **Cron** still works on any Unix-like system and is shown second as a fallback (macOS, BSD, Alpine, containers without an init system).
 

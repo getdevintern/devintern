@@ -115,7 +115,7 @@ export async function resolveWorkspaceAutomationContext(
   }
 }
 
-/** Per-task CLI args: workspace defaults win, then the usual env/default. */
+/** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
 export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   const raw = config.defaults.workerTaskArgs;
   if (raw && raw.trim()) {
@@ -264,13 +264,7 @@ export function createFleetTaskExecutor(
 export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
-  /** Fleet query override (`--query` / `WORKER_TASK_QUERY` beat the config). */
-  query?: string;
-  intervalSeconds: number;
   verbose?: boolean;
-  /** Also serve the local observability dashboard. */
-  ui?: boolean;
-  uiPort?: number;
 }
 
 /**
@@ -306,11 +300,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // In-process consumers (dashboard, run records) follow the fleet DB.
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
 
-  const query = options.query ?? config.defaults.taskQuery;
+  const query = config.defaults.taskQuery;
+  const intervalSeconds = config.defaults.pollIntervalSeconds;
   if (!query && config.automations.length === 0) {
     console.error(
-      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml " +
-        "or pass --query.",
+      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
     process.exit(1);
   }
@@ -347,6 +341,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       new AutomationAcquirer({
         automations: config.automations,
         dbPath: state.dbPath,
+        extraArgs: fleetTaskArgs(config),
         resolveContext: (automation) =>
           resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
       }),
@@ -376,7 +371,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         detector,
         searchTasks: (q) => tracker.searchTasks(q),
         query,
-        intervalSeconds: options.intervalSeconds,
+        intervalSeconds,
         verbose: options.verbose,
       }),
     );
@@ -388,16 +383,16 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         repoManager,
         searchTasks: (q) => tracker.searchTasks(q),
         query,
-        intervalSeconds: options.intervalSeconds,
+        intervalSeconds,
         verbose: options.verbose,
       })),
     );
   }
 
-  if (options.ui) {
+  if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      startDashboardServer({ port: options.uiPort });
+      startDashboardServer({ port: config.workspace.dashboardPort });
     } catch (error) {
       console.warn(
         `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,

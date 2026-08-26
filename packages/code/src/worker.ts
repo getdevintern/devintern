@@ -61,10 +61,8 @@ export async function startWorker(
 
   if (acquirers.length === 0) {
     console.error("❌ No event sources enabled.");
-    console.error(
-      "   Poll your tracker with:          devintern worker --query '<ready-tasks query>'",
-    );
-    console.error("   Or run the webhook listener with: devintern webhook serve");
+    console.error("   Set [defaults].task_query in workspace.toml, or add [[automations]].");
+    console.error("   Direct webhooks are a separate command:  devintern webhook serve");
     lock.release();
     process.exit(1);
   }

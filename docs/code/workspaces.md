@@ -27,11 +27,14 @@ Workspace mode runs under the same automation license as the rest of the worker:
 ```toml
 [workspace]
 worktrees_ttl_days = 7
+dashboard = true
+# dashboard_port = 4400
 
 [defaults]
 tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
+poll_interval = 60
 default_branch = "main"
 
 [[repos]]
@@ -118,7 +121,7 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
+The fleet query comes from `[defaults].task_query`. A workspace with automations can omit the query and run as an automation-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
 
 `devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 

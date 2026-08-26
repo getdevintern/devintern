@@ -393,15 +393,14 @@ DevIntern always runs the full workflow after fetching a task (clarity check →
 Agents run with their own permission prompts disabled (the equivalent of `--dangerously-skip-permissions`), so by default they have the same access to your machine as your user account. DevIntern can wrap every agent run in an OS-level sandbox so the agent stays confined even in fully automated worker runs.
 
 ```bash
-# In .devintern-code/.env
+# In the workspace .env (~/.devintern/.env)
 AGENT_SANDBOX=auto
 ```
 
-Or per run:
+Or per interactive run:
 
 ```bash
 devintern PROJ-123 --sandbox nono
-devintern worker --sandbox auto
 ```
 
 Run `devintern sandbox` at any time for a full diagnosis: which providers are installed, the one-time setup steps each still needs, which one `auto` would pick, and exactly what your next run will do with the current configuration, including why it would fail. The command exits non-zero when the configured provider guarantees a failed run, so scripts and CI can gate on it.
