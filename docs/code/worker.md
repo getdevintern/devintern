@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-24
+dateModified: 2026-08-26
 ---
 
 # Worker Daemon
@@ -125,7 +125,7 @@ TASK_TRACKER=markdown MARKDOWN_TASKS_DIR=./tasks devintern worker --query "statu
 
 ### Re-running a task
 
-When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket and moves it back to your to-do status. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
+When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket (crash, interrupt, and failed-feasibility comments do the same) and moves it back to your to-do status. That comment tells you how to unlock a retry. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
@@ -136,6 +136,15 @@ Either action bumps the ticket's update stamp, so the worker picks it up on the 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `WORKER_TASK_ARGS`, since that would disable the gate for every polled task.
+
+### Ticket matches the query but is not picked up
+
+The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
+
+- `📌 picking up KEY` — it was claimed on this tick.
+- `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
+- `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
+- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
 ## Options
 
@@ -163,9 +172,9 @@ The regular polling requests use ETags, and GitHub does not count `304 Not Modif
 
 ### Merge conflicts on the agent's PRs
 
-When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. It verifies ancestry with GitHub's comparison API, merges the base branch into the PR branch, and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
+When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. Eligibility comes from GitHub's own `mergeable_state` (`dirty` = conflicts, `behind` = mergeable but not up to date) — not from ancestry checks against the API-reported base SHA, a field GitHub can leave stale for days. The worker merges the base branch into the PR branch and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed; every conflicting PR in the watch list is synced, not just one per tick. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base SHA is a durable event in `.devintern-code/queue.db`. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts; a newly advanced base creates a new event. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
 ## Mention the bot on any PR
 

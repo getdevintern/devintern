@@ -12,6 +12,11 @@
 - **Graceful worker shutdown drains the fleet**: on SIGINT/SIGTERM the worker stops acquiring events, cancels queued-but-unstarted tasks **with their dedupe marks rolled back** (they re-enter on the next start instead of being silently skipped), awaits in-flight runs so every per-repo lock is released cleanly, closes shared SQLite handles, then releases the workspace lock. A second signal exits immediately if a run appears hung; interrupted runs recover through the normal incomplete-attempt machinery
 - **Central state database uses WAL**: `queue.db` connections (webhook queue, worker state, run records, routing skips, fleet activity) now enable WAL journaling, a busy timeout, and NORMAL sync so concurrent fleet runs read and write history without `SQLITE_BUSY` failures; `WebhookQueue.removeProcessed` rolls back dedupe marks for accepted-but-cancelled work
 
+### Fixed
+
+- **Jira and Azure DevOps worker pickup no longer sticks after the first attempt**: the worker dedupes ready tasks by `(key, updated)`. Jira enhanced JQL search (`GET /rest/api/3/search/jql`) omitted `fields`, and Azure WIQL search batch-fetched titles without `System.ChangedDate`, so both recorded an empty stamp and never retried after a failed run — even when the ticket was edited. Jira search now requests `updated` (and the other issue fields used for routing); Azure search now fetches `System.ChangedDate`. The worker also logs when every matching task is skipped as already processed, and warns when search results have no update stamp, so this is visible in the worker log instead of looking like the poller is idle.
+- **Failure comments say how to retrigger pickup**: incomplete-implementation, crash/interrupt, and failed-feasibility comments on every hosted tracker (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello) now tell the user to edit the description, post a comment, or delete the bot comment so the worker (or next `--query` run) will pick the ticket up again. Markdown files do not receive tracker comments. The previous Jira incomplete text only said "update the description and retry."
+
 ## [2.4.0] - 2026-08-22
 
 The onboarding release: `devintern doctor`, an extended init wizard with post-setup checks, first-run rescue when running a task in an unconfigured project, and upgrade-in-place for existing setups.

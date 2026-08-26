@@ -14,8 +14,8 @@ import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
 import {
   TaskPollingAcquirer,
+  processedTaskId,
   runTaskViaCli,
-  taskExternalId,
   workerTaskArgs,
 } from "../task-polling-acquirer";
 import type { ReadyTask } from "../task-polling-acquirer";
@@ -221,7 +221,7 @@ export async function dispatchBatchViaScheduler(
 ): Promise<void> {
   await Promise.all(
     tasks.map(async (task) => {
-      const externalId = taskExternalId(task);
+      const externalId = processedTaskId(task);
       // Mark before executing (same convention as serial mode): a
       // persistently failing task must not loop every tick. A shutdown that
       // cancels the queued work rolls the mark back below.
@@ -635,6 +635,13 @@ async function buildFleetEventAcquirers(options: {
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
     const { RunStore } = await import("../run-recorder");
+    const runStore = new RunStore(state.dbPath);
+    const reapedRuns = runStore.reapOrphanedRuns();
+    if (reapedRuns > 0) {
+      console.warn(
+        `⚠️  Marked ${reapedRuns} in-progress run(s) as failed: previous worker exited before they finished`,
+      );
+    }
     acquirers.push(
       new ReviewPollingAcquirer({
         intervalSeconds,
@@ -660,20 +667,11 @@ async function buildFleetEventAcquirers(options: {
             );
             return result.data ?? [];
           },
-          isBaseIncluded: async (repo, baseSha, headSha) => {
-            const result = await gh.conditionalGet<{ status: string }>(
-              `/repos/${repo}/compare/${baseSha}...${headSha}`,
-              ownerOf(repo),
-              nameOf(repo),
-            );
-            const status = result.data?.status;
-            return status ? status === "ahead" || status === "identical" : null;
-          },
         },
         addressPr,
         resolveConflicts,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
-        runStore: new RunStore(state.dbPath),
+        runStore,
         allowedRepos: slugs,
         verbose,
       }),

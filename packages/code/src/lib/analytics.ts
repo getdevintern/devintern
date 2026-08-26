@@ -217,10 +217,17 @@ export async function flushAnalytics(timeoutMs = 1500): Promise<void> {
   try {
     const sender = getSender();
     if (!sender || !("inflight" in sender)) return;
-    await Promise.race([
-      Promise.all((sender as RealSender).inflight.splice(0)),
-      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all((sender as RealSender).inflight.splice(0)),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
     // ignore
   }

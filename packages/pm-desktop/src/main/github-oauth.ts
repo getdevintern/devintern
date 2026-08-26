@@ -40,6 +40,12 @@ function fetchImpl(): FetchLike {
   return fetchForTests ?? fetch;
 }
 
+/** Test-only override for the poll interval (ms), bypassing the 1s minimum clamp. */
+let pollIntervalMsForTests: number | undefined;
+export function setGitHubOAuthPollIntervalForTests(ms: number | undefined): void {
+  pollIntervalMsForTests = ms;
+}
+
 /** Test-only override for the openExternal callback. */
 let openExternalForTests: ((url: string) => Promise<void>) | undefined;
 export function setGitHubOAuthOpenExternalForTests(
@@ -173,7 +179,7 @@ export async function pollForToken(
   }
   const fetchFn = options.fetch ?? fetchImpl();
   const deadline = Date.now() + expiresInSeconds * 1000;
-  const intervalMs = Math.max(intervalSeconds, 1) * 1000;
+  const intervalMs = pollIntervalMsForTests ?? Math.max(intervalSeconds, 1) * 1000;
 
   while (Date.now() < deadline) {
     if (options.signal?.aborted) {

@@ -336,6 +336,27 @@ export class RunStore {
   }
 
   /**
+   * Fail every `in_progress` run left over from a previous worker process.
+   *
+   * Only one worker owns a queue database, so any run still `in_progress`
+   * when a worker starts was abandoned by a crashed or killed predecessor.
+   * A late `finishRun` from an outlived subprocess still wins afterwards —
+   * it overwrites the row unconditionally.
+   *
+   * @returns Number of reaped runs
+   */
+  reapOrphanedRuns(): number {
+    const result = this.db.run(
+      `UPDATE runs SET status = 'failed',
+         outcome_reason = 'orphaned: worker exited before the run finished',
+         finished_at = ?
+       WHERE status = 'in_progress'`,
+      [Date.now()],
+    );
+    return result.changes;
+  }
+
+  /**
    * Load a run by id.
    *
    * @param id - Run id
