@@ -80,6 +80,7 @@ import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
+import { formatProcessingFailureMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -1698,10 +1699,7 @@ async function reportProcessingFailure(taskKey: string, reason: string): Promise
   try {
     await tracker.postComment(taskKey, {
       format: "markdown",
-      body:
-        `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
-        `**Reason:** ${reason}\n\n` +
-        `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.`,
+      body: formatProcessingFailureMarkdown(taskKey, reason),
     });
     console.log(`💬 Posted a failure comment to ${taskKey}`);
   } catch (commentError) {

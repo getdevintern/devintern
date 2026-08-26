@@ -5,7 +5,9 @@ import {
   formatEstimationCommentMarkdown,
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
+  formatProcessingFailureMarkdown,
   isDevInternCommentText,
+  RETRY_PICKUP_BODY,
 } from "../src/lib/trackers/shared/markdown-comment-formatter";
 
 describe("markdown-comment-formatter - clarity assessment", () => {
@@ -45,6 +47,18 @@ describe("markdown-comment-formatter - clarity assessment", () => {
     expect(markdown).toContain("🔴 **Scope:** Acceptance criteria missing");
     expect(markdown).toContain("1. Add acceptance criteria");
     expect(markdown).toContain("2. Link design mockups");
+    expect(markdown).toContain(RETRY_PICKUP_BODY);
+  });
+
+  test("passing assessment does not include retry pickup instructions", () => {
+    const markdown = formatClarityAssessmentMarkdown({
+      clarityScore: 8,
+      isImplementable: true,
+      summary: "Task is clear and implementable",
+      issues: [],
+      recommendations: [],
+    });
+    expect(markdown).not.toContain(RETRY_PICKUP_BODY);
   });
 });
 
@@ -66,7 +80,17 @@ describe("markdown-comment-formatter - comment bodies", () => {
     const body = formatIncompleteImplementationCommentMarkdown("Partial work", "Fix login bug");
     expect(body).toContain("⚠️ Implementation Incomplete");
     expect(body).toContain("Task: Fix login bug");
+    expect(body).toContain(RETRY_PICKUP_BODY);
+    expect(body).toContain("post a comment");
     expect(isDevInternCommentText(body)).toBe(true);
+  });
+
+  test("processing-failure comment includes reason, branch hint, and retry pickup", () => {
+    const body = formatProcessingFailureMarkdown("DEV-87", "Agent exited with code 1");
+    expect(body).toContain("Automated implementation did not complete");
+    expect(body).toContain("Agent exited with code 1");
+    expect(body).toContain("feature/dev-87");
+    expect(body).toContain(RETRY_PICKUP_BODY);
   });
 
   test("assessment failure bodies name the reason", () => {

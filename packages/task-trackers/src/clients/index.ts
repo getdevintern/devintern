@@ -48,7 +48,7 @@ export type {
   TrelloList,
 } from "./trello.ts";
 
-export { JiraClient } from "./jira.ts";
+export { JiraClient, JIRA_SEARCH_ISSUE_FIELDS } from "./jira.ts";
 export type {
   JiraAttachment,
   JiraClientConfig,

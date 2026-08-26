@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Jira worker pickup no longer sticks after the first attempt**: enhanced JQL search (`GET /rest/api/3/search/jql`) returns only issue ids unless `fields` is requested. The worker dedupes ready tasks by `(key, updated)`, so a missing stamp recorded `task:DEV-87:` and never retried after a failed run, even when the ticket was edited. Search now requests `updated` (and the other issue fields used for routing). The worker also logs when every matching task is skipped as already processed, and warns when search results have no update stamp, so this is visible in the worker log instead of looking like the poller is idle.
+- **Failure comments say how to retrigger pickup**: incomplete-implementation, crash/interrupt, and failed-feasibility comments now tell the user to edit the description, post a comment, or delete the bot comment so the worker (or next `--query` run) will pick the ticket up again. The previous Jira incomplete text only said "update the description and retry."
+
 ## [2.4.0] - 2026-08-22
 
 The onboarding release: `devintern doctor`, an extended init wizard with post-setup checks, first-run rescue when running a task in an unconfigured project, and upgrade-in-place for existing setups.
