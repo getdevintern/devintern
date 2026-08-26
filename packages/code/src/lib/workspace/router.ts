@@ -91,10 +91,15 @@ export function routeTask(task: RoutableTask, config: WorkspaceConfig): RoutingD
   const repos = [...new Set(matchedRules.map((rule) => rule.repo))].sort();
 
   if (repos.length === 1) {
-    return { kind: "routed", repo: repos[0], matchedRules };
+    return { kind: "routed", repo: repos[0]!, matchedRules };
   }
   if (repos.length > 1) {
     return { kind: "ambiguous", candidates: repos, matchedRules };
+  }
+  // A 1-repo workspace needs no routing rules: N=1 already implies the only
+  // checkout (the same policy automations already use).
+  if (config.repos.length === 1) {
+    return { kind: "routed", repo: config.repos[0]!.name, matchedRules: [] };
   }
   return { kind: "unrouted" };
 }

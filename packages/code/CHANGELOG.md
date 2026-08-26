@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars
+- **Worker dashboard is on by default**: `devintern worker` serves localhost:4400 unless `--no-ui` is passed; dashboard startup failures no longer stop task processing
+
+### Fixed
+
+- **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
+- **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
+
 ## [2.5.0] - 2026-08-26
 
 Recurring scheduled automations, Supporter licenses covering multi-repo workspace mode, anonymous CLI analytics, and pickup/sync/JSON robustness fixes.

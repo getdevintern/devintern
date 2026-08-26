@@ -14,22 +14,26 @@ Your code, credentials, and agent execution never leave your machine.
 
 ## Quick Start
 
-The fastest way to set up the worker is the guided setup (your tracker must already be configured; run `devintern init` first if not):
+The fastest way to set up the worker is the guided setup:
 
 ```bash
 devintern worker init
+devintern worker
 ```
 
-It walks you through the ready-tasks query (and validates it against your tracker with a live dry run), polling vs. webhook mode (generating a `WEBHOOK_SECRET` when needed), checks your automation license up front, and can write a ready-to-install systemd service file.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. `--listen` (direct webhooks) is an advanced path, not part of this wizard.
 
 Or configure by hand and start directly:
 
 ```bash
-# Poll your tracker for ready tasks (no webhooks, no public endpoint)
+# After a workspace exists (worker init, or workspace init + import)
+devintern worker
+
+# Override the workspace query for this process
 devintern worker --query "status=todo"
 
-# Also run the GitHub webhook listener (direct webhooks)
-devintern worker --query "status=todo" --listen
+# Also run the GitHub webhook listener (direct webhooks; single-repo)
+devintern worker --query "status=todo" --listen --no-workspace
 ```
 
 `devintern serve` still works as a deprecated alias for `devintern worker --listen`.
@@ -155,7 +159,8 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 | `--port <port>`     | Webhook listener port (default: 3000 or `WEBHOOK_PORT`)             |
 | `--host <host>`     | Webhook listener host (default: 0.0.0.0 or `WEBHOOK_HOST`)          |
 | `--interval <secs>` | Polling interval in seconds (default: 60 or `WORKER_POLL_INTERVAL`) |
-| `--ui`              | Also serve the local [observability dashboard](./dashboard.md)      |
+| `--ui`              | Serve the local [observability dashboard](./dashboard.md) (default) |
+| `--no-ui`           | Disable the dashboard for this worker process                        |
 | `--ui-port <port>`  | Dashboard port (default: 4400 or `DASHBOARD_PORT`)                  |
 | `--sandbox <name>`  | Run agents inside an OS-level sandbox (overrides `AGENT_SANDBOX`)   |
 | `-v, --verbose`     | Verbose logging                                                     |
@@ -198,15 +203,15 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). For instant reaction without hosting your own webhook endpoint, pair the worker with the [DevIntern relay](./relay.md): sign in, run `devintern worker connect` (and optionally `connect linear|asana|trello|azure-devops|jira` with that tracker's env vars), and events reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so the relay can never lose you events.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so relay downtime only affects latency. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
 
 ## Seeing what the worker did
 
-Every run is recorded stage by stage in the local database. Add `--ui` to serve the [observability dashboard](./dashboard.md) alongside the daemon, or run `devintern dashboard` standalone at any time (it works with the worker stopped too).
+Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) at `http://localhost:4400` by default; pass `--no-ui` to disable it. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a systemd service file to `.devintern-code/devintern-worker.service` with install instructions. For pm2 and tunnel setups (webhook mode), see the [GitHub Integration guide](./github-integration.md). In polling mode no public endpoint is needed, so a plain systemd service with `ExecStart=devintern worker --query "..."` is enough.
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md).
 
 ## License
 

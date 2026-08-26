@@ -531,26 +531,26 @@ if (process.argv[2] === "init") {
       const { isInteractive } = await import("./lib/init-wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: set WORKER_TASK_QUERY, WORKER_POLL_INTERVAL, and");
-        console.log("   (for --listen) WEBHOOK_SECRET in .devintern-code/.env by hand.");
+        console.log("   Non-interactive setup: `devintern workspace init` + `workspace import`,");
+        console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
         process.exit(1);
       }
       const trackerManager = new TaskTrackerManager();
-      const ok = await runWorkerInit({
+      const result = await runWorkerInit({
         dryRunQuery: async (query) => {
           const result = await trackerManager.getClient().searchTasks(query);
           return result.tasks.length;
         },
         checkAutomationLicense: async () => {
-          const result = await checkLicense({
+          const license = await checkLicense({
             productKey: "devintern/code",
             supabaseConfig: loadSupabaseConfig(),
             requireAutomation: true,
           });
-          return result.valid ? null : result.message;
+          return license.valid ? null : license.message;
         },
       });
-      process.exit(ok ? 0 : 1);
+      process.exit(result.ok ? 0 : 1);
     }
 
     let listen = false;
@@ -559,7 +559,7 @@ if (process.argv[2] === "init") {
     let intervalSeconds = parseInt(process.env.WORKER_POLL_INTERVAL || "60", 10);
     let workerQuery = process.env.WORKER_TASK_QUERY;
     let verbose = false;
-    let ui = false;
+    let ui = true;
     let uiPort: number | undefined;
     let workspacePath: string | undefined;
     let workspaceFlag = false;
@@ -590,6 +590,8 @@ if (process.argv[2] === "init") {
         i++;
       } else if (args[i] === "--ui") {
         ui = true;
+      } else if (args[i] === "--no-ui") {
+        ui = false;
       } else if (args[i] === "--ui-port" && args[i + 1]) {
         ui = true;
         uiPort = parseInt(args[i + 1], 10);
@@ -609,9 +611,10 @@ if (process.argv[2] === "init") {
         console.log("events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
         console.log("Subcommands:");
-        console.log("  init                Guided server-automation setup: ready-tasks query");
-        console.log("                      (with a live dry run), webhook secret, license check,");
-        console.log("                      and an optional systemd unit");
+        console.log(
+          "  init                Guided unattended setup: tracker, workspace, ready-tasks",
+        );
+        console.log("                      query (live dry run), and license check");
         console.log("");
         console.log("Options:");
         console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
@@ -626,8 +629,8 @@ if (process.argv[2] === "init") {
           "  --host <host>       Webhook listener host (default: 0.0.0.0 or WEBHOOK_HOST)",
         );
         console.log("  --interval <secs>   Polling interval in seconds (default: 60)");
-        console.log("  --ui                Also serve the local observability dashboard");
-        console.log("                      (localhost only; see also `devintern dashboard`)");
+        console.log("  --ui                Serve the local dashboard (default)");
+        console.log("  --no-ui             Disable the dashboard for this worker process");
         console.log("  --ui-port <port>    Dashboard port (default: 4400 or DASHBOARD_PORT)");
         console.log("  --sandbox <name>    Sandbox agent runs: none | auto | native | nono |");
         console.log("                      srt | docker | smolvm (overrides AGENT_SANDBOX)");
@@ -652,6 +655,25 @@ if (process.argv[2] === "init") {
       }
     }
 
+    const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
+      await import("./lib/workspace/paths");
+    const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
+
+    // Workspace credentials must be available before the license gate. This
+    // matters for native services, whose working directory is the workspace
+    // home rather than a source checkout.
+    if (workspaceMode && !listen) {
+      const { parseEnvFile } = await import("./lib/workspace/env");
+      const selectedWorkspaceDir = workspacePath
+        ? dirname(resolve(workspacePath))
+        : resolveWorkspaceDir();
+      for (const [key, value] of Object.entries(
+        parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)),
+      )) {
+        if (process.env[key] === undefined) process.env[key] = value;
+      }
+    }
+
     // License check — the worker is unattended automation, so it always
     // requires an automation entitlement.
     const supabaseConfig = loadSupabaseConfig();
@@ -665,28 +687,24 @@ if (process.argv[2] === "init") {
     // Workspace (fleet) mode: one daemon serves every repo in the workspace.
     // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
     // unless --no-workspace.
-    {
-      const { hasWorkspace } = await import("./lib/workspace/paths");
-      const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
-      if (workspaceMode && !listen) {
-        const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
-        await runWorkspaceWorker({
-          workspacePath,
-          query: workerQuery,
-          intervalSeconds,
-          verbose,
-          ui,
-          uiPort,
-        });
-        return;
-      }
-      if (workspaceMode && listen) {
-        console.error(
-          "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
-            "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
-        );
-        process.exit(1);
-      }
+    if (workspaceMode && !listen) {
+      const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
+      await runWorkspaceWorker({
+        workspacePath,
+        query: workerQuery,
+        intervalSeconds,
+        verbose,
+        ui,
+        uiPort,
+      });
+      return;
+    }
+    if (workspaceMode && listen) {
+      console.error(
+        "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
+          "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
+      );
+      process.exit(1);
     }
 
     const { startWorker } = await import("./worker");
@@ -1078,8 +1096,14 @@ if (process.argv[2] === "init") {
     // Local observability dashboard alongside the daemon (same server module
     // as the standalone `devintern dashboard` command; reads the DB read-only).
     if (ui) {
-      const { startDashboardServer } = await import("./dashboard-server");
-      startDashboardServer({ port: uiPort });
+      try {
+        const { startDashboardServer } = await import("./dashboard-server");
+        startDashboardServer({ port: uiPort });
+      } catch (error) {
+        console.warn(
+          `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,
+        );
+      }
     }
 
     await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
@@ -1566,7 +1590,7 @@ Subcommands:
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
   worker               Run the worker daemon (webhook listener via --listen);
-                       'worker init' runs a guided server-automation setup
+                       'worker init' writes a workspace and ready-tasks query
   dashboard            Serve the local observability dashboard (run history and stats)
   serve                Deprecated alias for 'worker --listen'
   address-review       Address review feedback on an existing pull request
