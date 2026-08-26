@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -451,23 +451,82 @@ describe("ReviewPollingAcquirer", () => {
       { outcome: "failed" as const, message: "agent" },
       { outcome: "clean" as const, message: "must not run" },
     ];
-    let made = makeAcquirer(gh, { resolveResults: failures });
-    await made.acquirer.tick();
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.attempts).toBe(1);
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+    try {
+      const start = 1_750_000_000_000;
+      setSystemTime(start);
+      let made = makeAcquirer(gh, { resolveResults: failures });
+      await made.acquirer.tick();
+      expect(queue.getBaseSyncEvent(eventKey)?.attempts).toBe(1);
 
-    // Reopening all stores models a worker restart; attempts must survive.
-    workerState.close();
-    queue.close();
-    workerState = new WorkerState(dbPath);
-    queue = new WebhookQueue({ dbPath, maxRetries: 2 });
-    made = makeAcquirer(gh, { resolveResults: failures });
-    await made.acquirer.tick();
-    await made.acquirer.tick();
-    expect(made.resolved).toHaveLength(1);
-    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.attempts).toBe(2);
-    expect(queue.hasProcessed("github:base-sync", "base-sync:acme/widgets#42:base1:head1")).toBe(
-      true,
-    );
+      // Reopening all stores models a worker restart; attempts and the
+      // backoff anchor must survive.
+      workerState.close();
+      queue.close();
+      workerState = new WorkerState(dbPath);
+      queue = new WebhookQueue({ dbPath, maxRetries: 2 });
+      made = makeAcquirer(gh, { resolveResults: failures });
+
+      // Still inside the retry backoff window: nothing runs yet.
+      setSystemTime(start + 5_000);
+      await made.acquirer.tick();
+      expect(made.resolved).toHaveLength(0);
+
+      setSystemTime(start + 31_000);
+      await made.acquirer.tick();
+      // Second failure exhausts the configured limit of 2.
+      expect(made.resolved).toHaveLength(1);
+      expect(queue.getBaseSyncEvent(eventKey)?.attempts).toBe(2);
+      expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
+
+      setSystemTime(start + 120_000);
+      await made.acquirer.tick();
+      expect(made.resolved).toHaveLength(1);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("failed base-sync attempts wait out an exponential backoff before retrying", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const start = 1_750_000_000_000;
+    try {
+      setSystemTime(start);
+      const gh: FakeGitHubState = {
+        prState: "open",
+        mergeableState: "dirty",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      };
+      const made = makeAcquirer(gh, {
+        resolveResults: [
+          { outcome: "failed", message: "boom" },
+          { outcome: "clean", message: "second attempt" },
+        ],
+      });
+      const eventKey = "base-sync:acme/widgets#42:base1:head1";
+
+      await made.acquirer.tick();
+      expect(made.resolved).toHaveLength(1);
+      expect(queue.getBaseSyncEvent(eventKey)?.attempts).toBe(1);
+
+      // A tick inside the 30s window after the failure is skipped entirely.
+      setSystemTime(start + 5_000);
+      await made.acquirer.tick();
+      expect(made.resolved).toHaveLength(1);
+      expect(queue.getBaseSyncEvent(eventKey)?.attempts).toBe(1);
+
+      // Once the backoff has elapsed, the retry goes ahead.
+      setSystemTime(start + 31_000);
+      await made.acquirer.tick();
+      expect(made.resolved).toHaveLength(2);
+      expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("recent and changing heads defer without consuming attempts", async () => {

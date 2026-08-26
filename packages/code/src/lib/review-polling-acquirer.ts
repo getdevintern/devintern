@@ -122,6 +122,23 @@ const prRunTails = new Map<string, Promise<void>>();
  */
 const MAX_CONSECUTIVE_DEFERS = 3;
 
+/** Backoff before the first retry of a failed base-sync event. */
+const RETRY_BACKOFF_BASE_MS = 30_000;
+
+/** Upper bound on the wait between retries of a failed base-sync event. */
+const RETRY_BACKOFF_MAX_MS = 10 * 60_000;
+
+/**
+ * Wait required before retrying a base-sync event that has failed `attempts`
+ * times: 30s after the first failure, doubling to a 10-minute cap. Keeps
+ * persistent failures (bad credentials, repo renamed, agent crash loop) from
+ * hammering GitHub and the agent on every poll tick while still retrying.
+ */
+export function baseSyncRetryBackoffMs(attempts: number): number {
+  if (attempts <= 0) return 0;
+  return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
+}
+
 /** Default wall-clock budget for one resolve-conflicts subprocess. */
 export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -563,6 +580,14 @@ export class ReviewPollingAcquirer implements Acquirer {
       now,
     });
     if (event.status !== "pending") return;
+
+    // Retry backoff: a previously failed event waits (doubled per further
+    // failure) before another attempt. The anchor is the event's own
+    // `updated_at`, stamped by the queue's clock at the last meaningful
+    // change, so this works across worker restarts too.
+    const backoffMs = baseSyncRetryBackoffMs(event.attempts);
+    if (backoffMs > 0 && Date.now() - event.updatedAt < backoffMs) return;
+
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 

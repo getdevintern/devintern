@@ -63,6 +63,12 @@ export interface BaseSyncEvent {
   attempts: number;
   status: BaseSyncEventStatus;
   lastError?: string;
+  /**
+   * Last meaningful change (creation, head movement, attempt outcome) —
+   * deliberately NOT bumped by no-op observations, so it anchors retry
+   * backoff.
+   */
+  updatedAt: number;
 }
 
 /**
@@ -371,7 +377,12 @@ export class WebhookQueue {
              WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.head_observed_at
              ELSE base_sync_events.head_observed_at
            END,
-           updated_at = excluded.updated_at`,
+           -- updated_at anchors retry backoff, so only meaningful changes
+           -- (a new head) may move it; routine polls must not.
+           updated_at = CASE
+             WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.updated_at
+             ELSE base_sync_events.updated_at
+           END`,
         [input.externalId, input.repo, input.prNumber, input.baseSha, input.headSha, now, now],
       );
       return this.getBaseSyncEvent(input.externalId)!;
@@ -394,6 +405,7 @@ export class WebhookQueue {
       attempts: row.attempts as number,
       status: row.status as BaseSyncEventStatus,
       lastError: (row.last_error as string | null) ?? undefined,
+      updatedAt: row.updated_at as number,
     };
   }
 
@@ -406,12 +418,16 @@ export class WebhookQueue {
     return this.getBaseSyncEvent(externalId)?.attempts ?? 0;
   }
 
-  /** Undo a tentative attempt when the resolver detects concurrent branch movement. */
+  /**
+   * Undo a tentative attempt when the resolver detects concurrent branch
+   * movement. `updated_at` is deliberately left alone: defers are benign, and
+   * moving the retry-backoff anchor here would stall real retries.
+   */
   deferBaseSyncAttempt(externalId: string): void {
     this.db.run(
       `UPDATE base_sync_events
-       SET attempts = MAX(0, attempts - 1), updated_at = ? WHERE external_id = ?`,
-      [Date.now(), externalId],
+       SET attempts = MAX(0, attempts - 1) WHERE external_id = ?`,
+      [externalId],
     );
   }
 

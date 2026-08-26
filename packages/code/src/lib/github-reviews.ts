@@ -38,6 +38,12 @@ export interface PullRequestInfo {
   html_url: string;
   /** Whether maintainers may push to a fork PR's branch. */
   maintainer_can_modify?: boolean;
+  /**
+   * GitHub's computed merge state (`clean`, `dirty`, `behind`, `unstable`,
+   * `blocked`, `unknown`...). Recomputed asynchronously, so it can lag a
+   * recent push; absent while GitHub has never computed it.
+   */
+  mergeable_state?: string;
 }
 
 export interface FileContent {

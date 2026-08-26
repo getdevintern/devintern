@@ -1358,6 +1358,12 @@ if (process.argv[2] === "init") {
       }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
+      } else if (result.outcome === "failed") {
+        console.error(
+          `❌ Failed: ${result.message}. The PR was left untouched where noted; see the PR for details.`,
+        );
+      } else if (result.outcome === "deferred") {
+        console.log(`⏳ Deferred: ${result.message}`);
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
