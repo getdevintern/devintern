@@ -116,7 +116,6 @@ For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote 
 ```bash
 devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
-devintern worker --no-workspace   # force single-repo mode in the current repo
 ```
 
 The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.

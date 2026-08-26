@@ -6,7 +6,7 @@
 
 - **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars
 - **Worker dashboard is on by default**: `devintern worker` serves localhost:4400 unless `--no-ui` is passed; dashboard startup failures no longer stop task processing
-- **Direct webhooks have a dedicated command**: `devintern webhook serve` is the canonical advanced repo-local listener. `devintern worker --listen` keeps its legacy combined behavior for compatibility but is deprecated, and `devintern serve` is now a deprecated alias for the dedicated command
+- **Direct webhooks have a dedicated command**: `devintern webhook serve` is the advanced repo-local listener. The legacy `devintern worker --listen`, `devintern serve`, `--no-workspace`, and cwd worker modes are removed; `devintern worker` now always requires a workspace
 
 ### Fixed
 

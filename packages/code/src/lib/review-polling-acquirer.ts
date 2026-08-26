@@ -192,8 +192,8 @@ async function serializePrRun<T>(
  * @param repo - `owner/repo` slug
  * @param prNumber - Pull request number
  * @param opts - Working directory and environment for the subprocess;
- *               workspace mode runs from the repo's base worktree with
- *               per-repo env, single-repo mode inherits both
+ *               the workspace worker runs from the repo's base worktree with
+ *               per-repo env; direct callers inherit both
  */
 export function runAddressReviewViaCli(
   repo: string,

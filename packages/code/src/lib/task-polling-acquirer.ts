@@ -72,8 +72,8 @@ export function workerTaskArgs(): string[] {
  * @param taskKey - Task key to process
  * @param extraArgs - CLI flags (default from {@link workerTaskArgs})
  * @param opts - Working directory and environment for the subprocess;
- *               workspace mode routes each task to its repo's worktree with
- *               per-repo env, single-repo mode inherits both
+ *               the workspace worker routes each task to its repo's worktree
+ *               with per-repo env; direct callers inherit both
  * @returns true when the CLI exited 0
  */
 export function runTaskViaCli(
