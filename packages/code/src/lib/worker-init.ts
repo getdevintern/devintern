@@ -3,7 +3,7 @@
  *
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
  * `.env`, dry-runs the ready-tasks query, and checks any automation license.
- * Polling is always on; `--listen` is not part of this wizard.
+ * Polling is always on; direct webhooks run as a separate advanced service.
  *
  * Prompt-loop mechanics come from `@devintern/task-trackers` (shared with
  * `devintern init`); everything effectful is injectable for tests.

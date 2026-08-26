@@ -1,31 +1,18 @@
 /**
  * devintern worker
  *
- * Single long-running daemon on the customer's machine that replaces the
- * cron + standalone webhook server setup. Event acquisition modes:
+ * Single long-running workspace daemon on the customer's machine. Event
+ * acquirers feed work into the shared queue without exposing a public port.
  *
  * - Mode 1 (polling): per-tracker change detectors feed the queue. No public
  *   endpoint, no DevIntern infrastructure. (Acquirers register here as they
  *   land; the detect-then-evaluate loop ships separately.)
- * - Mode 3 compatibility (direct webhooks): deprecated `--listen` runs the
- *   repo-local webhook server inside the daemon. New deployments run
- *   `devintern webhook serve` as a separate process.
- *
  * Code, credentials, and agent execution never leave this machine.
  */
-
-import type { Server } from "http";
 
 import { LockManager } from "./lib/lock-manager";
 
 export interface WorkerOptions {
-  /** Deprecated Mode 3 compatibility: also run the GitHub webhook HTTP server. */
-  listen: boolean;
-  port?: number;
-  host?: string;
-  /** Mode 1 polling interval in seconds (default 60). */
-  intervalSeconds?: number;
-  verbose?: boolean;
   /** Single-instance lock override (workspace mode locks the workspace home
    *  instead of the current directory). */
   lock?: LockManager;
@@ -43,14 +30,11 @@ export interface Acquirer {
   stop(): Promise<void> | void;
 }
 
-/** Default Mode 1 polling interval (seconds). */
-export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
-
 /**
- * Start the worker daemon: single-instance lock, optional webhook listener,
- * registered polling acquirers, and graceful shutdown on SIGINT/SIGTERM.
+ * Start the worker daemon: single-instance lock, registered event acquirers,
+ * and graceful shutdown on SIGINT/SIGTERM.
  *
- * @param options - Daemon options (listen mode, port/host, poll interval)
+ * @param options - Daemon options such as workspace lock and display label
  * @param acquirers - Polling acquirers to run (Mode 1); empty until detectors register
  */
 export async function startWorker(
@@ -58,8 +42,7 @@ export async function startWorker(
   acquirers: Acquirer[] = [],
 ): Promise<void> {
   console.log("👷 Starting devintern worker");
-  console.log(`   Project: ${options.label ?? process.cwd()}`);
-  console.log(`   Webhook listener (Mode 3): ${options.listen ? "enabled" : "disabled"}`);
+  console.log(`   Workspace: ${options.label ?? process.cwd()}`);
   console.log(
     `   Polling sources (Mode 1): ${
       acquirers.length > 0 ? acquirers.map((a) => a.name).join(", ") : "none configured"
@@ -76,7 +59,7 @@ export async function startWorker(
     process.exit(1);
   }
 
-  if (!options.listen && acquirers.length === 0) {
+  if (acquirers.length === 0) {
     console.error("❌ No event sources enabled.");
     console.error(
       "   Poll your tracker with:          devintern worker --query '<ready-tasks query>'",
@@ -84,12 +67,6 @@ export async function startWorker(
     console.error("   Or run the webhook listener with: devintern webhook serve");
     lock.release();
     process.exit(1);
-  }
-
-  let server: Server | null = null;
-  if (options.listen) {
-    const { startWebhookServer } = await import("./webhook-server");
-    server = await startWebhookServer({ port: options.port, host: options.host });
   }
 
   for (const acquirer of acquirers) {
@@ -110,11 +87,6 @@ export async function startWorker(
       } catch (error) {
         console.warn(`⚠️  Failed to stop acquirer ${acquirer.name}: ${(error as Error).message}`);
       }
-    }
-
-    if (server) {
-      await new Promise<void>((resolve) => server!.close(() => resolve()));
-      console.log("   Webhook listener stopped");
     }
 
     // In-flight queue events stay marked in SQLite and are recovered on the

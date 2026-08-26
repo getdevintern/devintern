@@ -409,9 +409,6 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const { startWorker } = await import("../../worker");
   await startWorker(
     {
-      listen: false,
-      intervalSeconds: options.intervalSeconds,
-      verbose: options.verbose,
       lock: createWorkspaceLock(workspaceDir),
       label: workspaceDir,
     },

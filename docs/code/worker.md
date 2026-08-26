@@ -8,7 +8,7 @@ dateModified: 2026-08-26
 
 # Worker Daemon
 
-`devintern worker` runs devintern as a single long-running daemon on your own machine. It replaces the cron plus standalone webhook server setup: one process acquires events (reviews on the agent's PRs, ready tasks from your tracker) and executes them locally.
+`devintern worker` runs devintern as a single long-running workspace daemon on your own machine. It acquires events for every configured repository and executes them locally.
 
 Your code, credentials, and agent execution never leave your machine.
 
@@ -36,16 +36,15 @@ devintern worker --query "status=todo"
 devintern webhook serve
 ```
 
-`devintern worker --listen` preserves the old combined single-repo process for compatibility, but is deprecated. Run the workspace worker and `devintern webhook serve` as separate processes instead. `devintern serve` remains a deprecated alias for `devintern webhook serve`.
-
 ## Recurring automations
 
-For a single repository, put recurring work in `.devintern-code/automations.toml`:
+Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
 
 ```toml
 [[automations]]
 id = "dependency-health"
 enabled = true
+repo = "web-app"
 interval = "6h"
 prompt = """Pick one outdated dependency and upgrade it within the same major version.
 Run the test suite; if anything breaks, revert the upgrade instead of fixing forward."""
@@ -53,6 +52,7 @@ Run the test suite; if anything breaks, revert the upgrade instead of fixing for
 [[automations]]
 id = "flaky-test-triage"
 enabled = true
+repo = "web-app"
 cron = "0 9 * * 1"
 prompt = """Re-run the test suite twice and look for flaky tests.
 For each flaky test, add a short comment explaining the suspected race condition.
@@ -61,7 +61,7 @@ Do not change production code."""
 
 Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
-Configuration is validated as a group at worker startup and changes require a restart. An automation file is itself a valid event source, so `devintern worker` stays running without `--query` or `--listen` when at least one automation entry is configured (disabled entries are validated but not scheduled).
+Configuration is validated as a group at worker startup and changes require a restart. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is
 
@@ -69,14 +69,14 @@ Automations are independent of your task tracker: **the prompt is the task**. Ea
 
 Concretely, each occurrence:
 
-1. Writes `.devintern-code/automations/<id>/<timestamp>.md` (resolved like every other devintern state: the nearest `.devintern-code` walking up from the working directory).
+1. Writes `~/.devintern/automations/<id>/<timestamp>.md` (or the equivalent under `DEVINTERN_WORKSPACE_DIR`).
 2. Spawns the normal CLI on that file as a subprocess, so the run gets its own branch, commits, and — by default — a pull request.
 3. Records the attempt with the `scheduled` origin and the automation id, so you can filter scheduled runs in the [dashboard](./dashboard.md).
 
 Because the occurrence is just a markdown task, you can reproduce or rerun any occurrence by hand:
 
 ```bash
-devintern .devintern-code/automations/dependency-health/2026-08-24T09-00-00-000Z.md
+devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
 ### Writing good prompts
@@ -106,7 +106,7 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
 | `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
 | Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
-| Task files pile up under `.devintern-code/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
 
 ## Polling mode
 
@@ -155,9 +155,6 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 | Option              | Description                                                         |
 | ------------------- | ------------------------------------------------------------------- |
 | `--query <query>`   | Poll the tracker for ready tasks matching this query                |
-| `--listen`          | Deprecated combined repo-local webhook listener                    |
-| `--port <port>`     | Deprecated listener port used only with `--listen`                 |
-| `--host <host>`     | Deprecated listener host used only with `--listen`                 |
 | `--interval <secs>` | Polling interval in seconds (default: 60 or `WORKER_POLL_INTERVAL`) |
 | `--ui`              | Serve the local [observability dashboard](./dashboard.md) (default) |
 | `--no-ui`           | Disable the dashboard for this worker process                        |
@@ -171,9 +168,9 @@ Unattended automation is exactly where sandboxing the agent matters most: set `A
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own.
 
-The watch list is scoped to the project the worker runs in: single-repo mode watches only PRs on that checkout's GitHub repo, and workspace mode only repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred, or by an older checkout sharing the same `.devintern-code/` state — are unwatched automatically at startup instead of being polled (and failing auth) forever.
+The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 
-The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. The deprecated combined `--listen` mode disables this poller so feedback is never handled twice.
+The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair.
 
 ### Merge conflicts on the agent's PRs
 

@@ -433,7 +433,7 @@ export WEBHOOK_DEBUG="true"       # Verbose request/processing logging
 
 ### Start the Server
 
-`devintern webhook serve` runs the advanced repo-local webhook listener. Keep it separate from the workspace worker so webhook delivery and tracker automation can be operated independently. The old `devintern worker --listen` combined mode and `devintern serve` alias remain temporarily available with deprecation warnings.
+`devintern webhook serve` runs the advanced repo-local webhook listener. Keep it separate from the workspace worker so webhook delivery and tracker automation can be operated independently.
 
 ```bash
 # Development
