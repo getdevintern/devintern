@@ -123,6 +123,18 @@ export { detectMaxTurnsReached, findMaxTurnsReachedLine } from "./detect-max-tur
 // Usage/rate-limit detection
 export { detectUsageLimit, resetHintToMs, type UsageLimitResult } from "./detect-usage-limit.js";
 
+// Normalized token/cost usage extraction
+export {
+  extractAgentUsage,
+  findJsonUsageObjects,
+  mergeAgentUsages,
+  normalizeJsonUsage,
+  type AgentUsage,
+  type MergedAgentUsage,
+  type UsageExtractionInput,
+  type UsageSource,
+} from "./usage.js";
+
 // Incomplete implementation detection
 export {
   detectIncompleteImplementation,

@@ -33,6 +33,7 @@ import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
+import { recordSessionOutput } from "./lib/run-recorder";
 import {
   handlePingEvent,
   isGitHubIP,
@@ -1332,6 +1333,8 @@ async function runAgentHarnessForReview(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this review session's usage when a run is being recorded.
+        recordSessionOutput(currentHarnessName(), stdoutOutput, stderrOutput);
         const maxTurnsReached = detectMaxTurnsReached(
           stdoutOutput,
           stderrOutput,

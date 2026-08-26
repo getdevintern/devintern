@@ -16,7 +16,7 @@ import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
-import { beginRun, endRun, recordRunStage } from "./run-recorder";
+import { beginRun, endRun, recordRunStage, recordSessionOutput } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
@@ -201,6 +201,8 @@ export async function runAgent(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this change-request session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         const maxTurnsReached = detectMaxTurnsReached(
           stdoutOutput,
           stderrOutput,
@@ -473,6 +475,8 @@ export async function addressReview(
     repo: `${owner}/${repo}`,
     prNumber,
     branch: pr.head.ref,
+    harness: resolveHarness().harness.name,
+    unattended: process.env.DEVINTERN_WORKER === "1" || undefined,
   });
   recordRunStage("change_request", {
     status: "succeeded",

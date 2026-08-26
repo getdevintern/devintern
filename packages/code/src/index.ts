@@ -77,7 +77,14 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunPr,
+  recordRunStage,
+  recordSessionOutput,
+} from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
@@ -660,6 +667,11 @@ if (process.argv[2] === "init") {
       requireAutomation: true,
     });
     requireLicense(licenseResult);
+
+    // Mark this process tree as unattended so run records can distinguish
+    // worker-originated runs from manual CLI runs (the env marker is
+    // inherited by the task subprocesses the worker spawns).
+    process.env.DEVINTERN_WORKER = "1";
 
     // Workspace (fleet) mode: one daemon serves every repo in the workspace.
     // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
@@ -1819,6 +1831,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
       tracker: process.env.TASK_TRACKER || "jira",
+      unattended: process.env.DEVINTERN_WORKER === "1" || undefined,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
     });
 
@@ -2828,6 +2841,8 @@ async function runClarityCheck(
       clarityAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this feasibility session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         if (timedOut) {
           reject(
             new Error(
@@ -3210,6 +3225,8 @@ async function runEstimation(
       estimationAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this estimation session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
 
         if (timedOut) {
           reject(new Error(`Agent estimation timed out after ${timeoutMinutes} minutes`));
@@ -3657,6 +3674,8 @@ async function runAgentHarness(
       codeAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this implementation session's usage to the current run.
+        recordSessionOutput(harness.name, stdoutOutput, stderrOutput);
         console.log("\n" + "=".repeat(60));
 
         if (timedOut) {
@@ -4195,6 +4214,8 @@ async function runAgentHarness(
 
                     retryProcess.on("close", async (retryCode: number | null) => {
                       retrySandboxCleanup().catch(() => {});
+                      // Attribute this plan-retry session's usage to the run.
+                      recordSessionOutput(harness.name, retryStdoutOutput, retryStderrOutput);
                       console.log("\n" + "=".repeat(60));
 
                       if (retryCode === 0) {

@@ -17,6 +17,7 @@ import { parseAgentJsonObject } from "./agent-json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
+import { recordSessionOutput } from "./run-recorder";
 import type {
   AutoReviewLoopOptions,
   AutoReviewLoopResult,
@@ -371,6 +372,8 @@ async function runAgentPrompt(
       agentProcess.on("close", (code) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        // Attribute this auto-review session's usage to the current run.
+        recordSessionOutput(harness.name, stdout, stderr);
         if (timedOut) {
           reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
         } else if (code !== 0) {

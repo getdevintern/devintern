@@ -18,6 +18,25 @@ import { formatDuration, formatRate } from "@/lib/utils";
 const WINDOWS = ["7d", "30d", "90d", "all"] as const;
 const RUN_ORIGINS: RunOrigin[] = ["task", "pr_mention", "conflict_resolution", "scheduled"];
 
+/** Format a token count compactly (12.3k, 4.5M). */
+function formatTokens(count: number): string {
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    return `${(count / 1_000).toFixed(1)}k`;
+  }
+  return String(count);
+}
+
+/**
+ * Known-spend label that never presents unknown data as $0.
+ * Returns null when nothing is priced in the window.
+ */
+function formatSpend(knownSpendUsd: number | null): string | null {
+  return knownSpendUsd === null ? null : `$${knownSpendUsd.toFixed(2)}`;
+}
+
 /** Hand-rolled SVG bar chart of runs per week (keeps dependencies minimal). */
 function WeeklyBars({ weeks }: { weeks: { weekStart: string; count: number }[] }) {
   if (weeks.length === 0) {
@@ -105,6 +124,72 @@ export function StatsView() {
             />
           </div>
 
+          {(() => {
+            const usage = stats.usage;
+            const spend = formatSpend(usage.knownSpendUsd);
+            const unknownExposure =
+              usage.runsWithoutUsage + usage.runsWithIncompleteUsage > 0 || spend === null;
+            return (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Token &amp; cost usage
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <StatTile
+                      label="Known spend (USD)"
+                      value={spend ?? "unknown"}
+                      hint={
+                        spend === null
+                          ? "no priced runs in this window"
+                          : `${usage.runsWithUsage} run${usage.runsWithUsage === 1 ? "" : "s"} with usage`
+                      }
+                    />
+                    <StatTile
+                      label="Input tokens"
+                      value={usage.inputTokens === null ? "–" : formatTokens(usage.inputTokens)}
+                      hint={
+                        usage.cachedInputTokens === null
+                          ? undefined
+                          : `${formatTokens(usage.cachedInputTokens)} cached`
+                      }
+                    />
+                    <StatTile
+                      label="Output tokens"
+                      value={usage.outputTokens === null ? "–" : formatTokens(usage.outputTokens)}
+                    />
+                    <StatTile
+                      label="Total tokens"
+                      value={usage.totalTokens === null ? "–" : formatTokens(usage.totalTokens)}
+                      hint={
+                        usage.reasoningTokens === null
+                          ? undefined
+                          : `${formatTokens(usage.reasoningTokens)} reasoning`
+                      }
+                    />
+                  </div>
+                  {unknownExposure ? (
+                    <p className="text-xs text-muted-foreground">
+                      ⚠️ Partial data:{" "}
+                      {usage.runsWithoutUsage > 0
+                        ? `${usage.runsWithoutUsage} finished run${usage.runsWithoutUsage === 1 ? "" : "s"} without usage reporting`
+                        : null}
+                      {usage.runsWithoutUsage > 0 && usage.runsWithIncompleteUsage > 0
+                        ? "; "
+                        : null}
+                      {usage.runsWithIncompleteUsage > 0
+                        ? `${usage.runsWithIncompleteUsage} with incomplete accounting or unpriced model${usage.runsWithIncompleteUsage === 1 ? "" : "s"}`
+                        : null}
+                      . Totals cover known values only — unknown runs are not counted as $0.
+                    </p>
+                  ) : null}
+                </CardContent>
+              </Card>
+            );
+          })()}
+
           <Card>
             <CardHeader>
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -127,6 +212,7 @@ export function StatsView() {
                     <TableHead className="px-4">Failed</TableHead>
                     <TableHead className="px-4">Escalated</TableHead>
                     <TableHead className="px-4">Median duration</TableHead>
+                    <TableHead className="px-4">Spend (USD)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -145,6 +231,13 @@ export function StatsView() {
                         {harness.medianDurationMs === null
                           ? "–"
                           : formatDuration(harness.medianDurationMs)}
+                      </TableCell>
+                      <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+                        {harness.spendUsd === null
+                          ? harness.runsWithUnknownCost > 0
+                            ? `unknown (${harness.runsWithUnknownCost})`
+                            : "–"
+                          : `$${harness.spendUsd.toFixed(2)}`}
                       </TableCell>
                     </TableRow>
                   ))}

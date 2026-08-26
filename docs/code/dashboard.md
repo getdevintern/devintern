@@ -28,12 +28,16 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs).
-- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
-- **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, duration, and known cost. Filter by status or origin (`origin=scheduled` isolates automation runs).
+- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome. Runs that reported token usage also show the model, token totals (input / output), and cost (only when the harness reported one).
+- **Stats**: runs per week, success and escalation rates, median run duration, aggregate token usage and known spend, and a per-harness breakdown (including per-harness spend) over a selectable window (7, 30, or 90 days, or all time).
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
 
 Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
+
+### Usage and cost data quality
+
+Token/cost accounting depends on what each harness CLI reports: usage is captured only from structured JSON output (e.g. `--json` / `--output-format json` modes), and CLIs that don't emit it show no usage at all rather than zeros. Wherever data is partial, the dashboard says so explicitly — unknown costs render as "unknown" (never `$0.00`) and incomplete accounting is marked "(partial)". Aggregate stats sum only *known* values and show an explicit partial-data notice when runs in the window have missing or unpriced usage.
 
 ## Options
 
