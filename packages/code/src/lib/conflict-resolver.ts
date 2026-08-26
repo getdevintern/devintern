@@ -35,11 +35,19 @@ export interface ResolveConflictsOptions {
   ) => Promise<{ success: boolean; output: string }>;
   /** Injected PR fetch (tests). Defaults to the GitHub API. */
   fetchPr?: (owner: string, repo: string, prNumber: number) => Promise<PullRequestInfo>;
+  /** Abort safely if polling eligibility became stale before execution. */
+  expectedHeadSha?: string;
+  /**
+   * Advisory only: GitHub's PR API reports a stale `base.sha` until it
+   * recomputes the PR, so a mismatch against the fetched ref is logged, not
+   * treated as a race — the fetched tip is what gets merged.
+   */
+  expectedBaseSha?: string;
 }
 
 export interface ResolveConflictsResult {
   /** `resolved` = merge pushed; `clean` = base merged without conflicts. */
-  outcome: "clean" | "resolved" | "skipped" | "failed";
+  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
   message: string;
 }
 
@@ -109,6 +117,12 @@ export async function resolveConflictsOnPr(
   if (pr.state !== "open") {
     return { outcome: "skipped", message: `PR is ${pr.state}` };
   }
+  if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
+    return { outcome: "deferred", message: "PR head changed before execution" };
+  }
+  if (options.expectedBaseSha && pr.base.sha !== options.expectedBaseSha) {
+    return { outcome: "deferred", message: "PR base changed before execution" };
+  }
   const baseRepo = `${owner}/${repo}`;
   if (pr.head.repo && pr.head.repo.full_name !== baseRepo) {
     return {
@@ -125,6 +139,13 @@ export async function resolveConflictsOnPr(
     return { outcome: "failed", message: `worktree preparation failed: ${worktree.error}` };
   }
   const workDir = worktree.path;
+
+  if (options.expectedHeadSha) {
+    const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
+    if (!preparedHead.success || preparedHead.output.trim() !== options.expectedHeadSha) {
+      return { outcome: "deferred", message: "PR head changed during worktree preparation" };
+    }
+  }
 
   // Commit attribution for the merge commit (matches address-review).
   if (!process.env.GITHUB_TOKEN) {
@@ -149,9 +170,28 @@ export async function resolveConflictsOnPr(
   if (shallow.output.trim() === "true") {
     await Utils.executeGitCommand(["fetch", "--unshallow", "origin"], { cwd: workDir, verbose });
   }
-  await Utils.executeGitCommand(["fetch", "origin", baseRef], { cwd: workDir, verbose });
+  const baseFetch = await Utils.fetchRemoteBranch(baseRef, { cwd: workDir, verbose });
+  if (!baseFetch.success) {
+    return { outcome: "failed", message: `base fetch failed: ${baseFetch.error}` };
+  }
+  // GitHub's PR API can report a stale `base.sha` long after the branch
+  // advanced (it only updates when GitHub recomputes the PR). Deferring on a
+  // mismatch would retry forever against a deterministic mismatch, so the
+  // freshly fetched ref is the source of truth for what to merge.
+  if (options.expectedBaseSha) {
+    const fetchedBase = await Utils.executeGitCommand(["rev-parse", `origin/${baseRef}`], {
+      cwd: workDir,
+    });
+    if (fetchedBase.success && fetchedBase.output.trim() !== options.expectedBaseSha) {
+      console.log(
+        `ℹ️  GitHub reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
+          `origin/${baseRef} is at ${fetchedBase.output.trim().slice(0, 7)}; syncing to the actual tip`,
+      );
+    }
+  }
 
-  const merge = await Utils.executeGitCommand(["merge", `origin/${baseRef}`, "--no-edit"], {
+  const mergeTarget = `origin/${baseRef}`;
+  const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
     cwd: workDir,
     verbose,
   });
@@ -226,9 +266,43 @@ export async function resolveConflictsOnPr(
     return { outcome, message: "merge committed (push skipped)" };
   }
 
-  // Never force: a rejected push means a human moved the branch — theirs wins.
-  const push = await Utils.pushCurrentBranch({ cwd: workDir, expectedBranch: branch, verbose });
+  if (options.expectedHeadSha) {
+    const headFetch = await Utils.executeGitCommand(
+      ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      { cwd: workDir, verbose },
+    );
+    if (!headFetch.success) {
+      return { outcome: "failed", message: `head fetch before push failed: ${headFetch.error}` };
+    }
+    const remoteHead = await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], {
+      cwd: workDir,
+    });
+    if (!remoteHead.success || remoteHead.output.trim() !== options.expectedHeadSha) {
+      return { outcome: "deferred", message: "PR head changed before push" };
+    }
+  }
+
+  // The exact lease makes the head check above atomic with the push. The push
+  // helper also verifies that HEAD descends from the leased commit.
+  const push = await Utils.pushCurrentBranch({
+    cwd: workDir,
+    expectedBranch: branch,
+    expectedRemoteSha: options.expectedHeadSha,
+    verbose,
+  });
   if (!push.success) {
+    if (options.expectedHeadSha) {
+      const refreshed = await Utils.executeGitCommand(
+        ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+        { cwd: workDir, verbose },
+      );
+      const remoteHead = refreshed.success
+        ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
+        : null;
+      if (remoteHead?.success && remoteHead.output.trim() !== options.expectedHeadSha) {
+        return { outcome: "deferred", message: "PR head changed during push" };
+      }
+    }
     return { outcome: "failed", message: `push rejected: ${push.message}` };
   }
 

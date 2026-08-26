@@ -37,6 +37,34 @@ describe("RunStore", () => {
     expect(run?.finishedAt).toBeUndefined();
   });
 
+  test("reapOrphanedRuns fails only in_progress runs, terminal runs stay untouched", () => {
+    const orphan = store.createRun({ origin: "conflict_resolution" });
+    const finished = store.createRun({ origin: "task", taskKey: "PROJ-2" });
+    store.finishRun(finished, "succeeded", "done");
+
+    const reaped = store.reapOrphanedRuns();
+    expect(reaped).toBe(1);
+
+    const orphanRun = store.getRun(orphan);
+    expect(orphanRun?.status).toBe("failed");
+    expect(orphanRun?.outcomeReason).toContain("orphaned");
+    expect(orphanRun?.finishedAt).toBeDefined();
+
+    // Terminal rows are not modified by a second sweep.
+    expect(store.reapOrphanedRuns()).toBe(0);
+    expect(store.getRun(finished)?.status).toBe("succeeded");
+  });
+
+  test("a late finishRun from an outlived subprocess wins over the reap", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    store.reapOrphanedRuns();
+    store.finishRun(id, "succeeded", "late completion");
+
+    const run = store.getRun(id);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBe("late completion");
+  });
+
   test("pr_mention runs have no task key", () => {
     const id = store.createRun({ origin: "pr_mention", repo: "acme/widgets", prNumber: 42 });
 
@@ -45,6 +73,22 @@ describe("RunStore", () => {
     expect(run?.taskKey).toBeUndefined();
     expect(run?.repo).toBe("acme/widgets");
     expect(run?.prNumber).toBe(42);
+  });
+
+  test("scheduled runs persist automation metadata", () => {
+    const id = store.createRun({
+      origin: "scheduled",
+      automationId: "weekly-plan",
+      repo: "backend",
+      harness: "codex",
+    });
+    store.finishRun(id, "succeeded");
+
+    expect(store.getRun(id)).toMatchObject({
+      origin: "scheduled",
+      automationId: "weekly-plan",
+    });
+    expect(store.getStats(null).byOrigin.scheduled).toBe(1);
   });
 
   test("stages accumulate in order with structured detail", () => {
@@ -159,6 +203,8 @@ describe("RunStore", () => {
     const migrated = new RunStore(legacyPath);
     const id = migrated.createRun({ origin: "task", taskKey: "OLD-1" });
     expect(migrated.getRun(id)?.attempt).toBe(2);
+    const scheduled = migrated.createRun({ origin: "scheduled", automationId: "new-schedule" });
+    expect(migrated.getRun(scheduled)?.automationId).toBe("new-schedule");
     migrated.close();
     for (const suffix of ["", "-wal", "-shm"]) {
       rmSync(`${legacyPath}${suffix}`, { force: true });

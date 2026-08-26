@@ -10,18 +10,21 @@ describe("Default branch detection", () => {
   const remoteDirs: string[] = [];
 
   function configureOrigin(defaultBranch: string): string {
-    execSync(`git branch -M ${defaultBranch}`, { cwd: repoDir });
-
     const remoteDir = join(
       tmpdir(),
       `default-branch-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     remoteDirs.push(remoteDir);
     mkdirSync(remoteDir, { recursive: true });
-    execSync("git init --bare", { cwd: remoteDir });
-    execSync(`git symbolic-ref HEAD refs/heads/${defaultBranch}`, { cwd: remoteDir });
-    execSync(`git remote add origin ${remoteDir}`, { cwd: repoDir });
-    execSync(`git push -u origin ${defaultBranch}`, { cwd: repoDir });
+    // Single shell call keeps per-test git spawn overhead low.
+    const script = [
+      `git branch -M ${defaultBranch}`,
+      `git -C "${remoteDir}" init --bare`,
+      `git -C "${remoteDir}" symbolic-ref HEAD refs/heads/${defaultBranch}`,
+      `git remote add origin "${remoteDir}"`,
+      `git push -qu origin ${defaultBranch}`,
+    ].join(" && ");
+    execSync(script, { cwd: repoDir });
     return remoteDir;
   }
 
@@ -32,12 +35,15 @@ describe("Default branch detection", () => {
     );
     mkdirSync(repoDir, { recursive: true });
 
-    execSync("git init", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test User'", { cwd: repoDir });
     writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
+    const script = [
+      "git init",
+      "git config user.email 'test@test.com'",
+      "git config user.name 'Test User'",
+      "git add .",
+      "git commit -qm 'Initial commit'",
+    ].join(" && ");
+    execSync(script, { cwd: repoDir });
   });
 
   afterEach(() => {

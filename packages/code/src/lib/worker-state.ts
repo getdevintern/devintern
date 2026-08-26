@@ -251,6 +251,37 @@ export class WorkerState {
   }
 
   /**
+   * Close every open agent PR whose repo is not managed by this worker,
+   * e.g. rows left over from a repo rename/transfer or from an older
+   * checkout sharing the same queue database. Returns what was closed so
+   * the caller can log it.
+   *
+   * @param allowedRepos - Repo slugs (`owner/repo`) this worker manages
+   */
+  closeForeignAgentPrs(allowedRepos: Iterable<string>): Array<{ repo: string; prNumber: number }> {
+    const allowed = [...allowedRepos];
+    if (allowed.length === 0) {
+      return [];
+    }
+    const placeholders = allowed.map(() => "?").join(", ");
+    const foreign = this.db
+      .query(
+        `SELECT repo, pr_number FROM agent_prs
+         WHERE state = 'open' AND repo NOT IN (${placeholders})`,
+      )
+      .all(...allowed) as Array<{ repo: string; pr_number: number }>;
+    if (foreign.length === 0) {
+      return [];
+    }
+    this.db.run(
+      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+       WHERE state = 'open' AND repo NOT IN (${placeholders})`,
+      [Date.now(), ...allowed],
+    );
+    return foreign.map((row) => ({ repo: row.repo, prNumber: row.pr_number }));
+  }
+
+  /**
    * Mark an agent PR as closed/merged so review polling stops watching it.
    *
    * @param repo - Repo slug

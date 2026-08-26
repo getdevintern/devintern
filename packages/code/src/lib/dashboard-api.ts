@@ -26,7 +26,13 @@ const RUN_STATUSES: RunStatus[] = [
   "escalated",
   "abandoned",
 ];
-const RUN_ORIGINS: RunOrigin[] = ["task", "pr_mention", "ci_fix"];
+const RUN_ORIGINS: RunOrigin[] = [
+  "task",
+  "pr_mention",
+  "conflict_resolution",
+  "scheduled",
+  "ci_fix",
+];
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,

@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-23
+dateModified: 2026-08-26
 ---
 
 # Worker Daemon
@@ -34,6 +34,76 @@ devintern worker --query "status=todo" --listen
 
 `devintern serve` still works as a deprecated alias for `devintern worker --listen`.
 
+## Recurring automations
+
+For a single repository, put recurring work in `.devintern-code/automations.toml`:
+
+```toml
+[[automations]]
+id = "dependency-health"
+enabled = true
+interval = "6h"
+prompt = """Pick one outdated dependency and upgrade it within the same major version.
+Run the test suite; if anything breaks, revert the upgrade instead of fixing forward."""
+
+[[automations]]
+id = "flaky-test-triage"
+enabled = true
+cron = "0 9 * * 1"
+prompt = """Re-run the test suite twice and look for flaky tests.
+For each flaky test, add a short comment explaining the suspected race condition.
+Do not change production code."""
+```
+
+Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
+
+Configuration is validated as a group at worker startup and changes require a restart. An automation file is itself a valid event source, so `devintern worker` stays running without `--query` or `--listen` when at least one automation entry is configured (disabled entries are validated but not scheduled).
+
+### What an automation is
+
+Automations are independent of your task tracker: **the prompt is the task**. Each occurrence writes the prompt to a local markdown task file and feeds it through exactly the same pipeline as any other task — clarity check, planning, implementation, commit, PR creation, auto-review, run records. Nothing is created in your tracker, so no tracker credentials are needed for automation-only workers.
+
+Concretely, each occurrence:
+
+1. Writes `.devintern-code/automations/<id>/<timestamp>.md` (resolved like every other devintern state: the nearest `.devintern-code` walking up from the working directory).
+2. Spawns the normal CLI on that file as a subprocess, so the run gets its own branch, commits, and — by default — a pull request.
+3. Records the attempt with the `scheduled` origin and the automation id, so you can filter scheduled runs in the [dashboard](./dashboard.md).
+
+Because the occurrence is just a markdown task, you can reproduce or rerun any occurrence by hand:
+
+```bash
+devintern .devintern-code/automations/dependency-health/2026-08-24T09-00-00-000Z.md
+```
+
+### Writing good prompts
+
+The prompt replaces the ticket description the agent would normally read, so treat it like you would write a task for a new teammate:
+
+- **Scope it to one change per run.** "Apply one safe improvement" produces reviewable PRs; "clean up the repository" produces sprawling ones.
+- **State the guardrails.** What not to touch, when to stop, what must pass (`Run the test suite before committing`).
+- **Say what done means.** The pipeline's incomplete-detection reads the agent output; concrete success criteria make escalations rare.
+- Prefer recurring maintenance work (dependency bumps within a major, flaky-test triage, changelog refreshes, TODO sweeps) over open-ended feature work.
+
+### Tuning how occurrences run
+
+Occurrences use the same flag defaults as polled tasks: `WORKER_TASK_ARGS` overrides them (default `--create-pr`). For example, set `WORKER_TASK_ARGS=--auto-review` to have every automated PR go through the review loop too, or clear it to keep runs local without PRs. Note this variable applies to polled tracker tasks as well.
+
+### Schedule semantics
+
+Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
+
+On shutdown the scheduler stops its timer, terminates active automation subprocess groups, waits for them to exit, and leaves their claims recoverable in SQLite.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+| ---------------------------- | ------------------------------------------------------------ |
+| No occurrences fire after editing the TOML | Config is loaded at startup — restart the worker. Startup validation errors name the offending entry. |
+| `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
+| `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
+| Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
+| Task files pile up under `.devintern-code/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
+
 ## Polling mode
 
 With `--query` (or `WORKER_TASK_QUERY`), the worker polls your tracker on an interval (default 60 seconds) and runs every task that matches the query. The query uses the same language as batch `--query` runs for your tracker, so "ready" means whatever your query says, for example a status or label.
@@ -55,7 +125,7 @@ TASK_TRACKER=markdown MARKDOWN_TASKS_DIR=./tasks devintern worker --query "statu
 
 ### Re-running a task
 
-When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket and moves it back to your to-do status. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
+When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket (crash, interrupt, and failed-feasibility comments do the same) and moves it back to your to-do status. That comment tells you how to unlock a retry. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
@@ -66,6 +136,15 @@ Either action bumps the ticket's update stamp, so the worker picks it up on the 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `WORKER_TASK_ARGS`, since that would disable the gate for every polled task.
+
+### Ticket matches the query but is not picked up
+
+The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
+
+- `📌 picking up KEY` — it was claimed on this tick.
+- `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
+- `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
+- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
 ## Options
 
@@ -87,13 +166,15 @@ Unattended automation is exactly where sandboxing the agent matters most: set `A
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own.
 
-The polling is cheap: requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
+The watch list is scoped to the project the worker runs in: single-repo mode watches only PRs on that checkout's GitHub repo, and workspace mode only repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred, or by an older checkout sharing the same `.devintern-code/` state — are unwatched automatically at startup instead of being polled (and failing auth) forever.
+
+The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
 
 ### Merge conflicts on the agent's PRs
 
-When a watched PR falls behind its base branch and GitHub reports merge conflicts, the worker catches the branch up automatically: it merges the base branch into the PR branch, and if the merge conflicts, the agent resolves the conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected and the merge is abandoned for them to handle. A comment on the PR reports what happened either way, and stacked PRs benefit the most, since merging one PR routinely conflicts the next one in the chain.
+When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. Eligibility comes from GitHub's own `mergeable_state` (`dirty` = conflicts, `behind` = mergeable but not up to date) — not from ancestry checks against the API-reported base SHA, a field GitHub can leave stale for days. The worker merges the base branch into the PR branch and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed; every conflicting PR in the watch list is synced, not just one per tick. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each conflict state is attempted once: a failed resolution is retried only after the branch or its base moves again. The same logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
 ## CI failures on the agent's PRs
 
@@ -127,7 +208,7 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 - Events are persisted to a local SQLite queue (`.devintern-code/queue.db`) before processing, so a crash or restart never loses accepted work.
 - Duplicate webhook deliveries are detected by GitHub's delivery id and skipped.
 - Review feedback is processed before new task pickup: a human waiting on feedback beats a ticket that can wait a minute.
-- One task runs at a time per repository.
+- One task or scheduled automation runs at a time per repository.
 
 ## Instant events with the relay
 

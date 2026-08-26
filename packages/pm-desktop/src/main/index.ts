@@ -18,6 +18,7 @@ import {
 import { registerIpcHandlers } from "./ipc.ts";
 import { installAppMenu } from "./menu.ts";
 import { augmentPath } from "./path-fix.ts";
+import { disposeQuickCapture, syncQuickCaptureRegistration } from "./quick-capture.ts";
 import { createWindow } from "./window.ts";
 
 augmentPath();
@@ -54,7 +55,10 @@ if (!hasLock) {
   void app.whenReady().then(async () => {
     // Re-apply identity now that `app.getVersion()` is fully resolved.
     installAppMenu({ createWindow });
-    registerIpcHandlers();
+    registerIpcHandlers({ createWindow });
+    // Register the Quick Capture global shortcut per persisted settings.
+    // Registration failures surface through Settings; never block startup.
+    void syncQuickCaptureRegistration();
 
     if (app.isPackaged) {
       // Dynamic import: unpackaged/dev never loads electron-updater.
@@ -85,6 +89,7 @@ if (!hasLock) {
 
   app.on("before-quit", () => {
     stopAutoUpdateChecks();
+    disposeQuickCapture();
     void shutdownAnalytics();
     void shutdownErrorTracking();
   });

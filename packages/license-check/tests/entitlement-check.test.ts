@@ -63,6 +63,7 @@ describe("checkLicense entitlement API", () => {
 
     const result = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig: freshSupabaseConfig(),
     });
 
@@ -95,6 +96,7 @@ describe("checkLicense entitlement API", () => {
 
     const result = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig: freshSupabaseConfig(),
       requireAutomation: true,
     });
@@ -137,6 +139,7 @@ describe("checkLicense entitlement API", () => {
 
     const first = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig,
       requireAutomation: true,
     });
@@ -150,6 +153,7 @@ describe("checkLicense entitlement API", () => {
     failing = true;
     const second = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig,
       requireAutomation: true,
     });
@@ -184,6 +188,7 @@ describe("checkLicense entitlement API", () => {
 
     const first = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig,
       requireAutomation: true,
     });
@@ -192,6 +197,7 @@ describe("checkLicense entitlement API", () => {
     mode = "denied";
     const second = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig,
       requireAutomation: true,
     });
@@ -200,6 +206,7 @@ describe("checkLicense entitlement API", () => {
     mode = "down";
     const third = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig,
       requireAutomation: true,
     });
@@ -227,6 +234,7 @@ describe("checkLicense entitlement API", () => {
 
     const result = await checkLicense({
       productKey: "devintern/code",
+      retryBaseDelayMs: 1,
       supabaseConfig: freshSupabaseConfig(),
     });
 

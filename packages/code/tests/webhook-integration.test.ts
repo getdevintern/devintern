@@ -2,8 +2,8 @@
  * Integration test suite for webhook server with queue and worktree
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
@@ -12,7 +12,43 @@ import { execSync } from "child_process";
 describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktrees", () => {
   let testDir: string;
   let repoDir: string;
+  let templateDir: string;
+  let templateRepo: string;
   let originalWorktreeEnv: string | undefined;
+
+  beforeAll(() => {
+    // Build the fixture repository once; each test copies it into its own
+    // unique temp directory, which preserves isolation while avoiding
+    // replaying the git command sequence for every test.
+    templateDir = mkdtempSync(join(tmpdir(), "webhook-integration-template-"));
+    templateRepo = join(templateDir, "test-repo");
+    mkdirSync(templateRepo, { recursive: true });
+
+    // Initialize git repo
+    execSync("git init", { cwd: templateRepo });
+    execSync("git config user.email 'test@test.com'", { cwd: templateRepo });
+    execSync("git config user.name 'Test User'", { cwd: templateRepo });
+
+    // Create initial commit on main branch
+    writeFileSync(join(templateRepo, "README.md"), "# Test Repo\n", "utf8");
+    execSync("git add .", { cwd: templateRepo });
+    execSync("git commit -m 'Initial commit'", { cwd: templateRepo });
+
+    // Create multiple PR branches
+    for (let i = 1; i <= 3; i++) {
+      execSync(`git checkout -b pr-${i}`, { cwd: templateRepo });
+      writeFileSync(join(templateRepo, `pr${i}.txt`), `PR ${i} content\n`, "utf8");
+      execSync("git add .", { cwd: templateRepo });
+      execSync(`git commit -m 'Add PR ${i} changes'`, { cwd: templateRepo });
+      execSync("git checkout main || git checkout master", { cwd: templateRepo });
+    }
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(templateDir, { recursive: true, force: true });
+    } catch {}
+  });
 
   beforeEach(async () => {
     // Create unique test directory for each test
@@ -27,28 +63,9 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
     originalWorktreeEnv = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(testDir, "review-worktree");
 
-    // Create a test git repository
+    // Copy the pre-built template repository into this test's directory
     repoDir = join(testDir, "test-repo");
-    mkdirSync(repoDir, { recursive: true });
-
-    // Initialize git repo
-    execSync("git init", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test User'", { cwd: repoDir });
-
-    // Create initial commit on main branch
-    writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
-
-    // Create multiple PR branches
-    for (let i = 1; i <= 3; i++) {
-      execSync(`git checkout -b pr-${i}`, { cwd: repoDir });
-      writeFileSync(join(repoDir, `pr${i}.txt`), `PR ${i} content\n`, "utf8");
-      execSync("git add .", { cwd: repoDir });
-      execSync(`git commit -m 'Add PR ${i} changes'`, { cwd: repoDir });
-      execSync("git checkout main || git checkout master", { cwd: repoDir });
-    }
+    cpSync(templateRepo, repoDir, { recursive: true });
 
     // Create .devintern-code directory
     mkdirSync(join(repoDir, ".devintern-code"), { recursive: true });
