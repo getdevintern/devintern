@@ -586,7 +586,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     // `updated_at`, stamped by the queue's clock at the last meaningful
     // change, so this works across worker restarts too.
     const backoffMs = baseSyncRetryBackoffMs(event.attempts);
-    if (backoffMs > 0 && Date.now() - event.updatedAt < backoffMs) return;
+    if (backoffMs > 0 && now - event.updatedAt < backoffMs) return;
 
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
@@ -622,7 +622,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       return;
     }
 
-    const attempt = queue.beginBaseSyncAttempt(externalId);
+    const attempt = queue.beginBaseSyncAttempt(externalId, now);
     let runId: number | null = null;
     try {
       runId =
@@ -671,7 +671,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       }
     } else {
       console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
-      const exhausted = queue.failBaseSyncEvent(externalId, result.message);
+      const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
       if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
     }
     if (runId !== null) {

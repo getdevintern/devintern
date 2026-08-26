@@ -67,6 +67,8 @@ export interface ResolveConflictsResult {
   /** `resolved` = merge pushed; `clean` = base merged without conflicts. */
   outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
   message: string;
+  /** How far a failed resolution got; determines whether the PR was touched. */
+  failureKind?: FailureKind;
 }
 
 /** Parse an `owner/repo` + PR number out of a GitHub PR URL. */
@@ -122,13 +124,15 @@ const DEFAULT_VERIFY_ATTEMPTS = 4;
 const DEFAULT_VERIFY_DELAY_MS = 3_000;
 
 /** Failure comment variants, matched to how far the resolution got. */
-type FailureKind =
+export type FailureKind =
   /** Nothing started (worktree/fetch problems); no changes were made. */
   | "setup"
   /** The merge was rolled back locally (agent failure, bad tree). */
   | "aborted"
   /** A merge exists locally but never reached the PR. */
-  | "push-failed";
+  | "push-failed"
+  /** The push was accepted, but GitHub could not confirm a healthy PR. */
+  | "landed-but-unconfirmed";
 
 function failureCommentBody(kind: FailureKind, baseRef: string, detail: string): string {
   switch (kind) {
@@ -138,7 +142,41 @@ function failureCommentBody(kind: FailureKind, baseRef: string, detail: string):
       return `⚠️ devintern attempted to resolve this branch's merge conflicts with \`${baseRef}\` but could not finish safely (${detail}). The merge was aborted; manual resolution needed.`;
     case "push-failed":
       return `⚠️ devintern resolved this branch's merge conflicts with \`${baseRef}\` but could not publish the merge to this PR (${detail}). No changes landed on the PR; manual action needed.`;
+    case "landed-but-unconfirmed":
+      return `⚠️ devintern pushed a merge of \`${baseRef}\` into this branch, but GitHub still reports a problem with the PR (${detail}). The merge commit is on the branch — please re-run conflict resolution or check the PR state manually.`;
   }
+}
+
+/**
+ * Upper bound for raw error text embedded in a public PR comment; long
+ * subprocess/agent dumps belong in the local log, not on the PR.
+ */
+const MAX_PUBLIC_COMMENT_DETAIL_LENGTH = 300;
+
+/**
+ * Make raw subprocess/API error text safe to post publicly. Git errors echo
+ * remote URLs (which can carry embedded credentials) and worktree/fetch
+ * failures expose absolute local filesystem paths; neither belongs on a PR
+ * that anyone can read. Callers keep the unsanitized original local-only
+ * (console.error / result message).
+ */
+export function sanitizeErrorForPublicComment(detail: string): string {
+  let sanitized = detail
+    // URL credentials: https://user:token@host → https://***@host.
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^@\s/?]*@/gi, (match) => {
+      const schemeEnd = match.indexOf(":");
+      return `${match.slice(0, schemeEnd)}://***@`;
+    })
+    // Bare credential pairs: user:token@host → user:***@host.
+    .replace(/([^\s:@/'"]{1,256}):([^\s:@/'"]{1,1024})@/g, "$1:***@")
+    // Absolute local paths (POSIX and drive-letter form), keeping the delimiter.
+    .replace(/(^|[\s"'=([])((?:\/|\w:\\)[\w@.+-]*(?:[/\\][\w@.+-]+)+)/g, "$1[path]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (sanitized.length > MAX_PUBLIC_COMMENT_DETAIL_LENGTH) {
+    sanitized = `${sanitized.slice(0, MAX_PUBLIC_COMMENT_DETAIL_LENGTH)}…`;
+  }
+  return sanitized;
 }
 
 /**
@@ -246,9 +284,14 @@ export async function resolveConflictsOnPr(
   async function failWith(kind: FailureKind, message: string): Promise<ResolveConflictsResult> {
     console.error(`❌ ${message}`);
     if (!noComment) {
-      await postOutcomeComment(postComment, failureCommentBody(kind, baseRef, message));
+      // Raw errors can carry credentials and local paths; only the sanitized
+      // form is posted where the public can read it.
+      await postOutcomeComment(
+        postComment,
+        failureCommentBody(kind, baseRef, sanitizeErrorForPublicComment(message)),
+      );
     }
-    return { outcome: "failed", message };
+    return { outcome: "failed", message, failureKind: kind };
   }
 
   const pr = await fetchPrNow(owner, repo, prNumber);
@@ -506,22 +549,32 @@ export async function resolveConflictsOnPr(
     // declaring success: re-fetch the PR until the head carries the pushed
     // commit and mergeability has been recomputed (bounded window).
     const pushedRev = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
-    const verification = await verifyPushLandedOnPr({
-      fetchPr: () => fetchPrNow(owner, repo, prNumber),
-      pushedSha: pushedRev.success ? pushedRev.output.trim() : "",
-      attempts: options.verifyAttempts ?? DEFAULT_VERIFY_ATTEMPTS,
-      delayMs: options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
-    });
+    const pushedSha = pushedRev.success ? pushedRev.output.trim() : "";
+    // The push was accepted; if the local read of what was pushed fails, skip
+    // verification rather than compare against a sentinel — an empty SHA
+    // would deterministically report `head-moved` and post a false "the merge
+    // commit is missing" alarm on the PR.
+    const verification: PushVerification = pushedSha
+      ? await verifyPushLandedOnPr({
+          fetchPr: () => fetchPrNow(owner, repo, prNumber),
+          pushedSha,
+          attempts: options.verifyAttempts ?? DEFAULT_VERIFY_ATTEMPTS,
+          delayMs: options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
+        })
+      : {
+          status: "unverified",
+          reason: `could not read pushed SHA (${pushedRev.error || "empty rev-parse output"})`,
+        };
 
     if (verification.status === "head-moved") {
       return await failWith(
-        "push-failed",
+        "landed-but-unconfirmed",
         `the PR head does not include the pushed merge commit (GitHub reports ${verification.headSha.slice(0, 7) || "no head"})`,
       );
     }
     if (verification.status === "dirty") {
       return await failWith(
-        "push-failed",
+        "landed-but-unconfirmed",
         "GitHub still reports merge conflicts after the push (the base likely advanced again); re-run resolve-conflicts",
       );
     }

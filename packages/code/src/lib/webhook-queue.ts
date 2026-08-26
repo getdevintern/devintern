@@ -410,10 +410,10 @@ export class WebhookQueue {
   }
 
   /** Consume one real execution attempt. Eligibility deferrals never call this. */
-  beginBaseSyncAttempt(externalId: string): number {
+  beginBaseSyncAttempt(externalId: string, now: number = Date.now()): number {
     this.db.run(
       `UPDATE base_sync_events SET attempts = attempts + 1, updated_at = ? WHERE external_id = ?`,
-      [Date.now(), externalId],
+      [now, externalId],
     );
     return this.getBaseSyncEvent(externalId)?.attempts ?? 0;
   }
@@ -432,13 +432,13 @@ export class WebhookQueue {
   }
 
   /** Persist a retryable failure, or terminally exhaust the event. */
-  failBaseSyncEvent(externalId: string, error: string): boolean {
+  failBaseSyncEvent(externalId: string, error: string, now: number = Date.now()): boolean {
     const event = this.getBaseSyncEvent(externalId);
     if (!event) return false;
     const exhausted = event.attempts >= this.maxRetries;
     this.db.run(
       `UPDATE base_sync_events SET status = ?, last_error = ?, updated_at = ? WHERE external_id = ?`,
-      [exhausted ? "failed" : "pending", error, Date.now(), externalId],
+      [exhausted ? "failed" : "pending", error, now, externalId],
     );
     return exhausted;
   }

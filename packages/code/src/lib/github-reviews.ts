@@ -254,6 +254,9 @@ export class GitHubReviewsClient {
   /**
    * Fetch pull request metadata.
    *
+   * The raw PR API payload is passed through unfiltered (cast, not remapped),
+   * so fields like `mergeable_state` and `mergeable` reach callers as-is.
+   *
    * @param owner - Repository owner
    * @param repo - Repository name
    * @param prNumber - Pull request number

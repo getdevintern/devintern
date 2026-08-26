@@ -4,7 +4,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { buildConflictPrompt, resolveConflictsOnPr } from "../src/lib/conflict-resolver";
+import {
+  buildConflictPrompt,
+  resolveConflictsOnPr,
+  sanitizeErrorForPublicComment,
+} from "../src/lib/conflict-resolver";
 import type { PullRequestInfo } from "../src/lib/github-reviews";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
@@ -24,6 +28,48 @@ describe("buildConflictPrompt", () => {
     expect(prompt).toContain("- src/b.ts");
     expect(prompt).toContain("origin/main");
     expect(prompt).toContain("Do NOT push");
+  });
+});
+
+describe("sanitizeErrorForPublicComment", () => {
+  test("redacts URL credentials", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      "fatal: unable to access 'https://ci-bot:ghs_secret123@github.com/acme/widgets.git/': 403",
+    );
+    expect(sanitized).not.toContain("ghs_secret123");
+    expect(sanitized).toContain("https://***@github.com/acme/widgets.git/");
+  });
+
+  test("redacts bare user:token@ pairs without a scheme", () => {
+    const sanitized = sanitizeErrorForPublicComment("auth failed for ci-bot:ghp_abc@github.com");
+    expect(sanitized).not.toContain("ghp_abc");
+    expect(sanitized).toContain("ci-bot:***@github.com");
+  });
+
+  test("strips absolute local paths but keeps relative refs and URLs", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      "could not lock /home/dev/repo/.git/config; merging origin/main from https://github.com/acme/widgets/pull/7",
+    );
+    expect(sanitized).not.toContain("/home/dev");
+    expect(sanitized).toContain("[path]; merging");
+    expect(sanitized).toContain("origin/main");
+    expect(sanitized).toContain("https://github.com/acme/widgets/pull/7");
+  });
+
+  test("strips windows drive-letter paths", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      `worktree at C:\\Users\\dev\\repo\\.git broken`,
+    );
+    expect(sanitized).not.toContain("Users");
+    expect(sanitized).toContain("[path]");
+  });
+
+  test("collapses whitespace and truncates to a bounded length", () => {
+    const long = `push failed:\n${"x".repeat(1000)}`;
+    const sanitized = sanitizeErrorForPublicComment(long);
+    expect(sanitized).toHaveLength(301); // bound + ellipsis
+    expect(sanitized.endsWith("…")).toBe(true);
+    expect(sanitized).not.toContain("\n");
   });
 });
 
@@ -436,6 +482,52 @@ describe("resolveConflictsOnPr", () => {
     expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
   });
 
+  test("redacts credentials and local paths from the public failure comment", async () => {
+    const untouchedHead = git(seedDir, "rev-parse origin/feature/change").trim();
+    const leakyPath = join(testDir, "leaky-worktree");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh
+echo "fatal: unable to access 'https://ci-bot:ghs_supersecret@github.com/acme/widgets.git/': 403" >&2
+echo "hint: check the worktree at ${leakyPath}/.git" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(comments).toHaveLength(1);
+    // Nothing sensitive reaches the public PR comment...
+    expect(comments[0]).not.toContain("ghs_supersecret");
+    expect(comments[0]).not.toContain(leakyPath);
+    expect(comments[0]).toContain("***@");
+    expect(comments[0]).toContain("[path]");
+    expect(comments[0]).toContain("manual action needed");
+    // ...while the full detail stays available locally.
+    expect(result.message).toContain("ghs_supersecret");
+    expect(result.message).toContain(leakyPath);
+
+    // Origin's feature branch never received the merge.
+    expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
+  });
+
   test("retries the whole merge when a transient push rejection clears", async () => {
     const marker = join(testDir, "rejected-once");
     const hookPath = join(repoDir, ".git", "hooks", "pre-push");
@@ -586,7 +678,9 @@ exit 1
     expect(result.message).toContain("still reports merge conflicts");
     expect(fetches).toBe(3); // initial + 2 verification polls
     expect(comments).toHaveLength(1);
-    expect(comments[0]).toContain("could not publish the merge");
+    // The push landed; the comment must not claim nothing was published.
+    expect(comments[0]).toContain("pushed a merge");
+    expect(comments[0]).not.toContain("No changes landed");
   });
 
   test("reports success with a caveat when GitHub keeps recomputing mergeability", async () => {
@@ -646,7 +740,9 @@ exit 1
 
     expect(result.outcome).toBe("failed");
     expect(result.message).toContain("does not include the pushed merge commit");
-    expect(comments[0]).toContain("could not publish the merge");
+    // The push landed; the comment must not claim nothing was published.
+    expect(comments[0]).toContain("pushed a merge");
+    expect(comments[0]).not.toContain("No changes landed");
   });
 
   test("completes a rerere-auto-resolved retry without re-running the agent", async () => {
@@ -757,6 +853,63 @@ exit 1
     // A landed push must not be reported as failed because of rate limits.
     expect(result.outcome).toBe("resolved");
     expect(result.message).toContain("has not confirmed mergeability yet");
+  });
+
+  test("reports success when reading the pushed SHA fails after an accepted push", async () => {
+    // Simulate a local `rev-parse HEAD` failure after the push was accepted:
+    // a pre-push hook arms a marker, then the reference-transaction hook that
+    // fires for the push's remote-tracking ref update corrupts the worktree
+    // git-dir HEAD. The old sentinel behavior compared GitHub's head against
+    // "" and deterministically reported head-moved even though the merge
+    // landed.
+    const marker = join(testDir, "push-started");
+    writeFileSync(join(repoDir, ".git", "hooks", "pre-push"), `#!/bin/sh\ntouch "${marker}"\n`, {
+      mode: 0o755,
+    });
+    const refTxHook = [
+      "#!/bin/sh",
+      "while read -r _old _new ref; do",
+      '  case "$ref" in refs/remotes/origin/feature/change)',
+      '    [ "$1" = "committed" ] && [ -f "' + marker + '" ] || exit 0',
+      '    git_dir="$(git rev-parse --absolute-git-dir)"',
+      "    printf 'corrupted\\n' > \"$git_dir/HEAD\"",
+      "    ;;",
+      "esac",
+      "done",
+      "exit 0",
+    ].join("\n");
+    writeFileSync(join(repoDir, ".git", "hooks", "reference-transaction"), refTxHook, {
+      mode: 0o755,
+    });
+
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    // The push landed; an unreadable local SHA must degrade to unverified,
+    // never claim the pushed merge commit is missing.
+    expect(result.outcome).toBe("resolved");
+    expect(result.message).toContain("has not confirmed mergeability yet");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain("devintern resolved them and pushed the merge");
+
+    // And the merge genuinely is on origin's feature branch.
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-sha-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe("resolved\n");
+    rmSync(shipped, { recursive: true, force: true });
   });
 
   test("an already-up-to-date branch stays quiet and posts nothing", async () => {
