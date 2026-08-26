@@ -3,7 +3,7 @@ title: "Story Points Estimation"
 description: "Automatically estimate JIRA story points with AI using the --estimate flag"
 section: "Server Automation"
 order: 6
-dateModified: 2026-07-08
+dateModified: 2026-08-26
 ---
 
 # Story Points Estimation
@@ -92,7 +92,7 @@ If your JIRA instance uses a custom field name, you can override it in `.devinte
 
 ## Automated Estimation
 
-Run estimation on a schedule via systemd timers (recommended on modern Linux servers) or cron (any Unix-like system without systemd).
+`--estimate` is still a CLI one-shot. The [worker](./worker.md) does not schedule estimation yet. Until it does, the unattended path is a systemd timer or crontab of `devintern --estimate --query`. Prefer that over inventing a second daemon; drain ready tickets with the worker, and keep this timer only for story points.
 
 ### systemd timers
 

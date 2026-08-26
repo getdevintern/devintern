@@ -4,7 +4,7 @@
  * Serves the local observability dashboard: a read-only JSON API over the
  * worker's SQLite state (handlers in `lib/dashboard-api.ts`) plus the static
  * UI built from `packages/dashboard-ui`. Started standalone by
- * `devintern dashboard`, or alongside the daemon by `devintern worker --ui`.
+ * `devintern dashboard`, or alongside the daemon by `devintern worker`.
  *
  * All data stays in the customer's SQLite; the server binds to localhost by
  * default and there is no authentication, so a non-loopback host is warned

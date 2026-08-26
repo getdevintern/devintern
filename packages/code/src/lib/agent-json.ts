@@ -57,6 +57,61 @@ function escapeControlCharsInStrings(text: string): string {
   return result;
 }
 
+/**
+ * Escape unescaped double quotes inside JSON string literals.
+ *
+ * Models sometimes quote terms mid-value (`a legacy "cwd" mode`) without
+ * escaping, which terminates the JSON string early and corrupts everything
+ * after it. A closing quote is only trusted when the next non-whitespace
+ * character is a plausible structural token (`,`, `}`, `]`, `:`, or end of
+ * text); otherwise the quote is escaped. Best-effort: prose like `"a", "b"`
+ * can still fool it, but wrong guesses just produce another failing candidate.
+ */
+function escapeUnescapedQuotesInStrings(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  const isStructural = (index: number): boolean => {
+    let cursor = index;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    if (cursor >= text.length) return true;
+    return ",}]: ".includes(text[cursor]);
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (!inString) {
+      if (character === '"') inString = true;
+      result += character;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      result += character;
+      continue;
+    }
+
+    if (character === "\\") {
+      escaped = true;
+      result += character;
+    } else if (character === '"') {
+      if (isStructural(index + 1)) {
+        inString = false;
+        result += character;
+      } else {
+        result += '\\"';
+      }
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
+}
+
 function balancedObjectCandidates(text: string): string[] {
   const candidates: string[] = [];
   let start = -1;
@@ -123,10 +178,30 @@ export function parseAgentJsonObject(output: string, requiredKey: string): Recor
     }
   }
 
-  candidates.push(...balancedObjectCandidates(output).reverse());
+  const balanced = balancedObjectCandidates(output).reverse();
+  // Grok sometimes emits junk between the final value and the closing brace
+  // (e.g. a literal `\n` after the last string). Retry with the object closed
+  // right after its last string value.
+  const withClosures = [
+    ...balanced,
+    ...balanced.map((object) => {
+      const lastQuote = object.lastIndexOf('"');
+      return lastQuote === -1 ? object : `${object.slice(0, lastQuote + 1)}}`;
+    }),
+  ];
+
+  const baseCandidates = [...candidates, ...withClosures];
 
   let lastParseError: unknown;
-  for (const candidate of [...candidates, ...candidates.map(escapeControlCharsInStrings)]) {
+  // Repair ladder: raw → control chars escaped → embedded quotes also escaped.
+  const variants = [
+    ...baseCandidates,
+    ...baseCandidates.map(escapeControlCharsInStrings),
+    ...baseCandidates.map((base) =>
+      escapeUnescapedQuotesInStrings(escapeControlCharsInStrings(base)),
+    ),
+  ];
+  for (const candidate of variants) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       if (

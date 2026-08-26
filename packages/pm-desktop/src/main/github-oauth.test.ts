@@ -9,6 +9,7 @@ import {
   setGitHubOAuthClientIdForTests,
   setGitHubOAuthFetchForTests,
   setGitHubOAuthOpenExternalForTests,
+  setGitHubOAuthPollIntervalForTests,
 } from "./github-oauth.ts";
 import { setGitHubAuthCryptoForTests, setGitHubAuthUserDataDirForTests } from "./github-auth.ts";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -29,6 +30,7 @@ describe("github-oauth", () => {
     setGitHubOAuthClientIdForTests(undefined);
     setGitHubOAuthFetchForTests(undefined);
     setGitHubOAuthOpenExternalForTests(undefined);
+    setGitHubOAuthPollIntervalForTests(undefined);
     setGitHubAuthUserDataDirForTests(undefined);
     setGitHubAuthCryptoForTests({});
     if (tempDir) {
@@ -69,6 +71,7 @@ describe("github-oauth", () => {
   });
 
   test("pollForToken resolves after authorization_pending then success", async () => {
+    setGitHubOAuthPollIntervalForTests(10);
     setGitHubOAuthClientIdForTests("Iv23lizCPMPWFM5LO9lK");
     let calls = 0;
     setGitHubOAuthFetchForTests(async () => {
@@ -90,6 +93,7 @@ describe("github-oauth", () => {
   });
 
   test("pollForToken surfaces denied on access_denied", async () => {
+    setGitHubOAuthPollIntervalForTests(10);
     setGitHubOAuthClientIdForTests("Iv23lizCPMPWFM5LO9lK");
     setGitHubOAuthFetchForTests(async () =>
       jsonResponse(200, { error: "access_denied", error_description: "user said no" }),
@@ -143,6 +147,7 @@ describe("github-oauth", () => {
   });
 
   test("runDeviceFlow persists tokens and returns login", async () => {
+    setGitHubOAuthPollIntervalForTests(10);
     setGitHubOAuthClientIdForTests("Iv23lizCPMPWFM5LO9lK");
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-gh-oauth-flow-"));
     setGitHubAuthUserDataDirForTests(tempDir);

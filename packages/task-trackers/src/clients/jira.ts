@@ -20,6 +20,27 @@ import { sanitizeDomain } from "../config/load-tracker-config.ts";
 import { textToADF } from "./jira-adf.ts";
 import { mimeTypeFromFilename } from "./mime.ts";
 
+/**
+ * Fields requested on enhanced JQL search (`GET /rest/api/3/search/jql`).
+ *
+ * That endpoint omits `fields` entirely by default (only `id`/`key`/`self`).
+ * `updated` is required for worker dedupe; labels and components are used by
+ * workspace routing. Keep this list aligned with Jira issue normalization.
+ */
+export const JIRA_SEARCH_ISSUE_FIELDS = [
+  "summary",
+  "issuetype",
+  "status",
+  "priority",
+  "assignee",
+  "reporter",
+  "created",
+  "updated",
+  "labels",
+  "components",
+  "fixVersions",
+] as const;
+
 export interface JiraStory {
   key: string;
   url: string;
@@ -226,7 +247,12 @@ export class JiraClient {
   }
 
   /**
-   * Search issues with JQL using the REST v3 search endpoint.
+   * Search issues with JQL using the REST v3 enhanced search endpoint.
+   *
+   * `GET /rest/api/3/search/jql` returns only `id` / `key` / `self` unless
+   * `fields` is set. The worker dedupes ready tasks by `(key, updated)`, so
+   * omitting `updated` records an empty stamp and never retriggers after the
+   * first attempt — even when the issue is edited later.
    *
    * @param jql - JQL query string
    * @param startAt - Pagination offset
@@ -238,10 +264,11 @@ export class JiraClient {
     startAt: number = 0,
     maxResults: number = 50,
   ): Promise<{ issues: any[]; total: number }> {
-    // Use the new /rest/api/3/search/jql endpoint as per JIRA API migration
     const url = `/rest/api/3/search/jql?jql=${encodeURIComponent(
       jql,
-    )}&startAt=${startAt}&maxResults=${maxResults}&expand=names,schema`;
+    )}&startAt=${startAt}&maxResults=${maxResults}&fields=${encodeURIComponent(
+      JIRA_SEARCH_ISSUE_FIELDS.join(","),
+    )}&expand=names,schema`;
 
     try {
       const response = await this.jiraApiCall("GET", url);

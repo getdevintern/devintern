@@ -2,11 +2,10 @@
  * Fleet event handling: PR reviews, @mentions, and relay envelopes across
  * every repo in the workspace.
  *
- * The single-repo worker handles mentions in-process (the pipeline operates
- * on the current checkout). Fleet mode has no ambient checkout, so every
- * event run is a CLI subprocess in the repo's persistent base worktree with
- * that repo's composed environment. The permission gate for mention-driven
- * runs (write/maintain/admin, fails closed) therefore lives HERE, before the
+ * The workspace worker has no ambient checkout, so every event run is a CLI
+ * subprocess in the repo's persistent base worktree with that repo's composed
+ * environment. The permission gate for mention-driven runs
+ * (write/maintain/admin, fails closed) therefore lives HERE, before the
  * subprocess: `devintern address-review` is a manual command and performs no
  * gating of its own.
  */

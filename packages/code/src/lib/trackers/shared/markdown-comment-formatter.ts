@@ -50,6 +50,21 @@ export interface EstimationResultLike {
 const MAX_AGENT_OUTPUT_LENGTH = 8000;
 
 /**
+ * How to unlock another worker/cron pickup after a failed or incomplete run.
+ * The retry gate skips an unchanged ticket; any of these bumps the update
+ * stamp (and, for incomplete runs, satisfies the gate).
+ */
+export const RETRY_PICKUP_HEADING = "To retry this task";
+export const RETRY_PICKUP_BODY =
+  "This ticket will not be picked up again until it changes. " +
+  "Edit the description, post a comment (a one-line clarification is enough), or delete this comment.";
+
+/** Markdown "how to retry" block posted on failure / incomplete comments. */
+export function formatRetryPickupMarkdown(): string {
+  return `**${RETRY_PICKUP_HEADING}:** ${RETRY_PICKUP_BODY}`;
+}
+
+/**
  * Format a clarity/feasibility assessment as markdown.
  *
  * Mirrors the structure of {@link JiraFormatter.createClarityAssessmentADF}.
@@ -102,6 +117,10 @@ export function formatClarityAssessmentMarkdown(assessment: ClarityAssessmentLik
     "> *This assessment focuses on basic implementability. Technical details, UI/UX patterns, and implementation specifics are expected to be inferred from existing codebase.*",
   );
 
+  if (!assessment.isImplementable) {
+    lines.push("", formatRetryPickupMarkdown());
+  }
+
   return lines.join("\n");
 }
 
@@ -124,7 +143,17 @@ export function formatIncompleteImplementationCommentMarkdown(
   const header = taskSummary
     ? `⚠️ Implementation Incomplete\nTask: ${taskSummary}`
     : "⚠️ Implementation Incomplete";
-  return `${header}\n\n${agentOutput.slice(0, MAX_AGENT_OUTPUT_LENGTH)}`;
+  return `${header}\n\n${agentOutput.slice(0, MAX_AGENT_OUTPUT_LENGTH)}\n\n${formatRetryPickupMarkdown()}`;
+}
+
+/** Format the crash / interrupt / usage-limit failure comment body. */
+export function formatProcessingFailureMarkdown(taskKey: string, reason: string): string {
+  return (
+    `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
+    `**Reason:** ${reason}\n\n` +
+    `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.\n\n` +
+    formatRetryPickupMarkdown()
+  );
 }
 
 /** Format the assessment-failure comment body. */

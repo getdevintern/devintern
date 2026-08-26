@@ -1,16 +1,24 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { execSync, spawn as nodeSpawn } from "child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
-import {
-  NonoSandboxProvider,
-  parseDenyOverlaps,
-  refineGrantsAgainstDenies,
-} from "../src/sandbox/providers/nono.js";
 import { SmolvmSandboxProvider } from "../src/sandbox/providers/smolvm.js";
 import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
+
+// The Linux Landlock preflight inside NonoSandboxProvider.wrapCommand shells
+// out to `nono run … -- true`; these tests assert argv composition, not the
+// host-dependent grant refinement, so stub the spawn to a fast no-op.
+mock.module("child_process", () => ({
+  execSync,
+  spawn: nodeSpawn,
+  spawnSync: () => ({ status: 0, stdout: "", stderr: "" }),
+}));
+
+const { NonoSandboxProvider, parseDenyOverlaps, refineGrantsAgainstDenies } =
+  await import("../src/sandbox/providers/nono.js");
 
 function policy(overrides: Partial<SandboxPolicy> = {}): SandboxPolicy {
   return {
@@ -31,10 +39,12 @@ describe("NonoSandboxProvider.wrapCommand", () => {
     process.env = { ...originalEnv };
   });
 
-  // wrapCommand runs a Linux Landlock preflight (`nono run … -- true`); under
-  // full-suite load the spawn routinely exceeds bun's 5s default.
   test("wraps the agent after -- with policy grants and no profile by default", () => {
-    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
+    const wrapped = new NonoSandboxProvider().wrapCommand(
+      "/usr/bin/claude",
+      ["-p", "hi"],
+      policy(),
+    );
     expect(wrapped.path).toBe("nono");
     expect(wrapped.args[0]).toBe("run");
     // With no env override, macOS uses the harness's nono pack profile when
@@ -66,11 +76,15 @@ describe("NonoSandboxProvider.wrapCommand", () => {
         expect(wrapped.args[i + 1]).not.toBe(process.env.HOME);
       }
     }
-  }, 30_000);
+  });
 
   test("passes AGENT_SANDBOX_NONO_PROFILE as --profile", () => {
     process.env.AGENT_SANDBOX_NONO_PROFILE = "devintern";
-    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
+    const wrapped = new NonoSandboxProvider().wrapCommand(
+      "/usr/bin/claude",
+      ["-p", "hi"],
+      policy(),
+    );
     expect(wrapped.args.slice(0, 3)).toEqual(["run", "--profile", "devintern"]);
     const sep = wrapped.args.indexOf("--");
     expect(wrapped.args.slice(sep + 1)).toEqual(["/usr/bin/claude", "-p", "hi"]);
@@ -86,7 +100,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
       .map((a, i) => (a === "--allow-domain" ? wrapped.args[i + 1] : null))
       .filter(Boolean);
     expect(domains).toEqual(["api.anthropic.com", "github.com"]);
-  }, 30_000);
+  });
 
   test("grants cursor-agent write access to ~/.config/cursor", () => {
     const home = process.env.HOME ?? "";
@@ -103,7 +117,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
       if (wrapped.args[i] === "--allow") allows.push(wrapped.args[i + 1] as string);
     }
     expect(allows).toContain(cursorConfig);
-  }, 30_000);
+  });
 
   test("grants /dev/ptmx so lefthook can allocate a PTY", () => {
     if (!existsSync("/dev/ptmx")) return; // absent on some constrained hosts
@@ -114,7 +128,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
       if (wrapped.args[i] === "--allow-file") allowFiles.push(wrapped.args[i + 1] as string);
     }
     expect(allowFiles).toContain("/dev/ptmx");
-  }, 30_000);
+  });
 });
 
 describe("nono Landlock grant refinement", () => {
@@ -312,7 +326,11 @@ describe("SmolvmSandboxProvider.wrapCommand", () => {
 
   test("rejects unsupported harnesses", () => {
     expect(() =>
-      new SmolvmSandboxProvider().wrapCommand("/usr/bin/goose", [], policy({ harnessName: "goose" })),
+      new SmolvmSandboxProvider().wrapCommand(
+        "/usr/bin/goose",
+        [],
+        policy({ harnessName: "goose" }),
+      ),
     ).toThrow("does not support");
   });
 });

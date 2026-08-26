@@ -22,7 +22,7 @@ import {
   requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense, requireTeamAutomation } from "@devintern/license-check";
+import { checkLicense, requireLicense } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -80,12 +80,12 @@ import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
+import { formatProcessingFailureMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
-import { parseEnvInteger } from "./lib/env-integer";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
@@ -469,6 +469,72 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
+function printWebhookHelp(): void {
+  console.log("Usage: devintern webhook <command>");
+  console.log("");
+  console.log("Run advanced direct-webhook services. Relay is recommended for normal workers.");
+  console.log("");
+  console.log("Commands:");
+  console.log("  serve               Start the repo-local GitHub webhook server");
+  console.log("");
+  console.log("Run 'devintern webhook serve --help' for command-specific options.");
+}
+
+function printWebhookServeHelp(): void {
+  console.log("Usage: devintern webhook serve [options]");
+  console.log("");
+  console.log("Start the repo-local webhook server for GitHub PR events.");
+  console.log("");
+  console.log("Options:");
+  console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
+  console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
+  console.log("  -h, --help     Display this help message");
+  console.log("");
+  console.log("Environment variables:");
+  console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
+  console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
+  console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
+  console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");
+  console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
+  console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
+}
+
+async function runWebhookServeCommand(args: string[]): Promise<void> {
+  let portOverride: number | undefined;
+  let hostOverride: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+      portOverride = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i] === "--host" && args[i + 1]) {
+      hostOverride = args[i + 1];
+      i++;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printWebhookServeHelp();
+      return;
+    } else {
+      console.error(`❌ Unknown webhook serve option: ${args[i]}`);
+      console.error("   Run 'devintern webhook serve --help' for usage.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  loadedEnvPath = loadEnvironment();
+  const port = portOverride ?? parseInt(process.env.WEBHOOK_PORT || "3000", 10);
+  const host = hostOverride ?? (process.env.WEBHOOK_HOST || "0.0.0.0");
+  const licenseResult = await checkLicense({
+    productKey: "devintern/code",
+    supabaseConfig: loadSupabaseConfig(),
+    requireAutomation: true,
+  });
+  requireLicense(licenseResult);
+
+  const { startWebhookServer } = await import("./webhook-server");
+  await startWebhookServer({ port, host });
+}
+
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
 let sentryInitialized = false;
 function initSentryOnce(): void {
@@ -504,8 +570,7 @@ if (process.argv[2] === "init") {
     process.exit(0);
   })();
 } else if (process.argv[2] === "worker") {
-  // Handle worker command - long-running daemon (webhook listener now;
-  // polling acquirers register here as they land)
+  // Handle worker command - long-running workspace daemon.
   (async () => {
     loadedEnvPath = loadEnvironment();
 
@@ -530,75 +595,65 @@ if (process.argv[2] === "init") {
       const { isInteractive } = await import("./lib/init-wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: set WORKER_TASK_QUERY, WORKER_POLL_INTERVAL, and");
-        console.log("   (for --listen) WEBHOOK_SECRET in .devintern-code/.env by hand.");
+        console.log("   Non-interactive setup: `devintern workspace init` + `workspace import`,");
+        console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
         process.exit(1);
       }
       const trackerManager = new TaskTrackerManager();
-      const ok = await runWorkerInit({
+      const result = await runWorkerInit({
         dryRunQuery: async (query) => {
           const result = await trackerManager.getClient().searchTasks(query);
           return result.tasks.length;
         },
         checkAutomationLicense: async () => {
-          const result = await checkLicense({
+          const license = await checkLicense({
             productKey: "devintern/code",
             supabaseConfig: loadSupabaseConfig(),
             requireAutomation: true,
           });
-          return result.valid ? null : result.message;
+          return license.valid ? null : license.message;
         },
       });
-      process.exit(ok ? 0 : 1);
+      process.exit(result.ok ? 0 : 1);
     }
 
-    let listen = false;
-    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
-    let intervalSeconds = parseInt(process.env.WORKER_POLL_INTERVAL || "60", 10);
-    let workerQuery = process.env.WORKER_TASK_QUERY;
     let verbose = false;
-    let ui = false;
-    let uiPort: number | undefined;
     let workspacePath: string | undefined;
-    let workspaceFlag = false;
-    let noWorkspace = false;
+
+    const removedWorkerFlags: Record<string, string> = {
+      "--listen": "Use the workspace worker or `devintern webhook serve`.",
+      "--no-workspace": "Use the workspace worker or `devintern webhook serve`.",
+      "--port": "Use the workspace worker or `devintern webhook serve`.",
+      "--host": "Use the workspace worker or `devintern webhook serve`.",
+      "--query": "Set [defaults].task_query in workspace.toml.",
+      "--interval": "Set [defaults].poll_interval in workspace.toml.",
+      "--ui": "The dashboard is on by default. Set [workspace].dashboard = false to disable it.",
+      "--no-ui": "Set [workspace].dashboard = false in workspace.toml.",
+      "--ui-port": "Set [workspace].dashboard_port in workspace.toml.",
+      "--sandbox": "Set AGENT_SANDBOX in the workspace .env.",
+    };
 
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--listen") {
-        listen = true;
-      } else if (args[i] === "--workspace") {
-        workspaceFlag = true;
-        if (args[i + 1] && !args[i + 1].startsWith("-")) {
-          workspacePath = args[i + 1];
-          i++;
+      const arg = args[i];
+      if (arg === undefined) {
+        continue;
+      }
+      const removed = removedWorkerFlags[arg];
+      if (removed) {
+        console.error(`❌ ${arg} has been removed from devintern worker.`);
+        console.error(`   ${removed}`);
+        process.exit(1);
+      }
+      if (arg === "--workspace") {
+        if (!args[i + 1] || args[i + 1].startsWith("-")) {
+          console.error("❌ --workspace requires a path to workspace.toml.");
+          process.exit(1);
         }
-      } else if (args[i] === "--no-workspace") {
-        noWorkspace = true;
-      } else if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
+        workspacePath = args[i + 1];
         i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--interval" && args[i + 1]) {
-        intervalSeconds = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--query" && args[i + 1]) {
-        workerQuery = args[i + 1];
-        i++;
-      } else if (args[i] === "--ui") {
-        ui = true;
-      } else if (args[i] === "--ui-port" && args[i + 1]) {
-        ui = true;
-        uiPort = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--sandbox" && args[i + 1]) {
-        setSandboxOverride(args[i + 1]);
-        i++;
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
+      } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
-      } else if (args[i] === "--help" || args[i] === "-h") {
+      } else if (arg === "--help" || arg === "-h") {
         console.log("Usage: devintern worker [init] [options]");
         console.log("       devintern worker connect [github|status] [--repo owner/name]");
         console.log("");
@@ -607,48 +662,43 @@ if (process.argv[2] === "init") {
         console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
         console.log("events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
+        console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
+        console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
+        console.log("");
         console.log("Subcommands:");
-        console.log("  init                Guided server-automation setup: ready-tasks query");
-        console.log("                      (with a live dry run), webhook secret, license check,");
-        console.log("                      and an optional systemd unit");
+        console.log(
+          "  init                Guided unattended setup: tracker, workspace, ready-tasks",
+        );
+        console.log("                      query (live dry run), and license check");
         console.log("");
         console.log("Options:");
-        console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
-        console.log("                      (same query language as batch --query runs)");
-        console.log("  --workspace [path]  Fleet mode: serve every repo in the workspace");
-        console.log("                      (~/.devintern/workspace.toml, or the given path).");
-        console.log("                      Auto-enabled when a workspace exists; team tier.");
-        console.log("  --no-workspace      Ignore an existing workspace; single-repo mode");
-        console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
-        console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
-        console.log(
-          "  --host <host>       Webhook listener host (default: 0.0.0.0 or WEBHOOK_HOST)",
-        );
-        console.log("  --interval <secs>   Polling interval in seconds (default: 60)");
-        console.log("  --ui                Also serve the local observability dashboard");
-        console.log("                      (localhost only; see also `devintern dashboard`)");
-        console.log("  --ui-port <port>    Dashboard port (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --sandbox <name>    Sandbox agent runs: none | auto | native | nono |");
-        console.log("                      srt | docker | smolvm (overrides AGENT_SANDBOX)");
+        console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
+        console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
         console.log("  -v, --verbose       Verbose logging");
         console.log("  -h, --help          Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log(
-          "  WEBHOOK_SECRET       (required with --listen) GitHub webhook signature secret",
-        );
-        console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
-        console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
-        console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
-        console.log(
-          "  WORKER_BASE_SYNC_QUIET_SECONDS Stable-head window before PR base sync (default: 30)",
-        );
-        console.log(
-          "  WEBHOOK_MAX_RETRIES Retry limit for queued and PR base-sync work (default: 3)",
-        );
-        console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
         process.exit(0);
       }
+    }
+
+    const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
+      await import("./lib/workspace/paths");
+    const workspaceMode = Boolean(workspacePath) || hasWorkspace();
+    if (!workspaceMode) {
+      console.error("❌ No workspace configured. Run `devintern worker init` first.");
+      process.exit(1);
+    }
+
+    // Workspace credentials must be available before the license gate. This
+    // matters for native services, whose working directory is the workspace
+    // home rather than a source checkout.
+    const { parseEnvFile } = await import("./lib/workspace/env");
+    const selectedWorkspaceDir = workspacePath
+      ? dirname(resolve(workspacePath))
+      : resolveWorkspaceDir();
+    for (const [key, value] of Object.entries(
+      parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)),
+    )) {
+      if (process.env[key] === undefined) process.env[key] = value;
     }
 
     // License check — the worker is unattended automation, so it always
@@ -661,426 +711,12 @@ if (process.argv[2] === "init") {
     });
     requireLicense(licenseResult);
 
-    // Workspace (fleet) mode: one daemon serves every repo in the workspace.
-    // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
-    // unless --no-workspace. Team-tier capability.
-    {
-      const { hasWorkspace } = await import("./lib/workspace/paths");
-      const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
-      if (workspaceMode && !listen) {
-        requireTeamAutomation(licenseResult);
-        const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
-        await runWorkspaceWorker({
-          workspacePath,
-          query: workerQuery,
-          intervalSeconds,
-          verbose,
-          ui,
-          uiPort,
-        });
-        return;
-      }
-      if (workspaceMode && listen) {
-        console.error(
-          "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
-            "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
-        );
-        process.exit(1);
-      }
-    }
-
-    const { startWorker } = await import("./worker");
-    const { WorkerState } = await import("./lib/worker-state");
-    const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
-      await import("./lib/webhook-queue");
-    const dbPath = resolveQueueDbPath();
-    const acquirers = [];
-
-    const { loadSingleRepoAutomations } = await import("./lib/automation-config");
-    const automations = loadSingleRepoAutomations();
-    if (automations.length > 0) {
-      const { AutomationAcquirer } = await import("./lib/automation-acquirer");
-      acquirers.push(
-        new AutomationAcquirer({
-          automations,
-          dbPath,
-          resolveContext: async () => {
-            const runLock = new LockManager(process.cwd());
-            if (!runLock.acquire().success) return null;
-            return {
-              cwd: process.cwd(),
-              env: { ...process.env },
-              release: () => runLock.release(),
-            };
-          },
-        }),
-      );
-    }
-
-    if (workerQuery) {
-      const trackerType = process.env.TASK_TRACKER || "jira";
-      const { supportsPolling, trackersSupportingPolling } =
-        await import("./lib/tracker-capabilities");
-      if (!supportsPolling(trackerType)) {
-        console.error(
-          `❌ Worker polling is not available for tracker '${trackerType}' yet.\n` +
-            `   Trackers with polling support: ${trackersSupportingPolling().join(", ")}\n` +
-            `   You can still use --listen for webhook-driven review handling.`,
-        );
-        process.exit(1);
-      }
-
-      const { TaskPollingAcquirer, runTaskViaCli } = await import("./lib/task-polling-acquirer");
-      const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
-
-      const tracker = new TaskTrackerManager().getClient();
-
-      const { createChangeDetector } = await import("./lib/change-detector");
-      const detector = createChangeDetector(trackerType, (q) => tracker.searchTasks(q));
-      if (!detector) {
-        console.error(
-          `❌ Could not initialize the ${trackerType} change detector. ` +
-            `Check the tracker's required environment variables.`,
-        );
-        process.exit(1);
-      }
-
-      acquirers.push(
-        new TaskPollingAcquirer({
-          trackerType,
-          query: workerQuery,
-          intervalSeconds,
-          detector,
-          workerState: new WorkerState(dbPath),
-          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-          searchTasks: (q) => tracker.searchTasks(q),
-          executeTask: (taskKey) => runTaskViaCli(taskKey),
-          verbose,
-        }),
-      );
-    }
-
-    // Tier 1 review polling: watch the agent's own PRs (agent_prs registry)
-    // and address review feedback without an @mention. Skipped with --listen
-    // (webhooks already deliver reviews there — polling too would double-run)
-    // and without GitHub credentials.
-    if (!listen && (process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID)) {
-      const { ReviewPollingAcquirer, runAddressReviewViaCli, runResolveConflictsViaCli } =
-        await import("./lib/review-polling-acquirer");
-      const { GitHubReviewsClient } = await import("./lib/github-reviews");
-      const { RunStore } = await import("./lib/run-recorder");
-      const gh = new GitHubReviewsClient({ preferAppAuth: true });
-      const ownerOf = (repo: string) => repo.split("/")[0] as string;
-      const nameOf = (repo: string) => repo.split("/")[1] as string;
-
-      // This checkout's GitHub slug scopes review polling to the agent PRs
-      // of this project; registry rows for any other repo are stale (e.g.
-      // left behind by a rename/transfer) and get auto-unwatched at start.
-      const repoSlug =
-        process.env.GITHUB_REPO ||
-        (await new PRManager()
-          .detectRepository()
-          .then((r) => (r.platform === "github" ? r.repository : "")));
-
-      acquirers.push(
-        new ReviewPollingAcquirer({
-          intervalSeconds,
-          workerState: new WorkerState(dbPath),
-          queue: new WebhookQueue({
-            dbPath,
-            legacyDbPath: LEGACY_DB_PATH,
-            maxRetries: parseEnvInteger("WEBHOOK_MAX_RETRIES", 3, { min: 0 }),
-          }),
-          github: {
-            fetchPr: (repo, n, etag) =>
-              gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
-            fetchReviews: (repo, n, etag) =>
-              gh.conditionalGet(
-                `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
-                ownerOf(repo),
-                nameOf(repo),
-                etag,
-              ),
-            fetchReviewCommentsSince: async (repo, n, sinceIso) => {
-              const result = await gh.conditionalGet<
-                Array<{ id: number; user: { login: string; type: string }; created_at: string }>
-              >(
-                `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
-                ownerOf(repo),
-                nameOf(repo),
-              );
-              return result.data ?? [];
-            },
-            isBaseIncluded: async (repo, baseSha, headSha) => {
-              const result = await gh.conditionalGet<{ status: string }>(
-                `/repos/${repo}/compare/${baseSha}...${headSha}`,
-                ownerOf(repo),
-                nameOf(repo),
-              );
-              const status = result.data?.status;
-              return status ? status === "ahead" || status === "identical" : null;
-            },
-          },
-          addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
-          resolveConflicts: (repo, n, expected) =>
-            runResolveConflictsViaCli(repo, n, {
-              expectedHeadSha: expected.headSha,
-              expectedBaseSha: expected.baseSha,
-            }),
-          quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
-          runStore: new RunStore(dbPath),
-          allowedRepos: repoSlug ? [repoSlug] : undefined,
-          verbose,
-        }),
-      );
-
-      // Tier 2 mention sweep: react to @mentions on ANY PR in the repo (two
-      // since-cursor requests per tick). Permission + mention gates apply in
-      // the shared review pipeline; fork PRs without maintainer_can_modify
-      // are skipped with an explanatory comment.
-      if (repoSlug) {
-        const { MentionSweepAcquirer } = await import("./lib/mention-sweep-acquirer");
-        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
-        const [repoOwner, repoName] = repoSlug.split("/") as [string, string];
-        const sweepUser = (user: { login: string; type: string }) => ({
-          login: user.login,
-          id: 0,
-          avatar_url: "",
-          type: user.type as "User" | "Bot" | "Organization",
-        });
-
-        acquirers.push(
-          new MentionSweepAcquirer({
-            repo: repoSlug,
-            intervalSeconds,
-            workerState: new WorkerState(dbPath),
-            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-            github: {
-              fetchIssueCommentsSince: async (sinceIso) => {
-                const result = await gh.conditionalGet<
-                  Array<{
-                    id: number;
-                    body: string | null;
-                    user: { login: string; type: string };
-                    created_at: string;
-                    html_url: string;
-                    issue_url?: string;
-                  }>
-                >(
-                  `/repos/${repoSlug}/issues/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
-                  repoOwner,
-                  repoName,
-                );
-                return result.data ?? [];
-              },
-              fetchReviewCommentsSince: async (sinceIso) => {
-                const result = await gh.conditionalGet<
-                  Array<{
-                    id: number;
-                    body: string | null;
-                    user: { login: string; type: string };
-                    created_at: string;
-                    html_url: string;
-                    pull_request_url?: string;
-                  }>
-                >(
-                  `/repos/${repoSlug}/pulls/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
-                  repoOwner,
-                  repoName,
-                );
-                return result.data ?? [];
-              },
-              getBotUsername: () => gh.getBotUsername(repoOwner, repoName),
-              getPr: async (prNumber) => {
-                const pr = await gh.getPullRequest(repoOwner, repoName, prNumber);
-                return {
-                  number: pr.number,
-                  state: pr.state,
-                  headRepoFullName: pr.head.repo?.full_name,
-                  maintainerCanModify: pr.maintainer_can_modify,
-                };
-              },
-              postComment: (prNumber, body) =>
-                gh.postPullRequestComment(repoOwner, repoName, prNumber, body).then(() => {}),
-            },
-            handleMention: (comment, prNumber) =>
-              processIssueCommentAsync(
-                {
-                  action: "created",
-                  issue: {
-                    number: prNumber,
-                    title: "",
-                    state: "open",
-                    user: sweepUser(comment.user),
-                    pull_request: { url: "", html_url: comment.html_url },
-                  },
-                  comment: {
-                    id: comment.id,
-                    body: comment.body,
-                    user: sweepUser(comment.user),
-                    html_url: comment.html_url,
-                    created_at: comment.created_at,
-                  },
-                  repository: {
-                    id: 0,
-                    name: repoName,
-                    full_name: repoSlug,
-                    private: false,
-                    owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
-                    html_url: `https://github.com/${repoSlug}`,
-                    default_branch: "main",
-                  },
-                  sender: sweepUser(comment.user),
-                },
-                DEFAULT_CONFIG,
-              ),
-            verbose,
-          }),
-        );
-      } else if (verbose) {
-        console.log("   Mention sweep disabled: could not determine the GitHub repo slug.");
-      }
-    }
-
-    // Mode 2 relay: long-poll the control plane for reference envelopes when
-    // this project is connected (`devintern worker connect`) or a relay URL
-    // is set explicitly. Mode 1 polling keeps running as the fallback sweep;
-    // dedupe and live-state re-derivation bound double-triggers.
-    const { loadRelayState } = await import("./lib/relay-connect");
-    const relayState = loadRelayState();
-    if (relayState || process.env.WORKER_RELAY_URL) {
-      const relayToken = relayState?.relayToken;
-      const relayUrl =
-        process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
-      if (!relayToken) {
-        console.warn(
-          "⚠️  Relay is configured but no relay token is stored — run `devintern worker connect` while signed in (`devintern login`). Mode 1 polling continues.",
-        );
-      } else if (relayUrl) {
-        const { RelayAcquirer } = await import("./lib/relay-acquirer");
-        const { runAddressReviewViaCli } = await import("./lib/review-polling-acquirer");
-        const { runTaskViaCli } = await import("./lib/task-polling-acquirer");
-        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
-        const { mentionsBot } = await import("./lib/mention-sweep-acquirer");
-        const relayWorkerState = new WorkerState(dbPath);
-
-        const hasGitHubCreds = Boolean(process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID);
-        const { GitHubReviewsClient } = await import("./lib/github-reviews");
-        const relayGh = hasGitHubCreds ? new GitHubReviewsClient({ preferAppAuth: true }) : null;
-
-        // Task envelopes re-evaluate the user's query before running
-        // (detect-then-evaluate, same as the polling acquirer).
-        const relayTracker = workerQuery
-          ? await (async () => {
-              const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
-              return new TaskTrackerManager().getClient();
-            })()
-          : null;
-
-        const relayUser = (user: { login: string; type: string }) => ({
-          login: user.login,
-          id: 0,
-          avatar_url: "",
-          type: user.type as "User" | "Bot" | "Organization",
-        });
-
-        acquirers.push(
-          new RelayAcquirer({
-            relayUrl,
-            relayToken,
-            workerState: relayWorkerState,
-            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-            isAgentPr: (repo, prNumber) =>
-              relayWorkerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
-            handlers: {
-              addressPr: async (repo, prNumber) => {
-                await runAddressReviewViaCli(repo, prNumber);
-              },
-              handlePrComment: async (repo, prNumber, commentId) => {
-                if (!relayGh) {
-                  return;
-                }
-                const [repoOwner, repoName] = repo.split("/") as [string, string];
-                // Fetch the referenced comment (envelopes never carry text),
-                // then pre-filter for the bot mention before entering the
-                // pipeline; the permission gate applies inside.
-                const { data: comment } = await relayGh.conditionalGet<{
-                  id: number;
-                  body: string | null;
-                  user: { login: string; type: string };
-                  created_at: string;
-                  html_url: string;
-                }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
-                if (!comment) {
-                  return;
-                }
-                const botName = await relayGh.getBotUsername(repoOwner, repoName);
-                if (!botName || !mentionsBot(comment.body, botName)) {
-                  return;
-                }
-                console.log(`📌 [relay] @mention on ${repo}#${prNumber}`);
-                await processIssueCommentAsync(
-                  {
-                    action: "created",
-                    issue: {
-                      number: prNumber,
-                      title: "",
-                      state: "open",
-                      user: relayUser(comment.user),
-                      pull_request: { url: "", html_url: comment.html_url },
-                    },
-                    comment: {
-                      id: comment.id,
-                      body: comment.body,
-                      user: relayUser(comment.user),
-                      html_url: comment.html_url,
-                      created_at: comment.created_at,
-                    },
-                    repository: {
-                      id: 0,
-                      name: repoName,
-                      full_name: repo,
-                      private: false,
-                      owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
-                      html_url: `https://github.com/${repo}`,
-                      default_branch: "main",
-                    },
-                    sender: relayUser(comment.user),
-                  },
-                  DEFAULT_CONFIG,
-                );
-              },
-              evaluateTask: async (taskKey) => {
-                if (!relayTracker || !workerQuery) {
-                  if (verbose) {
-                    console.log(
-                      `   [relay] task ${taskKey} changed but no --query is configured; skipping.`,
-                    );
-                  }
-                  return;
-                }
-                const { tasks } = await relayTracker.searchTasks(workerQuery);
-                if (!tasks.some((task) => task.key === taskKey)) {
-                  return;
-                }
-                console.log(`📌 [relay] task ${taskKey} is ready`);
-                await runTaskViaCli(taskKey);
-              },
-            },
-            verbose,
-          }),
-        );
-      }
-    }
-
-    // Local observability dashboard alongside the daemon (same server module
-    // as the standalone `devintern dashboard` command; reads the DB read-only).
-    if (ui) {
-      const { startDashboardServer } = await import("./dashboard-server");
-      startDashboardServer({ port: uiPort });
-    }
-
-    await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
+    const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
+    await runWorkspaceWorker({
+      workspacePath,
+      verbose,
+    });
+    return;
   })();
 } else if (process.argv[2] === "workspace") {
   // Workspace management: scaffold or grow the multi-repo fleet config.
@@ -1217,70 +853,20 @@ if (process.argv[2] === "init") {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   })();
-} else if (process.argv[2] === "serve") {
-  // Handle serve command - start webhook server
-  // Deprecated alias for `devintern worker --listen`.
+} else if (process.argv[2] === "webhook") {
   (async () => {
-    console.warn(
-      "⚠️  `devintern serve` is deprecated; use `devintern worker --listen` instead.\n" +
-        "   The worker daemon also supports tracker polling (no webhook setup needed).",
-    );
-
-    // Load environment for webhook server
-    loadedEnvPath = loadEnvironment();
-
-    // Parse serve-specific options
-    const args = process.argv.slice(3);
-    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern serve [options]");
-        console.log("");
-        console.log("Start the webhook server to automatically address PR review feedback");
-        console.log("");
-        console.log("Options:");
-        console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
-        console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
-        console.log("  -h, --help     Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log(
-          "  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures",
-        );
-        console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
-        console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
-        console.log(
-          "  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments",
-        );
-        console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
-        console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
-        console.log("");
-        console.log("See docs/WEBHOOK-DEPLOYMENT.md for deployment instructions.");
-        process.exit(0);
-      }
+    const command = process.argv[3];
+    if (!command || command === "--help" || command === "-h") {
+      printWebhookHelp();
+      return;
     }
-
-    // License check — the webhook server is unattended automation, so it
-    // always requires an automation license.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    requireLicense(licenseResult);
-
-    // Import and start webhook server
-    const { startWebhookServer } = await import("./webhook-server");
-    startWebhookServer({ port, host });
+    if (command !== "serve") {
+      console.error(`❌ Unknown webhook command: ${command}`);
+      console.error("   Run 'devintern webhook --help' for usage.");
+      process.exitCode = 1;
+      return;
+    }
+    await runWebhookServeCommand(process.argv.slice(4));
   })();
 } else if (process.argv[2] === "address-review") {
   // Handle address-review command - manually address PR review feedback
@@ -1619,10 +1205,10 @@ Subcommands:
   init                 Initialize .devintern-code configuration in current directory
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
-  worker               Run the worker daemon (webhook listener via --listen);
-                       'worker init' runs a guided server-automation setup
+  worker               Run the workspace worker daemon;
+                       'worker init' writes a workspace and ready-tasks query
   dashboard            Serve the local observability dashboard (run history and stats)
-  serve                Deprecated alias for 'worker --listen'
+  webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
   login [method]       Sign in (github | google | x | email; prompts if omitted)
@@ -1642,7 +1228,7 @@ const isSubcommand = [
   "worker",
   "dashboard",
   "workspace",
-  "serve",
+  "webhook",
   "address-review",
   "resolve-conflicts",
   "login",
@@ -1752,10 +1338,7 @@ async function reportProcessingFailure(taskKey: string, reason: string): Promise
   try {
     await tracker.postComment(taskKey, {
       format: "markdown",
-      body:
-        `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
-        `**Reason:** ${reason}\n\n` +
-        `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.`,
+      body: formatProcessingFailureMarkdown(taskKey, reason),
     });
     console.log(`💬 Posted a failure comment to ${taskKey}`);
   } catch (commentError) {

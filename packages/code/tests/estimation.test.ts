@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { spawnSync } from "child_process";
 import { mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -13,16 +12,16 @@ import type { ProjectSettings } from "../src/types/settings";
 setDefaultTimeout(30_000);
 
 const CLI_PATH = join(__dirname, "..", "src", "index.ts");
-const CLI_SPAWN_TIMEOUT_MS = 30_000;
 /** Closed local port: argument-parse tests must not hang on a live tracker host. */
 const CLI_UNREACHABLE_TRACKER_URL = "http://127.0.0.1:1";
 
-// Helper to run the CLI in an isolated directory
-function runCLI(args: string[]): {
+// Helper to run the CLI in an isolated directory.
+// Async so tests in describe.concurrent can overlap their subprocesses.
+async function runCLI(args: string[]): Promise<{
   stdout: string;
   stderr: string;
   exitCode: number;
-} {
+}> {
   const testDir = join(
     tmpdir(),
     `est-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
@@ -30,9 +29,8 @@ function runCLI(args: string[]): {
   mkdirSync(testDir, { recursive: true });
 
   try {
-    const result = spawnSync("bun", [CLI_PATH, ...args], {
-      encoding: "utf8",
-      timeout: CLI_SPAWN_TIMEOUT_MS,
+    const proc = Bun.spawn({
+      cmd: ["bun", CLI_PATH, ...args],
       cwd: testDir,
       env: {
         ...process.env,
@@ -43,13 +41,15 @@ function runCLI(args: string[]): {
         DEVINTERN_SKIP_LICENSE_CHECK: "1",
         DEVINTERN_NO_UPDATE: "1",
       },
+      stdout: "pipe",
+      stderr: "pipe",
     });
-
-    return {
-      stdout: result.stdout || "",
-      stderr: result.stderr || "",
-      exitCode: result.status || 0,
-    };
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited.then((code) => code ?? 0),
+    ]);
+    return { stdout, stderr, exitCode };
   } finally {
     try {
       rmSync(testDir, { recursive: true, force: true });
@@ -819,37 +819,37 @@ describe("Settings - storyPointsField", () => {
   });
 });
 
-describe("CLI - --estimate option", () => {
-  test("should accept --estimate option", () => {
-    const result = runCLI(["--help"]);
+describe.concurrent("CLI - --estimate option", () => {
+  test("should accept --estimate option", async () => {
+    const result = await runCLI(["--help"]);
     expect(result.stdout).toContain("--estimate");
     expect(result.stdout).toContain("estimation mode");
     expect(result.exitCode).toBe(0);
   });
 
-  test("should accept --estimate with task keys", () => {
-    const result = runCLI(["TEST-123", "--estimate"]);
+  test("should accept --estimate with task keys", async () => {
+    const result = await runCLI(["TEST-123", "--estimate"]);
     // Will fail to connect to JIRA but should parse args correctly
     const output = result.stdout + result.stderr;
     expect(output).toContain("estimation mode");
   });
 
-  test("should accept --estimate with --jql (deprecated alias for --query)", () => {
-    const result = runCLI(["--estimate", "--jql", "project = TEST"]);
+  test("should accept --estimate with --jql (deprecated alias for --query)", async () => {
+    const result = await runCLI(["--estimate", "--jql", "project = TEST"]);
     const output = result.stdout + result.stderr;
     // --jql prints a deprecation warning and maps to --query
     expect(output).toContain("--jql is deprecated");
     expect(output).toContain("Searching task tracker with query");
   });
 
-  test("should accept --estimate with --skip-jira-comments", () => {
-    const result = runCLI(["TEST-123", "--estimate", "--skip-jira-comments"]);
+  test("should accept --estimate with --skip-jira-comments", async () => {
+    const result = await runCLI(["TEST-123", "--estimate", "--skip-jira-comments"]);
     const output = result.stdout + result.stderr;
     expect(output).toContain("estimation mode");
   });
 
-  test("should error when --estimate used without tasks", () => {
-    const result = runCLI(["--estimate"]);
+  test("should error when --estimate used without tasks", async () => {
+    const result = await runCLI(["--estimate"]);
     const output = result.stdout + result.stderr;
     expect(output).toContain("No tasks specified");
   });
