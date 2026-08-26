@@ -192,7 +192,7 @@ AGENT_HARNESS=claude-code
 #
 #   GitHub App (GITHUB_APP_ID + private key)
 #     Team / unattended automation: @mention matching on any PR (worker
-#     mention sweep and webhook / devintern worker --listen) and slug[bot]
+#     mention sweep and devintern webhook serve) and slug[bot]
 #     commit attribution.
 #     Also creates PRs when no GITHUB_TOKEN is set.
 #     Both GITHUB_APP_ID and a private key are required; ID alone is ignored.
@@ -208,7 +208,7 @@ AGENT_HARNESS=claude-code
 #
 # Precedence when both are set:
 #   CLI / PR creation: GITHUB_TOKEN is used.
-#   worker --listen / webhook server: the App is used (bot identity).
+#   webhook serve: the App is used (bot identity).
 
 # Bitbucket app password for creating pull requests
 # Create at: https://bitbucket.org/account/settings/app-passwords/

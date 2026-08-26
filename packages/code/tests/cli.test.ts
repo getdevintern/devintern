@@ -98,6 +98,38 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).not.toContain("--skip-jira-comments");
     expect(result.stdout).toContain("devintern PROJ-123 PROJ-456 PROJ-789 --create-pr");
     expect(result.stdout).toContain("devintern ENG-42 ENG-43 ENG-44 --create-pr");
+    expect(result.stdout).toContain("webhook serve");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should show webhook command help", async () => {
+    const result = await runCLI(["webhook", "--help"]);
+    expect(result.stdout).toContain("Usage: devintern webhook <command>");
+    expect(result.stdout).toContain("serve");
+    expect(result.stderr).not.toContain("deprecated");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should show canonical webhook serve help without a deprecation warning", async () => {
+    const result = await runCLI(["webhook", "serve", "--help"]);
+    expect(result.stdout).toContain("Usage: devintern webhook serve [options]");
+    expect(result.stdout).toContain("--port <port>");
+    expect(result.stderr).not.toContain("deprecated");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should keep serve as a deprecated webhook serve alias", async () => {
+    const result = await runCLI(["serve", "--help"]);
+    expect(result.stdout).toContain("Usage: devintern webhook serve [options]");
+    expect(result.stderr).toContain("`devintern serve` is deprecated");
+    expect(result.stderr).toContain("devintern webhook serve");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should mark worker --listen as deprecated in help", async () => {
+    const result = await runCLI(["worker", "--help"]);
+    expect(result.stdout).toContain("--listen");
+    expect(result.stdout).toContain("Deprecated");
     expect(result.exitCode).toBe(0);
   });
 

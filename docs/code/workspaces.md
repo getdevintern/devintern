@@ -119,7 +119,7 @@ devintern worker --workspace /path/to/workspace.toml
 devintern worker --no-workspace   # force single-repo mode in the current repo
 ```
 
-The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
+The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
 
 `devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 

@@ -21,7 +21,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. `--listen` (direct webhooks) is an advanced path, not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
 Or configure by hand and start directly:
 
@@ -32,11 +32,11 @@ devintern worker
 # Override the workspace query for this process
 devintern worker --query "status=todo"
 
-# Also run the GitHub webhook listener (direct webhooks; single-repo)
-devintern worker --query "status=todo" --listen --no-workspace
+# Advanced: run the repo-local GitHub webhook listener separately
+devintern webhook serve
 ```
 
-`devintern serve` still works as a deprecated alias for `devintern worker --listen`.
+`devintern worker --listen` preserves the old combined single-repo process for compatibility, but is deprecated. Run the workspace worker and `devintern webhook serve` as separate processes instead. `devintern serve` remains a deprecated alias for `devintern webhook serve`.
 
 ## Recurring automations
 
@@ -155,9 +155,9 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 | Option              | Description                                                         |
 | ------------------- | ------------------------------------------------------------------- |
 | `--query <query>`   | Poll the tracker for ready tasks matching this query                |
-| `--listen`          | Also run the GitHub webhook listener (direct webhooks)              |
-| `--port <port>`     | Webhook listener port (default: 3000 or `WEBHOOK_PORT`)             |
-| `--host <host>`     | Webhook listener host (default: 0.0.0.0 or `WEBHOOK_HOST`)          |
+| `--listen`          | Deprecated combined repo-local webhook listener                    |
+| `--port <port>`     | Deprecated listener port used only with `--listen`                 |
+| `--host <host>`     | Deprecated listener host used only with `--listen`                 |
 | `--interval <secs>` | Polling interval in seconds (default: 60 or `WORKER_POLL_INTERVAL`) |
 | `--ui`              | Serve the local [observability dashboard](./dashboard.md) (default) |
 | `--no-ui`           | Disable the dashboard for this worker process                        |
@@ -173,7 +173,7 @@ In polling mode the worker also watches the pull requests it created (no webhook
 
 The watch list is scoped to the project the worker runs in: single-repo mode watches only PRs on that checkout's GitHub repo, and workspace mode only repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred, or by an older checkout sharing the same `.devintern-code/` state — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 
-The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
+The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. The deprecated combined `--listen` mode disables this poller so feedback is never handled twice.
 
 ### Merge conflicts on the agent's PRs
 

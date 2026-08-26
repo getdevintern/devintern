@@ -7,8 +7,9 @@
  * - Mode 1 (polling): per-tracker change detectors feed the queue. No public
  *   endpoint, no DevIntern infrastructure. (Acquirers register here as they
  *   land; the detect-then-evaluate loop ships separately.)
- * - Mode 3 (direct webhooks): `--listen` runs the existing webhook server
- *   inside the daemon (the previous `devintern serve` behavior).
+ * - Mode 3 compatibility (direct webhooks): deprecated `--listen` runs the
+ *   repo-local webhook server inside the daemon. New deployments run
+ *   `devintern webhook serve` as a separate process.
  *
  * Code, credentials, and agent execution never leave this machine.
  */
@@ -18,7 +19,7 @@ import type { Server } from "http";
 import { LockManager } from "./lib/lock-manager";
 
 export interface WorkerOptions {
-  /** Mode 3: also run the GitHub webhook HTTP server. */
+  /** Deprecated Mode 3 compatibility: also run the GitHub webhook HTTP server. */
   listen: boolean;
   port?: number;
   host?: string;
@@ -80,7 +81,7 @@ export async function startWorker(
     console.error(
       "   Poll your tracker with:          devintern worker --query '<ready-tasks query>'",
     );
-    console.error("   Or run the webhook listener with: devintern worker --listen");
+    console.error("   Or run the webhook listener with: devintern webhook serve");
     lock.release();
     process.exit(1);
   }

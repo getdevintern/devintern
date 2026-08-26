@@ -433,17 +433,17 @@ export WEBHOOK_DEBUG="true"       # Verbose request/processing logging
 
 ### Start the Server
 
-`devintern worker --listen` runs the webhook listener inside the worker daemon. The previous `devintern serve` command still works as a deprecated alias.
+`devintern webhook serve` runs the advanced repo-local webhook listener. Keep it separate from the workspace worker so webhook delivery and tracker automation can be operated independently. The old `devintern worker --listen` combined mode and `devintern serve` alias remain temporarily available with deprecation warnings.
 
 ```bash
 # Development
 bun run src/webhook-server.ts
 
 # Production (after build)
-devintern worker --listen --port 3000
+devintern webhook serve --port 3000
 
 # With PM2 (process manager)
-pm2 start "devintern worker --listen" --name devintern-webhooks
+pm2 start "devintern webhook serve" --name devintern-webhooks
 ```
 
 ### Systemd Service (Linux)
@@ -467,7 +467,7 @@ Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_TOKEN=ghp_...
 Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
-ExecStart=/usr/local/bin/devintern worker --listen --port 3000
+ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always
 RestartSec=10
 
@@ -537,7 +537,7 @@ curl https://webhooks.yourdomain.com/health
 Run with verbose logging:
 
 ```bash
-WEBHOOK_DEBUG=true devintern worker --listen
+WEBHOOK_DEBUG=true devintern webhook serve
 ```
 
 ---
@@ -577,7 +577,7 @@ export LICENSE_KEY="your-server-automation-key"
 export GITHUB_TOKEN="ghp_..."   # or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH
 
 # 4. Start server
-devintern worker --listen &
+devintern webhook serve &
 
 # 5. Start tunnel
 cloudflared tunnel run devintern-webhooks
