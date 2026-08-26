@@ -46,6 +46,7 @@ import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 export { isInteractive };
 
 type PromptFn = (question: string) => Promise<string>;
+type LogFn = (message: string) => void;
 type ProbeFn = (trackerId: string, env: Record<string, string>) => Promise<void>;
 
 export interface InitWizardUserLike {
@@ -191,80 +192,8 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
   }
 
   try {
-    const values: Record<string, string> = {};
-    let trackerId: string | undefined;
-
-    // Fast track: reuse tracker credentials from an existing @devintern/pm
-    // config in the same project (env var names are shared).
-    const pmEnvPath = resolve(projectRoot, ".devintern-pm", ".env");
-    if (existsSync(pmEnvPath)) {
-      const existing = extractExistingTrackerConfig(readFileSync(pmEnvPath, "utf8"), TRACKER_SETUP);
-      if (existing) {
-        const reused = await promptReuseExistingConfig(existing, {
-          sourceLabel: "@devintern/pm configuration (.devintern-pm/.env)",
-          trackerName: TRACKER_CAPABILITIES[existing.trackerId]?.displayName ?? existing.trackerId,
-          steps: TRACKER_SETUP[existing.trackerId] ?? [],
-          prompt,
-          log,
-          values,
-        });
-        if (reused) trackerId = existing.trackerId;
-      }
-    }
-
-    const reusedExisting = trackerId !== undefined;
-    if (trackerId === undefined) {
-      // Zero-account path first: markdown needs no credentials, so evaluators
-      // can reach a first successful run in minutes.
-      const otherIds = Object.keys(TRACKER_SETUP).filter((id) => id !== "markdown");
-      trackerId = await promptForTracker(prompt, log, [
-        {
-          id: "markdown",
-          displayName: "Markdown files",
-          hint: "local .md task files, no account needed — quickest way to try DevIntern",
-        },
-        ...otherIds.map((id) => ({
-          id,
-          displayName: TRACKER_CAPABILITIES[id]?.displayName ?? id,
-        })),
-      ]);
-    }
-    const steps = TRACKER_SETUP[trackerId] ?? [];
-
-    const docs = TRACKER_DOCS[trackerId];
-    if (docs) {
-      log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
-    }
-
-    if (!reusedExisting) {
-      await promptSteps(steps, prompt, log, values);
-    }
-
-    if (trackerId === "markdown") {
-      log("\nℹ️  No credentials needed for the markdown tracker.");
-    } else {
-      await validateConnection(
-        trackerId,
-        values,
-        steps,
-        prompt,
-        probe,
-        log,
-        ".devintern-code/.env",
-      );
-    }
-
-    // Optional PR-integration token when the tracker itself is not GitHub.
-    if (trackerId !== "github") {
-      log(
-        "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
-      );
-      log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
-    }
-
-    const envContent = renderEnvFile(trackerId, values);
-    if (!scaffoldProject({ cwd, envContent })) {
+    const result = await runTrackerSetup(prompt, log, probe, cwd);
+    if (!result) {
       return;
     }
 
@@ -272,8 +201,8 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
     log("\n🎉 Project initialized successfully!");
     log("\n📝 Next steps:");
-    if (trackerId === "markdown") {
-      const tasksDir = values.MARKDOWN_TASKS_DIR ?? "./tasks";
+    if (result.trackerId === "markdown") {
+      const tasksDir = result.values.MARKDOWN_TASKS_DIR ?? "./tasks";
       log(`   1. Create ${tasksDir} and add a task file, e.g. TASK-1.md`);
       log("   2. Run 'devintern TASK-1' to start working on it");
     } else {
@@ -286,6 +215,91 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
   } finally {
     rl?.close();
   }
+}
+
+/**
+ * Tracker-only subset of `devintern init`: pick a tracker, collect credentials,
+ * validate, and scaffold `.devintern-code/`. Used by `devintern init` and by
+ * `devintern worker init` when the repo has no tracker config yet.
+ *
+ * @returns Tracker id and collected values, or null when scaffolding refused
+ */
+export async function runTrackerSetup(
+  prompt: PromptFn,
+  log: LogFn,
+  probe: ProbeFn,
+  cwd: string,
+): Promise<{ trackerId: string; values: Record<string, string> } | null> {
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const values: Record<string, string> = {};
+  let trackerId: string | undefined;
+
+  // Fast track: reuse tracker credentials from an existing @devintern/pm
+  // config in the same project (env var names are shared).
+  const pmEnvPath = resolve(projectRoot, ".devintern-pm", ".env");
+  if (existsSync(pmEnvPath)) {
+    const existing = extractExistingTrackerConfig(readFileSync(pmEnvPath, "utf8"), TRACKER_SETUP);
+    if (existing) {
+      const reused = await promptReuseExistingConfig(existing, {
+        sourceLabel: "@devintern/pm configuration (.devintern-pm/.env)",
+        trackerName: TRACKER_CAPABILITIES[existing.trackerId]?.displayName ?? existing.trackerId,
+        steps: TRACKER_SETUP[existing.trackerId] ?? [],
+        prompt,
+        log,
+        values,
+      });
+      if (reused) trackerId = existing.trackerId;
+    }
+  }
+
+  const reusedExisting = trackerId !== undefined;
+  if (trackerId === undefined) {
+    // Zero-account path first: markdown needs no credentials, so evaluators
+    // can reach a first successful run in minutes.
+    const otherIds = Object.keys(TRACKER_SETUP).filter((id) => id !== "markdown");
+    trackerId = await promptForTracker(prompt, log, [
+      {
+        id: "markdown",
+        displayName: "Markdown files",
+        hint: "local .md task files, no account needed — quickest way to try DevIntern",
+      },
+      ...otherIds.map((id) => ({
+        id,
+        displayName: TRACKER_CAPABILITIES[id]?.displayName ?? id,
+      })),
+    ]);
+  }
+  const steps = TRACKER_SETUP[trackerId] ?? [];
+
+  const docs = TRACKER_DOCS[trackerId];
+  if (docs) {
+    log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
+  }
+
+  if (!reusedExisting) {
+    await promptSteps(steps, prompt, log, values);
+  }
+
+  if (trackerId === "markdown") {
+    log("\nℹ️  No credentials needed for the markdown tracker.");
+  } else {
+    await validateConnection(trackerId, values, steps, prompt, probe, log, ".devintern-code/.env");
+  }
+
+  // Optional PR-integration token when the tracker itself is not GitHub.
+  if (trackerId !== "github") {
+    log(
+      "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
+    );
+    log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
+    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+  }
+
+  const envContent = renderEnvFile(trackerId, values);
+  if (!scaffoldProject({ cwd, envContent })) {
+    return null;
+  }
+  return { trackerId, values };
 }
 
 /**

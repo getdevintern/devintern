@@ -37,6 +37,11 @@ export interface ResolveConflictsOptions {
   fetchPr?: (owner: string, repo: string, prNumber: number) => Promise<PullRequestInfo>;
   /** Abort safely if polling eligibility became stale before execution. */
   expectedHeadSha?: string;
+  /**
+   * Advisory only: GitHub's PR API reports a stale `base.sha` until it
+   * recomputes the PR, so a mismatch against the fetched ref is logged, not
+   * treated as a race — the fetched tip is what gets merged.
+   */
   expectedBaseSha?: string;
 }
 
@@ -169,16 +174,23 @@ export async function resolveConflictsOnPr(
   if (!baseFetch.success) {
     return { outcome: "failed", message: `base fetch failed: ${baseFetch.error}` };
   }
+  // GitHub's PR API can report a stale `base.sha` long after the branch
+  // advanced (it only updates when GitHub recomputes the PR). Deferring on a
+  // mismatch would retry forever against a deterministic mismatch, so the
+  // freshly fetched ref is the source of truth for what to merge.
   if (options.expectedBaseSha) {
     const fetchedBase = await Utils.executeGitCommand(["rev-parse", `origin/${baseRef}`], {
       cwd: workDir,
     });
-    if (!fetchedBase.success || fetchedBase.output.trim() !== options.expectedBaseSha) {
-      return { outcome: "deferred", message: "PR base changed during worktree preparation" };
+    if (fetchedBase.success && fetchedBase.output.trim() !== options.expectedBaseSha) {
+      console.log(
+        `ℹ️  GitHub reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
+          `origin/${baseRef} is at ${fetchedBase.output.trim().slice(0, 7)}; syncing to the actual tip`,
+      );
     }
   }
 
-  const mergeTarget = options.expectedBaseSha ?? `origin/${baseRef}`;
+  const mergeTarget = `origin/${baseRef}`;
   const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
     cwd: workDir,
     verbose,

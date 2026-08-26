@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
+  buildFleetEventAcquirers,
   createWorkspaceTaskAcquirer,
   fleetTaskArgs,
   resolveWorkspaceAutomationContext,
@@ -14,6 +15,7 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
+import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -226,6 +228,52 @@ describe("createWorkspaceTaskAcquirer", () => {
 describe("fleetTaskArgs", () => {
   test("workspace defaults win over the env default", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
+  });
+});
+
+describe("buildFleetEventAcquirers", () => {
+  test("starts tracker relay without GitHub polling credentials", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    const state = openWorkspaceState(workspaceDir);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const savedToken = process.env.GITHUB_TOKEN;
+    const savedAppId = process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_APP_ID;
+    saveRelayState(
+      {
+        relayUrl: "https://relay.test",
+        customerId: "customer-1",
+        connectedAt: new Date(0).toISOString(),
+        registrations: [],
+        relayToken: "drt_test",
+      },
+      workspaceDir,
+    );
+
+    try {
+      const acquirers = await buildFleetEventAcquirers({
+        config: CONFIG,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: async () => ({ tasks: [] }),
+        query: "status=todo",
+        intervalSeconds: 60,
+      });
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["relay"]);
+    } finally {
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+      if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+      else process.env.GITHUB_APP_ID = savedAppId;
+      state.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 

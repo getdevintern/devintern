@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { JiraClient } from "./src/clients/jira.ts";
+import { JIRA_SEARCH_ISSUE_FIELDS, JiraClient } from "./src/clients/jira.ts";
 
 describe("JiraClient constructor", () => {
   test("accepts legacy baseUrl/email/token signature", () => {
@@ -288,6 +288,25 @@ describe("JiraClient REST helpers", () => {
       issues: [{ key: "ACME-1" }, { key: "ACME-2" }],
       total: 2,
     });
+  });
+
+  test("searchIssues requests fields including updated (enhanced JQL omits them by default)", async () => {
+    const client = new JiraClient("https://acme.atlassian.net", "user@example.com", "token");
+
+    let capturedUrl = "";
+    client.jiraApiCall = async (_method, url) => {
+      capturedUrl = url;
+      return { issues: [], total: 0 };
+    };
+
+    await client.searchIssues("status = Open");
+
+    const decoded = decodeURIComponent(capturedUrl);
+    expect(decoded).toContain("fields=");
+    expect(decoded).toContain("updated");
+    for (const field of JIRA_SEARCH_ISSUE_FIELDS) {
+      expect(decoded).toContain(field);
+    }
   });
 
   test("updateStoryPoints sets field via PUT", async () => {

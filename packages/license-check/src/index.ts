@@ -62,6 +62,8 @@ export interface LicenseCheckOptions {
    * an automation entitlement grants the right to run.
    */
   requireAutomation?: boolean;
+  /** Base delay between entitlement retries in ms (defaults to 500). */
+  retryBaseDelayMs?: number;
 }
 
 interface CachedEntitlement {
@@ -188,6 +190,7 @@ async function checkEntitlementViaWebsite(
   productKey: string,
   accessToken: string,
   requireAutomation: boolean,
+  retryBaseDelayMs: number,
 ): Promise<EntitlementCheckResult> {
   const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
   const params = new URLSearchParams({ productKey });
@@ -198,7 +201,7 @@ async function checkEntitlementViaWebsite(
     const response = await fetchWithRetry(
       url,
       { headers: { Authorization: `Bearer ${accessToken}` } },
-      { maxRetries: ENTITLEMENT_MAX_RETRIES, baseDelay: 500, jitter: false },
+      { maxRetries: ENTITLEMENT_MAX_RETRIES, baseDelay: retryBaseDelayMs, jitter: false },
     );
 
     if (response.ok) {
@@ -239,7 +242,13 @@ async function checkEntitlementViaWebsite(
  * @returns Validation outcome with `valid`, `source`, and a human-readable `message`.
  */
 export async function checkLicense(options: LicenseCheckOptions): Promise<LicenseCheckResult> {
-  const { productKey, licenseKey, supabaseConfig, requireAutomation = false } = options;
+  const {
+    productKey,
+    licenseKey,
+    supabaseConfig,
+    requireAutomation = false,
+    retryBaseDelayMs,
+  } = options;
 
   // Allow tests and CI to skip license checks
   if (process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1") {
@@ -330,6 +339,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
       productKey,
       user.accessToken,
       requireAutomation,
+      retryBaseDelayMs ?? 500,
     );
 
     if (entitlementResult.status === "entitled") {
@@ -400,35 +410,6 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     source: "none",
     message: messages.join(" "),
   };
-}
-
-/**
- * Whether a license outcome qualifies for fleet/workspace mode.
- *
- * The multi-repo worker is a team-tier capability, so solo automation keys
- * do not qualify. A grace-window result counts when the cached entitlement
- * was team-automation.
- *
- * @param result - Outcome from {@link checkLicense}.
- */
-export function isTeamAutomationEntitled(result: LicenseCheckResult): boolean {
-  return result.valid && result.entitlementSource === "team-automation";
-}
-
-/**
- * Exit-on-failure wrapper around {@link isTeamAutomationEntitled}.
- *
- * @param result - Outcome from {@link checkLicense}.
- */
-export function requireTeamAutomation(result: LicenseCheckResult): void {
-  if (isTeamAutomationEntitled(result)) {
-    return;
-  }
-  console.error("\n❌ Workspace (multi-repo) mode requires a team automation subscription");
-  console.error(
-    "   Your license covers single-repo automation only. Upgrade at https://devintern.com/pricing\n",
-  );
-  process.exit(1);
 }
 
 /**

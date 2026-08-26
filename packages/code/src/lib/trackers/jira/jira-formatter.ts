@@ -9,6 +9,31 @@ import {
   parseTextWithFormatting as sharedParseTextWithFormatting,
   sanitizeJiraOutput,
 } from "@devintern/text-formatter";
+import { RETRY_PICKUP_BODY, RETRY_PICKUP_HEADING } from "../shared/markdown-comment-formatter";
+
+/** ADF warning panel telling the user how to unlock another pickup. */
+function retryPickupPanel(): Record<string, unknown> {
+  return {
+    type: "panel",
+    attrs: { panelType: "warning" },
+    content: [
+      {
+        type: "paragraph",
+        content: [
+          {
+            type: "text",
+            text: `${RETRY_PICKUP_HEADING}: `,
+            marks: [{ type: "strong" }],
+          },
+          {
+            type: "text",
+            text: RETRY_PICKUP_BODY,
+          },
+        ],
+      },
+    ],
+  };
+}
 
 export class JiraFormatter {
   /**
@@ -413,6 +438,10 @@ export class JiraFormatter {
       ],
     });
 
+    if (!assessment.isImplementable) {
+      content.push(retryPickupPanel());
+    }
+
     return content;
   }
 
@@ -552,27 +581,7 @@ export class JiraFormatter {
     const formattedOutput = JiraFormatter.formatAgentOutputToADF(agentOutput);
     content.push(...formattedOutput);
 
-    // Add action panel
-    content.push({
-      type: "panel",
-      attrs: { panelType: "warning" },
-      content: [
-        {
-          type: "paragraph",
-          content: [
-            {
-              type: "text",
-              text: "Action Required: ",
-              marks: [{ type: "strong" }],
-            },
-            {
-              type: "text",
-              text: "Please review the output above, update the task description with more details if needed, and retry the implementation.",
-            },
-          ],
-        },
-      ],
-    });
+    content.push(retryPickupPanel());
 
     return content;
   }

@@ -56,6 +56,32 @@ describe("JiraFormatter - @devintern/code Comment Markers", () => {
     const adfString = JSON.stringify(adf);
     expect(adfString).toContain("Implementation Incomplete");
     expect(adfString).toContain("⚠️");
+    expect(adfString).toContain("To retry this task");
+    expect(adfString).toContain("post a comment");
+  });
+
+  test("failed feasibility assessment includes retry pickup instructions", () => {
+    const adf = JiraFormatter.createClarityAssessmentADF({
+      clarityScore: 3,
+      isImplementable: false,
+      summary: "Requirements are vague",
+      issues: [],
+      recommendations: [],
+    });
+    const adfString = JSON.stringify(adf);
+    expect(adfString).toContain("To retry this task");
+    expect(adfString).toContain("post a comment");
+  });
+
+  test("passing feasibility assessment omits retry pickup instructions", () => {
+    const adf = JiraFormatter.createClarityAssessmentADF({
+      clarityScore: 8,
+      isImplementable: true,
+      summary: "Task is clear",
+      issues: [],
+      recommendations: [],
+    });
+    expect(JSON.stringify(adf)).not.toContain("To retry this task");
   });
 
   test("all @devintern/code comments should have unique identifiable markers", () => {

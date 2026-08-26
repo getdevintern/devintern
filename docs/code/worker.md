@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-24
+dateModified: 2026-08-26
 ---
 
 # Worker Daemon
@@ -14,22 +14,26 @@ Your code, credentials, and agent execution never leave your machine.
 
 ## Quick Start
 
-The fastest way to set up the worker is the guided setup (your tracker must already be configured; run `devintern init` first if not):
+The fastest way to set up the worker is the guided setup:
 
 ```bash
 devintern worker init
+devintern worker
 ```
 
-It walks you through the ready-tasks query (and validates it against your tracker with a live dry run), polling vs. webhook mode (generating a `WEBHOOK_SECRET` when needed), checks your automation license up front, and can write a ready-to-install systemd service file.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. `--listen` (direct webhooks) is an advanced path, not part of this wizard.
 
 Or configure by hand and start directly:
 
 ```bash
-# Poll your tracker for ready tasks (no webhooks, no public endpoint)
+# After a workspace exists (worker init, or workspace init + import)
+devintern worker
+
+# Override the workspace query for this process
 devintern worker --query "status=todo"
 
-# Also run the GitHub webhook listener (direct webhooks)
-devintern worker --query "status=todo" --listen
+# Also run the GitHub webhook listener (direct webhooks; single-repo)
+devintern worker --query "status=todo" --listen --no-workspace
 ```
 
 `devintern serve` still works as a deprecated alias for `devintern worker --listen`.
@@ -125,7 +129,7 @@ TASK_TRACKER=markdown MARKDOWN_TASKS_DIR=./tasks devintern worker --query "statu
 
 ### Re-running a task
 
-When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket and moves it back to your to-do status. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
+When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket (crash, interrupt, and failed-feasibility comments do the same) and moves it back to your to-do status. That comment tells you how to unlock a retry. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
@@ -137,6 +141,15 @@ If a run completes but you want a different result, move the ticket back to your
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `WORKER_TASK_ARGS`, since that would disable the gate for every polled task.
 
+### Ticket matches the query but is not picked up
+
+The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
+
+- `📌 picking up KEY` — it was claimed on this tick.
+- `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
+- `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
+- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
+
 ## Options
 
 | Option              | Description                                                         |
@@ -146,7 +159,8 @@ Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's curso
 | `--port <port>`     | Webhook listener port (default: 3000 or `WEBHOOK_PORT`)             |
 | `--host <host>`     | Webhook listener host (default: 0.0.0.0 or `WEBHOOK_HOST`)          |
 | `--interval <secs>` | Polling interval in seconds (default: 60 or `WORKER_POLL_INTERVAL`) |
-| `--ui`              | Also serve the local [observability dashboard](./dashboard.md)      |
+| `--ui`              | Serve the local [observability dashboard](./dashboard.md) (default) |
+| `--no-ui`           | Disable the dashboard for this worker process                        |
 | `--ui-port <port>`  | Dashboard port (default: 4400 or `DASHBOARD_PORT`)                  |
 | `--sandbox <name>`  | Run agents inside an OS-level sandbox (overrides `AGENT_SANDBOX`)   |
 | `-v, --verbose`     | Verbose logging                                                     |
@@ -163,9 +177,9 @@ The regular polling requests use ETags, and GitHub does not count `304 Not Modif
 
 ### Merge conflicts on the agent's PRs
 
-When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. It verifies ancestry with GitHub's comparison API, merges the base branch into the PR branch, and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
+When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. Eligibility comes from GitHub's own `mergeable_state` (`dirty` = conflicts, `behind` = mergeable but not up to date) — not from ancestry checks against the API-reported base SHA, a field GitHub can leave stale for days. The worker merges the base branch into the PR branch and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed; every conflicting PR in the watch list is synced, not just one per tick. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base SHA is a durable event in `.devintern-code/queue.db`. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts; a newly advanced base creates a new event. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
 ## Mention the bot on any PR
 
@@ -189,15 +203,15 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). For instant reaction without hosting your own webhook endpoint, pair the worker with the [DevIntern relay](./relay.md): sign in, run `devintern worker connect` (and optionally `connect linear|asana|trello|azure-devops|jira` with that tracker's env vars), and events reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so the relay can never lose you events.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so relay downtime only affects latency. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
 
 ## Seeing what the worker did
 
-Every run is recorded stage by stage in the local database. Add `--ui` to serve the [observability dashboard](./dashboard.md) alongside the daemon, or run `devintern dashboard` standalone at any time (it works with the worker stopped too).
+Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) at `http://localhost:4400` by default; pass `--no-ui` to disable it. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a systemd service file to `.devintern-code/devintern-worker.service` with install instructions. For pm2 and tunnel setups (webhook mode), see the [GitHub Integration guide](./github-integration.md). In polling mode no public endpoint is needed, so a plain systemd service with `ExecStart=devintern worker --query "..."` is enough.
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md).
 
 ## License
 
