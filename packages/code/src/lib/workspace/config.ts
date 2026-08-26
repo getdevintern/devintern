@@ -33,6 +33,12 @@ export interface RepoConfig {
   defaultBranch?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
+  /**
+   * Extend automatic base sync to this repo's open, non-draft PRs authored
+   * by team members (`WORKER_BASE_SYNC_TEAM_PRS` equivalent). Requires a
+   * sandboxed agent; off by default.
+   */
+  syncTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
 }
@@ -125,6 +131,23 @@ function readStringList(
     return [];
   }
   return (value as string[]).map((item) => item.trim());
+}
+
+function readBoolean(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+): boolean | undefined {
+  const value = table[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    errors.push(`${label}.${key} must be a boolean.`);
+    return undefined;
+  }
+  return value;
 }
 
 function readEnvTable(
@@ -226,6 +249,7 @@ export function parseWorkspaceConfig(
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
       envFile: readString(table, "env_file", label, errors),
+      syncTeamPrs: readBoolean(table, "sync_team_prs", label, errors),
       env: readEnvTable(table, label, errors),
     });
   }

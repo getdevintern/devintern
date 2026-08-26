@@ -4,6 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  assertAgentSandboxForTeamPrSync,
+  isTeamAuthor,
   OPEN_PR_LIST_PAGE_SIZE,
   ReviewPollingAcquirer,
   runResolveConflictsViaCli,
@@ -41,6 +43,7 @@ describe("ReviewPollingAcquirer", () => {
     prState: string;
     mergeableState?: string;
     draft?: boolean;
+    authorAssociation?: string;
     headSha?: string;
     baseSha?: string;
     baseIncluded?: boolean | null;
@@ -65,8 +68,8 @@ describe("ReviewPollingAcquirer", () => {
       quietPeriodSeconds?: number;
       now?: () => number;
       allowedRepos?: string[];
-      syncAllOpenPrs?: boolean;
-      openPrs?: Array<{ number: number; draft?: boolean }>;
+      syncTeamPrsRepos?: string[];
+      openPrs?: Array<{ number: number; draft?: boolean; author_association?: string }>;
     } = {},
   ) {
     const addressed: string[] = [];
@@ -88,6 +91,7 @@ describe("ReviewPollingAcquirer", () => {
               state: gh.prState,
               mergeable_state: gh.mergeableState,
               draft: gh.draft,
+              author_association: gh.authorAssociation,
               head: gh.headSha
                 ? { sha: gh.headSha, ref: "agent/task", repo: { full_name: "acme/widgets" } }
                 : undefined,
@@ -113,7 +117,11 @@ describe("ReviewPollingAcquirer", () => {
               async listOpenPullRequests(
                 _repo: string,
                 etag?: string,
-              ): Promise<ConditionalResult<Array<{ number: number; draft?: boolean }>>> {
+              ): Promise<
+                ConditionalResult<
+                  Array<{ number: number; draft?: boolean; author_association?: string }>
+                >
+              > {
                 listCalls.push(etag);
                 if (gh.listEtagHit) {
                   return { data: null, etag, notModified: true };
@@ -135,7 +143,7 @@ describe("ReviewPollingAcquirer", () => {
       runStore: options.runStore,
       now: options.now,
       allowedRepos: options.allowedRepos,
-      syncAllOpenPrs: options.syncAllOpenPrs,
+      syncTeamPrsRepos: options.syncTeamPrsRepos,
     });
     return { acquirer, addressed, resolved, listCalls };
   }
@@ -145,6 +153,7 @@ describe("ReviewPollingAcquirer", () => {
   const dirtyState = (): FakeGitHubState => ({
     prState: "open",
     mergeableState: "dirty",
+    authorAssociation: "MEMBER",
     headSha: "head1",
     baseSha: "base1",
     reviews: [],
@@ -736,10 +745,10 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
-  test("foreign open PRs are not synced by default (WORKER_BASE_SYNC_ALL_PRS off)", async () => {
+  test("foreign open PRs are not synced by default (WORKER_BASE_SYNC_TEAM_PRS off)", async () => {
     const gh = dirtyState();
     const made = makeAcquirer(gh, {
-      openPrs: [{ number: 7 }],
+      openPrs: [{ number: 7, author_association: "MEMBER" }],
       allowedRepos: ["acme/widgets"],
     });
 
@@ -753,8 +762,8 @@ describe("ReviewPollingAcquirer", () => {
     const gh = dirtyState();
     gh.reviews = [{ id: 1, state: "changes_requested", user: human }];
     const made = makeAcquirer(gh, {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 7 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [{ number: 7, author_association: "MEMBER" }],
       allowedRepos: ["acme/widgets"],
     });
 
@@ -778,8 +787,8 @@ describe("ReviewPollingAcquirer", () => {
   test("enabled: a 304 open-PR list reuses the previously hydrated item set", async () => {
     const gh = dirtyState();
     const made = makeAcquirer(gh, {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 12 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [{ number: 12, author_association: "MEMBER" }],
       allowedRepos: ["acme/widgets"],
     });
     await made.acquirer.tick();
@@ -805,8 +814,8 @@ describe("ReviewPollingAcquirer", () => {
     // unconditionally instead of trusting the stale ETag.
     workerState.setCursor("github:open-prs:acme/widgets", "state", 'W/"list-stale"');
     const made = makeAcquirer(dirtyState(), {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 13 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [{ number: 13, author_association: "MEMBER" }],
       allowedRepos: ["acme/widgets"],
     });
 
@@ -822,8 +831,11 @@ describe("ReviewPollingAcquirer", () => {
   test("enabled: the agent's own PRs are polled once even when listed as open", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const made = makeAcquirer(dirtyState(), {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 42 }, { number: 43 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [
+        { number: 42, author_association: "MEMBER" },
+        { number: 43, author_association: "MEMBER" },
+      ],
       allowedRepos: ["acme/widgets"],
     });
 
@@ -834,8 +846,11 @@ describe("ReviewPollingAcquirer", () => {
   test("enabled: draft PRs are excluded from sync at discovery and per-PR polling", async () => {
     const gh = dirtyState();
     const made = makeAcquirer(gh, {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 8, draft: true }, { number: 9 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [
+        { number: 8, draft: true, author_association: "MEMBER" },
+        { number: 9, author_association: "MEMBER" },
+      ],
       allowedRepos: ["acme/widgets"],
     });
     await made.acquirer.tick();
@@ -868,7 +883,7 @@ describe("ReviewPollingAcquirer", () => {
           return [];
         },
         async listOpenPullRequests() {
-          return { data: [{ number: 10 }], notModified: false };
+          return { data: [{ number: 10, author_association: "MEMBER" }], notModified: false };
         },
       },
       addressPr: async () => true,
@@ -876,7 +891,7 @@ describe("ReviewPollingAcquirer", () => {
         resolved.push(`${repo}#${n}`);
         return { outcome: "clean", message: "merged" };
       },
-      syncAllOpenPrs: true,
+      syncTeamPrsRepos: ["acme/widgets"],
     });
     await acquirer.tick();
     expect(resolved).toEqual([]);
@@ -884,9 +899,9 @@ describe("ReviewPollingAcquirer", () => {
 
   test("enabled: a closed foreign PR stops being polled and leaves the watch list", async () => {
     const gh = dirtyState();
-    const openPrs = [{ number: 11 }];
+    const openPrs = [{ number: 11, author_association: "MEMBER" }];
     const made = makeAcquirer(gh, {
-      syncAllOpenPrs: true,
+      syncTeamPrsRepos: ["acme/widgets"],
       openPrs,
       allowedRepos: ["acme/widgets"],
     });
@@ -920,6 +935,7 @@ describe("ReviewPollingAcquirer", () => {
             data: {
               state: "open",
               mergeable_state: "dirty",
+              author_association: "MEMBER",
               head: { sha: "head1", ref: "feature", repo: { full_name: "contrib/widgets" } },
               base: { sha: "base1", ref: "main" },
             },
@@ -933,7 +949,7 @@ describe("ReviewPollingAcquirer", () => {
           return [];
         },
         async listOpenPullRequests() {
-          return { data: [{ number: 77 }], notModified: false };
+          return { data: [{ number: 77, author_association: "MEMBER" }], notModified: false };
         },
       },
       addressPr: async () => true,
@@ -941,7 +957,7 @@ describe("ReviewPollingAcquirer", () => {
         resolved.push(`${repo}#${n}`);
         return { outcome: "clean", message: "merged" };
       },
-      syncAllOpenPrs: true,
+      syncTeamPrsRepos: ["acme/widgets"],
       allowedRepos: ["acme/widgets"],
     });
     await acquirer.tick();
@@ -953,7 +969,7 @@ describe("ReviewPollingAcquirer", () => {
 
   test("enabled without list support degrades to own-PR syncing only", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const made = makeAcquirer(dirtyState(), { syncAllOpenPrs: true });
+    const made = makeAcquirer(dirtyState(), { syncTeamPrsRepos: ["acme/widgets"] });
 
     await made.acquirer.tick();
     expect(made.resolved).toEqual(["acme/widgets#42"]);
@@ -963,8 +979,8 @@ describe("ReviewPollingAcquirer", () => {
     const gh = dirtyState();
     const runStore = new RunStore(dbPath);
     const made = makeAcquirer(gh, {
-      syncAllOpenPrs: true,
-      openPrs: [{ number: 9 }],
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [{ number: 9, author_association: "MEMBER" }],
       allowedRepos: ["acme/widgets"],
       runStore,
     });
@@ -978,6 +994,72 @@ describe("ReviewPollingAcquirer", () => {
       status: "succeeded",
     });
     runStore.close();
+  });
+
+  test("enabled: PRs from outside authors are never discovered for sync", async () => {
+    const gh = dirtyState();
+    const made = makeAcquirer(gh, {
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [
+        { number: 20, author_association: "NONE" },
+        { number: 21, author_association: "FIRST_TIME_CONTRIBUTOR" },
+        { number: 22, author_association: "CONTRIBUTOR" },
+        { number: 23, author_association: undefined },
+        { number: 24, author_association: "COLLABORATOR" },
+        { number: 25, author_association: "MAINTAIN" },
+        { number: 26, author_association: "OWNER" },
+      ],
+      allowedRepos: ["acme/widgets"],
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#24", "acme/widgets#25", "acme/widgets#26"]);
+  });
+
+  test("enabled: the fresh per-PR author wins over a stale team-authored list entry", async () => {
+    const gh = dirtyState();
+    const made = makeAcquirer(gh, {
+      syncTeamPrsRepos: ["acme/widgets"],
+      openPrs: [{ number: 30, author_association: "MEMBER" }],
+      allowedRepos: ["acme/widgets"],
+    });
+
+    // Eligible at first sight.
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#30"]);
+
+    // Author association downgraded (e.g. collaborator access revoked):
+    // the per-PR payload gates even when the cached list entry says MEMBER,
+    // and a moved base does not open a new sync event.
+    gh.authorAssociation = "NONE";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#30"]);
+  });
+
+  test("team-PR base sync refuses to start without AGENT_SANDBOX", () => {
+    const prev = process.env.AGENT_SANDBOX;
+    try {
+      delete process.env.AGENT_SANDBOX;
+      expect(() => assertAgentSandboxForTeamPrSync()).toThrow(/AGENT_SANDBOX/);
+      process.env.AGENT_SANDBOX = "none";
+      expect(() => assertAgentSandboxForTeamPrSync()).toThrow(/AGENT_SANDBOX/);
+      process.env.AGENT_SANDBOX = "docker";
+      expect(() => assertAgentSandboxForTeamPrSync()).not.toThrow();
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_SANDBOX;
+      else process.env.AGENT_SANDBOX = prev;
+    }
+  });
+
+  test("isTeamAuthor accepts GitHub's team associations case-insensitively", () => {
+    expect(isTeamAuthor("MEMBER")).toBe(true);
+    expect(isTeamAuthor("collaborator")).toBe(true);
+    expect(isTeamAuthor("Maintain")).toBe(true);
+    expect(isTeamAuthor("OWNER")).toBe(true);
+    expect(isTeamAuthor("CONTRIBUTOR")).toBe(false);
+    expect(isTeamAuthor("NONE")).toBe(false);
+    expect(isTeamAuthor(undefined)).toBe(false);
   });
 });
 

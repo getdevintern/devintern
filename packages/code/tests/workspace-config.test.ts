@@ -35,6 +35,7 @@ name = "backend"
 remote = "git@github.com:acme/backend.git"
 default_branch = "develop"
 env_file = "env/backend.env"
+sync_team_prs = true
   [repos.env]
   GITHUB_REPO = "acme/backend"
 
@@ -65,11 +66,13 @@ describe("parseWorkspaceConfig", () => {
     expect(backend?.remote).toBe("git@github.com:acme/backend.git");
     expect(backend?.defaultBranch).toBe("develop");
     expect(backend?.envFile).toBe("env/backend.env");
+    expect(backend?.syncTeamPrs).toBe(true);
     expect(backend?.env).toEqual({ GITHUB_REPO: "acme/backend" });
 
     // frontend has no default_branch of its own: inherits [defaults].
     const frontend = findRepo(config, "frontend");
     expect(frontend?.defaultBranch).toBe("main");
+    expect(frontend?.syncTeamPrs).toBeUndefined();
     expect(frontend?.env).toEqual({});
 
     expect(config.routing).toHaveLength(2);
@@ -106,6 +109,20 @@ tracker = "markdown"
 tracker = "fossil"
 `),
     ).toThrow(/does not support polling/);
+  });
+
+  test("rejects a non-boolean repos.sync_team_prs", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+sync_team_prs = "yes"
+`),
+    ).toThrow(/\[\[repos\]\]\[0\]\.sync_team_prs must be a boolean/);
   });
 
   test("rejects duplicate repo names", () => {

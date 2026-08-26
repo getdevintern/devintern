@@ -644,9 +644,11 @@ if (process.argv[2] === "init") {
         console.log(
           "  WORKER_BASE_SYNC_QUIET_SECONDS Stable-head window before PR base sync (default: 30)",
         );
-        console.log("  WORKER_BASE_SYNC_ALL_PRS");
-        console.log("                       Set to true to base-sync every open PR in the repo,");
-        console.log("                       not just the agent's own (default: disabled)");
+        console.log("  WORKER_BASE_SYNC_TEAM_PRS");
+        console.log(
+          "                       Set to true to base-sync teammates' open PRs (requires",
+        );
+        console.log("                       AGENT_SANDBOX; default: disabled)");
         console.log(
           "  WEBHOOK_MAX_RETRIES Retry limit for queued and PR base-sync work (default: 3)",
         );
@@ -773,6 +775,7 @@ if (process.argv[2] === "init") {
         runAddressReviewViaCli,
         runResolveConflictsViaCli,
         OPEN_PR_LIST_PAGE_SIZE,
+        assertAgentSandboxForTeamPrSync,
       } = await import("./lib/review-polling-acquirer");
       const { GitHubReviewsClient } = await import("./lib/github-reviews");
       const { RunStore } = await import("./lib/run-recorder");
@@ -799,6 +802,19 @@ if (process.argv[2] === "init") {
         (await new PRManager()
           .detectRepository()
           .then((r) => (r.platform === "github" ? r.repository : "")));
+
+      // All-PR base sync hands foreign-authored code to the agent; it must
+      // not start unsandboxed. Refuse the run rather than silently degrading.
+      const syncTeamPrsRepos =
+        process.env.WORKER_BASE_SYNC_TEAM_PRS === "true" && repoSlug ? [repoSlug] : [];
+      if (process.env.WORKER_BASE_SYNC_TEAM_PRS === "true") {
+        try {
+          assertAgentSandboxForTeamPrSync();
+        } catch (error) {
+          console.error(`❌ ${(error as Error).message}`);
+          process.exit(1);
+        }
+      }
 
       acquirers.push(
         new ReviewPollingAcquirer({
@@ -846,7 +862,7 @@ if (process.argv[2] === "init") {
           quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
           runStore,
           allowedRepos: repoSlug ? [repoSlug] : undefined,
-          syncAllOpenPrs: process.env.WORKER_BASE_SYNC_ALL_PRS === "true",
+          syncTeamPrsRepos,
           verbose,
         }),
       );

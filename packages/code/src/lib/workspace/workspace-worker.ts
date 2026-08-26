@@ -18,7 +18,7 @@ import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, parseEnvFile } from "./env";
+import { buildRepoEnv, gitHubSlugFromRemote, parseEnvFile } from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -466,9 +466,32 @@ async function buildFleetEventAcquirers(options: {
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
-    const { ReviewPollingAcquirer, OPEN_PR_LIST_PAGE_SIZE } =
+    const { ReviewPollingAcquirer, OPEN_PR_LIST_PAGE_SIZE, assertAgentSandboxForTeamPrSync } =
       await import("../review-polling-acquirer");
     const { RunStore } = await import("../run-recorder");
+
+    // Per-repo opt-in (`sync_team_prs = true` in workspace.toml), resolved to
+    // GitHub slugs the same way fleetGitHubSlugs does.
+    const syncTeamPrsRepos = [
+      ...new Set(
+        config.repos
+          .filter((repo) => repo.syncTeamPrs === true)
+          .map((repo) => repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote))
+          .filter((slug): slug is string => Boolean(slug)),
+      ),
+    ];
+    if (syncTeamPrsRepos.length > 0) {
+      // Base-syncing foreign PRs hands teammate-authored code to the agent;
+      // refuse an unsandboxed fleet worker instead of silently degrading.
+      try {
+        assertAgentSandboxForTeamPrSync();
+      } catch (error) {
+        throw new Error(
+          `${(error as Error).message}\n  (repos with sync_team_prs enabled: ${syncTeamPrsRepos.join(", ")})`,
+        );
+      }
+    }
+
     const runStore = new RunStore(state.dbPath);
     const reapedRuns = runStore.reapOrphanedRuns();
     if (reapedRuns > 0) {
@@ -514,7 +537,7 @@ async function buildFleetEventAcquirers(options: {
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore,
         allowedRepos: slugs,
-        syncAllOpenPrs: process.env.WORKER_BASE_SYNC_ALL_PRS === "true",
+        syncTeamPrsRepos,
         verbose,
       }),
     );

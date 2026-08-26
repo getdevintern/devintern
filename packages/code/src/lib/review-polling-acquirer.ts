@@ -53,8 +53,14 @@ export interface PolledPr {
   state: string;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
-  /** Work-in-progress PR (excluded from all-PR base sync). */
+  /** Work-in-progress PR (excluded from team-PR base sync). */
   draft?: boolean;
+  /**
+   * GitHub's author/repo relationship (`OWNER`, `MEMBER`, `COLLABORATOR`,
+   * `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `NONE`, …). All-PR base sync
+   * only touches PRs authored by the repository's own team.
+   */
+  author_association?: string;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
   base?: { sha: string; ref?: string };
 }
@@ -62,8 +68,10 @@ export interface PolledPr {
 /** Open-PR list entry used to discover PRs beyond the agent's own. */
 export interface PolledPrListItem {
   number: number;
-  /** Draft PRs are excluded from all-PR base sync. */
+  /** Draft PRs are excluded from team-PR base sync. */
   draft?: boolean;
+  /** See {@link PolledPr.author_association}. */
+  author_association?: string;
 }
 
 export interface AutomaticResolveResult {
@@ -85,7 +93,7 @@ export interface ReviewPollingGitHub {
     sinceIso: string,
   ): Promise<PolledComment[]>;
   /**
-   * List the repo's open PRs (discovery for `syncAllOpenPrs`). Omit when the
+   * List the repo's open PRs (discovery for team-PR base sync). Omit when the
    * feature is disabled.
    */
   listOpenPullRequests?(
@@ -125,14 +133,16 @@ export interface ReviewPollingAcquirerOptions {
   allowedRepos?: string[];
   verbose?: boolean;
   /**
-   * Extend automatic base sync to every open, non-draft PR in the watched
-   * repos — not just the agent's own PRs (`WORKER_BASE_SYNC_ALL_PRS=true`).
-   * Requires `github.listOpenPullRequests`; default off.
+   * GitHub slugs (`owner/repo`) where automatic base sync extends beyond the
+   * agent's own PRs to the repo's open, non-draft PRs authored by team
+   * members (fleet: `sync_team_prs = true` per `[[repos]]`; single-repo:
+   * `WORKER_BASE_SYNC_TEAM_PRS=true`). Empty/omitted keeps the default
+   * own-PR-only behavior. Requires `github.listOpenPullRequests`.
    *
    * Foreign PR branches are untrusted input; see `sweepRepoOpenPrs` for
    * what that contains (and does not).
    */
-  syncAllOpenPrs?: boolean;
+  syncTeamPrsRepos?: string[];
 }
 
 /** Dedupe source for review/comment ids. */
@@ -157,6 +167,45 @@ export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
  * the first page are invisible to base-sync discovery.
  */
 export const OPEN_PR_LIST_PAGE_SIZE = 100;
+
+/**
+ * `author_association` values that count as "part of the repository's
+ * team" for team-PR base sync. Anything else (`CONTRIBUTOR`,
+ * `FIRST_TIME_CONTRIBUTOR`, `NONE`, …) is treated as an outside author:
+ * their PRs are never auto-synced, because same-repo PR branches from
+ * non-collaborators are rare and a rogue/compromised writer is exactly
+ * the threat this gate narrows.
+ */
+export const TEAM_AUTHOR_ASSOCIATIONS: ReadonlySet<string> = new Set([
+  "OWNER",
+  "MEMBER",
+  "COLLABORATOR",
+  "MAINTAIN",
+]);
+
+/** True when `author_association` marks the author as part of the repo team. */
+export function isTeamAuthor(association?: string): boolean {
+  return association !== undefined && TEAM_AUTHOR_ASSOCIATIONS.has(association.toUpperCase());
+}
+
+/**
+ * Guard for enabling team-PR base sync: conflict resolution on foreign
+ * branches hands untrusted code to the coding agent, which may run project
+ * tooling inside the review worktree. Without an OS sandbox that executes
+ * with the worker's full credentials, so the flag refuses to start.
+ *
+ * @throws When `AGENT_SANDBOX` is unset or explicitly `none`.
+ */
+export function assertAgentSandboxForTeamPrSync(): void {
+  const sandbox = process.env.AGENT_SANDBOX?.trim();
+  if (sandbox && sandbox.toLowerCase() !== "none") return;
+  throw new Error(
+    "WORKER_BASE_SYNC_TEAM_PRS / sync_team_prs requires a sandboxed agent " +
+      "(AGENT_SANDBOX), because base-syncing foreign PRs can hand attacker- or " +
+      `teammate-authored code to the coding agent. Set AGENT_SANDBOX (see \`devintern sandbox\`), ` +
+      "or disable team-PR base sync.",
+  );
+}
 
 /** Resolver subprocess budget; `WORKER_RESOLVE_TIMEOUT_SECONDS` overrides (0 disables). */
 function resolveTimeoutMs(overrideMs?: number): number {
@@ -394,25 +443,28 @@ export class ReviewPollingAcquirer implements Acquirer {
   private deferCounts = new Map<string, number>();
   /** Effective all-open-PR sync switch (disabled when discovery is unavailable). */
   private readonly syncAllActive: boolean;
+  /** Slugs where all-open-PR base sync is enabled. */
+  private readonly syncTeamPrsRepos: readonly string[];
   /** Last open-PR list seen per repo (lets a 304 reuse the previous set). */
   private foreignListItems = new Map<string, PolledPrListItem[]>();
   /** Repos whose at-cap open-PR list warning is active (reset when below the cap). */
   private capWarnedRepos = new Set<string>();
-  /** Whether the "nothing to sweep" warning is active (reset when targets exist). */
-  private emptySweepWarned = false;
   /** Foreign PRs currently watched for base sync (audit logging). */
   private foreignWatched = new Set<string>();
+  /** Foreign PRs already announced as author-ineligible (log once, not per tick). */
+  private foreignSkippedAuthors = new Set<string>();
   private foreignPrCache = new Map<string, PolledPr>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
-    this.syncAllActive = Boolean(options.syncAllOpenPrs);
-    if (this.syncAllActive && !options.github.listOpenPullRequests) {
+    this.syncTeamPrsRepos = options.syncTeamPrsRepos ?? [];
+    this.syncAllActive =
+      this.syncTeamPrsRepos.length > 0 && Boolean(options.github.listOpenPullRequests);
+    if (this.syncTeamPrsRepos.length > 0 && !this.syncAllActive) {
       console.warn(
-        `⚠️  [${this.name}] WORKER_BASE_SYNC_ALL_PRS is enabled but the GitHub client cannot ` +
+        `⚠️  [${this.name}] team-PR base sync is enabled but the GitHub client cannot ` +
           `list open PRs; syncing only the agent's own PRs`,
       );
-      this.syncAllActive = false;
     }
   }
 
@@ -434,14 +486,14 @@ export class ReviewPollingAcquirer implements Acquirer {
     );
     if (this.syncAllActive) {
       console.log(
-        `🌐 [${this.name}] base sync extended to every open PR in the watched repo(s) ` +
-          `(WORKER_BASE_SYNC_ALL_PRS)`,
+        `🌐 [${this.name}] base sync extended to team-authored open PRs in: ` +
+          `${this.syncTeamPrsRepos.join(", ")}`,
       );
       console.warn(
-        `⚠️  [${this.name}] foreign PRs are authored by anyone who can open one, so their ` +
-          `content is treated as untrusted: forks and drafts are skipped and each resolver ` +
-          `run is bounded by WORKER_RESOLVE_TIMEOUT_SECONDS, but conflict resolution may ` +
-          `invoke the coding agent — consider AGENT_SANDBOX`,
+        `⚠️  [${this.name}] foreign PRs are authored by teammates, so their content is ` +
+          `still treated as untrusted: forks, drafts, and non-team authors are skipped and ` +
+          `each resolver run is bounded by WORKER_RESOLVE_TIMEOUT_SECONDS, but conflict ` +
+          `resolution may invoke the coding agent (running under AGENT_SANDBOX)`,
       );
     }
     await this.tick();
@@ -486,31 +538,15 @@ export class ReviewPollingAcquirer implements Acquirer {
       }
 
       if (this.syncAllActive) {
-        const repos =
-          allowedRepos && allowedRepos.length > 0
-            ? allowedRepos
-            : [...new Set(watchedPrs.map((pr) => pr.repo))];
-        if (repos.length === 0) {
-          // No managed repo configured and nothing registered in the
-          // transient own-PR watch list: discovery would silently never run.
-          if (!this.emptySweepWarned) {
-            this.emptySweepWarned = true;
+        // Sweep only the repos explicitly opted in (fleet `sync_team_prs` /
+        // single-repo env), never every managed repo by accident.
+        for (const repo of this.syncTeamPrsRepos) {
+          try {
+            await this.sweepRepoOpenPrs(repo, watchedKeys);
+          } catch (error) {
             console.warn(
-              `⚠️  [${this.name}] WORKER_BASE_SYNC_ALL_PRS is enabled but there is nothing to ` +
-                `sweep: no managed repo is configured and the agent has no open PR to derive ` +
-                `a repo from`,
+              `⚠️  [${this.name}] listing open PRs on ${repo} failed: ${(error as Error).message}`,
             );
-          }
-        } else {
-          this.emptySweepWarned = false;
-          for (const repo of repos) {
-            try {
-              await this.sweepRepoOpenPrs(repo, watchedKeys);
-            } catch (error) {
-              console.warn(
-                `⚠️  [${this.name}] listing open PRs on ${repo} failed: ${(error as Error).message}`,
-              );
-            }
           }
         }
       }
@@ -616,23 +652,24 @@ export class ReviewPollingAcquirer implements Acquirer {
   }
 
   /**
-   * Discover open PRs beyond the agent's own (`WORKER_BASE_SYNC_ALL_PRS`)
-   * and run base-sync-only polling on each eligible one. Review feedback
-   * stays an own-PR feature: foreign PRs are never addressed, only caught
-   * up with their base.
+   * Discover open PRs beyond the agent's own in repos opted into team-PR
+   * base sync, and run base-sync-only polling on each eligible one. Review
+   * feedback stays an own-PR feature: foreign PRs are never addressed, only
+   * caught up with their base.
    *
    * Trust model: unlike the agent's own PRs, foreign branches are authored
-   * by anyone who can open a PR, so this path processes untrusted input.
-   * Contained by construction: work happens inside a dedicated branch-scoped
-   * review worktree (`prepareReviewWorktree`), never the worker checkout;
-   * fork heads are terminally skipped and drafts never enter; pushes are
-   * lease-verified and never forced; and each resolver subprocess is killed
-   * at `WORKER_RESOLVE_TIMEOUT_SECONDS`. Not contained: a genuinely
-   * conflicting merge hands the conflicted tree to the coding agent, which
-   * may run project tooling (typecheck/tests) inside that worktree — the
-   * same pipeline the agent's own PRs get. Operators enabling this flag on
-   * repos with untrusted contributors should sandbox the agent
-   * (`AGENT_SANDBOX`) and gate merges via branch protection.
+   * by other people, so this path processes untrusted input. Eligibility is
+   * narrowed to the repository's own team (`author_association` OWNER,
+   * MEMBER, COLLABORATOR, or MAINTAIN) — outside contributors and fork
+   * authors are never auto-synced. Contained by construction: work happens
+   * inside a dedicated branch-scoped review worktree (`prepareReviewWorktree`),
+   * never the worker checkout; fork heads are terminally skipped and drafts
+   * never enter; pushes are lease-verified and never forced; each resolver
+   * subprocess is killed at `WORKER_RESOLVE_TIMEOUT_SECONDS`; and enabling
+   * the feature requires AGENT_SANDBOX (see
+   * {@link assertAgentSandboxForTeamPrSync}). Still not contained: a
+   * genuinely conflicting merge hands a teammate's code to the sandboxed
+   * coding agent — branch protection decides what actually lands.
    */
   private async sweepRepoOpenPrs(repo: string, ownKeys: Set<string>): Promise<void> {
     const { github, workerState } = this.options;
@@ -674,6 +711,18 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (ownKeys.has(key)) continue;
       // Drafts signal work in progress; auto-merging into them surprises authors.
       if (item.draft === true) continue;
+      // Team gate: only PRs authored by the repository's own team are
+      // auto-synced (outside contributors' branches stay theirs to manage).
+      if (!isTeamAuthor(item.author_association)) {
+        if (!this.foreignSkippedAuthors.has(key)) {
+          this.foreignSkippedAuthors.add(key);
+          console.log(
+            `🚧 [${this.name}] skipping ${repo}#${item.number} for base sync: author is not a ` +
+              `team member/collaborator (${item.author_association ?? "unknown"})`,
+          );
+        }
+        continue;
+      }
       if (!this.foreignWatched.has(key)) {
         this.foreignWatched.add(key);
         console.log(`👀 [${this.name}] watching ${repo}#${item.number} (open PR) for base sync`);
@@ -691,6 +740,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (!key.startsWith(`${repo.toLowerCase()}#`) || currentKeys.has(key)) continue;
       this.foreignWatched.delete(key);
       this.foreignPrCache.delete(key);
+      this.foreignSkippedAuthors.delete(key);
       console.log(`👋 [${this.name}] ${key} left the open-PR list; no longer watching`);
     }
   }
@@ -720,6 +770,9 @@ export class ReviewPollingAcquirer implements Acquirer {
       return;
     }
     if (pr.draft === true) return;
+    // Re-check the team gate on the fresh per-PR payload: the open-PR list
+    // entry can be stale, and eligibility must hold at sync time.
+    if (!isTeamAuthor(pr.author_association)) return;
     this.foreignPrCache.set(prKey, pr);
     await this.maybeSyncBase(repo, prNumber, pr, { external: true });
   }
