@@ -37,6 +37,7 @@ import {
   resolveExecutablePathWithRetry,
   spawnAgent,
   reapTree,
+  UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
@@ -1246,18 +1247,6 @@ function validateEnvironment(): void {
   }
 }
 
-/**
- * Thrown when the agent hits an account-wide usage/rate limit. Since every
- * remaining task in a batch would fail identically, callers abort the batch
- * rather than retrying immediately.
- */
-class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
-    super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
-    this.name = "UsageLimitError";
-  }
-}
-
 // Context for the task currently being processed, so signal handlers and
 // error paths can leave feedback on the ticket instead of failing silently
 // with the task stranded in "In Progress".
@@ -2351,6 +2340,7 @@ async function runClarityCheck(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process for clarity check
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
@@ -2359,6 +2349,15 @@ async function runClarityCheck(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(clarityAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -2381,6 +2380,7 @@ async function runClarityCheck(
       if (clarityAgent.stdout) {
         clarityAgent.stdout.on("data", (data: Buffer) => {
           stdoutOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -2388,6 +2388,7 @@ async function runClarityCheck(
       if (clarityAgent.stderr) {
         clarityAgent.stderr.on("data", (data: Buffer) => {
           stderrOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -2415,6 +2416,10 @@ async function runClarityCheck(
               `${harness.displayName} clarity check timed out after ${timeoutMinutes} minutes`,
             ),
           );
+          return;
+        }
+        if (usageLimit?.limited) {
+          reject(new UsageLimitError(usageLimit.resetsAt));
           return;
         }
         if (code === 0) {
@@ -2738,6 +2743,7 @@ async function runEstimation(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       const { child: estimationAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -2745,6 +2751,15 @@ async function runEstimation(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(estimationAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -2766,12 +2781,14 @@ async function runEstimation(
       if (estimationAgent.stdout) {
         estimationAgent.stdout.on("data", (data: Buffer) => {
           stdoutOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
       if (estimationAgent.stderr) {
         estimationAgent.stderr.on("data", (data: Buffer) => {
           stderrOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -2797,7 +2814,7 @@ async function runEstimation(
           return;
         }
 
-        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
           if (usage.matchedLine) {
             console.log(`   Matched output: ${usage.matchedLine}`);
@@ -3176,6 +3193,7 @@ async function runAgentHarness(
       let stderrOutput = "";
       let stdoutOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process with enhanced permissions and max turns
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
@@ -3184,6 +3202,15 @@ async function runAgentHarness(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(codeAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -3207,6 +3234,7 @@ async function runAgentHarness(
         codeAgent.stdout.on("data", (data: Buffer) => {
           const output = data.toString();
           stdoutOutput += output;
+          stopOnUsageLimit();
           process.stdout.write(output);
         });
       }
@@ -3216,6 +3244,7 @@ async function runAgentHarness(
         codeAgent.stderr.on("data", (data: Buffer) => {
           const output = data.toString();
           stderrOutput += output;
+          stopOnUsageLimit();
           process.stderr.write(output);
         });
       }
@@ -3248,7 +3277,7 @@ async function runAgentHarness(
 
         // A usage/rate limit is account-global — abort the batch rather than
         // treating this task as a normal failure (every other task would fail too).
-        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
           console.log(
             `\n⏳ ${harness.displayName} hit a usage limit${
@@ -3949,6 +3978,10 @@ async function runAgentHarness(
                         return;
                       }
                     } catch (autoReviewError) {
+                      if (autoReviewError instanceof UsageLimitError) {
+                        reject(autoReviewError);
+                        return;
+                      }
                       recordRunStage("auto_review", {
                         status: "failed",
                         summary: `loop errored: ${(autoReviewError as Error).message}`,

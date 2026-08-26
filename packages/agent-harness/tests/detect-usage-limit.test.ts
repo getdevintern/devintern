@@ -167,6 +167,22 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(out, "").limited).toBe(true);
   });
 
+  test("detects OpenCode Go's five-hour usage limit and reset hint", () => {
+    const out = "AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("extracts a usage limit from OpenCode's printed structured log", () => {
+    const out =
+      'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=be653f66 message="stream error" providerID=opencode-go modelID=glm-5.3 error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+    expect(result.matchedLine).toBe(out);
+  });
+
   test("detects provider 'Rate limit reached' JSON error", () => {
     const out =
       'Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req"}}';

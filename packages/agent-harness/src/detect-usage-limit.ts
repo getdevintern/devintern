@@ -25,16 +25,10 @@
  * Ref (opencode API rate-limit reporting):
  *   https://github.com/sst/opencode/issues/2398  (AI_RetryError: ... Too Many Requests)
  *
- * KNOWN GAP — opencode + Claude subscription "plan" limit:
- * When opencode drives a Claude (OAuth) subscription and the *plan* usage limit
- * is hit, opencode emits NO message — it freezes with an empty response, so
- * there is nothing to match here. It surfaces to callers as an agent timeout
- * instead. Both issues are unresolved as of this writing:
- *   https://github.com/sst/opencode/issues/877  (no error message on Claude usage limit)
- *   https://github.com/sst/opencode/issues/777  (silent freeze / empty response)
- * For reliable subscription-limit handling prefer the `claude-code` harness,
- * which prints the limit message verified above. Revisit these issues before
- * attempting text-based detection of opencode plan limits.
+ * OpenCode may keep `run` alive after a provider error and only expose the
+ * diagnostic through `--print-logs`, as a timestamped line containing an
+ * `error.error="AI_APICallError: ..."` field. Callers should scan output while
+ * it streams and terminate the child as soon as this detector reports a limit.
  */
 
 import type { OutputLine } from "./output-lines.js";
@@ -46,7 +40,7 @@ const USAGE_LIMIT_PATTERNS = [
   // `super("Agent usage limit reached")` as though it were a CLI diagnostic.
   /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   /^(?:error:\s*)?you have reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
-  /^(?:error:\s*)?(?:(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[- ]hour\s+)?(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
 ] as const;
 
 // These are intentionally evaluated line-by-line and only when the line looks
@@ -80,6 +74,14 @@ export interface UsageLimitResult {
   resetsAt?: string;
   /** The line that matched the limit pattern, for logging. */
   matchedLine?: string;
+}
+
+/** Error raised when a harness reaches an account-wide usage or rate limit. */
+export class UsageLimitError extends Error {
+  constructor(public readonly resetHint?: string) {
+    super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
+    this.name = "UsageLimitError";
+  }
 }
 
 /**
@@ -137,7 +139,24 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
 function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefined {
   // Check stderr first because it is the conventional diagnostic channel, then
   // inspect stdout for explicit subscription-limit and structured SDK errors.
-  const lines = [...outputLines(stderr), ...outputLines(stdout)];
+  const lines = [...outputLines(stderr), ...outputLines(stdout)].flatMap((line) => {
+    // `opencode run --print-logs --log-level ERROR` mirrors its structured log
+    // line to stderr. Match the provider error value without weakening the
+    // source/diff safeguards for ordinary agent transcript lines.
+    if (/\blevel=ERROR\b/.test(line.normalized)) {
+      const match = line.normalized.match(/\berror\.error="((?:\\.|[^"\\])*)"/);
+      if (match?.[1]) {
+        return [
+          line,
+          {
+            raw: line.raw,
+            normalized: match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n"),
+          },
+        ];
+      }
+    }
+    return [line];
+  });
 
   return lines.find((line) => {
     const normalized = line.normalized.trim();

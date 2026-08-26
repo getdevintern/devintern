@@ -267,12 +267,15 @@ describe("OpencodeHarness", () => {
   });
 
   test("buildArgs empty", () => {
-    expect(h.buildArgs({})).toEqual(["run"]);
+    expect(h.buildArgs({})).toEqual(["run", "--print-logs", "--log-level", "ERROR"]);
   });
 
   test("buildArgs with all options", () => {
     expect(h.buildArgs({ skipPermissions: true, model: "gpt-4", workingDir: "/tmp/wt" })).toEqual([
       "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
       "--dangerously-skip-permissions",
       "--dir",
       "/tmp/wt",
@@ -284,6 +287,9 @@ describe("OpencodeHarness", () => {
   test("buildArgs forwards workingDir as --dir (opencode ignores spawn cwd)", () => {
     expect(h.buildArgs({ workingDir: "/tmp/devintern-review-worktree-feature-x" })).toEqual([
       "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
       "--dir",
       "/tmp/devintern-review-worktree-feature-x",
     ]);
