@@ -9,14 +9,31 @@
 
 ### Changed
 
-- **Workspace (multi-repo) mode no longer requires a Team subscription**: any valid automation entitlement — including the Supporter one-time license (`solo-automation`) — now runs `devintern worker` in workspace mode, matching published pricing where Supporter covers automation across your own repos. The team-tier gate was removed after the existing automation license check; unlicensed and invalid-license runs still fail as before, and grace-window cached solo entitlements now qualify too.
 - **Graceful worker shutdown drains the fleet**: on SIGINT/SIGTERM the worker stops acquiring events, cancels queued-but-unstarted tasks **with their dedupe marks rolled back** (they re-enter on the next start instead of being silently skipped), awaits in-flight runs so every per-repo lock is released cleanly, closes shared SQLite handles, then releases the workspace lock. A second signal exits immediately if a run appears hung; interrupted runs recover through the normal incomplete-attempt machinery
 - **Central state database uses WAL**: `queue.db` connections (webhook queue, worker state, run records, routing skips, fleet activity) now enable WAL journaling, a busy timeout, and NORMAL sync so concurrent fleet runs read and write history without `SQLITE_BUSY` failures; `WebhookQueue.removeProcessed` rolls back dedupe marks for accepted-but-cancelled work
 
+## [2.5.0] - 2026-08-26
+
+Recurring scheduled automations, Supporter licenses covering multi-repo workspace mode, anonymous CLI analytics, and pickup/sync/JSON robustness fixes.
+
+### Added
+
+- **Recurring scheduled automations**: `.devintern-code/automations.toml` (or `[[automations]]` in the workspace file) runs a prompt on an interval or cron through the normal task pipeline — markdown occurrence file → plan / implement / `--create-pr` / review. Independent of any tracker, so an automation-only worker can run with no `--query`. Occurrence files land next to project state, or under the workspace home in fleet mode
+- **Anonymous CLI usage analytics**: one fire-and-forget `cli_run` event per invocation (CLI version, OS/arch, tracker type, run mode, task count, and feature flags only — never task content, code, repo names, or credentials). Opt out with `DEVINTERN_TELEMETRY_DISABLED=1` or `analytics.enabled: false` in `.devintern-code/settings.json`. A missing `POSTHOG_API_KEY` at build time permanently disables analytics
+
+### Changed
+
+- **Workspace (multi-repo) mode no longer requires a Team subscription**: any valid automation entitlement — including the Supporter one-time license (`solo-automation`) — now runs `devintern worker` in workspace mode, matching published pricing where Supporter covers automation across your own repos. The team-tier gate was removed after the existing automation license check; unlicensed and invalid-license runs still fail as before, and grace-window cached solo entitlements now qualify too
+
 ### Fixed
 
-- **Jira and Azure DevOps worker pickup no longer sticks after the first attempt**: the worker dedupes ready tasks by `(key, updated)`. Jira enhanced JQL search (`GET /rest/api/3/search/jql`) omitted `fields`, and Azure WIQL search batch-fetched titles without `System.ChangedDate`, so both recorded an empty stamp and never retried after a failed run — even when the ticket was edited. Jira search now requests `updated` (and the other issue fields used for routing); Azure search now fetches `System.ChangedDate`. The worker also logs when every matching task is skipped as already processed, and warns when search results have no update stamp, so this is visible in the worker log instead of looking like the poller is idle.
+- **Jira and Azure DevOps worker pickup no longer sticks after the first attempt**: the worker dedupes ready tasks by `(key, updated)`. Jira enhanced JQL search (`GET /rest/api/3/search/jql`) omitted `fields`, and Azure WIQL search batch-fetched titles without `System.ChangedDate`, so both recorded an empty stamp and never retried after a failed run — even when the ticket was edited. Jira search now requests `updated` (and the other issue fields used for routing); Azure search now fetches `System.ChangedDate`. The worker also logs when every matching task is skipped as already processed, and warns when search results have no update stamp, so this is visible in the worker log instead of looking like the poller is idle
 - **Failure comments say how to retrigger pickup**: incomplete-implementation, crash/interrupt, and failed-feasibility comments on every hosted tracker (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello) now tell the user to edit the description, post a comment, or delete the bot comment so the worker (or next `--query` run) will pick the ticket up again. Markdown files do not receive tracker comments. The previous Jira incomplete text only said "update the description and retry."
+- **Mangled agent JSON is recovered instead of failing the run**: `parseAgentJson` now slices balanced `{...}` objects with a string-aware brace matcher, repairs raw control characters and unescaped quotes inside string values, and accepts a stray extra `}` or literal `\n` after the last value — shapes grok and opencode actually emit
+- **PR base-sync no longer skips conflicting PRs or loops forever**: eligibility uses GitHub's `mergeable_state` (`dirty` / `behind`) instead of comparing against a stale `base.sha`; the resolver merges the fetched base tip; three consecutive defers exhaust the event; hung `resolve-conflicts` subprocesses are killed after `WORKER_RESOLVE_TIMEOUT_SECONDS`
+- **Agent PRs on repos the worker no longer manages are unwatched**: review polling is scoped to the detected GitHub slug (single-repo) or `workspace.toml` repos (fleet). Foreign `agent_prs` rows are closed at startup and skipped on every tick, so a renamed/transferred repo cannot fail auth forever
+- **Transient PR-creation failures retry, and GitHub create is idempotent**: `fetchWithRetry` treats DNS/connect/`fetch failed` as transient; `PRManager.createPullRequest` retries transport failures; a GitHub 422 for an already-open PR on the head branch is treated as success so a blip after push no longer leaves the ticket In Progress with no PR
+- **Scheduled automation task files resolve through project config-dir traversal**: occurrence markdown is written into the nearest `.devintern-code` walking up from the run cwd (workspace automations use the workspace home), so a worker launched from a subfolder does not create a stray nested config directory
 
 ## [2.4.0] - 2026-08-22
 

@@ -37,7 +37,7 @@
     },
     "packages/code": {
       "name": "@getdevintern/code",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "bin": {
         "devintern": "dist/index.js",
       },
@@ -115,7 +115,7 @@
     },
     "packages/pm": {
       "name": "@getdevintern/pm",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "bin": {
         "devpm": "dist/index.js",
       },
@@ -145,7 +145,7 @@
     },
     "packages/pm-desktop": {
       "name": "@devintern/pm-desktop",
-      "version": "0.9.13",
+      "version": "0.9.14",
       "dependencies": {
         "@base-ui/react": "^1.7.0",
         "@devintern/agent-harness": "workspace:*",
