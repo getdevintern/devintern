@@ -1,6 +1,8 @@
 # Webhook Server Deployment Guide
 
-This guide covers secure deployment options for the @devintern/code webhook server to automatically address PR review comments.
+Prefer the worker plus the DevIntern relay for PR review feedback. This package-local copy of the [GitHub Integration guide](https://devintern.com/docs/code/github-integration) is the advanced path: `devintern webhook serve` for airgapped or self-hosted installs that already operate a public GitHub webhook.
+
+This guide covers secure deployment of that listener.
 
 ## Table of Contents
 
@@ -393,10 +395,10 @@ export WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS="5"  # Max review iterations (default:
 bun run src/webhook-server.ts
 
 # Production (after build)
-devintern serve --port 3000
+devintern webhook serve --port 3000
 
 # With PM2 (process manager)
-pm2 start "devintern serve" --name devintern-webhooks
+pm2 start "devintern webhook serve" --name devintern-webhooks
 ```
 
 ### Systemd Service (Linux)
@@ -417,7 +419,7 @@ Environment=GITHUB_APP_ID=123456
 Environment=GITHUB_APP_PRIVATE_KEY_PATH=/path/to/key.pem
 Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
-ExecStart=/usr/local/bin/devintern serve --port 3000
+ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always
 RestartSec=10
 
@@ -478,7 +480,7 @@ curl https://webhooks.yourdomain.com/health
 Run with verbose logging:
 
 ```bash
-WEBHOOK_DEBUG=true devintern serve
+WEBHOOK_DEBUG=true devintern webhook serve
 ```
 
 ---
@@ -517,7 +519,7 @@ export GITHUB_APP_ID="your-app-id"
 export GITHUB_APP_PRIVATE_KEY_PATH="/path/to/key.pem"
 
 # 4. Start server
-devintern serve &
+devintern webhook serve &
 
 # 5. Start tunnel
 cloudflared tunnel run devintern
