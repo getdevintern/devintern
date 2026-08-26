@@ -81,6 +81,28 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", "API Error: 429 Too Many Requests").limited).toBe(true);
   });
 
+  test("detects Qwen's bracketed headless 429 wrapper", () => {
+    expect(detectUsageLimit("", "[API Error: 429 status code (no body)]").limited).toBe(true);
+  });
+
+  test("detects Grok Build account and team rate-limit messages", () => {
+    const messages = [
+      "You’ve hit the rate limit for your plan. Upgrade your account or try again later.",
+      "You’ve hit your team’s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers",
+      "You’ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build",
+      "resource-exhausted: Too many requests for team abc. See https://console.x.ai/team/default/rate-limits.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("detects Goose credits exhaustion despite its successful exit", () => {
+    const out = "Error: Credits exhausted: Insufficient credits to complete this request";
+    expect(detectUsageLimit("", out).limited).toBe(true);
+  });
+
   test("detects an HTTP 429 diagnostic on stdout", () => {
     expect(detectUsageLimit("HTTP 429: Too Many Requests", "").limited).toBe(true);
   });
@@ -135,6 +157,16 @@ describe("detectUsageLimit", () => {
     const source = "The test expects Too Many Requests but received a socket error.";
 
     expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores TUI limit phrases embedded in source and prose", () => {
+    const transcript = [
+      'const message = "[API Error: 429 status code (no body)]";',
+      "The fixture expects Credits exhausted: Insufficient credits to complete this request.",
+      "A document quotes the Grok rate limit for your plan.",
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
   });
 
   test("ignores a test count containing 429", () => {

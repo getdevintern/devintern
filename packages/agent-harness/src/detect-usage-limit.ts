@@ -41,6 +41,13 @@ const USAGE_LIMIT_PATTERNS = [
   /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   /^(?:error:\s*)?you have reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[- ]hour\s+)?(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  // Grok Build translates account/team exhaustion to these headless messages.
+  /^you(?:'|’)ve hit the rate limit for your plan\.\s+upgrade your account or try again later[.]?$/i,
+  /^you(?:'|’)ve hit your team(?:'|’)s api rate limit\.\s+ask a team admin to purchase more credits for higher limits, or try again later\.\s+see https:\/\/docs\.x\.ai\/developers\/rate-limits#rate-limit-tiers$/i,
+  /^you(?:'|’)ve reached your free grok build usage limit for now\.\s+get supergrok for much higher limits, or try again later:\s+https:\/\/grok\.com\/supergrok\?referrer=grok-build$/i,
+  /^resource-exhausted:\s+too many requests for team [^.]+\.\s+see https:\/\/console\.x\.ai\/team\/default\/rate-limits[.]?$/i,
+  // Goose maps provider HTTP 402 responses to this error and can exit zero.
+  /^(?:error:\s*)?credits exhausted:\s+[^\n]+$/i,
 ] as const;
 
 // These are intentionally evaluated line-by-line and only when the line looks
@@ -115,6 +122,7 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
   // inherently trust stderr: Codex uses it for its complete tool transcript.
   if (
     /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
+    /^\[API Error:\s*429\b[^\n]*\]$/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
     /^HTTP\s*429\b/i.test(trimmed) ||
     /^\s*[{"[].*(?:rate_limit|quota).*[}\]]\s*$/i.test(trimmed) ||
