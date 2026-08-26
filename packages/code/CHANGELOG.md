@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- **OpenCode usage limits stop runs immediately instead of hanging**: headless OpenCode invocations mirror ERROR-level provider logs to stderr, recognize timestamped `AI_APICallError` five-hour-limit diagnostics, terminate the otherwise-stuck CLI process as soon as the limit arrives, and propagate the shared usage-limit error through implementation, analysis, review, auto-review, and hook-fix paths
 - **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
 - **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
 
