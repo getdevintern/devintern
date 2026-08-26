@@ -280,7 +280,7 @@ export interface RunWorkspaceWorkerOptions {
  * the tracker client can be constructed), sweeps stale worktrees, and runs
  * one fleet task acquirer under the workspace-wide lock.
  *
- * The caller has already passed the license and team-automation gates.
+ * The caller has already passed the license gate.
  */
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const workspaceDir = resolveWorkspaceDir();
