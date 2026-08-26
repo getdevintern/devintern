@@ -8,40 +8,40 @@ dateModified: 2026-08-26
 
 # Worker Daemon
 
-`devintern worker` runs devintern as a single long-running daemon on your own machine. It replaces the cron plus standalone webhook server setup: one process acquires events (reviews on the agent's PRs, ready tasks from your tracker) and executes them locally.
+`devintern worker` runs devintern as a single long-running workspace daemon on your own machine. It acquires events for every configured repository and executes them locally.
 
 Your code, credentials, and agent execution never leave your machine.
 
 ## Quick Start
 
-The fastest way to set up the worker is the guided setup (your tracker must already be configured; run `devintern init` first if not):
+The fastest way to set up the worker is the guided setup:
 
 ```bash
 devintern worker init
+devintern worker
 ```
 
-It walks you through the ready-tasks query (and validates it against your tracker with a live dry run), polling vs. webhook mode (generating a `WEBHOOK_SECRET` when needed), checks your automation license up front, and can write a ready-to-install systemd service file.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
 Or configure by hand and start directly:
 
 ```bash
-# Poll your tracker for ready tasks (no webhooks, no public endpoint)
-devintern worker --query "status=todo"
+# After a workspace exists (worker init, or workspace init + import)
+devintern worker
 
-# Also run the GitHub webhook listener (direct webhooks)
-devintern worker --query "status=todo" --listen
+# Advanced: run the repo-local GitHub webhook listener separately
+devintern webhook serve
 ```
-
-`devintern serve` still works as a deprecated alias for `devintern worker --listen`.
 
 ## Recurring automations
 
-For a single repository, put recurring work in `.devintern-code/automations.toml`:
+Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
 
 ```toml
 [[automations]]
 id = "dependency-health"
 enabled = true
+repo = "web-app"
 interval = "6h"
 prompt = """Pick one outdated dependency and upgrade it within the same major version.
 Run the test suite; if anything breaks, revert the upgrade instead of fixing forward."""
@@ -49,6 +49,7 @@ Run the test suite; if anything breaks, revert the upgrade instead of fixing for
 [[automations]]
 id = "flaky-test-triage"
 enabled = true
+repo = "web-app"
 cron = "0 9 * * 1"
 prompt = """Re-run the test suite twice and look for flaky tests.
 For each flaky test, add a short comment explaining the suspected race condition.
@@ -57,7 +58,7 @@ Do not change production code."""
 
 Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
-Configuration is validated as a group at worker startup and changes require a restart. An automation file is itself a valid event source, so `devintern worker` stays running without `--query` or `--listen` when at least one automation entry is configured (disabled entries are validated but not scheduled).
+Configuration is validated as a group at worker startup and changes require a restart. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is
 
@@ -65,14 +66,14 @@ Automations are independent of your task tracker: **the prompt is the task**. Ea
 
 Concretely, each occurrence:
 
-1. Writes `.devintern-code/automations/<id>/<timestamp>.md` (resolved like every other devintern state: the nearest `.devintern-code` walking up from the working directory).
+1. Writes `~/.devintern/automations/<id>/<timestamp>.md` (or the equivalent under `DEVINTERN_WORKSPACE_DIR`).
 2. Spawns the normal CLI on that file as a subprocess, so the run gets its own branch, commits, and — by default — a pull request.
 3. Records the attempt with the `scheduled` origin and the automation id, so you can filter scheduled runs in the [dashboard](./dashboard.md).
 
 Because the occurrence is just a markdown task, you can reproduce or rerun any occurrence by hand:
 
 ```bash
-devintern .devintern-code/automations/dependency-health/2026-08-24T09-00-00-000Z.md
+devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
 ### Writing good prompts
@@ -86,7 +87,7 @@ The prompt replaces the ticket description the agent would normally read, so tre
 
 ### Tuning how occurrences run
 
-Occurrences use the same flag defaults as polled tasks: `WORKER_TASK_ARGS` overrides them (default `--create-pr`). For example, set `WORKER_TASK_ARGS=--auto-review` to have every automated PR go through the review loop too, or clear it to keep runs local without PRs. Note this variable applies to polled tracker tasks as well.
+Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr`). For example, set `worker_task_args = "--create-pr --auto-review"` to have every automated PR go through the review loop too. This setting applies to polled tracker tasks as well.
 
 ### Schedule semantics
 
@@ -102,26 +103,22 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
 | `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
 | Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
-| Task files pile up under `.devintern-code/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
 
 ## Polling mode
 
-With `--query` (or `WORKER_TASK_QUERY`), the worker polls your tracker on an interval (default 60 seconds) and runs every task that matches the query. The query uses the same language as batch `--query` runs for your tracker, so "ready" means whatever your query says, for example a status or label.
+With `[defaults].task_query` in `workspace.toml`, the worker polls your tracker on an interval (`[defaults].poll_interval`, default 60 seconds) and runs every task that matches the query. The query uses the same language as batch `--query` runs for your tracker, so "ready" means whatever your query says, for example a status or label.
 
 How a poll cycle works:
 
 1. A cheap change detector asks the tracker "did anything change since the last cursor?" and nothing else.
 2. Only when something changed, the worker re-runs your query to get the tasks that are actually ready.
 3. Each ready task is picked up once per change: the worker remembers the task's last seen update stamp, so a task re-enters only when it is updated again.
-4. Tasks run one at a time through the normal pipeline (branch, implementation, PR, tracker updates), with `WORKER_TASK_ARGS` controlling the flags (default `--create-pr`).
+4. Tasks run one at a time through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`).
 
 Cursors persist in `.devintern-code/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
-Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed.
-
-```bash
-TASK_TRACKER=markdown MARKDOWN_TASKS_DIR=./tasks devintern worker --query "status=todo"
-```
+Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
 
 ### Re-running a task
 
@@ -135,7 +132,7 @@ Either action bumps the ticket's update stamp, so the worker picks it up on the 
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
-Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `WORKER_TASK_ARGS`, since that would disable the gate for every polled task.
+Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
 ### Ticket matches the query but is not picked up
 
@@ -148,27 +145,33 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 
 ## Options
 
+The daemon itself takes almost no flags. Durable settings live in `workspace.toml`:
+
+```toml
+[workspace]
+dashboard = true          # false disables the embedded dashboard
+dashboard_port = 4400     # optional; default 4400
+
+[defaults]
+task_query = "status=todo"
+worker_task_args = "--create-pr"
+poll_interval = 60
+```
+
 | Option              | Description                                                         |
 | ------------------- | ------------------------------------------------------------------- |
-| `--query <query>`   | Poll the tracker for ready tasks matching this query                |
-| `--listen`          | Also run the GitHub webhook listener (direct webhooks)              |
-| `--port <port>`     | Webhook listener port (default: 3000 or `WEBHOOK_PORT`)             |
-| `--host <host>`     | Webhook listener host (default: 0.0.0.0 or `WEBHOOK_HOST`)          |
-| `--interval <secs>` | Polling interval in seconds (default: 60 or `WORKER_POLL_INTERVAL`) |
-| `--ui`              | Also serve the local [observability dashboard](./dashboard.md)      |
-| `--ui-port <port>`  | Dashboard port (default: 4400 or `DASHBOARD_PORT`)                  |
-| `--sandbox <name>`  | Run agents inside an OS-level sandbox (overrides `AGENT_SANDBOX`)   |
+| `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`) |
 | `-v, --verbose`     | Verbose logging                                                     |
 
-Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in `.devintern-code/.env` (or pass `--sandbox`) to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
+Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 
 ## Review feedback on the agent's PRs
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own.
 
-The watch list is scoped to the project the worker runs in: single-repo mode watches only PRs on that checkout's GitHub repo, and workspace mode only repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred, or by an older checkout sharing the same `.devintern-code/` state — are unwatched automatically at startup instead of being polled (and failing auth) forever.
+The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 
-The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair. With `--listen`, review handling comes from webhooks instead and this poller stays off, so feedback is never handled twice.
+The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair.
 
 ### Merge conflicts on the agent's PRs
 
@@ -217,15 +220,15 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). For instant reaction without hosting your own webhook endpoint, pair the worker with the [DevIntern relay](./relay.md): sign in, run `devintern worker connect` (and optionally `connect linear|asana|trello|azure-devops|jira` with that tracker's env vars), and events reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so the relay can never lose you events.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so relay downtime only affects latency. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
 
 ## Seeing what the worker did
 
-Every run is recorded stage by stage in the local database. Add `--ui` to serve the [observability dashboard](./dashboard.md) alongside the daemon, or run `devintern dashboard` standalone at any time (it works with the worker stopped too).
+Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) at `http://localhost:4400` by default; set `[workspace].dashboard = false` to disable it, or `[workspace].dashboard_port` to change the port. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a systemd service file to `.devintern-code/devintern-worker.service` with install instructions. For pm2 and tunnel setups (webhook mode), see the [GitHub Integration guide](./github-integration.md). In polling mode no public endpoint is needed, so a plain systemd service with `ExecStart=devintern worker --query "..."` is enough.
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md).
 
 ## License
 

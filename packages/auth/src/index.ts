@@ -7,7 +7,14 @@ import {
 } from "./auth-callback";
 import { loginMethodLabel, promptForEmail, resolveLogin } from "./login-provider";
 import type { ResolvedLogin, OAuthProvider } from "./login-provider";
-import { openBrowser, readTextFileIfExists, removeFileIfExists, writeTextFile } from "./runtime";
+import {
+  isRemoteCliSession,
+  openBrowser,
+  readTextFileIfExists,
+  removeFileIfExists,
+  resolveAuthCallbackPort,
+  writeTextFile,
+} from "./runtime";
 import type { AuthenticatedUser, LoginMethod, SupabaseAuthConfig } from "./types";
 
 export type { AuthenticatedUser, LoginMethod, OAuthProvider, SupabaseAuthConfig } from "./types";
@@ -26,9 +33,11 @@ export {
 } from "./login-provider";
 export {
   AUTH_CALLBACK_TIMEOUT_MS,
+  DEFAULT_REMOTE_AUTH_CALLBACK_PORT,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
 } from "./auth-callback";
+export { isRemoteCliSession, resolveAuthCallbackPort } from "./runtime";
 
 export const DEFAULT_SUPABASE_URL = "https://robbzuhuqcgpfevaorux.supabase.co";
 export const DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_E31lRt1Z8hq3XuJIutiB3g_Y2sSEc5D";
@@ -162,6 +171,34 @@ async function exchangeCodeAndPersist(
 }
 
 /**
+ * Print how to complete browser OAuth when the CLI has no local GUI (SSH/mosh).
+ *
+ * Mosh cannot forward TCP — prefer copying a session from a laptop login.
+ * SSH can LocalForward the fixed callback port so the laptop browser reaches
+ * this process.
+ */
+function printRemoteLoginHints(
+  onStatus: (message: string) => void,
+  port: number,
+  url: string,
+): void {
+  onStatus(
+    [
+      "Remote shell detected (SSH/mosh) — a browser on this host will not complete login.",
+      "",
+      "Easiest (works with mosh): on your laptop run `devintern login`, then copy",
+      "  .devintern-code/.auth-session.json",
+      "to this machine (same path under the project) and Ctrl-C here; re-run once signed in.",
+      "",
+      "Or SSH-tunnel the callback (mosh cannot forward ports — use ssh):",
+      `  ssh -N -L ${port}:127.0.0.1:${port} user@this-host`,
+      "Then open this URL in your laptop browser:",
+      url,
+    ].join("\n"),
+  );
+}
+
+/**
  * Sign in via Supabase OAuth (PKCE) using a local browser callback server.
  *
  * @param config - Supabase auth configuration.
@@ -178,7 +215,11 @@ export async function loginWithOAuth(
   const onStatus = hooks?.onStatus ?? console.log;
   const client = createSupabaseClient(config);
   const providerName = loginMethodLabel(provider);
-  const callback = await createAuthCallbackServer();
+  const remote = isRemoteCliSession();
+  const callbackPort = resolveAuthCallbackPort();
+  const callback = await createAuthCallbackServer(
+    callbackPort === undefined ? {} : { port: callbackPort },
+  );
 
   try {
     const { data, error } = await client.auth.signInWithOAuth({
@@ -195,8 +236,19 @@ export async function loginWithOAuth(
       throw new Error("Supabase did not return an OAuth URL.");
     }
 
-    onStatus(`Opening ${providerName} login in your browser...`);
-    await openUrl(data.url);
+    if (remote) {
+      printRemoteLoginHints(onStatus, callback.port, data.url);
+    } else {
+      onStatus(`Opening ${providerName} login in your browser...`);
+      onStatus(`If the browser does not open, visit:\n${data.url}`);
+      try {
+        await openUrl(data.url);
+      } catch (error) {
+        onStatus(
+          `Could not open the browser automatically (${(error as Error).message}). Open the URL above.`,
+        );
+      }
+    }
     onStatus("Waiting for authentication callback...");
 
     const code = await callback.waitForCode(AUTH_CALLBACK_TIMEOUT_MS);
@@ -227,7 +279,11 @@ export async function loginWithEmail(
   }
 
   const client = createSupabaseClient(config);
-  const callback = await createAuthCallbackServer();
+  const remote = isRemoteCliSession();
+  const callbackPort = resolveAuthCallbackPort();
+  const callback = await createAuthCallbackServer(
+    callbackPort === undefined ? {} : { port: callbackPort },
+  );
 
   try {
     const { error } = await client.auth.signInWithOtp({
@@ -242,6 +298,15 @@ export async function loginWithEmail(
     }
 
     onStatus(`Sign-in link sent to ${address}.`);
+    if (remote) {
+      onStatus(
+        [
+          "Remote shell detected — open the email link on your laptop after tunneling:",
+          `  ssh -N -L ${callback.port}:127.0.0.1:${callback.port} user@this-host`,
+          "(mosh cannot forward TCP; prefer `devintern login` on a laptop and copy .auth-session.json)",
+        ].join("\n"),
+      );
+    }
     onStatus("Check your email and open the link (waiting up to 10 minutes)...");
 
     const code = await callback.waitForCode(EMAIL_AUTH_CALLBACK_TIMEOUT_MS);

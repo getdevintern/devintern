@@ -41,6 +41,8 @@ export interface SpawnedAutomationRun {
 export interface AutomationAcquirerOptions {
   automations: AutomationConfig[];
   dbPath: string;
+  /** Per-task CLI flags; defaults to `--create-pr`. */
+  extraArgs?: string[];
   resolveContext: (automation: AutomationConfig) => Promise<AutomationRunContext | null>;
   now?: () => number;
   spawnRun?: (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun;
@@ -190,7 +192,12 @@ export class AutomationAcquirer implements Acquirer {
         console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
-          : defaultSpawnRun(automation, context, this.options.terminationGraceMs);
+          : defaultSpawnRun(
+              automation,
+              context,
+              this.options.extraArgs ?? workerTaskArgs(),
+              this.options.terminationGraceMs,
+            );
         const active: ActiveAutomationRun = {
           run,
           lifecycle: Promise.resolve(),
@@ -297,6 +304,7 @@ export function writeAutomationTaskFile(
 function defaultSpawnRun(
   automation: AutomationConfig,
   context: AutomationRunContext,
+  extraArgs: string[],
   terminationGraceMs?: number,
 ): SpawnedAutomationRun {
   const taskFile = writeAutomationTaskFile(automation, context);
@@ -307,7 +315,7 @@ function defaultSpawnRun(
   };
   return spawnAutomationProcess(
     process.execPath,
-    [process.argv[1] as string, taskFile, ...workerTaskArgs()],
+    [process.argv[1] as string, taskFile, ...extraArgs],
     {
       cwd: context.cwd,
       env,

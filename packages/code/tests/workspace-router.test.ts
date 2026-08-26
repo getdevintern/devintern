@@ -94,6 +94,23 @@ describe("routeTask", () => {
     expect(routeTask(task("MISC-9"), CONFIG)).toEqual({ kind: "unrouted" });
   });
 
+  test("a 1-repo workspace routes every task without routing rules", () => {
+    const oneRepo = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`);
+    const decision = routeTask(task("MISC-9"), oneRepo);
+    expect(decision.kind).toBe("routed");
+    if (decision.kind === "routed") {
+      expect(decision.repo).toBe("app");
+      expect(decision.matchedRules).toEqual([]);
+    }
+  });
+
   test("label-only routing works for trackers without project keys", () => {
     const decision = routeTask(task("123", ["ops"]), CONFIG);
     expect(decision.kind).toBe("routed");

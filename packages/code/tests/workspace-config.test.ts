@@ -4,6 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  DEFAULT_DASHBOARD,
+  DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
   findRepo,
   loadWorkspaceConfig,
@@ -58,9 +60,12 @@ describe("parseWorkspaceConfig", () => {
     const config = parseWorkspaceConfig(VALID_CONFIG);
 
     expect(config.workspace.worktreesTtlDays).toBe(3);
+    expect(config.workspace.dashboard).toBe(true);
+    expect(config.workspace.dashboardPort).toBeUndefined();
     expect(config.defaults.tracker).toBe("jira");
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
+    expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
 
     const backend = findRepo(config, "backend");
     expect(backend?.remote).toBe("git@github.com:acme/backend.git");
@@ -90,8 +95,55 @@ describe("parseWorkspaceConfig", () => {
 tracker = "markdown"
 `);
     expect(config.workspace.worktreesTtlDays).toBe(DEFAULT_WORKTREES_TTL_DAYS);
+    expect(config.workspace.dashboard).toBe(DEFAULT_DASHBOARD);
+    expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
     expect(config.repos).toEqual([]);
     expect(config.routing).toEqual([]);
+  });
+
+  test("parses dashboard and poll interval settings", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+dashboard = false
+dashboard_port = 4410
+
+[defaults]
+tracker = "markdown"
+poll_interval = 15
+`);
+    expect(config.workspace.dashboard).toBe(false);
+    expect(config.workspace.dashboardPort).toBe(4410);
+    expect(config.defaults.pollIntervalSeconds).toBe(15);
+  });
+
+  test("rejects invalid dashboard and poll interval values", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+dashboard = "off"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/\[workspace\]\.dashboard must be a boolean/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+dashboard_port = 70000
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/dashboard_port must be an integer between 1 and 65535/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+poll_interval = 0
+`),
+    ).toThrow(/poll_interval must be a positive integer/);
   });
 
   test("rejects invalid TOML", () => {

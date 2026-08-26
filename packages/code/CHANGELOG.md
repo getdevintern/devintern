@@ -6,6 +6,18 @@
 
 - **Opt-in base sync for teammates' open PRs (`WORKER_BASE_SYNC_TEAM_PRS`, fleet: `sync_team_prs` per repo)**: setting it extends the worker's automatic merge-conflict/base-behind sync from just the agent's own PRs to open, non-draft PRs authored by the repository's own team (`author_association` OWNER/MEMBER/COLLABORATOR/MAINTAIN) — useful when teammates' long-lived branches fall behind their base. Enabling it requires `AGENT_SANDBOX`: the worker refuses to start otherwise. Outside contributors and fork PRs are never auto-synced; discovery uses ETag-cached open-PR list polling (rate-limit friendly, first 100 open PRs per repo); review feedback stays an own-PR feature; every foreign sync is logged and recorded as a `conflict_resolution` run. Default remains off
 
+### Changed
+
+- **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars
+- **Worker dashboard is on by default**: `devintern worker` serves localhost:4400 unless `[workspace].dashboard = false`; dashboard startup failures no longer stop task processing
+- **Worker CLI is toml-backed**: query, poll interval, per-task flags, dashboard on/off, and dashboard port live in `workspace.toml`. `--query`, `--interval`, `--ui` / `--no-ui`, `--ui-port`, `--sandbox`, and the `WORKER_TASK_QUERY` / `WORKER_TASK_ARGS` / `WORKER_POLL_INTERVAL` env vars are removed from `devintern worker`. `--help` no longer lists operational env vars
+- **Direct webhooks have a dedicated command**: `devintern webhook serve` is the advanced repo-local listener. The legacy `devintern worker --listen`, `devintern serve`, `--no-workspace`, and cwd worker modes are removed; `devintern worker` now always requires a workspace
+
+### Fixed
+
+- **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
+- **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
+
 ## [2.5.0] - 2026-08-26
 
 Recurring scheduled automations, Supporter licenses covering multi-repo workspace mode, anonymous CLI analytics, and pickup/sync/JSON robustness fixes.

@@ -85,7 +85,7 @@ You can also pass file paths directly as arguments without setting `TASK_TRACKER
 
 **Personal / interactive:** a `GITHUB_TOKEN` (personal access token). That is enough for free CLI use from your terminal (`devintern TICKET-123`, `--create-pr`).
 
-**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern webhook serve`, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
 
 The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
 
@@ -102,7 +102,7 @@ Set both when you run mention-driven automation and also use GitHub Issues as a 
 **Precedence when both are set:**
 
 - CLI and PR creation use `GITHUB_TOKEN`
-- `devintern worker --listen` and the webhook server prefer the App so the bot identity (`slug[bot]`) resolves
+- `devintern webhook serve` prefers the App so the bot identity (`slug[bot]`) resolves
 
 Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
 
@@ -120,7 +120,7 @@ GITHUB_TOKEN=your-github-token
 
 ### GitHub App Authentication
 
-For team / unattended automation (`@mention` matching, webhook / `worker --listen`, `slug[bot]` commit attribution):
+For team / unattended automation (`@mention` matching, `webhook serve`, `slug[bot]` commit attribution):
 
 ```bash
 GITHUB_APP_ID=123456
@@ -393,15 +393,14 @@ DevIntern always runs the full workflow after fetching a task (clarity check →
 Agents run with their own permission prompts disabled (the equivalent of `--dangerously-skip-permissions`), so by default they have the same access to your machine as your user account. DevIntern can wrap every agent run in an OS-level sandbox so the agent stays confined even in fully automated worker runs.
 
 ```bash
-# In .devintern-code/.env
+# In the workspace .env (~/.devintern/.env)
 AGENT_SANDBOX=auto
 ```
 
-Or per run:
+Or per interactive run:
 
 ```bash
 devintern PROJ-123 --sandbox nono
-devintern worker --sandbox auto
 ```
 
 Run `devintern sandbox` at any time for a full diagnosis: which providers are installed, the one-time setup steps each still needs, which one `auto` would pick, and exactly what your next run will do with the current configuration, including why it would fail. The command exits non-zero when the configured provider guarantees a failed run, so scripts and CI can gate on it.
