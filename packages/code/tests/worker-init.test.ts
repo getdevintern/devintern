@@ -48,9 +48,9 @@ describe("renderSystemdUnit", () => {
     expect(unit).toContain("Restart=on-failure");
   });
 
-  test("appends --listen when webhook mode is chosen", () => {
+  test("uses the canonical webhook command when webhook mode is chosen", () => {
     const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app", listen: true });
-    expect(unit).toContain("ExecStart=devintern worker --listen");
+    expect(unit).toContain("ExecStart=devintern webhook serve");
   });
 });
 

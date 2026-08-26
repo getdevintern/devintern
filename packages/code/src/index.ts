@@ -470,6 +470,72 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
+function printWebhookHelp(): void {
+  console.log("Usage: devintern webhook <command>");
+  console.log("");
+  console.log("Run advanced direct-webhook services. Relay is recommended for normal workers.");
+  console.log("");
+  console.log("Commands:");
+  console.log("  serve               Start the repo-local GitHub webhook server");
+  console.log("");
+  console.log("Run 'devintern webhook serve --help' for command-specific options.");
+}
+
+function printWebhookServeHelp(): void {
+  console.log("Usage: devintern webhook serve [options]");
+  console.log("");
+  console.log("Start the repo-local webhook server for GitHub PR events.");
+  console.log("");
+  console.log("Options:");
+  console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
+  console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
+  console.log("  -h, --help     Display this help message");
+  console.log("");
+  console.log("Environment variables:");
+  console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
+  console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
+  console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
+  console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");
+  console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
+  console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
+}
+
+async function runWebhookServeCommand(args: string[]): Promise<void> {
+  let portOverride: number | undefined;
+  let hostOverride: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+      portOverride = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i] === "--host" && args[i + 1]) {
+      hostOverride = args[i + 1];
+      i++;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printWebhookServeHelp();
+      return;
+    } else {
+      console.error(`❌ Unknown webhook serve option: ${args[i]}`);
+      console.error("   Run 'devintern webhook serve --help' for usage.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  loadedEnvPath = loadEnvironment();
+  const port = portOverride ?? parseInt(process.env.WEBHOOK_PORT || "3000", 10);
+  const host = hostOverride ?? (process.env.WEBHOOK_HOST || "0.0.0.0");
+  const licenseResult = await checkLicense({
+    productKey: "devintern/code",
+    supabaseConfig: loadSupabaseConfig(),
+    requireAutomation: true,
+  });
+  requireLicense(licenseResult);
+
+  const { startWebhookServer } = await import("./webhook-server");
+  await startWebhookServer({ port, host });
+}
+
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
 let sentryInitialized = false;
 function initSentryOnce(): void {
@@ -505,8 +571,8 @@ if (process.argv[2] === "init") {
     process.exit(0);
   })();
 } else if (process.argv[2] === "worker") {
-  // Handle worker command - long-running daemon (webhook listener now;
-  // polling acquirers register here as they land)
+  // Handle worker command - long-running workspace daemon. Deprecated
+  // --listen keeps the previous combined single-repo behavior temporarily.
   (async () => {
     loadedEnvPath = loadEnvironment();
 
@@ -623,7 +689,7 @@ if (process.argv[2] === "init") {
         console.log("                      (~/.devintern/workspace.toml, or the given path).");
         console.log("                      Auto-enabled when a workspace exists.");
         console.log("  --no-workspace      Ignore an existing workspace; single-repo mode");
-        console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
+        console.log("  --listen            Deprecated: also run the repo-local webhook listener");
         console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
         console.log(
           "  --host <host>       Webhook listener host (default: 0.0.0.0 or WEBHOOK_HOST)",
@@ -657,7 +723,28 @@ if (process.argv[2] === "init") {
 
     const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
       await import("./lib/workspace/paths");
-    const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
+    const { resolveWorkerWorkspaceMode } = await import("./lib/worker-mode");
+    const selectedWorkerMode = resolveWorkerWorkspaceMode({
+      workspaceRequested: workspaceFlag,
+      noWorkspace,
+      listen,
+      workspaceExists: hasWorkspace(),
+    });
+    if (selectedWorkerMode.conflict === "workspace-listen") {
+      console.error(
+        "❌ --workspace and --listen cannot be combined.\n" +
+          "   Run `devintern worker --workspace ...` and `devintern webhook serve` as separate processes.",
+      );
+      process.exit(1);
+    }
+    if (listen) {
+      console.warn(
+        "⚠️  `devintern worker --listen` is deprecated.\n" +
+          "   Run `devintern worker` and `devintern webhook serve` as separate processes.\n" +
+          "   Continuing in legacy single-repo mode for this release.",
+      );
+    }
+    const workspaceMode = selectedWorkerMode.workspace;
 
     // Workspace credentials must be available before the license gate. This
     // matters for native services, whose working directory is the workspace
@@ -699,14 +786,6 @@ if (process.argv[2] === "init") {
       });
       return;
     }
-    if (workspaceMode && listen) {
-      console.error(
-        "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
-          "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
-      );
-      process.exit(1);
-    }
-
     const { startWorker } = await import("./worker");
     const { WorkerState } = await import("./lib/worker-state");
     const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
@@ -1187,70 +1266,26 @@ if (process.argv[2] === "init") {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   })();
-} else if (process.argv[2] === "serve") {
-  // Handle serve command - start webhook server
-  // Deprecated alias for `devintern worker --listen`.
+} else if (process.argv[2] === "webhook") {
   (async () => {
-    console.warn(
-      "⚠️  `devintern serve` is deprecated; use `devintern worker --listen` instead.\n" +
-        "   The worker daemon also supports tracker polling (no webhook setup needed).",
-    );
-
-    // Load environment for webhook server
-    loadedEnvPath = loadEnvironment();
-
-    // Parse serve-specific options
-    const args = process.argv.slice(3);
-    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern serve [options]");
-        console.log("");
-        console.log("Start the webhook server to automatically address PR review feedback");
-        console.log("");
-        console.log("Options:");
-        console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
-        console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
-        console.log("  -h, --help     Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log(
-          "  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures",
-        );
-        console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
-        console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
-        console.log(
-          "  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments",
-        );
-        console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
-        console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
-        console.log("");
-        console.log("See docs/WEBHOOK-DEPLOYMENT.md for deployment instructions.");
-        process.exit(0);
-      }
+    const command = process.argv[3];
+    if (!command || command === "--help" || command === "-h") {
+      printWebhookHelp();
+      return;
     }
-
-    // License check — the webhook server is unattended automation, so it
-    // always requires an automation license.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    requireLicense(licenseResult);
-
-    // Import and start webhook server
-    const { startWebhookServer } = await import("./webhook-server");
-    startWebhookServer({ port, host });
+    if (command !== "serve") {
+      console.error(`❌ Unknown webhook command: ${command}`);
+      console.error("   Run 'devintern webhook --help' for usage.");
+      process.exitCode = 1;
+      return;
+    }
+    await runWebhookServeCommand(process.argv.slice(4));
+  })();
+} else if (process.argv[2] === "serve") {
+  // Deprecated alias for `devintern webhook serve`.
+  (async () => {
+    console.warn("⚠️  `devintern serve` is deprecated; use `devintern webhook serve` instead.");
+    await runWebhookServeCommand(process.argv.slice(3));
   })();
 } else if (process.argv[2] === "address-review") {
   // Handle address-review command - manually address PR review feedback
@@ -1589,10 +1624,11 @@ Subcommands:
   init                 Initialize .devintern-code configuration in current directory
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
-  worker               Run the worker daemon (webhook listener via --listen);
+  worker               Run the workspace worker daemon;
                        'worker init' writes a workspace and ready-tasks query
   dashboard            Serve the local observability dashboard (run history and stats)
-  serve                Deprecated alias for 'worker --listen'
+  webhook serve        Start the advanced repo-local direct-webhook server
+  serve                Deprecated alias for 'webhook serve'
   address-review       Address review feedback on an existing pull request
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
   login [method]       Sign in (github | google | x | email; prompts if omitted)
@@ -1612,6 +1648,7 @@ const isSubcommand = [
   "worker",
   "dashboard",
   "workspace",
+  "webhook",
   "serve",
   "address-review",
   "resolve-conflicts",

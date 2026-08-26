@@ -87,27 +87,27 @@ export function upsertEnvVars(content: string, vars: Record<string, string>): st
 /**
  * Render a systemd service unit for the worker.
  *
- * @param options - Binary path, working directory, and whether to pass --listen
+ * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
 export function renderSystemdUnit(options: {
   execPath: string;
   projectDir: string;
   listen?: boolean;
 }): string {
-  const listenFlag = options.listen ? " --listen" : "";
+  const command = options.listen ? "webhook serve" : "worker";
   const quote = (value: string) =>
     /^[A-Za-z0-9_./:-]+$/.test(value)
       ? value.replace(/%/g, "%%")
       : `"${value.replace(/%/g, "%%").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   return `[Unit]
-Description=devintern worker (${options.projectDir})
+Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=${quote(options.projectDir)}
-ExecStart=${quote(options.execPath)} worker${listenFlag}
+ExecStart=${quote(options.execPath)} ${command}
 Restart=on-failure
 RestartSec=30
 
