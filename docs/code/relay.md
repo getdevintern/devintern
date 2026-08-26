@@ -31,7 +31,7 @@ If the relay is unreachable, nothing breaks: the worker's regular polling keeps 
 
 ## How authentication works
 
-Connect is an interactive step. You sign in with `devintern login` (Supabase session on disk). The relay verifies that session and your automation entitlement, then mints a durable **relay token** (`drt_…`). The worker uses that token for `/v1/status` and `/v1/events` long-polls, so polling survives session rotation, logouts, and password changes.
+Connect is an interactive step. The default `devintern worker init` flow offers sign-in, registers GitHub plus the active tracker, and stores the workspace's durable pairing under `~/.devintern/`. The relay verifies the session and your automation entitlement, then mints a durable **relay token** (`drt_…`). The worker uses that token for `/v1/status` and `/v1/events` long-polls, so polling survives session rotation, logouts, and password changes.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
 
@@ -54,7 +54,7 @@ devintern worker connect
 devintern worker --query "status=todo"
 ```
 
-The worker detects the pairing (stored in `.devintern-code/relay.json`, including the minted relay token) and starts the relay connection automatically alongside its normal polling.
+The worker detects the pairing and starts the relay connection automatically alongside its normal polling. `worker init` stores workspace pairing under the workspace home; standalone `worker connect` stores single-repo pairing in `.devintern-code/relay.json`.
 
 For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.devintern-code/.env` first (same vars as `TASK_TRACKER=…`), then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
 

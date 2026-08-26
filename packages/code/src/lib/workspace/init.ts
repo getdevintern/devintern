@@ -72,17 +72,76 @@ function tomlString(value: string): string {
 }
 
 /**
- * Scaffold the workspace config and shared env file.
+ * Insert or update `[defaults].tracker` / `[defaults].task_query` in a
+ * workspace.toml document without rewriting unrelated comments or tables.
  *
- * @returns Process exit code (0 on success).
+ * @param content - Current workspace.toml text
+ * @param defaults - Fields to write
  */
-export function runWorkspaceInit(): number {
+export function upsertWorkspaceDefaults(
+  content: string,
+  defaults: { tracker?: string; taskQuery?: string },
+): string {
+  let next = content.endsWith("\n") ? content : `${content}\n`;
+
+  if (!/^\[defaults\]/m.test(next) && (defaults.tracker || defaults.taskQuery !== undefined)) {
+    next += "\n[defaults]\n";
+  }
+
+  const sectionStart = next.search(/^\[defaults\]\s*$/m);
+  if (sectionStart === -1) return next;
+  const contentStart = next.indexOf("\n", sectionStart) + 1;
+  const remaining = next.slice(contentStart);
+  const nextTableOffset = remaining.search(/^\s*\[(?!defaults\])[^\n]*$/m);
+  const sectionEnd = nextTableOffset === -1 ? next.length : contentStart + nextTableOffset;
+  let section = next.slice(contentStart, sectionEnd);
+
+  const upsert = (key: string, value: string, allowCommented: boolean): void => {
+    const prefix = allowCommented ? "#?\\s*" : "";
+    const pattern = new RegExp(`^\\s*${prefix}${key}\\s*=\\s*.*$`, "m");
+    const line = `${key} = ${tomlString(value)}`;
+    if (pattern.test(section)) {
+      section = section.replace(pattern, line);
+      return;
+    }
+    const separator = section.length > 0 && !section.endsWith("\n") ? "\n" : "";
+    section += `${separator}${line}\n`;
+  };
+
+  if (defaults.tracker) upsert("tracker", defaults.tracker, false);
+  if (defaults.taskQuery !== undefined) upsert("task_query", defaults.taskQuery, true);
+
+  next = next.slice(0, contentStart) + section + next.slice(sectionEnd);
+
+  return next;
+}
+
+/** Validate and persist `[defaults]` updates to `workspace.toml`. */
+export function writeWorkspaceDefaults(
+  workspaceDir: string,
+  defaults: { tracker?: string; taskQuery?: string },
+): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const updated = upsertWorkspaceDefaults(readFileSync(configPath, "utf8"), defaults);
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
+export type WorkspaceLogFn = (message: string) => void;
+
+/**
+ * Create `workspace.toml` + `.env` when missing. Does not refuse an existing
+ * workspace (unlike the CLI `workspace init`).
+ */
+export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
+  workspaceDir: string;
+  configPath: string;
+  created: boolean;
+} {
   const workspaceDir = resolveWorkspaceDir();
   const configPath = workspaceConfigPath(workspaceDir);
   if (existsSync(configPath)) {
-    console.error(`❌ ${configPath} already exists; refusing to overwrite.`);
-    console.error("   Edit it directly, or run `devintern workspace import` inside a repo.");
-    return 1;
+    return { workspaceDir, configPath, created: false };
   }
 
   mkdirSync(workspaceDir, { recursive: true });
@@ -92,9 +151,25 @@ export function runWorkspaceInit(): number {
     writeFileSync(envPath, ENV_TEMPLATE);
   }
 
-  console.log(`✅ Workspace created at ${workspaceDir}`);
-  console.log(`   Config: ${configPath}`);
-  console.log(`   Env:    ${envPath}`);
+  log(`✅ Workspace created at ${workspaceDir}`);
+  log(`   Config: ${configPath}`);
+  log(`   Env:    ${envPath}`);
+  return { workspaceDir, configPath, created: true };
+}
+
+/**
+ * Scaffold the workspace config and shared env file.
+ *
+ * @returns Process exit code (0 on success).
+ */
+export function runWorkspaceInit(): number {
+  const { created, configPath } = ensureWorkspaceScaffold();
+  if (!created) {
+    console.error(`❌ ${configPath} already exists; refusing to overwrite.`);
+    console.error("   Edit it directly, or run `devintern workspace import` inside a repo.");
+    return 1;
+  }
+
   console.log("");
   console.log("Next steps:");
   console.log("  1. Put shared credentials in the workspace .env");
@@ -104,6 +179,11 @@ export function runWorkspaceInit(): number {
   return 0;
 }
 
+export interface WorkspaceImportOptions {
+  log?: WorkspaceLogFn;
+  error?: WorkspaceLogFn;
+}
+
 /**
  * Migrate the repo at `cwd` into the workspace.
  *
@@ -111,32 +191,35 @@ export function runWorkspaceInit(): number {
  * config untouched; env merging still runs but only ever adds missing keys.
  *
  * @param cwd - Repository checkout to import.
+ * @param options - Optional log/error sinks (defaults to console).
  * @returns Process exit code (0 on success).
  */
-export async function runWorkspaceImport(cwd: string): Promise<number> {
+export async function runWorkspaceImport(
+  cwd: string,
+  options: WorkspaceImportOptions = {},
+): Promise<number> {
+  const log = options.log ?? console.log;
+  const error = options.error ?? console.error;
   const workspaceDir = resolveWorkspaceDir();
   const configPath = workspaceConfigPath(workspaceDir);
   if (!existsSync(configPath)) {
-    console.error(
-      `❌ No workspace found at ${configPath}. Run \`devintern workspace init\` first.`,
-    );
+    error(`❌ No workspace found at ${configPath}. Run \`devintern workspace init\` first.`);
     return 1;
   }
 
   const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
   if (!remoteResult.success || !remoteResult.output.trim()) {
-    console.error(
-      "❌ Could not read the origin remote here. Run this inside a git repo with an origin.",
-    );
+    error("❌ Could not read the origin remote here. Run this inside a git repo with an origin.");
     return 1;
   }
   const remote = remoteResult.output.trim();
 
   const existingText = readFileSync(configPath, "utf8");
   const config = parseWorkspaceConfig(existingText, configPath);
+  const isFirstRepo = config.repos.length === 0;
 
   if (config.repos.some((repo) => repo.remote === remote)) {
-    console.log(`ℹ️  ${remote} is already in the workspace; config unchanged.`);
+    log(`ℹ️  ${remote} is already in the workspace; config unchanged.`);
     mergeEnv(workspaceDir, cwd, {});
     return 0;
   }
@@ -179,7 +262,7 @@ export async function runWorkspaceImport(cwd: string): Promise<number> {
   }
 
   // Seed a routing rule from the repo's default project key, unless a rule
-  // already claims that project.
+  // already claims that project. A 1-repo workspace needs no rule.
   const repoEnv = readRepoEnv(cwd);
   const projectKey = repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY;
   const projectTaken = config.routing.some(
@@ -196,23 +279,63 @@ export async function runWorkspaceImport(cwd: string): Promise<number> {
   writeFileSync(configPath, updated);
   loadWorkspaceConfig(configPath);
 
-  console.log(`✅ Imported ${remote} as "${name}"`);
+  log(`✅ Imported ${remote} as "${name}"`);
   if (defaultBranch) {
-    console.log(`   default_branch: ${defaultBranch}`);
+    log(`   default_branch: ${defaultBranch}`);
   }
   if (Object.keys(conflicts).length > 0) {
-    console.log(
+    log(
       `   ${Object.keys(conflicts).length} env value(s) differed from the workspace .env and were kept in [repos.env]: ` +
         Object.keys(conflicts).join(", "),
     );
   }
   if (projectKey && !projectTaken) {
-    console.log(`   Seeded routing rule: project = ${projectKey}`);
+    log(`   Seeded routing rule: project = ${projectKey}`);
+  } else if (isFirstRepo) {
+    log(
+      "   1-repo workspace: every ready task runs here. Add routing rules when you import another repo.",
+    );
   } else {
-    console.log("   Add a [[routing.rules]] entry so tasks route to this repo.");
+    log("   Add a [[routing.rules]] entry so tasks route to this repo.");
   }
-  console.log("   Note: .devintern-code/settings.json travels with the repo; nothing to migrate.");
+  log("   Note: .devintern-code/settings.json travels with the repo; nothing to migrate.");
   return 0;
+}
+
+/**
+ * Create the workspace if needed and import `cwd` into it.
+ *
+ * @param cwd - Repository checkout to import
+ * @param log - Status messages
+ * @param error - Failure messages
+ */
+export async function ensureWorkspaceAndImport(
+  cwd: string,
+  log: WorkspaceLogFn = console.log,
+  error: WorkspaceLogFn = console.error,
+): Promise<{ ok: true; workspaceDir: string; created: boolean } | { ok: false; error: string }> {
+  const { workspaceDir, created } = ensureWorkspaceScaffold(log);
+  if (!created) {
+    log(`ℹ️  Using existing workspace at ${workspaceDir}`);
+    const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+    if (!remoteResult.success || !remoteResult.output.trim()) {
+      return { ok: false, error: "Could not read this repo's origin remote." };
+    }
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    if (!config.repos.some((repo) => repo.remote === remoteResult.output.trim())) {
+      return {
+        ok: false,
+        error:
+          "A workspace already exists and does not contain this repo. " +
+          "Use `devintern workspace import` to add it without replacing workspace defaults.",
+      };
+    }
+  }
+  const code = await runWorkspaceImport(cwd, { log, error });
+  if (code !== 0) {
+    return { ok: false, error: "Could not import this repo into the workspace." };
+  }
+  return { ok: true, workspaceDir, created };
 }
 
 function readRepoEnv(cwd: string): Record<string, string> {

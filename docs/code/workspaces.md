@@ -8,14 +8,16 @@ dateModified: 2026-08-26
 
 # Workspaces (Multi-Repo Fleet)
 
-Workspace mode lets one `devintern worker` process serve every repository your team automates. Instead of one worker per repo, you describe your repos once in `~/.devintern/workspace.toml`, point the worker at one tracker query, and route each ready task to the right repository with explicit rules.
+Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe your repos once in `~/.devintern/workspace.toml`, point the worker at one tracker query, and route each ready task to the right repository with explicit rules when there is more than one repo.
+
+The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (import + `[defaults].task_query`) and you add more repos later with `devintern workspace import`.
 
 Workspace mode runs under the same automation license as the rest of the worker: any Supporter, Team, or Business key (or an active trial) covers it — one license spans all of your own repos in the fleet.
 
 ## How it works
 
 - The worker polls your tracker with one fleet-wide query (the same detect-then-evaluate loop as single-repo polling, with one cursor).
-- Each ready task is matched against your routing rules. A task runs only when the rules agree on exactly one repository. The worker never guesses: tasks that match no rule, or rules for different repositories, are skipped and recorded, and are retried only after the task changes again.
+- Each ready task is matched against your routing rules. A task runs only when the rules agree on exactly one repository. The worker never guesses: tasks that match no rule, or rules for different repositories, are skipped and recorded, and are retried only after the task changes again. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days`.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
 - Runs are serialized: one task at a time, with a per-repository lock. One systemd unit (or one terminal) drives the whole fleet.
@@ -119,7 +121,7 @@ devintern worker --no-workspace   # force single-repo mode in the current repo
 
 The fleet query comes from `[defaults].task_query`, or `--query` / `WORKER_TASK_QUERY` to override. A workspace with automations can omit the query and run as an automation-only worker. `--listen` (direct webhooks) is single-repo and cannot be combined with workspace mode. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
 
-One systemd unit runs the whole fleet:
+`devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 
 ```ini
 [Unit]
@@ -129,7 +131,7 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/devintern worker
 Restart=on-failure
-User=devintern
+WorkingDirectory=/home/you/.devintern
 
 [Install]
 WantedBy=multi-user.target
@@ -141,7 +143,7 @@ With GitHub credentials in the workspace `.env`, the fleet worker also reacts to
 
 - **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed.
-- **Relay (instant events)**: set `WORKER_RELAY_URL` and `LICENSE_KEY` in the workspace `.env`. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Events for repositories not in the workspace are ignored.
+- **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Tracker relay events work even when GitHub polling credentials are not configured. Events for repositories not in the workspace are ignored.
 
 Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
 

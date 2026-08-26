@@ -5,7 +5,11 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import { runWorkspaceImport, runWorkspaceInit } from "../src/lib/workspace/init";
+import {
+  runWorkspaceImport,
+  runWorkspaceInit,
+  upsertWorkspaceDefaults,
+} from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
 function git(cwd: string, command: string): string {
@@ -117,6 +121,39 @@ describe("workspace init/import", () => {
 
     await runWorkspaceImport(repoDir);
     expect(readFileSync(configPath, "utf8")).toContain("# my custom note");
+  });
+
+  test("upsertWorkspaceDefaults uncomments task_query and sets tracker", () => {
+    runWorkspaceInit();
+    const before = readFileSync(workspaceConfigPath(), "utf8");
+    const updated = upsertWorkspaceDefaults(before, {
+      tracker: "markdown",
+      taskQuery: "project = PROJ AND status = 'To Do'",
+    });
+    expect(updated).toContain('tracker = "markdown"');
+    expect(updated).not.toContain('tracker = "jira"');
+    expect(updated).toContain(`task_query = "project = PROJ AND status = 'To Do'"`);
+    expect(updated).not.toMatch(/^\s*#\s*task_query/m);
+    expect(updated).toContain("# Days before a leftover");
+  });
+
+  test("upsertWorkspaceDefaults only edits the defaults table", () => {
+    const updated = upsertWorkspaceDefaults(
+      `[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+  [repos.env]
+  tracker = "repo-specific"
+  task_query = "leave-me-alone"
+`,
+      { tracker: "linear", taskQuery: "status = Todo" },
+    );
+    expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
+    expect(updated).toContain('  tracker = "repo-specific"');
+    expect(updated).toContain('  task_query = "leave-me-alone"');
   });
 
   test("import fails cleanly without a workspace or origin remote", async () => {
