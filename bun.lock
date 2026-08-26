@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "devintern",
@@ -56,7 +57,7 @@
         "@devintern/task-trackers": "workspace:*",
         "@devintern/text-formatter": "workspace:*",
         "@devintern/utils": "workspace:*",
-        "@types/bun": "^1.3.3",
+        "@types/bun": "^1.4.0",
         "@types/node": "^20.10.0",
         "bun-types": "1.4.0",
         "oxfmt": "^0.44.0",
