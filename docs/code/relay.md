@@ -37,6 +37,29 @@ Connect is an interactive step. The default `devintern worker init` flow offers 
 
 Tracker webhooks never hit your machine. Self-register commands call the tracker API from your laptop with your own API keys, pointing the callback at a private per-customer ingest URL on the relay.
 
+### Signing in over SSH or mosh
+
+Browser OAuth redirects to `http://127.0.0.1:<port>/auth/callback` on the machine where the CLI is running. Over SSH/mosh there is no local GUI, and opening the URL on your laptop hits your laptop's loopback — not the remote process.
+
+**Preferred (works with mosh):** sign in on a machine with a browser, then copy the session file:
+
+```bash
+# on your laptop
+devintern login
+scp .devintern-code/.auth-session.json user@host:/path/to/project/.devintern-code/
+```
+
+Then re-run `worker init` / `worker connect` on the remote host (it will see you as signed in).
+
+**SSH tunnel alternative:** remote login binds a stable callback port (`17865`, or `DEVINTERN_AUTH_CALLBACK_PORT`). From your laptop:
+
+```bash
+ssh -N -L 17865:127.0.0.1:17865 user@host
+# open the printed OAuth URL in your laptop browser
+```
+
+Mosh cannot forward TCP — use `ssh` for the tunnel, or the session-copy path above.
+
 ## Quick Start
 
 ```bash

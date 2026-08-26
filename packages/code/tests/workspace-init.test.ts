@@ -95,6 +95,18 @@ describe("workspace init/import", () => {
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
   });
 
+  test("import from a package subdirectory still merges the repo-root .env", async () => {
+    runWorkspaceInit();
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+
+    expect(await runWorkspaceImport(nested)).toBe(0);
+
+    const env = readFileSync(workspaceEnvPath(), "utf8");
+    expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
+    expect(env).toContain("GITHUB_TOKEN=repo-token");
+  });
+
   test("import is idempotent and demotes conflicting env values to [repos.env]", async () => {
     runWorkspaceInit();
     // Pre-seed a conflicting shared value.
@@ -106,11 +118,18 @@ describe("workspace init/import", () => {
     // Shared value untouched.
     expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("GITHUB_TOKEN=shared-token");
 
-    // Second import: no duplicate entry, config identical.
+    // Second import: no duplicate entry, config identical. Missing workspace
+    // keys still merge (re-running worker init from a subdirectory).
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(repoDir, ".devintern-code", ".env"), "JIRA_EMAIL=dev@acme.test\n", {
+      flag: "a",
+    });
     const before = readFileSync(workspaceConfigPath(), "utf8");
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+    expect(await runWorkspaceImport(nested)).toBe(0);
     expect(readFileSync(workspaceConfigPath(), "utf8")).toBe(before);
     expect(loadWorkspaceConfig(workspaceConfigPath()).repos).toHaveLength(1);
+    expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("JIRA_EMAIL=dev@acme.test");
   });
 
   test("import preserves hand-written comments in the existing config", async () => {

@@ -13,6 +13,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 
+import { findProjectRoot } from "@devintern/utils";
+
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
 import { parseEnvFile } from "./env";
@@ -220,7 +222,7 @@ export async function runWorkspaceImport(
 
   if (config.repos.some((repo) => repo.remote === remote)) {
     log(`ℹ️  ${remote} is already in the workspace; config unchanged.`);
-    mergeEnv(workspaceDir, cwd, {});
+    mergeEnv(workspaceDir, cwd, {}, log);
     return 0;
   }
 
@@ -248,7 +250,7 @@ export async function runWorkspaceImport(
 
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
-  const conflicts = mergeEnv(workspaceDir, cwd, {});
+  const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
 
   let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
   if (defaultBranch) {
@@ -339,7 +341,10 @@ export async function ensureWorkspaceAndImport(
 }
 
 function readRepoEnv(cwd: string): Record<string, string> {
-  return parseEnvFile(join(cwd, ".devintern-code", ".env"));
+  // Same traversal as tracker setup: `worker init` / `workspace import` from a
+  // package subdirectory must still find the repo-root `.devintern-code/.env`.
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  return parseEnvFile(join(projectRoot, ".devintern-code", ".env"));
 }
 
 /**
@@ -352,6 +357,7 @@ function mergeEnv(
   workspaceDir: string,
   cwd: string,
   conflicts: Record<string, string>,
+  log: WorkspaceLogFn,
 ): Record<string, string> {
   const repoEnv = readRepoEnv(cwd);
   const envPath = workspaceEnvPath(workspaceDir);
@@ -373,7 +379,7 @@ function mergeEnv(
     const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
     const separator = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
     writeFileSync(envPath, existing + separator + additions.join("\n") + "\n");
-    console.log(`   Merged ${additions.length} env key(s) into ${envPath}`);
+    log(`   Merged ${additions.length} env key(s) into ${envPath}`);
   }
 
   return conflicts;

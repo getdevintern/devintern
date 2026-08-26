@@ -5,7 +5,20 @@ describe("createAuthCallbackServer", () => {
   test("returns a valid redirect URL with localhost", async () => {
     const server = await createAuthCallbackServer();
     expect(server.redirectTo).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
+    expect(server.port).toBeGreaterThan(0);
     await server.stop(0);
+  });
+
+  test("binds a fixed port when requested", async () => {
+    const server = await createAuthCallbackServer({ port: 0 });
+    // port 0 still means ephemeral; assert the exposed port matches the URL
+    expect(server.redirectTo).toBe(`http://127.0.0.1:${server.port}/auth/callback`);
+    await server.stop(0);
+
+    const fixed = await createAuthCallbackServer({ port: 17866 });
+    expect(fixed.port).toBe(17866);
+    expect(fixed.redirectTo).toBe("http://127.0.0.1:17866/auth/callback");
+    await fixed.stop(0);
   });
 
   test("returns 404 for non-callback paths", async () => {
