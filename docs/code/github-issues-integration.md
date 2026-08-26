@@ -4,7 +4,7 @@ sidebarLabel: "GitHub Issues Integration"
 description: "Fetch GitHub issues, track status labels, implement with your coding agent, and open the PR in the same repository."
 section: "Code"
 order: 5
-dateModified: 2026-08-17
+dateModified: 2026-08-26
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
@@ -12,7 +12,7 @@ tags: ["github", "github-issues", "devintern/code", "integration"]
 
 @devintern/code can implement work directly from GitHub Issues: fetch issue details and comments, run a feasibility check, move status labels, execute your AI agent, commit changes, open a pull request in the same repository, and post results back on the issue.
 
-Looking for webhook-based PR review automation? See the [GitHub webhook server guide](./github-integration.md).
+Looking for unattended PR review automation? Use the [worker](./worker.md) (polling plus the [relay](./relay.md)). Direct GitHub webhooks are an advanced path: [GitHub Integration](./github-integration.md).
 
 ## Prerequisites
 

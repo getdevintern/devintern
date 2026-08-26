@@ -16,7 +16,7 @@ Workspace mode runs under the same automation license as the rest of the worker:
 
 ## How it works
 
-- The worker polls your tracker with one fleet-wide query (the same detect-then-evaluate loop as single-repo polling, with one cursor).
+- The worker polls your tracker with one fleet-wide query (a detect-then-evaluate loop with one cursor).
 - Each ready task is matched against your routing rules. A task runs only when the rules agree on exactly one repository. The worker never guesses: tasks that match no rule, or rules for different repositories, are skipped and recorded, and are retried only after the task changes again. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days`.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.

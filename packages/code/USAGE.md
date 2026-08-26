@@ -293,7 +293,7 @@ devintern ENG-42 --create-pr
 # Process all "In Progress" issues assigned to you
 devintern --query '{"state":{"name":{"eq":"In Progress"}}}' --create-pr
 
-# Process all issues with the "intern" label (great for cron automations)
+# Process all issues with the "intern" label (typical worker query)
 devintern --query '{"labels":{"name":{"eq":"intern"}}}' --create-pr
 
 # Process high-priority issues
@@ -428,43 +428,29 @@ devintern PROJ-123
 devintern PROJ-123 --no-git
 ```
 
-## Automated Processing with Cron
+## Automated Processing
 
-You can set up automated task processing using cron jobs. This is useful for continuously picking up new tasks labeled for the intern to work on:
-
-```bash
-# Example: Process tasks labeled "Intern" in open sprints every 10 minutes
-# Add to crontab (run: crontab -e)
-*/10 * * * * cd /path/to/your/project && devintern --jql 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process assigned tasks every hour
-0 * * * * cd /path/to/your/project && devintern --jql 'assignee = currentUser() AND status = "To Do" AND labels IN (AutoImpl)' --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process high-priority bugs twice daily
-0 9,17 * * * cd /path/to/your/project && devintern --jql 'type = Bug AND priority = High AND status = "To Do" AND labels IN (Intern)' --max-turns 300 --create-pr >> /tmp/devintern-cron.log 2>&1
-```
-
-### Linear cron examples
-
-The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in single quotes so the shell passes it through unchanged:
+Unattended drains belong on the worker, not on a crontab of `devintern --query`:
 
 ```bash
-# Example: Process "intern"-labeled Linear issues every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process high-priority Linear issues assigned to you every hour
-0 * * * * cd /path/to/your/project && devintern --query '{"assignee":{"isMe":{"eq":true}},"priority":{"lte":2}}' --create-pr >> /tmp/devintern-cron.log 2>&1
+devintern worker init
+devintern worker
 ```
 
-**Important notes for cron setup:**
+See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). Cron of the CLI remains only as a gap filler for a wall-clock window (for example only at night) until the worker has quiet hours, and for `--estimate` schedules.
 
-- Always change to your project directory (`cd /path/to/your/project`) to ensure the correct `.devintern-code/.env` is loaded
-- Use absolute paths or ensure PATH includes `devintern` and `claude` binaries
-- Redirect output to a log file for monitoring (`>> /tmp/devintern-cron.log 2>&1`)
-- For Jira, use the `ORDER BY created DESC` clause to process newest tasks first
-- Consider using labels (e.g., Jira `labels = "Intern"`, Linear `{"labels":{"name":{"eq":"intern"}}}`) to mark tasks for automated processing
-- Test your query manually before adding to cron to ensure it returns the expected tasks
-- Monitor the log file regularly to ensure the cron job is running successfully
+```bash
+# Night-only drain, if you are not running the worker
+0 22 * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
+```
+
+**Notes if you keep a timer:**
+
+- Always change to your project directory (`cd /path/to/your/project`) so the correct `.devintern-code/.env` is loaded
+- Use absolute paths or ensure PATH includes `devintern` and the agent binary
+- Redirect output to a log file (`>> /tmp/devintern-cron.log 2>&1`)
+- For Jira, use `ORDER BY created DESC` to process newest tasks first
+- Test your query manually before scheduling
 
 ## Troubleshooting
 

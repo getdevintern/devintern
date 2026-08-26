@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
 section: "Code"
 order: 2
-dateModified: 2026-08-17
+dateModified: 2026-08-26
 ---
 
 # @devintern/code Configuration
@@ -53,7 +53,7 @@ LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
 
 Create a Personal API key at [https://linear.app/settings/api](https://linear.app/settings/api). Story points are written to Linear's built-in `estimate` field, so no custom field ID is required.
 
-See the [Linear Integration guide](./linear-integration.md) for state transitions, JSON `IssueFilter` batch runs, and cron examples.
+See the [Linear Integration guide](./linear-integration.md) for state transitions and JSON `IssueFilter` batch runs. For unattended drains, use the [worker](./worker.md).
 
 ### Trello
 
