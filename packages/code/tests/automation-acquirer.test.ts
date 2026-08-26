@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -128,6 +128,10 @@ describe("AutomationAcquirer", () => {
   test("falls back to the run cwd's config dir when no parent config exists", () => {
     const worktree = join(tmpdir(), `acquirer-fallback-${Date.now()}-${Math.random()}`);
     mkdirSync(worktree, { recursive: true });
+    // Disposable worktrees carry a `.git` file; it also pins config-dir
+    // traversal to this directory so ambient ancestors (/tmp, /) cannot
+    // satisfy the lookup on a shared machine.
+    writeFileSync(join(worktree, ".git"), "gitdir: /tmp/fake-worktree.git\n");
 
     const filePath = writeAutomationTaskFile(
       {

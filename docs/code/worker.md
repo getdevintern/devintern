@@ -176,6 +176,24 @@ When a watched PR falls behind its base branch, the worker catches the branch up
 
 This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
+### Syncing every open PR (`WORKER_BASE_SYNC_ALL_PRS`)
+
+By default only the agent's own PRs are synced, as described above. Set `WORKER_BASE_SYNC_ALL_PRS=true` in `.devintern-code/.env` to extend automatic base sync to **every open pull request** in the repo(s) the worker manages — useful when human teammates' long-lived branches also fall behind their base.
+
+Behavior with the flag enabled:
+
+- Discovery polls each watched repo's open-PR list every tick using conditional (ETag-cached) requests, so idle ticks stay rate-limit-free. The first sweep after startup fetches PR details once per open PR; afterwards only changed PRs cost requests. The list covers up to the first 100 open PRs per repo — while a repo sits at that page-size cap, the worker logs a warning, since PRs beyond it are invisible to discovery.
+- Closed and merged PRs drop out of the open list on their own; draft PRs are never auto-synced (a draft signals work in progress).
+- Fork PRs are skipped: devintern cannot — and should not — push merges to forks, so conflicts there remain the author's to resolve.
+- Review feedback handling stays an own-PR feature: other people's PRs are only ever caught up with their base, never addressed or replied to beyond the sync outcome.
+- Everything else works exactly as for the agent's own PRs: quiet period, durable per-SHA events, retry limits, no force-pushes, and branch protection rules apply equally.
+
+**Trust boundaries:** unlike the agent's own PRs, these branches are authored by anyone who can open a PR, so their content is untrusted input. What contains it: all resolution work happens inside a dedicated branch-scoped worktree under `/tmp/`, never in your checkout; fork PRs and drafts never enter the pipeline; merge pushes are lease-verified and never forced; and each resolver subprocess is killed at `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800). What does *not* contain it: genuine conflict resolution hands the conflicted tree to the coding agent, which may run project tooling (typecheck/tests) inside that worktree — the same pipeline the agent's own PRs use. On repositories that accept PRs from arbitrary third parties, run the agent sandboxed (`AGENT_SANDBOX`, see [Sandboxing the Agent](./configuration.md#sandboxing-the-agent)) and let branch protection decide what actually lands. There is no per-author allowlist: the flag is all-or-nothing per watched repo.
+
+The sweep also needs at least one repo target. Single-repo workers derive it from the checkout's detected GitHub repo (workspace mode uses `workspace.toml`); if detection fails and the agent has no open PR yet, discovery has nothing to run on and the worker logs a "nothing to sweep" warning until a target exists.
+
+Sync activity on non-devintern PRs is fully auditable: the worker logs each foreign PR it starts/stops watching (`👀 … watching owner/repo#N (open PR) for base sync`) and marks its sync lines with `(external PR)`; the resolver posts a comment on the PR describing what was merged; and every attempt is recorded as a `conflict_resolution` run in the [dashboard](./dashboard.md).
+
 ## Mention the bot on any PR
 
 The worker also reacts to mentions on pull requests it did not create. When a teammate writes a comment like `@devintern address the review feedback` on any PR in the repository, the worker picks it up on the next poll and handles it through the same pipeline. Detection is a repository-wide sweep of new comments (two requests per interval, regardless of how many PRs are open), so mentions work without any webhook setup.

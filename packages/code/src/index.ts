@@ -644,6 +644,9 @@ if (process.argv[2] === "init") {
         console.log(
           "  WORKER_BASE_SYNC_QUIET_SECONDS Stable-head window before PR base sync (default: 30)",
         );
+        console.log("  WORKER_BASE_SYNC_ALL_PRS");
+        console.log("                       Set to true to base-sync every open PR in the repo,");
+        console.log("                       not just the agent's own (default: disabled)");
         console.log(
           "  WEBHOOK_MAX_RETRIES Retry limit for queued and PR base-sync work (default: 3)",
         );
@@ -765,8 +768,12 @@ if (process.argv[2] === "init") {
     // (webhooks already deliver reviews there — polling too would double-run)
     // and without GitHub credentials.
     if (!listen && (process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID)) {
-      const { ReviewPollingAcquirer, runAddressReviewViaCli, runResolveConflictsViaCli } =
-        await import("./lib/review-polling-acquirer");
+      const {
+        ReviewPollingAcquirer,
+        runAddressReviewViaCli,
+        runResolveConflictsViaCli,
+        OPEN_PR_LIST_PAGE_SIZE,
+      } = await import("./lib/review-polling-acquirer");
       const { GitHubReviewsClient } = await import("./lib/github-reviews");
       const { RunStore } = await import("./lib/run-recorder");
       const gh = new GitHubReviewsClient({ preferAppAuth: true });
@@ -822,6 +829,13 @@ if (process.argv[2] === "init") {
               );
               return result.data ?? [];
             },
+            listOpenPullRequests: (repo, etag) =>
+              gh.conditionalGet(
+                `/repos/${repo}/pulls?state=open&per_page=${OPEN_PR_LIST_PAGE_SIZE}`,
+                ownerOf(repo),
+                nameOf(repo),
+                etag,
+              ),
           },
           addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
           resolveConflicts: (repo, n, expected) =>
@@ -832,6 +846,7 @@ if (process.argv[2] === "init") {
           quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
           runStore,
           allowedRepos: repoSlug ? [repoSlug] : undefined,
+          syncAllOpenPrs: process.env.WORKER_BASE_SYNC_ALL_PRS === "true",
           verbose,
         }),
       );

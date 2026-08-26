@@ -53,8 +53,17 @@ export interface PolledPr {
   state: string;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
+  /** Work-in-progress PR (excluded from all-PR base sync). */
+  draft?: boolean;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
   base?: { sha: string; ref?: string };
+}
+
+/** Open-PR list entry used to discover PRs beyond the agent's own. */
+export interface PolledPrListItem {
+  number: number;
+  /** Draft PRs are excluded from all-PR base sync. */
+  draft?: boolean;
 }
 
 export interface AutomaticResolveResult {
@@ -75,6 +84,14 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
+  /**
+   * List the repo's open PRs (discovery for `syncAllOpenPrs`). Omit when the
+   * feature is disabled.
+   */
+  listOpenPullRequests?(
+    repo: string,
+    etag?: string,
+  ): Promise<ConditionalResult<PolledPrListItem[]>>;
 }
 
 export interface ReviewPollingAcquirerOptions {
@@ -107,6 +124,15 @@ export interface ReviewPollingAcquirerOptions {
    */
   allowedRepos?: string[];
   verbose?: boolean;
+  /**
+   * Extend automatic base sync to every open, non-draft PR in the watched
+   * repos — not just the agent's own PRs (`WORKER_BASE_SYNC_ALL_PRS=true`).
+   * Requires `github.listOpenPullRequests`; default off.
+   *
+   * Foreign PR branches are untrusted input; see `sweepRepoOpenPrs` for
+   * what that contains (and does not).
+   */
+  syncAllOpenPrs?: boolean;
 }
 
 /** Dedupe source for review/comment ids. */
@@ -124,6 +150,13 @@ const MAX_CONSECUTIVE_DEFERS = 3;
 
 /** Default wall-clock budget for one resolve-conflicts subprocess. */
 export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Page size the built-in GitHub clients request when listing a repo's open
+ * PRs. A list reaching this size means GitHub truncated it: open PRs past
+ * the first page are invisible to base-sync discovery.
+ */
+export const OPEN_PR_LIST_PAGE_SIZE = 100;
 
 /** Resolver subprocess budget; `WORKER_RESOLVE_TIMEOUT_SECONDS` overrides (0 disables). */
 function resolveTimeoutMs(overrideMs?: number): number {
@@ -359,9 +392,28 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Effective all-open-PR sync switch (disabled when discovery is unavailable). */
+  private readonly syncAllActive: boolean;
+  /** Last open-PR list seen per repo (lets a 304 reuse the previous set). */
+  private foreignListItems = new Map<string, PolledPrListItem[]>();
+  /** Repos whose at-cap open-PR list warning is active (reset when below the cap). */
+  private capWarnedRepos = new Set<string>();
+  /** Whether the "nothing to sweep" warning is active (reset when targets exist). */
+  private emptySweepWarned = false;
+  /** Foreign PRs currently watched for base sync (audit logging). */
+  private foreignWatched = new Set<string>();
+  private foreignPrCache = new Map<string, PolledPr>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
+    this.syncAllActive = Boolean(options.syncAllOpenPrs);
+    if (this.syncAllActive && !options.github.listOpenPullRequests) {
+      console.warn(
+        `⚠️  [${this.name}] WORKER_BASE_SYNC_ALL_PRS is enabled but the GitHub client cannot ` +
+          `list open PRs; syncing only the agent's own PRs`,
+      );
+      this.syncAllActive = false;
+    }
   }
 
   /** Start polling: immediate first tick, then on the configured interval. */
@@ -380,6 +432,18 @@ export class ReviewPollingAcquirer implements Acquirer {
       `🔎 Polling reviews on agent PRs every ${this.options.intervalSeconds}s ` +
         `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
     );
+    if (this.syncAllActive) {
+      console.log(
+        `🌐 [${this.name}] base sync extended to every open PR in the watched repo(s) ` +
+          `(WORKER_BASE_SYNC_ALL_PRS)`,
+      );
+      console.warn(
+        `⚠️  [${this.name}] foreign PRs are authored by anyone who can open one, so their ` +
+          `content is treated as untrusted: forks and drafts are skipped and each resolver ` +
+          `run is bounded by WORKER_RESOLVE_TIMEOUT_SECONDS, but conflict resolution may ` +
+          `invoke the coding agent — consider AGENT_SANDBOX`,
+      );
+    }
     await this.tick();
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
   }
@@ -418,6 +482,36 @@ export class ReviewPollingAcquirer implements Acquirer {
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
+        }
+      }
+
+      if (this.syncAllActive) {
+        const repos =
+          allowedRepos && allowedRepos.length > 0
+            ? allowedRepos
+            : [...new Set(watchedPrs.map((pr) => pr.repo))];
+        if (repos.length === 0) {
+          // No managed repo configured and nothing registered in the
+          // transient own-PR watch list: discovery would silently never run.
+          if (!this.emptySweepWarned) {
+            this.emptySweepWarned = true;
+            console.warn(
+              `⚠️  [${this.name}] WORKER_BASE_SYNC_ALL_PRS is enabled but there is nothing to ` +
+                `sweep: no managed repo is configured and the agent has no open PR to derive ` +
+                `a repo from`,
+            );
+          }
+        } else {
+          this.emptySweepWarned = false;
+          for (const repo of repos) {
+            try {
+              await this.sweepRepoOpenPrs(repo, watchedKeys);
+            } catch (error) {
+              console.warn(
+                `⚠️  [${this.name}] listing open PRs on ${repo} failed: ${(error as Error).message}`,
+              );
+            }
+          }
         }
       }
     } finally {
@@ -521,7 +615,121 @@ export class ReviewPollingAcquirer implements Acquirer {
     );
   }
 
-  private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
+  /**
+   * Discover open PRs beyond the agent's own (`WORKER_BASE_SYNC_ALL_PRS`)
+   * and run base-sync-only polling on each eligible one. Review feedback
+   * stays an own-PR feature: foreign PRs are never addressed, only caught
+   * up with their base.
+   *
+   * Trust model: unlike the agent's own PRs, foreign branches are authored
+   * by anyone who can open a PR, so this path processes untrusted input.
+   * Contained by construction: work happens inside a dedicated branch-scoped
+   * review worktree (`prepareReviewWorktree`), never the worker checkout;
+   * fork heads are terminally skipped and drafts never enter; pushes are
+   * lease-verified and never forced; and each resolver subprocess is killed
+   * at `WORKER_RESOLVE_TIMEOUT_SECONDS`. Not contained: a genuinely
+   * conflicting merge hands the conflicted tree to the coding agent, which
+   * may run project tooling (typecheck/tests) inside that worktree — the
+   * same pipeline the agent's own PRs get. Operators enabling this flag on
+   * repos with untrusted contributors should sandbox the agent
+   * (`AGENT_SANDBOX`) and gate merges via branch protection.
+   */
+  private async sweepRepoOpenPrs(repo: string, ownKeys: Set<string>): Promise<void> {
+    const { github, workerState } = this.options;
+    const listOpenPullRequests = github.listOpenPullRequests;
+    if (!listOpenPullRequests) return;
+
+    // Hydrate once per process even when an ETag survived a restart
+    // (mirrors pollPr), then reuse conditional requests on later ticks.
+    const listSource = `github:open-prs:${repo}`;
+    const listCursor = workerState.getCursor(listSource);
+    const result = await listOpenPullRequests(
+      repo,
+      this.foreignListItems.has(repo) ? listCursor?.etag : undefined,
+    );
+    if (!result.notModified && result.data) {
+      this.foreignListItems.set(repo, result.data);
+      if (result.etag) workerState.setCursor(listSource, "state", result.etag);
+      // The built-in clients fetch a single per_page=OPEN_PR_LIST_PAGE_SIZE
+      // page: a full page means GitHub truncated the list, so PRs beyond it
+      // are silently invisible to discovery. Surface that once (until the
+      // list dips below the cap again) instead of failing silently.
+      if (result.data.length >= OPEN_PR_LIST_PAGE_SIZE && !this.capWarnedRepos.has(repo)) {
+        this.capWarnedRepos.add(repo);
+        console.warn(
+          `⚠️  [${this.name}] ${repo}'s open-PR list hit its page-size cap (${result.data.length} ` +
+            `PRs); open PRs past the first ${OPEN_PR_LIST_PAGE_SIZE} are not discovered for base sync`,
+        );
+      } else if (result.data.length < OPEN_PR_LIST_PAGE_SIZE) {
+        this.capWarnedRepos.delete(repo);
+      }
+    }
+    const items = this.foreignListItems.get(repo) ?? [];
+
+    const currentKeys = new Set<string>();
+    for (const item of items) {
+      const key = `${repo.toLowerCase()}#${item.number}`;
+      currentKeys.add(key);
+      // The agent's own PRs go through the full review pipeline above.
+      if (ownKeys.has(key)) continue;
+      // Drafts signal work in progress; auto-merging into them surprises authors.
+      if (item.draft === true) continue;
+      if (!this.foreignWatched.has(key)) {
+        this.foreignWatched.add(key);
+        console.log(`👀 [${this.name}] watching ${repo}#${item.number} (open PR) for base sync`);
+      }
+      try {
+        await this.pollForeignPr(repo, item.number);
+      } catch (error) {
+        console.warn(
+          `⚠️  [${this.name}] polling ${repo}#${item.number} failed: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    for (const key of [...this.foreignWatched]) {
+      if (!key.startsWith(`${repo.toLowerCase()}#`) || currentKeys.has(key)) continue;
+      this.foreignWatched.delete(key);
+      this.foreignPrCache.delete(key);
+      console.log(`👋 [${this.name}] ${key} left the open-PR list; no longer watching`);
+    }
+  }
+
+  /** Base-sync-only polling for a PR the agent did not create. */
+  private async pollForeignPr(repo: string, prNumber: number): Promise<void> {
+    const { github, resolveConflicts, workerState } = this.options;
+    if (!resolveConflicts) return;
+
+    const prSource = `github:base-sync-pr:${repo}#${prNumber}`;
+    const prKey = this.prKey(repo, prNumber);
+    const prResult = await github.fetchPr(
+      repo,
+      prNumber,
+      this.foreignPrCache.has(prKey) ? workerState.getCursor(prSource)?.etag : undefined,
+    );
+    if (prResult.notModified) {
+      const cachedPr = this.foreignPrCache.get(prKey);
+      if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr, { external: true });
+      return;
+    }
+    if (prResult.etag) workerState.setCursor(prSource, "state", prResult.etag);
+    const pr = prResult.data;
+    if (!pr || pr.state !== "open") {
+      // Closed/merged PRs drop out on the next open-PR list refresh.
+      this.foreignPrCache.delete(prKey);
+      return;
+    }
+    if (pr.draft === true) return;
+    this.foreignPrCache.set(prKey, pr);
+    await this.maybeSyncBase(repo, prNumber, pr, { external: true });
+  }
+
+  private async maybeSyncBase(
+    repo: string,
+    prNumber: number,
+    pr: PolledPr,
+    opts: { external?: boolean } = {},
+  ): Promise<void> {
     const { github, queue, resolveConflicts, runStore } = this.options;
     if (!resolveConflicts) return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
@@ -613,7 +821,10 @@ export class ReviewPollingAcquirer implements Acquirer {
       console.warn(`⚠️  Run recording (base sync begin) failed: ${(error as Error).message}`);
     }
 
-    console.log(`\n🔀 [${this.name}] syncing ${repo}#${prNumber} with its advanced base`);
+    console.log(
+      `\n🔀 [${this.name}] syncing ${repo}#${prNumber}` +
+        `${opts.external ? " (external PR)" : ""} with its advanced base`,
+    );
     let result: AutomaticResolveResult;
     try {
       result = await resolveConflicts(repo, prNumber, {

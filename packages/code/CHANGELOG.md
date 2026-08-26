@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in base sync for every open PR (`WORKER_BASE_SYNC_ALL_PRS`)**: setting it to `true` extends the worker's automatic merge-conflict/base-behind sync from just the agent's own PRs to every open, non-draft PR in the managed repo(s) — useful when teammates' long-lived branches fall behind their base. Discovery uses ETag-cached open-PR list polling (rate-limit friendly, first 100 open PRs per repo), fork PRs are skipped, review feedback stays an own-PR feature, and every foreign sync is logged and recorded as a `conflict_resolution` run. Default remains off: only devintern's own PRs are synced
+
 ## [2.5.0] - 2026-08-26
 
 Recurring scheduled automations, Supporter licenses covering multi-repo workspace mode, anonymous CLI analytics, and pickup/sync/JSON robustness fixes.
