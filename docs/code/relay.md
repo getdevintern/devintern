@@ -74,7 +74,7 @@ devintern worker connect
 
 # Then install the DevIntern AI GitHub App on the repository when prompted,
 # and run the worker as usual:
-devintern worker --query "status=todo"
+devintern worker
 ```
 
 The worker detects the pairing and starts the relay connection automatically alongside its normal polling. `worker init` stores workspace pairing under the workspace home; standalone `worker connect` stores single-repo pairing in `.devintern-code/relay.json`.
@@ -125,7 +125,7 @@ Running the worker against those trackers still needs the usual `TASK_TRACKER=â€
 
 - Reviews submitted on the agent's own PRs are addressed automatically, same as polling mode.
 - New PR comments are checked for a `@devintern-ai` mention; the same permission gate applies (only users with push access can direct the agent).
-- Tracker task events re-run your configured `--query` before acting, so "ready" still means whatever your query says.
+- Tracker task events re-run your configured `[defaults].task_query` before acting, so "ready" still means whatever your query says.
 - Every envelope is deduplicated against the worker's local database, so relay delivery and fallback polling never double-run work.
 
 ## Availability

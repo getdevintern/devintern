@@ -226,8 +226,20 @@ describe("createWorkspaceTaskAcquirer", () => {
 });
 
 describe("fleetTaskArgs", () => {
-  test("workspace defaults win over the env default", () => {
+  test("uses worker_task_args from the workspace config", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
+  });
+
+  test("defaults to --create-pr when worker_task_args is omitted", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+`);
+    expect(fleetTaskArgs(config)).toEqual(["--create-pr"]);
   });
 });
 

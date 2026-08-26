@@ -617,50 +617,43 @@ if (process.argv[2] === "init") {
       process.exit(result.ok ? 0 : 1);
     }
 
-    let intervalSeconds = parseInt(process.env.WORKER_POLL_INTERVAL || "60", 10);
-    let workerQuery = process.env.WORKER_TASK_QUERY;
     let verbose = false;
-    let ui = true;
-    let uiPort: number | undefined;
     let workspacePath: string | undefined;
-    let workspaceFlag = false;
+
+    const removedWorkerFlags: Record<string, string> = {
+      "--listen": "Use the workspace worker or `devintern webhook serve`.",
+      "--no-workspace": "Use the workspace worker or `devintern webhook serve`.",
+      "--port": "Use the workspace worker or `devintern webhook serve`.",
+      "--host": "Use the workspace worker or `devintern webhook serve`.",
+      "--query": "Set [defaults].task_query in workspace.toml.",
+      "--interval": "Set [defaults].poll_interval in workspace.toml.",
+      "--ui": "The dashboard is on by default. Set [workspace].dashboard = false to disable it.",
+      "--no-ui": "Set [workspace].dashboard = false in workspace.toml.",
+      "--ui-port": "Set [workspace].dashboard_port in workspace.toml.",
+      "--sandbox": "Set AGENT_SANDBOX in the workspace .env.",
+    };
 
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--workspace") {
-        workspaceFlag = true;
-        if (args[i + 1] && !args[i + 1].startsWith("-")) {
-          workspacePath = args[i + 1];
-          i++;
-        }
-      } else if (
-        args[i] === "--listen" ||
-        args[i] === "--no-workspace" ||
-        args[i] === "--port" ||
-        args[i] === "--host"
-      ) {
-        console.error(`❌ ${args[i]} has been removed from devintern worker.`);
-        console.error("   Use the workspace worker or `devintern webhook serve`.");
+      const arg = args[i];
+      if (arg === undefined) {
+        continue;
+      }
+      const removed = removedWorkerFlags[arg];
+      if (removed) {
+        console.error(`❌ ${arg} has been removed from devintern worker.`);
+        console.error(`   ${removed}`);
         process.exit(1);
-      } else if (args[i] === "--interval" && args[i + 1]) {
-        intervalSeconds = parseInt(args[i + 1], 10);
+      }
+      if (arg === "--workspace") {
+        if (!args[i + 1] || args[i + 1].startsWith("-")) {
+          console.error("❌ --workspace requires a path to workspace.toml.");
+          process.exit(1);
+        }
+        workspacePath = args[i + 1];
         i++;
-      } else if (args[i] === "--query" && args[i + 1]) {
-        workerQuery = args[i + 1];
-        i++;
-      } else if (args[i] === "--ui") {
-        ui = true;
-      } else if (args[i] === "--no-ui") {
-        ui = false;
-      } else if (args[i] === "--ui-port" && args[i + 1]) {
-        ui = true;
-        uiPort = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--sandbox" && args[i + 1]) {
-        setSandboxOverride(args[i + 1]);
-        i++;
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
+      } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
-      } else if (args[i] === "--help" || args[i] === "-h") {
+      } else if (arg === "--help" || arg === "-h") {
         console.log("Usage: devintern worker [init] [options]");
         console.log("       devintern worker connect [github|status] [--repo owner/name]");
         console.log("");
@@ -669,6 +662,9 @@ if (process.argv[2] === "init") {
         console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
         console.log("events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
+        console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
+        console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
+        console.log("");
         console.log("Subcommands:");
         console.log(
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
@@ -676,38 +672,17 @@ if (process.argv[2] === "init") {
         console.log("                      query (live dry run), and license check");
         console.log("");
         console.log("Options:");
-        console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
-        console.log("                      (same query language as batch --query runs)");
-        console.log("  --workspace [path]  Fleet mode: serve every repo in the workspace");
-        console.log("                      (~/.devintern/workspace.toml, or the given path).");
-        console.log("                      Auto-enabled when a workspace exists.");
-        console.log("  --interval <secs>   Polling interval in seconds (default: 60)");
-        console.log("  --ui                Serve the local dashboard (default)");
-        console.log("  --no-ui             Disable the dashboard for this worker process");
-        console.log("  --ui-port <port>    Dashboard port (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --sandbox <name>    Sandbox agent runs: none | auto | native | nono |");
-        console.log("                      srt | docker | smolvm (overrides AGENT_SANDBOX)");
+        console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
+        console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
         console.log("  -v, --verbose       Verbose logging");
         console.log("  -h, --help          Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
-        console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
-        console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
-        console.log(
-          "  WORKER_BASE_SYNC_QUIET_SECONDS Stable-head window before PR base sync (default: 30)",
-        );
-        console.log(
-          "  WEBHOOK_MAX_RETRIES Retry limit for queued and PR base-sync work (default: 3)",
-        );
-        console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
         process.exit(0);
       }
     }
 
     const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
       await import("./lib/workspace/paths");
-    const workspaceMode = workspaceFlag || hasWorkspace();
+    const workspaceMode = Boolean(workspacePath) || hasWorkspace();
     if (!workspaceMode) {
       console.error("❌ No workspace configured. Run `devintern worker init` first.");
       process.exit(1);
@@ -739,11 +714,7 @@ if (process.argv[2] === "init") {
     const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
     await runWorkspaceWorker({
       workspacePath,
-      query: workerQuery,
-      intervalSeconds,
       verbose,
-      ui,
-      uiPort,
     });
     return;
   })();
