@@ -88,6 +88,7 @@ import {
   enterTaskWorktreeIsolation,
   isWorktreeIsolationActive,
 } from "./lib/worktree-isolation";
+import type { WorktreeIsolationHandle } from "./lib/worktree-isolation";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
@@ -2669,17 +2670,26 @@ async function main(): Promise<void> {
 
       // Each task runs in its own disposable worktree so the user's checkout
       // (uncommitted changes, staged files, current branch) is never touched.
-      // Non-git directories and opt-outs return null and run in place.
-      const isolation =
-        options.git && options.worktreeIsolation !== false
-          ? await enterTaskWorktreeIsolation({
-              taskKey,
-              targetBranch: options.prTargetBranch,
-              autoCommit: options.autoCommit,
-              patchDir: join(resolveOutputDir(), taskKey.toLowerCase()),
-              verbose: options.verbose,
-            })
-          : null;
+      // Non-git directories and opt-outs return null and run in place; a
+      // thrown entry (unwritable worktree root, failed base-ref fetch) must
+      // degrade the same way instead of aborting the remaining batch tasks.
+      let isolation: WorktreeIsolationHandle | null = null;
+      if (options.git && options.worktreeIsolation !== false) {
+        try {
+          isolation = await enterTaskWorktreeIsolation({
+            taskKey,
+            targetBranch: options.prTargetBranch,
+            autoCommit: options.autoCommit,
+            patchDir: join(resolveOutputDir(), taskKey.toLowerCase()),
+            verbose: options.verbose,
+          });
+        } catch (error) {
+          console.warn(
+            `⚠️  Could not isolate — running in your working directory (${(error as Error).message}).`,
+          );
+          console.warn("   Commit or stash to be safe.");
+        }
+      }
 
       let succeeded = false;
       try {

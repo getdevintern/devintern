@@ -15,7 +15,9 @@
  * - preserve: before removal, uncommitted worktree changes are committed to
  *   the feature branch (commits survive worktree removal — they live in the
  *   shared object store); if a commit is impossible a patch file is written
- *   to the task output directory instead
+ *   to the task output directory instead; when both fail the directory is
+ *   renamed to `<name>.unsaved` and left for manual recovery instead of
+ *   being destroyed
  * - teardown: `git worktree remove --force` → `rmSync` fallback → `prune`
  *   (the same ladder as `removeReviewWorktree` / `removeTaskWorktree`)
  *
@@ -23,7 +25,8 @@
  * `process.exit()` calls and fatal signals bypass `finally` blocks, so an
  * exit-event guard plus a hook in `gracefulShutdown` perform the same
  * synchronous cleanup. Worktrees orphaned by SIGKILL/power loss are swept by
- * PID-liveness on the next run (dir names embed the creating pid).
+ * PID-liveness on the next run (dir names embed the creating pid); dirty
+ * orphans are kept as `<name>.unsaved` rather than destroyed.
  *
  * Config continuity: config discovery walks up from cwd but stops at the
  * first `.git` entry — which includes every linked worktree's `.git` file.
@@ -47,13 +50,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, isAbsolute } from "path";
 
 import { Utils } from "./utils";
 
@@ -89,6 +92,8 @@ interface GitSyncResult {
 export interface WorktreeIsolationDeps {
   chdir: (directory: string) => void;
   cwd: () => string;
+  /** Injectable symlink so tests can simulate environments without symlink support. */
+  symlink?: typeof symlinkSync;
 }
 
 export interface EnterTaskWorktreeOptions {
@@ -193,7 +198,10 @@ function runGitSync(args: string[], cwd?: string): GitSyncResult {
 
 function captureWorktreeState(worktreePath: string): { dirty: boolean; branchName: string | null } {
   const status = runGitSync(["status", "--porcelain"], worktreePath);
-  const dirty = status.success && status.output.length > 0;
+  // A failed status (index.lock contention, fs error) is unknown state, not a
+  // clean tree: treat it as dirty so preservation runs instead of teardown
+  // destroying uncommitted work.
+  const dirty = !status.success || status.output.length > 0;
   const branch = runGitSync(["branch", "--show-current"], worktreePath);
   return {
     dirty,
@@ -201,15 +209,9 @@ function captureWorktreeState(worktreePath: string): { dirty: boolean; branchNam
   };
 }
 
-/**
- * Best-effort snapshot of uncommitted changes as a binary-safe patch.
- *
- * @returns Patch path, or null when nothing could be captured
- */
-function writePatchSnapshot(worktreePath: string, patchDir: string): string | null {
+function writeGitDiff(worktreePath: string, args: string[], patchDir: string): string | null {
   try {
-    runGitSync(["add", "-A"], worktreePath);
-    const diff = spawnSync("git", ["diff", "--cached", "--binary"], {
+    const diff = spawnSync("git", args, {
       cwd: worktreePath,
       encoding: "buffer",
       maxBuffer: 256 * 1024 * 1024,
@@ -224,6 +226,24 @@ function writePatchSnapshot(worktreePath: string, patchDir: string): string | nu
   } catch {
     return null;
   }
+}
+
+/**
+ * Best-effort snapshot of uncommitted changes as a binary-safe patch.
+ *
+ * @returns Patch path, or null when nothing could be captured
+ */
+function writePatchSnapshot(worktreePath: string, patchDir: string): string | null {
+  // Primary: stage everything (captures untracked files) and diff the index.
+  runGitSync(["add", "-A"], worktreePath);
+  const staged = writeGitDiff(worktreePath, ["diff", "--cached", "--binary"], patchDir);
+  if (staged) {
+    return staged;
+  }
+  // Last resort when staging or reading the index failed (index lock held by
+  // another process, non-zero diff exit): tracked changes against HEAD,
+  // which needs no index writes at all.
+  return writeGitDiff(worktreePath, ["diff", "HEAD", "--binary"], patchDir);
 }
 
 /**
@@ -327,7 +347,7 @@ function ensureStateDirIgnored(repoRoot: string): void {
 
 /** Resolve `path` relative to `from` without depending on process.cwd(). */
 function resolveFrom(from: string, path: string): string {
-  return path.startsWith("/") ? path : join(from, path);
+  return isAbsolute(path) ? path : join(from, path);
 }
 
 /**
@@ -335,7 +355,11 @@ function resolveFrom(from: string, path: string): string {
  *
  * An entry is stale when its embedded pid is dead or it predates the orphan
  * age backstop. Entries belonging to live processes (concurrent runs) and
- * unrecognized names are never touched.
+ * unrecognized names are never touched. A stale entry holding uncommitted
+ * changes (a failed status counts as unknown-dirty) is renamed to
+ * `<name>.unsaved` for manual recovery instead of being destroyed — a run
+ * killed minutes ago can hold hours of agent work; only clean stale entries
+ * are removed outright.
  *
  * @returns Paths that were removed
  */
@@ -369,6 +393,29 @@ export function sweepOrphanedTaskWorktrees(
     const stalePath = join(worktreeRoot, entry);
     if (options?.verbose) {
       console.log(`   🧹 Sweeping orphaned task worktree: ${stalePath}`);
+    }
+    // No preservation step ever ran for a crashed run, so the sweep must not
+    // assume a dead-pid tree is disposable. Mirror finish()'s salvage policy:
+    // unknown or dirty trees are renamed aside — the suffix also escapes the
+    // name-pattern check, so future sweeps cannot rematch them — with only
+    // the registration pruned; teardown deletes clean trees only.
+    if (captureWorktreeState(stalePath).dirty) {
+      const salvagedPath = `${stalePath}.unsaved`;
+      try {
+        renameSync(stalePath, salvagedPath);
+        console.warn(`\n⚠️  Orphaned task worktree had uncommitted changes; kept for recovery:`);
+        console.warn(`   ${salvagedPath}`);
+        console.warn("   Recover your files from it manually, then delete it.");
+      } catch {
+        console.warn(`⚠️  Could not move dirty orphan aside; left intact at: ${stalePath}`);
+      }
+      // The salvaged copy no longer sits at its registered path; drop only
+      // the stale registration (prune never touches directories that exist).
+      runGitSync(["worktree", "prune"], repoCwd);
+      if (!existsSync(stalePath)) {
+        removed.push(stalePath);
+      }
+      continue;
     }
     teardownWorktreeSync(stalePath, repoCwd);
     if (!existsSync(stalePath)) {
@@ -430,8 +477,22 @@ class WorktreeIsolation implements WorktreeIsolationHandle {
 
     let preserved: { committed: boolean; patchPath?: string } = { committed: false };
     let branchName: string | null = null;
+    let unsalvageable = false;
     if (existsSync(this.worktreePath)) {
-      branchName = captureWorktreeState(this.worktreePath).branchName;
+      // Drop the shared-state link before anything inspects the tree: the
+      // agent run has ended, so config continuity is no longer needed, and a
+      // link surviving into `git status --porcelain` / `git add -A` whenever
+      // the .git/info/exclude registration failed would commit a
+      // machine-specific absolute symlink onto the feature branch. rmSync
+      // also covers the copied-settings fallback directory and never
+      // traverses a symlink, so the real state dir stays intact either way.
+      try {
+        rmSync(join(this.worktreePath, ".devintern-code"), { force: true, recursive: true });
+      } catch {
+        /* best-effort: absent, already removed, or unwritable */
+      }
+      const entryState = captureWorktreeState(this.worktreePath);
+      branchName = entryState.branchName;
       preserved = preserveWorktreeChanges({
         worktreePath: this.worktreePath,
         taskKey: this.options.taskKey,
@@ -440,25 +501,48 @@ class WorktreeIsolation implements WorktreeIsolationHandle {
         autoCommit: this.options.autoCommit,
         patchDir: this.options.patchDir,
       });
-      // Unlink the shared-state link before removal so no deletion strategy
-      // can ever traverse into the real config directory.
-      try {
-        unlinkSync(join(this.worktreePath, ".devintern-code"));
-      } catch {
-        /* absent or already removed */
+      // Dirty on entry but neither a commit nor a patch captured it: tearing
+      // down would destroy that work. Keep the raw directory instead — the
+      // failure modes here (unwritable patch dir, refused commits, index
+      // lock) correlate with unusual environments where the user most needs
+      // the bytes. Renaming outside the parsed worktree-name pattern also
+      // keeps the orphan sweep from reaping it later; recovery costs one
+      // leftover directory, deletion loses the work permanently.
+      unsalvageable = entryState.dirty && !preserved.committed && !preserved.patchPath;
+      if (unsalvageable) {
+        console.warn(`\n⚠️  WARNING: uncommitted changes could NOT be saved from:`);
+        console.warn(`   ${this.worktreePath}`);
+        console.warn("   Commit and patch preservation both failed.");
       }
-      teardownWorktreeSync(this.worktreePath, this.repoRoot);
+      if (unsalvageable) {
+        const salvagedPath = `${this.worktreePath}.unsaved`;
+        try {
+          renameSync(this.worktreePath, salvagedPath);
+          console.warn(`   Directory kept intact at: ${salvagedPath}`);
+          console.warn("   Recover your files from it manually, then delete it.");
+        } catch {
+          console.warn(`   Directory left intact at: ${this.worktreePath}`);
+        }
+        // The salvaged copy is unregistered; drop only the stale registration
+        // (prune never touches directories that still exist).
+        runGitSync(["worktree", "prune"], this.repoRoot);
+      } else {
+        teardownWorktreeSync(this.worktreePath, this.repoRoot);
+      }
     }
 
-    this.report(outcome, preserved, branchName);
+    this.report(outcome, preserved, branchName, unsalvageable);
   }
 
   private report(
     outcome: IsolationOutcome,
     preserved: { committed: boolean; patchPath?: string },
     branchName: string | null,
+    unsalvageable: boolean,
   ): void {
-    if (outcome === "completed") {
+    if (unsalvageable) {
+      console.log("\n🧹 Isolated worktree kept for manual recovery");
+    } else if (outcome === "completed") {
       console.log("\n🧹 Isolated worktree cleaned up");
     } else if (outcome === "interrupted") {
       console.log("\n🧹 Interrupted run: isolated worktree cleaned up");
@@ -466,11 +550,11 @@ class WorktreeIsolation implements WorktreeIsolationHandle {
       console.log("\n🧠 Task failed: isolated worktree cleaned up");
     }
 
-    if (branchName) {
+    if (branchName && !unsalvageable) {
       console.log(
         `   Results live on branch '${branchName}' — check out with: git checkout ${branchName}`,
       );
-    } else {
+    } else if (!unsalvageable) {
       console.log(`   Your working directory was not modified.`);
     }
     if (preserved.patchPath) {
@@ -515,21 +599,28 @@ export function cleanupActiveWorktreeIsolation(): void {
  * config discovery stopping at the worktree's `.git` entry.
  *
  * Falls back to copying settings.json when symlinks are unavailable, and
- * `WEBHOOK_QUEUE_DB` is pinned regardless so durable state never lands in a
- * directory that teardown deletes.
+ * `WEBHOOK_QUEUE_DB` is pinned before any early return — including on a
+ * genuinely first run where the shared dir does not exist yet. Lazy queue.db
+ * writers create missing parent directories, so an unpinned first run would
+ * create the database inside the disposable worktree and teardown would
+ * destroy the run records/retry bookkeeping in it.
  */
-function linkSharedConfigDir(worktreePath: string, repoRoot: string): void {
+function linkSharedConfigDir(
+  worktreePath: string,
+  repoRoot: string,
+  symlink: typeof symlinkSync,
+): void {
   const sharedDir = join(repoRoot, ".devintern-code");
   const linkPath = join(worktreePath, ".devintern-code");
+
+  process.env.WEBHOOK_QUEUE_DB = join(sharedDir, "queue.db");
 
   if (!existsSync(sharedDir)) {
     return;
   }
 
-  process.env.WEBHOOK_QUEUE_DB = join(sharedDir, "queue.db");
-
   try {
-    symlinkSync(sharedDir, linkPath, "dir");
+    symlink(sharedDir, linkPath, "dir");
     return;
   } catch {
     // Symlinks unavailable (Windows without dev mode, restricted fs): fall
@@ -567,6 +658,36 @@ async function resolveBaseRef(
     }
   }
   return "HEAD";
+}
+
+/**
+ * Per-process cache over {@link resolveBaseRef}, keyed by repo root + branch.
+ *
+ * Batch mode resolves the same base for every task; without this each entry
+ * pays a network fetch round-trip against an unchanged remote. The promise is
+ * cached (not the value) so concurrent entries share one in-flight resolution,
+ * and a rejection evicts the entry so a later task can retry.
+ */
+const baseRefCache = new Map<string, Promise<string>>();
+
+async function resolveBaseRefCached(
+  targetBranch: string | undefined,
+  repoRoot: string,
+  verbose?: boolean,
+): Promise<string> {
+  const key = `${repoRoot}\u0000${targetBranch ?? ""}`;
+  let resolved = baseRefCache.get(key);
+  if (!resolved) {
+    resolved = resolveBaseRef(targetBranch, repoRoot, verbose);
+    baseRefCache.set(key, resolved);
+    try {
+      await resolved;
+    } catch (error) {
+      baseRefCache.delete(key);
+      throw error;
+    }
+  }
+  return resolved;
 }
 
 /**
@@ -620,7 +741,7 @@ export async function enterTaskWorktreeIsolation(
   ensureStateDirIgnored(repoRoot);
   sweepOrphanedTaskWorktrees(worktreeRoot, repoRoot, { verbose: options.verbose });
 
-  const baseRef = await resolveBaseRef(options.targetBranch, repoRoot, options.verbose);
+  const baseRef = await resolveBaseRefCached(options.targetBranch, repoRoot, options.verbose);
 
   const safeKey = sanitizeTaskKeyForPath(options.taskKey);
   let worktreePath = join(
@@ -644,7 +765,7 @@ export async function enterTaskWorktreeIsolation(
     return null;
   }
 
-  linkSharedConfigDir(worktreePath, repoRoot);
+  linkSharedConfigDir(worktreePath, repoRoot, deps.symlink ?? symlinkSync);
 
   const handle = new WorktreeIsolation(worktreePath, repoRoot, originalCwd, deps, options);
   activeHandle = handle;
