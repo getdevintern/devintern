@@ -8,6 +8,8 @@
  *    `searchTasks` to get the tasks that are actually ready.
  * 3. Dedupe — skip tasks already picked up at the same `updated` stamp
  *    (`processed_events`), so a task re-enters only when it changes again.
+ *    Skips are logged when nothing new is claimed. An empty stamp is sticky
+ *    (tracker search must return `updated`) and is warned on.
  * 4. Execute — run each ready task sequentially through the CLI pipeline.
  *
  * The cursor advances only after a tick completes; a crash mid-tick re-detects
@@ -24,6 +26,15 @@ import type { Acquirer } from "../worker";
 export interface ReadyTask {
   key: string;
   updated?: string;
+}
+
+/** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
+export function processedTaskId(task: ReadyTask): string {
+  return `task:${task.key}:${task.updated?.trim() ?? ""}`;
+}
+
+function hasUpdateStamp(task: ReadyTask): boolean {
+  return Boolean(task.updated?.trim());
 }
 
 export interface TaskPollingAcquirerOptions {
@@ -130,21 +141,27 @@ export class TaskPollingAcquirer implements Acquirer {
 
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
-        if (verbose) {
-          console.log(`   [${this.name}] change detected; ${tasks.length} task(s) match query`);
-        }
+        const skipped: string[] = [];
+        const missingStamp: string[] = [];
+        let pickedUp = 0;
 
         for (const task of tasks) {
-          const externalId = `task:${task.key}:${task.updated ?? ""}`;
+          if (!hasUpdateStamp(task)) {
+            missingStamp.push(task.key);
+          }
+          const externalId = processedTaskId(task);
           if (queue.hasProcessed(detector.source, externalId)) {
+            skipped.push(task.key);
             continue;
           }
           // Mark before executing: a persistently failing task must not loop
           // every tick. It re-enters when the ticket is updated again (new
           // stamp), and the pipeline's own incomplete-attempt check guards
-          // the retry.
+          // the retry. An empty stamp is also sticky — tracker search must
+          // return `updated` or a later edit cannot retrigger this task.
           queue.markProcessed(detector.source, externalId);
 
+          pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
           const ok = await executeTask(task.key);
           console.log(
@@ -153,6 +170,8 @@ export class TaskPollingAcquirer implements Acquirer {
               : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
           );
         }
+
+        this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
       }
 
       if (detection.nextCursor !== null && detection.nextCursor !== cursor) {
@@ -162,6 +181,40 @@ export class TaskPollingAcquirer implements Acquirer {
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
       this.busy = false;
+    }
+  }
+
+  /**
+   * Always-on skip/stamp diagnosis. Silent skips made "ticket matches query
+   * but was never picked up" undebuggable from the worker log.
+   */
+  private logEvaluate(
+    matched: number,
+    skipped: string[],
+    missingStamp: string[],
+    pickedUp: number,
+    verbose?: boolean,
+  ): void {
+    if (verbose) {
+      const skipNote = skipped.length > 0 ? ` (${skipped.length} already processed)` : "";
+      console.log(`   [${this.name}] change detected; ${matched} task(s) match query${skipNote}`);
+    }
+
+    // Always log when every match was skipped — that is the "why didn't it
+    // pick up KEY?" case. Mixed pickup/skip stays verbose-only to avoid noise.
+    if (skipped.length > 0 && (pickedUp === 0 || verbose)) {
+      console.log(
+        `⏭️  [${this.name}] skipping ${skipped.join(", ")} (already processed at this update)`,
+      );
+    }
+
+    if (missingStamp.length > 0) {
+      const names = missingStamp.join(", ");
+      const singular = missingStamp.length === 1;
+      console.warn(
+        `⚠️  [${this.name}] ${names} ${singular ? "has" : "have"} no update stamp from the tracker. ` +
+          `Editing ${singular ? "that ticket" : "those tickets"} will not retrigger polling until search returns \`updated\`.`,
+      );
     }
   }
 }

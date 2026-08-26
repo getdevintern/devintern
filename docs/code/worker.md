@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-24
+dateModified: 2026-08-26
 ---
 
 # Worker Daemon
@@ -125,7 +125,7 @@ TASK_TRACKER=markdown MARKDOWN_TASKS_DIR=./tasks devintern worker --query "statu
 
 ### Re-running a task
 
-When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket and moves it back to your to-do status. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
+When a run cannot finish, devintern posts an "Implementation Incomplete" comment on the ticket (crash, interrupt, and failed-feasibility comments do the same) and moves it back to your to-do status. That comment tells you how to unlock a retry. The next pickup is gated so an unchanged ticket is not retried in a loop; you unlock a retry by changing the ticket:
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
@@ -136,6 +136,15 @@ Either action bumps the ticket's update stamp, so the worker picks it up on the 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `WORKER_TASK_ARGS`, since that would disable the gate for every polled task.
+
+### Ticket matches the query but is not picked up
+
+The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
+
+- `📌 picking up KEY` — it was claimed on this tick.
+- `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
+- `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
+- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
 ## Options
 
