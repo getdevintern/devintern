@@ -41,8 +41,11 @@ export interface SpawnedAutomationRun {
 export interface AutomationAcquirerOptions {
   automations: AutomationConfig[];
   dbPath: string;
-  /** Per-task CLI flags; defaults to `--create-pr`. */
-  extraArgs?: string[];
+  /**
+   * Per-task CLI flags; defaults to `--create-pr`. May be a factory so live
+   * config reloads (e.g. `[defaults].worker_task_args`) apply to later runs.
+   */
+  extraArgs?: string[] | (() => string[]);
   resolveContext: (automation: AutomationConfig) => Promise<AutomationRunContext | null>;
   now?: () => number;
   spawnRun?: (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun;
@@ -120,6 +123,55 @@ export class AutomationAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Replace the automation set at runtime (live workspace.toml reload).
+   *
+   * Reconciles durable schedule state without interrupting active work:
+   *
+   * - Newly added or rescheduled entries register (a changed schedule resets
+   *   the cursor; an unchanged one retains the prior interval anchor).
+   * - Entries removed from the config retire: removed-but-active runs finish
+   *   their current occurrence naturally, then their schedule state is
+   *   dropped. Fully removed inactive entries are unregistered immediately.
+   * - Entries merely disabled keep their schedule rows so re-enabling later
+   *   keeps the anchor, matching restart semantics.
+   */
+  applyAutomations(next: AutomationConfig[]): void {
+    const previous = this.options.automations;
+    this.options.automations = next;
+
+    const now = this.now();
+    for (const automation of next.filter((item) => item.enabled)) {
+      try {
+        this.store.register(automation, nextAutomationDue(automation, now));
+      } catch (error) {
+        console.error(
+          `❌ [automation:${automation.id}] invalid schedule after reload: ` +
+            `${(error as Error).message}`,
+        );
+      }
+    }
+
+    for (const retired of previous.filter((item) => !next.some((n) => n.id === item.id))) {
+      const active = this.active.get(retired.id);
+      if (active) {
+        // Let the in-flight occurrence run to completion; drop its state only
+        // after it ends and only if the id was not re-added in the meantime.
+        void active.lifecycle
+          .catch(() => undefined)
+          .then(() => {
+            if (!this.options.automations.some((item) => item.id === retired.id)) {
+              this.store.unregister(retired.id);
+            }
+          });
+      } else {
+        this.store.unregister(retired.id);
+      }
+    }
+
+    this.scheduleNext();
+  }
+
   private async runTick(): Promise<void> {
     const leaseMs = this.options.leaseMs ?? LEASE_MS;
     for (const automation of this.options.automations.filter((item) => item.enabled)) {
@@ -190,14 +242,12 @@ export class AutomationAcquirer implements Acquirer {
           continue;
         }
         console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
+        const extraArgs = this.options.extraArgs;
+        const args =
+          typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
-          : defaultSpawnRun(
-              automation,
-              context,
-              this.options.extraArgs ?? workerTaskArgs(),
-              this.options.terminationGraceMs,
-            );
+          : defaultSpawnRun(automation, context, args, this.options.terminationGraceMs);
         const active: ActiveAutomationRun = {
           run,
           lifecycle: Promise.resolve(),

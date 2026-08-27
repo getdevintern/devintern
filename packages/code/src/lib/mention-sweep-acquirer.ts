@@ -109,6 +109,7 @@ export class MentionSweepAcquirer implements Acquirer {
 
   /** Start sweeping: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
     console.log(
       `🔎 Sweeping ${this.options.repo} for @mentions every ${this.options.intervalSeconds}s`,
     );
@@ -122,6 +123,17 @@ export class MentionSweepAcquirer implements Acquirer {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * Apply a new sweep cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
   }
 
   /** One repo-wide sweep over both comment feeds. Skipped while busy. */

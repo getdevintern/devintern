@@ -103,9 +103,10 @@ export interface ReviewPollingAcquirerOptions {
    * Repo slugs (`owner/repo`) this worker manages. Open registry rows for
    * any other repo (e.g. left behind after a rename/transfer) are
    * auto-unwatched at startup and skipped on every tick. Omit to watch the
-   * whole registry (previous behavior).
+   * whole registry (previous behavior). May be a factory so live config
+   * reloads (repos added to `workspace.toml`) apply on later ticks.
    */
-  allowedRepos?: string[];
+  allowedRepos?: string[] | (() => string[]);
   verbose?: boolean;
 }
 
@@ -366,11 +367,12 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
     // Drop stale registry rows for repos this worker no longer manages
     // (e.g. after a rename/transfer) so they never hit the API again.
-    const { allowedRepos, workerState } = this.options;
+    const allowedRepos = this.resolveAllowedRepos();
     if (allowedRepos && allowedRepos.length > 0) {
-      for (const pr of workerState.closeForeignAgentPrs(allowedRepos)) {
+      for (const pr of this.options.workerState.closeForeignAgentPrs(allowedRepos)) {
         console.log(
           `🧹 [${this.name}] ${pr.repo}#${pr.prNumber} is not part of this project; unwatching`,
         );
@@ -392,6 +394,22 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Apply a new poll cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
+  }
+
+  private resolveAllowedRepos(): string[] | undefined {
+    const raw = this.options.allowedRepos;
+    return typeof raw === "function" ? raw() : raw;
+  }
+
   /** One polling cycle over all watched PRs. Skipped while busy. */
   async tick(): Promise<void> {
     if (this.busy) {
@@ -400,7 +418,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      const allowedRepos = this.options.allowedRepos;
+      const allowedRepos = this.resolveAllowedRepos();
       const watchedPrs = this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
       for (const key of this.prCache.keys()) {

@@ -104,6 +104,7 @@ export class TaskPollingAcquirer implements Acquirer {
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
     console.log(
       `🔎 Polling ${this.options.trackerType} every ${this.options.intervalSeconds}s ` +
         `(query: ${this.options.query})`,
@@ -118,6 +119,17 @@ export class TaskPollingAcquirer implements Acquirer {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * Apply a new poll cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
   }
 
   /** One detect → evaluate → dedupe → execute cycle. Skipped while busy. */

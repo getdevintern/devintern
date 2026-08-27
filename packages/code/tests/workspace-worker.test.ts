@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
+import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
   buildFleetEventAcquirers,
   createWorkspaceTaskAcquirer,
@@ -34,6 +35,20 @@ remote = "git@github.com:acme/frontend.git"
 [[routing.rules]]
 repo = "backend"
 labels = ["backend"]
+
+[[routing.rules]]
+repo = "frontend"
+labels = ["frontend"]
+`);
+
+const FRONTEND_ONLY_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
 
 [[routing.rules]]
 repo = "frontend"
@@ -283,6 +298,78 @@ describe("buildFleetEventAcquirers", () => {
       else process.env.GITHUB_TOKEN = savedToken;
       if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
       else process.env.GITHUB_APP_ID = savedAppId;
+      state.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reconciles mention sweeps when repos are added or removed while running", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-sweep-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    const state = openWorkspaceState(workspaceDir);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const savedToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "test-token";
+
+    // No GitHub remotes yet: review poller idles, zero mention sweeps.
+    const nonGithub = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/gitlab.git"
+
+[[repos]]
+name = "forgejo"
+remote = "https://forgejo.example/acme/forgejo.git"
+`);
+
+    // Block all network access: reconciliation starts new sweeps eagerly,
+    // and their initial poll must not reach api.github.com in tests.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as unknown as typeof fetch;
+
+    try {
+      const intervalUpdaters: Array<(seconds: number) => void> = [];
+      const hooksOut: {
+        hooks?: import("../src/lib/workspace/workspace-worker").FleetEventReloadHooks;
+      } = {};
+      const acquirers = await buildFleetEventAcquirers({
+        config: nonGithub,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: async () => ({ tasks: [] }),
+        query: "status=todo",
+        intervalSeconds: 60,
+        intervalUpdaters,
+        reloadHooksOut: hooksOut,
+      });
+
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["poll:reviews"]);
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
+
+      // Live reload adds two GitHub repos; reconciling attaches their sweeps
+      // without a restart.
+      applyWorkspaceConfig(nonGithub, CONFIG);
+      hooksOut.hooks?.reconcileMentionSweeps();
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual(["acme/backend", "acme/frontend"]);
+      expect(intervalUpdaters.length).toBeGreaterThanOrEqual(2);
+
+      // Removing a repo stops its sweep on the next reload.
+      applyWorkspaceConfig(nonGithub, FRONTEND_ONLY_CONFIG);
+      hooksOut.hooks?.reconcileMentionSweeps();
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual(["acme/frontend"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }

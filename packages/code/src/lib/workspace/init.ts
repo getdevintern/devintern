@@ -54,8 +54,9 @@ default_branch = "main"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 
-# Recurring work is loaded once when the worker starts. Each occurrence runs
-# the prompt through the normal task pipeline as a local markdown task.
+# Recurring work is hot-reloaded: edits apply to the running worker without a
+# restart. Each occurrence runs the prompt through the normal task pipeline as
+# a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
 #
 # [[automations]]
