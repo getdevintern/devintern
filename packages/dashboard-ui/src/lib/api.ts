@@ -32,6 +32,8 @@ export interface RunRecord {
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  /** Stable ID of the coordinated multi-repo effort this run belongs to. */
+  coordinationId?: string;
 }
 
 /** Outcome stages carry the run's terminal status (escalated, deferred, …). */

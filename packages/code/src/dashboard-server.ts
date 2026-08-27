@@ -16,6 +16,8 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleCoordinationDetail,
+  handleCoordinations,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -98,6 +100,7 @@ export function startDashboardServer(
   }
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const coordinationDetailPattern = /^\/api\/coordination\/([^/]+)$/;
 
   const server = Bun.serve({
     port,
@@ -119,6 +122,13 @@ export function startDashboardServer(
         const runDetail = pathname.match(runDetailPattern);
         if (runDetail) {
           return json(handleRunDetail(data, runDetail[1]));
+        }
+        if (pathname === "/api/coordination") {
+          return json(handleCoordinations(data, url.searchParams));
+        }
+        const coordinationDetail = pathname.match(coordinationDetailPattern);
+        if (coordinationDetail) {
+          return json(handleCoordinationDetail(data, coordinationDetail[1]));
         }
         if (pathname === "/api/stats") {
           return json(handleStats(data, url.searchParams));

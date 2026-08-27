@@ -1322,13 +1322,16 @@ export class Utils {
    *
    * @param taskKey - JIRA issue key used in the branch name
    * @param baseBranch - Optional explicit base branch
+   * @param options - Optional cwd and an explicit branch name override
+   *   (used by coordinated multi-repo runs, which derive a deterministic,
+   *   collision-resistant branch from the task + coordination ID)
    */
   static async createFeatureBranch(
     taskKey: string,
     baseBranch?: string,
-    options?: { cwd?: string },
+    options?: { cwd?: string; branchName?: string },
   ): Promise<{ success: boolean; branchName: string; message: string }> {
-    const baseBranchName = `feature/${taskKey.toLowerCase()}`;
+    const baseBranchName = options?.branchName ?? `feature/${taskKey.toLowerCase()}`;
     let branchName = baseBranchName;
     let attemptCounter = 1;
     const cwd = options?.cwd;

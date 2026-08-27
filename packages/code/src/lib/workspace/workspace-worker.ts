@@ -17,6 +17,7 @@ import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
+import type { RunStore } from "../run-recorder";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, parseEnvFile } from "./env";
@@ -30,6 +31,10 @@ import { routeTask, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
+import { runCoordinatedTask } from "./orchestrator";
+import type { CoordinatedGitHubDeps } from "./orchestrator";
+import type { CoordinationStore } from "./coordination";
+import type { PlanningTaskInput, PlannerResult } from "./planner-agent";
 import { RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
@@ -74,6 +79,24 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<boolean>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
+  /** Coordinated multi-repo execution (enabled by the workspace worker). */
+  coordination?: CoordinatedExecutionDeps;
+}
+
+/**
+ * Everything the fleet executor needs to coordinate a task across several
+ * repositories when deterministic routing is ambiguous. Absent ⇒ ambiguous
+ * tasks keep the legacy skip-and-record behavior.
+ */
+export interface CoordinatedExecutionDeps {
+  coordinationStore: CoordinationStore;
+  runStore: RunStore;
+  /** Agent-backed planner (injected for tests; defaults to the CLI agent). */
+  planner: (input: PlanningTaskInput) => Promise<PlannerResult>;
+  /** Fetch task title/description for planning (defaults: tracker client). */
+  getTaskContext?: (taskKey: string) => Promise<{ title?: string; description?: string }>;
+  /** GitHub backend for sibling-link reconciliation. */
+  github?: CoordinatedGitHubDeps;
 }
 
 interface RepoRunLockLike {
@@ -227,7 +250,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
-  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
+  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock" | "coordination"
 >;
 
 /**
@@ -246,12 +269,41 @@ export function createFleetTaskExecutor(
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
   const extraArgs = fleetTaskArgs(config);
+  const runCoordinated =
+    deps.coordination &&
+    createCoordinatedRunner(deps, deps.coordination, {
+      runTask,
+      repoLock,
+      extraArgs,
+    });
 
   return async (taskKey, routable) => {
     const decision = routeTask(routable, config);
 
     if (decision.kind !== "routed") {
       const candidates = decision.kind === "ambiguous" ? decision.candidates : [];
+
+      // Ambiguity is the multi-repo signal: when coordination is enabled and
+      // the candidate repos carry routing hints, plan and execute the task
+      // across them instead of skipping.
+      if (
+        decision.kind === "ambiguous" &&
+        runCoordinated &&
+        candidates.some((name) => findRepo(config, name)?.hints)
+      ) {
+        console.log(
+          `🧩 [fleet] ${taskKey} matches rules for multiple repos (${candidates.join(", ")}); planning a coordinated effort`,
+        );
+        try {
+          return await runCoordinated(taskKey, candidates);
+        } catch (error) {
+          console.error(
+            `❌ [fleet] coordinated execution failed for ${taskKey}: ${(error as Error).message}`,
+          );
+          return false;
+        }
+      }
+
       skips.record({
         taskKey,
         reason: decision.kind,
@@ -314,6 +366,66 @@ export function createFleetTaskExecutor(
   };
 }
 
+/**
+ * Build the coordinated (multi-repo) task runner used by the fleet executor:
+ * wraps {@link runCoordinatedTask} with the worker's stores, the agent
+ * planner, and a default task-context fetcher backed by the tracker client.
+ */
+function createCoordinatedRunner(
+  deps: FleetExecutorDeps,
+  coordination: CoordinatedExecutionDeps,
+  io: {
+    runTask: NonNullable<WorkspaceTaskAcquirerDeps["runTask"]>;
+    repoLock: (repoName: string) => LockManager;
+    extraArgs: string[];
+  },
+): (taskKey: string, candidates: string[]) => Promise<boolean> {
+  const getTaskContext =
+    coordination.getTaskContext ??
+    (async (taskKey: string) => {
+      try {
+        const { TaskTrackerManager } = await import("../task-tracker-manager");
+        const tracker = new TaskTrackerManager().getClient(taskKey);
+        const task = await tracker.getTask(taskKey);
+        return {
+          title: task.summary,
+          description: tracker.extractDescriptionText(task) ?? "",
+        };
+      } catch {
+        return {};
+      }
+    });
+
+  return async (taskKey, candidates) => {
+    const { title, description } = await getTaskContext(taskKey);
+    const result = await runCoordinatedTask(
+      {
+        config: deps.config,
+        workspaceDir: deps.workspaceDir,
+        store: coordination.coordinationStore,
+        runs: coordination.runStore,
+        repoManager: deps.repoManager,
+        repoLock: io.repoLock,
+        planner: coordination.planner,
+        github: coordination.github,
+        runTask: io.runTask,
+        extraArgs: io.extraArgs,
+        recordSkip: () => {
+          deps.skips.record({
+            taskKey,
+            reason: "unplanned",
+            candidates,
+            taskUpdated: undefined,
+          });
+        },
+      },
+      { taskKey, title, description, candidates },
+      candidates,
+    );
+    return result;
+  };
+}
+
 export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
@@ -366,6 +478,30 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
+
+  // Coordinated (multi-repo) execution: agent planning informed by routing
+  // hints, dependency-ordered per-repo runs, and sibling-PR reconciliation.
+  const { createMultiRepoPlanner } = await import("./planner-agent");
+  const { RunStore } = await import("../run-recorder");
+  const coordinationDeps: CoordinatedExecutionDeps = {
+    coordinationStore: state.coordination,
+    runStore: new RunStore(state.dbPath),
+    planner: createMultiRepoPlanner({ config, workingDir: workspaceDir }),
+  };
+  if (process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID) {
+    const { GitHubReviewsClient } = await import("../github-reviews");
+    const gh = new GitHubReviewsClient({ preferAppAuth: true });
+    coordinationDeps.github = {
+      getPullRequestBody: async (slug, prNumber) => {
+        const [owner, name] = slug.split("/") as [string, string];
+        return (await gh.getPullRequest(owner, name, prNumber)).body;
+      },
+      updatePullRequestBody: async (slug, prNumber, body) => {
+        const [owner, name] = slug.split("/") as [string, string];
+        await gh.updatePullRequestBody(owner, name, prNumber, body);
+      },
+    };
+  }
 
   for (const repo of config.repos) {
     const removed = await repoManager.sweepStaleWorktrees(
@@ -430,6 +566,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordination: coordinationDeps,
       }),
     );
     acquirers.push(
@@ -442,6 +579,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordination: coordinationDeps,
       })),
     );
   }
@@ -496,6 +634,7 @@ export async function buildFleetEventAcquirers(options: {
   query: string;
   intervalSeconds: number;
   verbose?: boolean;
+  coordination?: CoordinatedExecutionDeps;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
     options;
@@ -678,6 +817,7 @@ export async function buildFleetEventAcquirers(options: {
         workspaceDir,
         skips: state.skips,
         repoManager,
+        coordination: options.coordination,
       });
       const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
 

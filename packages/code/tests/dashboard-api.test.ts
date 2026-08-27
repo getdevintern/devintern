@@ -5,6 +5,8 @@ import { tmpdir } from "os";
 
 import {
   DashboardData,
+  handleCoordinationDetail,
+  handleCoordinations,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -14,6 +16,7 @@ import { RunStore } from "../src/lib/run-recorder";
 import type { RunStats } from "../src/lib/run-recorder";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
+import { CoordinationStore } from "../src/lib/workspace/coordination";
 import { startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -252,6 +255,151 @@ describe("dashboard API", () => {
     store.close();
 
     expect((handleRuns(data, new URLSearchParams()).body as { total: number }).total).toBe(1);
+  });
+});
+
+describe("coordination API", () => {
+  let dir: string;
+  let dbPath: string;
+  let data: DashboardData;
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `dash-coord-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    dbPath = join(dir, "queue.db");
+    data = new DashboardData({ dbPath, workingDir: dir });
+  });
+
+  afterEach(() => {
+    data.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("groups a coordinated effort with repository, status, deps, branch, and PR", async () => {
+    const plan = {
+      taskKey: "DEV-84",
+      coordinationId: "dev-84-abc123",
+      entries: [
+        { repo: "shared-config", rationale: "flags", change: "add flag", dependencies: [] },
+        {
+          repo: "backend",
+          rationale: "uses flag",
+          change: "use it",
+          dependencies: ["shared-config"],
+        },
+      ],
+      executionOrder: ["shared-config", "backend"],
+    };
+
+    // Seed the coordination state AND the pipeline run rows the way a real
+    // effort leaves them behind.
+    const coordinationStore = new CoordinationStore(dbPath);
+    const runsStore = new RunStore(dbPath);
+    coordinationStore.ensureCoordination({
+      coordinationId: plan.coordinationId,
+      taskKey: plan.taskKey,
+      plan,
+    });
+    coordinationStore.ensureRuns(plan);
+    coordinationStore.patchRun(plan.coordinationId, "shared-config", {
+      status: "succeeded",
+      branch: "feature/dev-84-abc123",
+      prUrl: "https://github.com/acme/shared-config/pull/1",
+      prNumber: 1,
+    });
+    coordinationStore.patchRun(plan.coordinationId, "backend", {
+      status: "failed",
+      reason: "tests failed",
+      branch: "task/dev-84-abc123",
+    });
+    runsStore.createRun({ origin: "task", taskKey: "DEV-84", coordinationId: plan.coordinationId });
+    runsStore.close();
+    coordinationStore.close();
+
+    // List endpoint.
+    const listResponse = handleCoordinations(data, new URLSearchParams());
+    expect(listResponse.status).toBe(200);
+    const list = (listResponse.body as { coordinations: Array<Record<string, unknown>> })
+      .coordinations;
+    expect(list).toHaveLength(1);
+    expect(list[0]?.coordinationId).toBe("dev-84-abc123");
+
+    // Detail endpoint with derived dependency state.
+    const detailResponse = handleCoordinationDetail(data, "dev-84-abc123");
+    expect(detailResponse.status).toBe(200);
+    const detail = detailResponse.body as {
+      status: string;
+      parentRunId?: number;
+      runs: Array<{
+        repo: string;
+        status: string;
+        branch?: string;
+        prUrl?: string;
+        dependencyState: string;
+        reason?: string;
+      }>;
+    };
+    expect(detail.status).toBe("in_progress");
+    expect(detail.runs).toHaveLength(2);
+
+    const sharedRow = detail.runs.find((run) => run.repo === "shared-config");
+    expect(sharedRow).toMatchObject({
+      status: "succeeded",
+      branch: "feature/dev-84-abc123",
+      prUrl: "https://github.com/acme/shared-config/pull/1",
+      dependencyState: "none",
+    });
+    const backendRow = detail.runs.find((run) => run.repo === "backend");
+    expect(backendRow).toMatchObject({
+      status: "failed",
+      branch: "task/dev-84-abc123",
+      dependencyState: "satisfied", // its prerequisite succeeded
+      reason: "tests failed",
+    });
+
+    // Unknown ids 404; bad limits 400.
+    expect(handleCoordinationDetail(data, "nope").status).toBe(404);
+    expect(handleCoordinations(data, new URLSearchParams("limit=0")).status).toBe(400);
+  });
+
+  test("blocked dependents expose a blocked dependency state", () => {
+    const coordinationStore = new CoordinationStore(dbPath);
+    const plan = {
+      taskKey: "DEV-85",
+      coordinationId: "dev-85-blocked",
+      entries: [
+        { repo: "shared-config", rationale: "", change: "", dependencies: [] },
+        { repo: "backend", rationale: "", change: "", dependencies: ["shared-config"] },
+      ],
+      executionOrder: ["shared-config", "backend"],
+    };
+    coordinationStore.ensureCoordination({
+      coordinationId: plan.coordinationId,
+      taskKey: plan.taskKey,
+      plan,
+    });
+    coordinationStore.ensureRuns(plan);
+    coordinationStore.patchRun(plan.coordinationId, "shared-config", { status: "failed" });
+    coordinationStore.patchRun(plan.coordinationId, "backend", { status: "blocked" });
+    coordinationStore.close();
+
+    const response = handleCoordinationDetail(data, "dev-85-blocked");
+    const detail = response.body as {
+      runs: Array<{ repo: string; dependencyState: string }>;
+    };
+    expect(detail.runs.find((run) => run.repo === "shared-config")?.dependencyState).toBe("none");
+    expect(detail.runs.find((run) => run.repo === "backend")?.dependencyState).toBe("blocked");
+  });
+
+  test("/api/runs filters by coordinationId for dashboard grouping", () => {
+    const store = new RunStore(dbPath);
+    store.createRun({ origin: "task", taskKey: "DEV-84", coordinationId: "dev-84-abc123" });
+    store.createRun({ origin: "task", taskKey: "DEV-84" }); // plain single-repo attempt
+    store.close();
+
+    const filtered = handleRuns(data, new URLSearchParams("coordinationId=dev-84-abc123"));
+    expect(filtered.status).toBe(200);
+    expect((filtered.body as { total: number }).total).toBe(1);
   });
 });
 

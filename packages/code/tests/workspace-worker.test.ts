@@ -15,6 +15,7 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
+import { RunStore } from "../src/lib/run-recorder";
 import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
@@ -305,6 +306,128 @@ describe("buildFleetEventAcquirers", () => {
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("coordinated execution trigger on ambiguous routing", () => {
+  const HINTED_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+
+[[repos]]
+name = "shared-config"
+remote = "git@github.com:acme/shared-config.git"
+  [repos.hints]
+  purpose = "Shared feature flags"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+  [repos.hints]
+  purpose = "API service"
+  depends_on = ["shared-config"]
+
+[[routing.rules]]
+repo = "shared-config"
+labels = ["flags"]
+
+[[routing.rules]]
+repo = "backend"
+labels = ["backend"]
+`);
+
+  let workspaceDir: string;
+  let state: WorkspaceState;
+  let repoManager: FakeRepoManager;
+  let runs: RunStore;
+  let ranRepos: string[];
+  let runResult: boolean;
+
+  beforeEach(() => {
+    workspaceDir = join(
+      tmpdir(),
+      `ws-coord-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+    repoManager = new FakeRepoManager(workspaceDir);
+    runs = new RunStore(join(workspaceDir, "state", "queue.db"));
+    ranRepos = [];
+    runResult = true;
+  });
+
+  afterEach(() => {
+    state.close();
+    runs.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  function makeAcquirer(plannerResult: unknown) {
+    return createWorkspaceTaskAcquirer({
+      config: HINTED_CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({
+        tasks: [{ key: "T-9", updated: "u1", labels: ["backend", "flags"] }],
+      }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      runTask: async (_taskKey, _args, opts) => {
+        const afterWorktrees = opts.cwd.split(/worktrees[\\/]/)[1] ?? "";
+        ranRepos.push(afterWorktrees.split(/[\\/]/)[0] ?? "?");
+        return runResult;
+      },
+      repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      coordination: {
+        coordinationStore: state.coordination,
+        runStore: runs,
+        planner: async () => plannerResult as never,
+      },
+    });
+  }
+
+  test("an ambiguous task with hinted candidates runs as one coordinated effort", async () => {
+    const acquirer = makeAcquirer({
+      ok: true,
+      entries: [
+        {
+          repo: "backend",
+          rationale: "implements",
+          change: "code",
+          dependencies: ["shared-config"],
+        },
+        { repo: "shared-config", rationale: "flag first", change: "flag", dependencies: [] },
+      ],
+      executionOrder: ["shared-config", "backend"],
+    });
+    await acquirer.tick();
+
+    // Both planned repos ran through the same single-repo pipeline.
+    expect(ranRepos).toEqual(["shared-config", "backend"]);
+    // No routing skip was recorded; the effort is tracked in coordination state.
+    expect(state.skips.list()).toHaveLength(0);
+    const effort = state.coordination.latestForTask("T-9");
+    expect(effort?.status).toBe("completed");
+    expect(effort?.plan?.executionOrder).toEqual(["shared-config", "backend"]);
+  });
+
+  test("a planning failure records an unplanned skip and touches no repository", async () => {
+    const acquirer = makeAcquirer({
+      ok: false,
+      errors: ["Plan selected no repositories; refusing to guess."],
+    });
+    await acquirer.tick();
+
+    expect(ranRepos).toEqual([]);
+    const skips = state.skips.list();
+    expect(skips).toHaveLength(1);
+    expect(skips[0]?.reason).toBe("unplanned");
+    expect(skips[0]?.candidates).toEqual(["backend", "shared-config"]);
   });
 });
 

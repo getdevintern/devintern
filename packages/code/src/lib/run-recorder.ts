@@ -50,6 +50,11 @@ export interface RunMeta {
   branch?: string;
   repo?: string;
   prNumber?: number;
+  /**
+   * Stable ID of the coordinated multi-repo effort this run belongs to
+   * (set from `DEVINTERN_COORDINATION_ID` by coordinated task runs).
+   */
+  coordinationId?: string;
   automationId?: string;
   /** Explicit attempt for non-task durable events. */
   attempt?: number;
@@ -66,6 +71,8 @@ export interface RunRecord extends RunMeta {
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  /** Stable ID of the coordinated multi-repo effort this run belongs to. */
+  coordinationId?: string;
 }
 
 export interface RunStageRecord {
@@ -85,6 +92,7 @@ export interface RunFilter {
   taskKey?: string;
   status?: RunStatus;
   origin?: RunOrigin;
+  coordinationId?: string;
 }
 
 export interface RunStatsWeek {
@@ -209,6 +217,12 @@ export class RunStore {
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
+    // Additive migration for databases created before coordinated runs:
+    // one stable coordination ID ties a parent effort to its per-repo runs.
+    if (!columns.some((c) => c.name === "coordination_id")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN coordination_id TEXT");
+    }
+
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_runs_task_key ON runs(task_key)
     `);
@@ -240,8 +254,8 @@ export class RunStore {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
       `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number,
-       automation_id, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       coordination_id, automation_id, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -250,6 +264,7 @@ export class RunStore {
         meta.branch ?? null,
         meta.repo ?? null,
         meta.prNumber ?? null,
+        meta.coordinationId ?? null,
         meta.automationId ?? null,
         Date.now(),
         attempt,
@@ -382,6 +397,10 @@ export class RunStore {
     if (filter.origin) {
       clauses.push("origin = ?");
       params.push(filter.origin);
+    }
+    if (filter.coordinationId) {
+      clauses.push("coordination_id = ?");
+      params.push(filter.coordinationId);
     }
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
@@ -548,6 +567,7 @@ export class RunStore {
       startedAt: row.started_at as number,
       finishedAt: (row.finished_at as number | null) ?? undefined,
       attempt: (row.attempt as number | null) ?? undefined,
+      coordinationId: (row.coordination_id as string | null) ?? undefined,
       automationId: (row.automation_id as string | null) ?? undefined,
       ticketKey: (row.ticket_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
@@ -579,12 +599,18 @@ function warnOnce(action: string, error: unknown): void {
 /**
  * Start recording a run. Replaces any dangling previous context.
  *
+ * Coordinated multi-repo runs propagate their parent effort through
+ * `DEVINTERN_COORDINATION_ID` in the subprocess environment; it links the
+ * per-repo pipeline run to its coordinated effort without threading state
+ * through the CLI.
+ *
  * @param meta - Run origin and metadata
  */
 export function beginRun(meta: RunMeta): void {
   try {
     currentStore ??= new RunStore();
-    currentRunId = currentStore.createRun(meta);
+    const coordinationId = meta.coordinationId ?? process.env.DEVINTERN_COORDINATION_ID;
+    currentRunId = currentStore.createRun(coordinationId ? { ...meta, coordinationId } : meta);
   } catch (error) {
     currentRunId = null;
     warnOnce("begin", error);

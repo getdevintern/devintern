@@ -262,6 +262,29 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Replace a pull request's description.
+   *
+   * Used by coordinated multi-repo runs to reconcile sibling PR links after
+   * every PR has been created. Only the body changes — title and state are
+   * preserved because the PATCH payload omits them.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param prNumber - Pull request number
+   * @param body - New description (markdown)
+   */
+  async updatePullRequestBody(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+  ): Promise<void> {
+    await this.apiRequest("PATCH", `/repos/${owner}/${repo}/pulls/${prNumber}`, owner, repo, {
+      body,
+    });
+  }
+
+  /**
    * Fetch a user's permission level on a repository.
    *
    * Used to gate mention-triggered automation: only users who can push

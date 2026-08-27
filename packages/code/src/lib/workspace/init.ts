@@ -53,6 +53,22 @@ default_branch = "main"
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
+#
+# Optional per-repo routing hints for coordinated multi-repo tasks. When a
+# task matches rules for several repos, the planner uses these hints (plus
+# the task text) to decide which repositories are affected and in which
+# order they should be implemented:
+#
+# [[repos]]
+# name = "frontend"
+# remote = "git@github.com:acme/frontend.git"
+#   [repos.hints]
+#   purpose = "Web dashboard"                  # what the repo is for
+#   domains = ["checkout"]                     # product areas covered
+#   capabilities = ["auth"]                    # provided to other repos
+#   owned_paths = ["src/checkout/**"]          # paths this repo owns
+#   depends_on = ["backend"]                   # code-level dependencies
+# branch_prefix = "task"                       # feature-branch convention (default "feature")
 
 # Recurring work is loaded once when the worker starts. Each occurrence runs
 # the prompt through the normal task pipeline as a local markdown task.
