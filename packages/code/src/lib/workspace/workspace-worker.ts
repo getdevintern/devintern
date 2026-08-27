@@ -13,6 +13,7 @@ import { dirname, join, resolve } from "path";
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
+import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
@@ -189,7 +190,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
   // task's routing fields from the evaluate step of the same tick.
   const routables = new Map<string, RoutableTask>();
 
-  const executeTask = (taskKey: string): Promise<boolean> =>
+  const executeTask = (taskKey: string): Promise<TaskExecutionResult> =>
     execute(
       taskKey,
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
@@ -239,7 +240,7 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-): (taskKey: string, routable: RoutableTask) => Promise<boolean> {
+): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
@@ -276,9 +277,9 @@ export function createFleetTaskExecutor(
     const lockResult = lock.acquire();
     if (!lockResult.success) {
       console.warn(
-        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
+        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
       );
-      return false;
+      return "deferred";
     }
 
     try {

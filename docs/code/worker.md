@@ -139,6 +139,7 @@ Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's curso
 The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
 
 - `📌 picking up KEY` — it was claimed on this tick.
+- `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
