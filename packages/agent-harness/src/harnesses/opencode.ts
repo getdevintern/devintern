@@ -43,7 +43,11 @@ export class OpencodeHarness implements AgentHarness {
    */
   buildArgs(options: AgentRunOptions): string[] {
     assertModeSupported(this, options.mode);
-    const args: string[] = ["run"];
+    // OpenCode can keep `run` alive after an unrecoverable provider error while
+    // writing the only diagnostic to its private log file. Mirror ERROR-level
+    // logs to stderr so headless callers can detect the failure and terminate
+    // the stuck process instead of waiting for their outer timeout.
+    const args: string[] = ["run", "--print-logs", "--log-level", "ERROR"];
 
     if (isConstrainedMode(options.mode)) {
       args.push("--agent", "plan");

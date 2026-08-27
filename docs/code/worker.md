@@ -209,8 +209,8 @@ Every run is recorded stage by stage in the local database. The worker serves th
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md).
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you need a wall-clock window instead of a resident process, see [Night-only CLI runs](./automated-task-processing.md#night-only-cli-runs).
 
 ## License
 
-The worker is unattended automation and requires an automation license (Supporter, Team, or Business), the same requirement scheduled runs have. Interactive runs stay free under the FSL license.
+The worker is unattended automation and requires an automation license (Supporter, Team, or Business). Interactive runs stay free under the FSL license.

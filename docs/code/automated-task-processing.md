@@ -1,22 +1,27 @@
 ---
 title: "Automated Task Processing"
-description: "Drain your backlog continuously with the worker daemon, or schedule @devintern/code via systemd timers or cron"
+description: "Drain your backlog continuously with the worker daemon"
 section: "Server Automation"
 order: 5
-dateModified: 2026-08-19
+dateModified: 2026-08-26
 ---
 
 # Automated Task Processing
 
-Run @devintern/code without manual intervention.
+Run @devintern/code without sitting at the keyboard. The unattended path is the [worker daemon](./worker.md): one long-running process that polls your tracker, runs ready tasks, watches the agent's PRs, and can receive events in seconds through the [relay](./relay.md).
 
-> **Recommended: the worker daemon.** `devintern worker` replaces timer and cron wiring with a single long-running process: it polls your tracker, runs ready tasks, and watches the agent's PRs for review feedback, with persistent cursors and crash-safe state. One systemd `.service` (no `.timer` needed), or just a terminal. See the [Worker Daemon guide](./worker.md).
+```bash
+devintern worker init
+devintern worker
+```
 
-The scheduled one-shot approach below still works everywhere and remains useful when you prefer runs at fixed times (for example, only at night) rather than a resident process. On modern Linux servers the recommended scheduler is **systemd timers**: structured logs via `journalctl`, restart-on-failure semantics, and no root crontab access required. **Cron** still works on any Unix-like system and is shown second as a fallback (macOS, BSD, Alpine, containers without an init system).
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing, and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
+
+Do not schedule `devintern --query` every few minutes. That is what the worker already does.
 
 ## Requires an automation license
 
-Unattended execution (the worker, systemd, cron, or any CI environment) requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds no matching license, the run fails immediately with:
+Unattended execution (the worker, a systemd timer, cron, or any CI environment) requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds no matching license, the run fails immediately with:
 
 ```
 ❌ License check failed
@@ -24,19 +29,25 @@ Unattended execution (the worker, systemd, cron, or any CI environment) requires
    automation license was found.
 ```
 
-Set `LICENSE_KEY` in your project's `.devintern-code/.env` (or as an `Environment=` entry in the unit file) to an automation license key (Supporter, Team, or Business) from [devintern.com/account](https://devintern.com/account). Interactive runs (`devintern PROJ-123` from your terminal) are unaffected and do **not** require a license. @devintern/code is free to use interactively under the FSL license.
+Set `LICENSE_KEY` in the workspace `.env` (or as an `Environment=` entry in a unit file) to an automation license key from [devintern.com/account](https://devintern.com/account). Interactive runs (`devintern PROJ-123` from your terminal) are unaffected and do **not** require a license. @devintern/code is free to use interactively under the FSL license.
 
-## systemd timers
+## Night-only CLI runs
 
-A systemd job is a pair of unit files: a one-shot `.service` that runs `devintern`, and a `.timer` that triggers it on a schedule. Omit `--pr-target-branch` unless you intentionally want PRs against a non-default branch — the CLI detects `main`, `master`, or a custom default from the remote.
+The worker polls whenever it is running. If you need a wall-clock window (for example only at night) until the worker has quiet hours, you can still fire a one-shot `devintern --query` from a systemd timer or crontab. This is a gap filler, not a second product.
 
-### Every 10 minutes: process Intern-labeled tasks
+Story-point estimation is the other remaining one-shot: see [Story Points Estimation](./story-points-estimation.md).
 
-`/etc/systemd/system/devintern-intern.service`:
+Omit `--pr-target-branch` unless you intentionally want PRs against a non-default branch — the CLI detects `main`, `master`, or a custom default from the remote.
+
+### systemd timer (Linux)
+
+A systemd job is a pair of unit files: a one-shot `.service` that runs `devintern`, and a `.timer` that triggers it on a schedule. This example drains Intern-labeled work at 22:00 every night.
+
+`/etc/systemd/system/devintern-nightly.service`:
 
 ```ini
 [Unit]
-Description=Process Intern-labeled tasks with @devintern/code
+Description=Nightly Intern-labeled drain with @devintern/code
 After=network-online.target
 Wants=network-online.target
 
@@ -52,15 +63,14 @@ StandardOutput=journal
 StandardError=journal
 ```
 
-`/etc/systemd/system/devintern-intern.timer`:
+`/etc/systemd/system/devintern-nightly.timer`:
 
 ```ini
 [Unit]
-Description=Run @devintern/code every 10 minutes
+Description=Run @devintern/code at 22:00
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
+OnCalendar=*-*-* 22:00:00
 Persistent=true
 
 [Install]
@@ -71,75 +81,25 @@ Enable, start, and inspect:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now devintern-intern.timer
+sudo systemctl enable --now devintern-nightly.timer
 
 # Show next scheduled run
-systemctl list-timers devintern-intern.timer
+systemctl list-timers devintern-nightly.timer
 
 # Tail recent runs
-journalctl -u devintern-intern.service -f
+journalctl -u devintern-nightly.service -f
 ```
 
-### Hourly: process AutoImpl-labeled tasks
+### Cron
 
-Same `.service` shape, swap the `ExecStart` JQL:
-
-```ini
-ExecStart=/usr/local/bin/devintern \
-  --query 'status = "To Do" AND labels IN (AutoImpl)' \
-  --create-pr
-```
-
-And use an hourly timer:
-
-```ini
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=1h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-### Twice daily: high-priority bug sweep
-
-For wall-clock schedules, use `OnCalendar` instead of `OnUnitActiveSec`. This timer fires at 09:00 and 17:00 every day:
-
-```ini
-[Timer]
-OnCalendar=*-*-* 09,17:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-Matching `.service`:
-
-```ini
-ExecStart=/usr/local/bin/devintern \
-  --query 'type = Bug AND priority = High AND status = "To Do" AND labels IN (Intern)' \
-  --max-turns 300 \
-  --create-pr
-```
-
-## Cron
-
-If you're on a system without systemd, the same three jobs work as crontab entries:
+If you're on a system without systemd, the same night window works as a crontab entry:
 
 ```bash
-# Process tasks labeled "Intern" in open sprints every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Process AutoImpl-labeled tasks every hour
-0 * * * * cd /path/to/your/project && devintern --query 'status = "To Do" AND labels IN (AutoImpl)' --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Process high-priority bugs twice daily
-0 9,17 * * * cd /path/to/your/project && devintern --query 'type = Bug AND priority = High AND status = "To Do" AND labels IN (Intern)' --max-turns 300 --create-pr >> /tmp/devintern-cron.log 2>&1
+# Drain Intern-labeled tasks in open sprints at 22:00
+0 22 * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 ```
 
-## Pin `PATH` so the `bun` shebang resolves
+### Pin `PATH` so the `bun` shebang resolves
 
 The `devintern` binary is a `#!/usr/bin/env bun` script, so it needs **`bun` on `PATH`** to run. systemd services start with a minimal `PATH` that usually excludes wherever your version manager (mise, asdf, nvm) installed Bun. The unit then fails with `bun: command not found` (or silently can't find `devintern` itself). Pin `PATH` explicitly in the `[Service]` section, listing the directory that contains `bun` (and `devintern`):
 
@@ -150,7 +110,7 @@ Environment="PATH=/home/youruser/.local/bin:/home/youruser/.local/share/mise/ins
 
 Confirm the path with `dirname "$(which bun)"`. The same applies to cron, which also runs with a stripped `PATH`: either set `PATH=` at the top of the crontab or call `devintern` by absolute path.
 
-## Running as a user service (no root)
+### Running as a user service (no root)
 
 The examples above install to `/etc/systemd/system` (system-wide, needs `sudo`). You can instead run entirely as your own user with **`systemctl --user`**: no root, and the unit can read your `~/.ssh` and version-manager installs directly. Place the unit in `~/.config/systemd/user/`, drop the `User=` line, and manage it with `systemctl --user enable --now <unit>.timer`. To keep user services running after you log out, enable lingering once:
 
@@ -158,7 +118,9 @@ The examples above install to `/etc/systemd/system` (system-wide, needs `sudo`).
 loginctl enable-linger "$USER"
 ```
 
-## Git push under automation
+For a resident worker rather than a night timer, `devintern worker init` already writes a user-level systemd unit or macOS launchd agent.
+
+### Git push under automation
 
 If your repo's remote is SSH (`git@github.com:...`), the unattended run needs the SSH key reachable without an interactive agent. The cleanest approach is a `~/.ssh/config` host entry pointing the host at the right key: plain `git push` then resolves it (no `GIT_SSH_COMMAND` needed):
 
@@ -169,11 +131,11 @@ Host github.com
 
 A `--user` service inherits your `$HOME` and reads this automatically; a system service with `User=` reads that user's `~/.ssh`. Alternatively, use an HTTPS remote with a `GITHUB_TOKEN`.
 
-## Cleaning up processes the agent leaves running
+### Cleaning up processes the agent leaves running
 
 While working a task, the AI agent often starts long-running processes to verify its changes: dev servers (`npm run dev`, `vite`), watchers, `docker compose up`, and so on. If the agent does not stop them, they would otherwise outlive the run and pile up across every scheduled execution.
 
-@devintern/code prevents this. Each agent is launched in its own process group, and the entire group (the agent plus anything it spawned) is torn down when the run ends, times out, or is interrupted. This works the same under systemd, cron, and macOS, so you do not need to do anything to enable it.
+@devintern/code prevents this. Each agent is launched in its own process group, and the entire group (the agent plus anything it spawned) is torn down when the run ends, times out, or is interrupted. This works the same under the worker, systemd, cron, and macOS, so you do not need to do anything to enable it.
 
 Two layers back this up:
 
@@ -183,21 +145,21 @@ Two layers back this up:
 If you run @devintern/code under cron on Linux and want the same daemon-proof guarantee systemd gives, wrap the command in a transient scope so its children share one cgroup:
 
 ```bash
-*/10 * * * * cd /path/to/your/project && systemd-run --user --scope --collect devintern --query '...' --create-pr >> /tmp/devintern-cron.log 2>&1
+0 22 * * * cd /path/to/your/project && systemd-run --user --scope --collect devintern --query '...' --create-pr >> /tmp/devintern-cron.log 2>&1
 ```
 
-## Failure feedback on the task tracker
+### Failure feedback on the task tracker
 
 A failed run never ends silently. When processing a task fails after it was moved to "In Progress" — an agent timeout, a usage limit, a crash, or the process being killed by `SIGTERM`/`SIGINT` (for example when a scheduler stops the job) — @devintern/code posts a comment on the ticket explaining that no pull request was created, the reason for the failure, and where partial work may live (the `feature/<key>` branch or a git stash). The ticket is also moved back to its To Do status so the next scheduled run can retry it.
 
 Pass `--skip-comments` to disable all tracker comments, including failure feedback.
 
-## Linear schedules
+### Linear schedules
 
 For Linear (`TASK_TRACKER=linear`), swap JQL for a JSON `IssueFilter`. Wrap the JSON in single quotes so the shell passes it through unchanged:
 
 ```ini
-# systemd service: process "intern"-labeled issues every 10 minutes
+# systemd service: nightly "intern"-labeled drain
 ExecStart=/usr/local/bin/devintern \
   --query '{"labels":{"name":{"eq":"intern"}}}' \
   --max-turns 500 \
@@ -205,14 +167,11 @@ ExecStart=/usr/local/bin/devintern \
 ```
 
 ```bash
-# cron: process "intern"-labeled Linear issues every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# cron: process high-priority issues assigned to me every hour
-0 * * * * cd /path/to/your/project && devintern --query '{"assignee":{"isMe":{"eq":true}},"priority":{"lte":2}}' --create-pr >> /tmp/devintern-cron.log 2>&1
+# cron: nightly "intern"-labeled Linear drain
+0 22 * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
 ```
 
-## Important Notes
+### Notes for timer runs
 
 - Set `WorkingDirectory` (systemd) or `cd` (cron) to your project directory so the correct `.devintern-code/.env` is loaded
 - Use absolute paths to the `devintern` and agent binaries, or pin `PATH` explicitly in the unit file (see above)
