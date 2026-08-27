@@ -28,7 +28,7 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs).
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, scheduled, or estimate), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs; `origin=estimate` isolates story-point sweeps).
 - **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
@@ -52,7 +52,7 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 
 | Endpoint                    | Returns                                                               |
 | --------------------------- | --------------------------------------------------------------------- |
-| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
+| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` and `origin=estimate` are supported |
 | `GET /api/runs/:id`         | One run with its stage timeline                                       |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
 | `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |

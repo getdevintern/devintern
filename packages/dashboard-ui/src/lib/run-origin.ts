@@ -5,6 +5,7 @@ export const RUN_ORIGIN_LABELS = {
   pr_mention: "PR mention",
   conflict_resolution: "Conflict resolution",
   scheduled: "Scheduled automation",
+  estimate: "Estimate run",
 } satisfies Record<RunOrigin, string>;
 
 export function formatRunOrigin(origin: RunOrigin): string {

@@ -88,6 +88,9 @@ describe("dashboard API", () => {
     const scheduled = handleRuns(data, new URLSearchParams("origin=scheduled"));
     expect((scheduled.body as { total: number }).total).toBe(1);
 
+    const estimate = handleRuns(data, new URLSearchParams("origin=estimate"));
+    expect((estimate.body as { total: number }).total).toBe(0);
+
     const byKey = handleRuns(data, new URLSearchParams("taskKey=PROJ-1"));
     expect((byKey.body as { total: number }).total).toBe(1);
   });

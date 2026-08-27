@@ -63,7 +63,9 @@ export async function startWorker(
 
   if (acquirers.length === 0) {
     console.error("❌ No event sources enabled.");
-    console.error("   Set [defaults].task_query in workspace.toml, or add [[automations]].");
+    console.error(
+      "   Set [defaults].task_query in workspace.toml, or add [[automations]] / [[estimations]].",
+    );
     console.error("   Direct webhooks are a separate command:  devintern webhook serve");
     lock.release();
     process.exit(1);

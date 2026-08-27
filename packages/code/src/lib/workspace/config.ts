@@ -1,8 +1,15 @@
 import { readFileSync } from "fs";
 
-import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
+import {
+  supportsEstimate,
+  supportsPolling,
+  trackersSupportingEstimate,
+  trackersSupportingPolling,
+} from "../tracker-capabilities";
 import { parseAutomationEntries } from "../automation-config";
 import type { AutomationConfig } from "../automation-config";
+import { parseEstimationEntries } from "../estimation-config";
+import type { EstimationConfig } from "../estimation-config";
 import { parseToml } from "./toml";
 
 /** Workspace-wide settings from the `[workspace]` table. */
@@ -62,6 +69,7 @@ export interface WorkspaceConfig {
   repos: RepoConfig[];
   routing: RoutingRule[];
   automations: AutomationConfig[];
+  estimations: EstimationConfig[];
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
@@ -244,6 +252,11 @@ export function parseWorkspaceConfig(
         `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
     );
   }
+  if (defaultsTable.estimate_query !== undefined) {
+    errors.push(
+      "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
+    );
+  }
   const defaults: WorkspaceDefaults = {
     tracker: tracker ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
@@ -325,6 +338,20 @@ export function parseWorkspaceConfig(
   });
   errors.push(...automationResult.errors);
 
+  const estimationResult = parseEstimationEntries(document.estimations);
+  errors.push(...estimationResult.errors);
+  // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
+  // with estimate support can serve them; fail the job at startup otherwise.
+  if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
+    for (const estimation of estimationResult.estimations) {
+      errors.push(
+        `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
+          `(supported: ${trackersSupportingEstimate().join(", ")}); ` +
+          `[defaults].tracker "${tracker}" does not.`,
+      );
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
@@ -335,6 +362,7 @@ export function parseWorkspaceConfig(
     repos,
     routing,
     automations: automationResult.automations,
+    estimations: estimationResult.estimations,
   };
 }
 
