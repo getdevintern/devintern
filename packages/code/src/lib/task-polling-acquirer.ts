@@ -4,7 +4,7 @@
  * Each tick:
  * 1. Detect — the tracker's change detector answers "did anything change
  *    since the persisted cursor?" (cheap, cursor-based).
- * 2. Evaluate — re-run the user's configured `--query` via the tracker's
+ * 2. Evaluate — re-run the user's configured query via the tracker's
  *    `searchTasks` to get the tasks that are actually ready.
  * 3. Dedupe — skip tasks already picked up at the same `updated` stamp
  *    (`processed_events`), so a task re-enters only when it changes again.
@@ -28,6 +28,9 @@ export interface ReadyTask {
   updated?: string;
 }
 
+/** A deferred task was not attempted and must be evaluated again next tick. */
+export type TaskExecutionResult = boolean | "deferred";
+
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
   return `task:${task.key}:${task.updated?.trim() ?? ""}`;
@@ -47,20 +50,13 @@ export interface TaskPollingAcquirerOptions {
   queue: WebhookQueue;
   /** Evaluate step: run the user's query (injected for tests). */
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
-  /** Execute step: process one ready task; returns success (injected for tests). */
-  executeTask: (taskKey: string) => Promise<boolean>;
+  /** Execute step: process, fail, or defer one ready task (injected for tests). */
+  executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
   verbose?: boolean;
 }
 
-/**
- * Extra CLI args the worker passes to each task run.
- * `WORKER_TASK_ARGS` overrides (whitespace-separated); default `--create-pr`.
- */
+/** Default CLI flags the worker passes to each task run. */
 export function workerTaskArgs(): string[] {
-  const raw = process.env.WORKER_TASK_ARGS;
-  if (raw && raw.trim()) {
-    return raw.trim().split(/\s+/);
-  }
   return ["--create-pr"];
 }
 
@@ -72,8 +68,8 @@ export function workerTaskArgs(): string[] {
  * @param taskKey - Task key to process
  * @param extraArgs - CLI flags (default from {@link workerTaskArgs})
  * @param opts - Working directory and environment for the subprocess;
- *               workspace mode routes each task to its repo's worktree with
- *               per-repo env, single-repo mode inherits both
+ *               the workspace worker routes each task to its repo's worktree
+ *               with per-repo env; direct callers inherit both
  * @returns true when the CLI exited 0
  */
 export function runTaskViaCli(
@@ -138,6 +134,7 @@ export class TaskPollingAcquirer implements Acquirer {
     try {
       const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursor);
+      let tickDeferred = false;
 
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
@@ -163,18 +160,27 @@ export class TaskPollingAcquirer implements Acquirer {
 
           pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
-          const ok = await executeTask(task.key);
-          console.log(
-            ok
-              ? `✅ [${this.name}] ${task.key} completed`
-              : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
-          );
+          const result = await executeTask(task.key);
+          if (result === "deferred") {
+            // The task never started. Release the provisional claim and retain
+            // the detector cursor so this same tracker change is evaluated on
+            // the next tick. Other tasks completed in this tick stay deduped.
+            queue.unmarkProcessed(detector.source, externalId);
+            tickDeferred = true;
+            console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+          } else {
+            console.log(
+              result
+                ? `✅ [${this.name}] ${task.key} completed`
+                : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+            );
+          }
         }
 
         this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
       }
 
-      if (detection.nextCursor !== null && detection.nextCursor !== cursor) {
+      if (!tickDeferred && detection.nextCursor !== null && detection.nextCursor !== cursor) {
         workerState.setCursor(detector.source, detection.nextCursor);
       }
     } catch (error) {

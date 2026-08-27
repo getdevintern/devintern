@@ -5,7 +5,11 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import { runWorkspaceImport, runWorkspaceInit } from "../src/lib/workspace/init";
+import {
+  runWorkspaceImport,
+  runWorkspaceInit,
+  upsertWorkspaceDefaults,
+} from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
 function git(cwd: string, command: string): string {
@@ -91,6 +95,18 @@ describe("workspace init/import", () => {
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
   });
 
+  test("import from a package subdirectory still merges the repo-root .env", async () => {
+    runWorkspaceInit();
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+
+    expect(await runWorkspaceImport(nested)).toBe(0);
+
+    const env = readFileSync(workspaceEnvPath(), "utf8");
+    expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
+    expect(env).toContain("GITHUB_TOKEN=repo-token");
+  });
+
   test("import is idempotent and demotes conflicting env values to [repos.env]", async () => {
     runWorkspaceInit();
     // Pre-seed a conflicting shared value.
@@ -102,11 +118,18 @@ describe("workspace init/import", () => {
     // Shared value untouched.
     expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("GITHUB_TOKEN=shared-token");
 
-    // Second import: no duplicate entry, config identical.
+    // Second import: no duplicate entry, config identical. Missing workspace
+    // keys still merge (re-running worker init from a subdirectory).
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(repoDir, ".devintern-code", ".env"), "JIRA_EMAIL=dev@acme.test\n", {
+      flag: "a",
+    });
     const before = readFileSync(workspaceConfigPath(), "utf8");
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+    expect(await runWorkspaceImport(nested)).toBe(0);
     expect(readFileSync(workspaceConfigPath(), "utf8")).toBe(before);
     expect(loadWorkspaceConfig(workspaceConfigPath()).repos).toHaveLength(1);
+    expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("JIRA_EMAIL=dev@acme.test");
   });
 
   test("import preserves hand-written comments in the existing config", async () => {
@@ -117,6 +140,39 @@ describe("workspace init/import", () => {
 
     await runWorkspaceImport(repoDir);
     expect(readFileSync(configPath, "utf8")).toContain("# my custom note");
+  });
+
+  test("upsertWorkspaceDefaults uncomments task_query and sets tracker", () => {
+    runWorkspaceInit();
+    const before = readFileSync(workspaceConfigPath(), "utf8");
+    const updated = upsertWorkspaceDefaults(before, {
+      tracker: "markdown",
+      taskQuery: "project = PROJ AND status = 'To Do'",
+    });
+    expect(updated).toContain('tracker = "markdown"');
+    expect(updated).not.toContain('tracker = "jira"');
+    expect(updated).toContain(`task_query = "project = PROJ AND status = 'To Do'"`);
+    expect(updated).not.toMatch(/^\s*#\s*task_query/m);
+    expect(updated).toContain("# Days before a leftover");
+  });
+
+  test("upsertWorkspaceDefaults only edits the defaults table", () => {
+    const updated = upsertWorkspaceDefaults(
+      `[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+  [repos.env]
+  tracker = "repo-specific"
+  task_query = "leave-me-alone"
+`,
+      { tracker: "linear", taskQuery: "status = Todo" },
+    );
+    expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
+    expect(updated).toContain('  tracker = "repo-specific"');
+    expect(updated).toContain('  task_query = "leave-me-alone"');
   });
 
   test("import fails cleanly without a workspace or origin remote", async () => {

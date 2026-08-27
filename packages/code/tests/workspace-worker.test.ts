@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
+  buildFleetEventAcquirers,
   createWorkspaceTaskAcquirer,
   fleetTaskArgs,
   resolveWorkspaceAutomationContext,
@@ -14,6 +15,7 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
+import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -221,11 +223,87 @@ describe("createWorkspaceTaskAcquirer", () => {
     const after = createRepoRunLock("backend", workspaceDir).acquire();
     expect(after.success).toBe(true);
   });
+
+  test("a task deferred by a busy repo retries on the next poll", async () => {
+    tasks = [{ key: "T-6", updated: "u1", labels: ["backend"] }];
+    const heldLock = createRepoRunLock("backend", workspaceDir);
+    expect(heldLock.acquire().success).toBe(true);
+    const acquirer = makeAcquirer();
+
+    await acquirer.tick();
+    expect(ran).toHaveLength(0);
+    expect(state.workerState.getCursor("markdown")).toBeNull();
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(false);
+
+    heldLock.release();
+    await acquirer.tick();
+    expect(ran.map((run) => run.taskKey)).toEqual(["T-6"]);
+    expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
+  });
 });
 
 describe("fleetTaskArgs", () => {
-  test("workspace defaults win over the env default", () => {
+  test("uses worker_task_args from the workspace config", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
+  });
+
+  test("defaults to --create-pr when worker_task_args is omitted", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+`);
+    expect(fleetTaskArgs(config)).toEqual(["--create-pr"]);
+  });
+});
+
+describe("buildFleetEventAcquirers", () => {
+  test("starts tracker relay without GitHub polling credentials", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    const state = openWorkspaceState(workspaceDir);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const savedToken = process.env.GITHUB_TOKEN;
+    const savedAppId = process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_APP_ID;
+    saveRelayState(
+      {
+        relayUrl: "https://relay.test",
+        customerId: "customer-1",
+        connectedAt: new Date(0).toISOString(),
+        registrations: [],
+        relayToken: "drt_test",
+      },
+      workspaceDir,
+    );
+
+    try {
+      const acquirers = await buildFleetEventAcquirers({
+        config: CONFIG,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: async () => ({ tasks: [] }),
+        query: "status=todo",
+        intervalSeconds: 60,
+      });
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["relay"]);
+    } finally {
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+      if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+      else process.env.GITHUB_APP_ID = savedAppId;
+      state.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -98,7 +98,50 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).not.toContain("--skip-jira-comments");
     expect(result.stdout).toContain("devintern PROJ-123 PROJ-456 PROJ-789 --create-pr");
     expect(result.stdout).toContain("devintern ENG-42 ENG-43 ENG-44 --create-pr");
+    expect(result.stdout).toContain("webhook serve");
+    expect(result.stdout).not.toContain("Deprecated alias for 'webhook serve'");
     expect(result.exitCode).toBe(0);
+  });
+
+  test("should show webhook command help", async () => {
+    const result = await runCLI(["webhook", "--help"]);
+    expect(result.stdout).toContain("Usage: devintern webhook <command>");
+    expect(result.stdout).toContain("serve");
+    expect(result.stderr).not.toContain("deprecated");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should show canonical webhook serve help without a deprecation warning", async () => {
+    const result = await runCLI(["webhook", "serve", "--help"]);
+    expect(result.stdout).toContain("Usage: devintern webhook serve [options]");
+    expect(result.stdout).toContain("--port <port>");
+    expect(result.stderr).not.toContain("deprecated");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("should omit removed flags and env vars from worker help", async () => {
+    const result = await runCLI(["worker", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: devintern worker");
+    expect(result.stdout).toContain("--workspace <path>");
+    expect(result.stdout).toContain("workspace.toml");
+    expect(result.stdout).not.toContain("--listen");
+    expect(result.stdout).not.toContain("--no-workspace");
+    expect(result.stdout).not.toContain("--host");
+    expect(result.stdout).not.toContain("--port");
+    expect(result.stdout).not.toContain("--no-ui");
+    expect(result.stdout).not.toContain("--query");
+    expect(result.stdout).not.toContain("Environment variables:");
+    expect(result.stdout).not.toContain("WORKER_TASK_QUERY");
+    expect(result.stdout).not.toContain("WORKER_POLL_INTERVAL");
+  });
+
+  test("should reject removed worker flags", async () => {
+    for (const flag of ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"]) {
+      const result = await runCLI(["worker", flag]);
+      expect(result.stderr).toContain(`${flag} has been removed from devintern worker`);
+      expect(result.exitCode).toBe(1);
+    }
   });
 
   test("should show version with --version", async () => {
@@ -268,6 +311,65 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(output).not.toMatch(/unknown option/i);
     expect(result.stdout).toContain("Processing");
     expect(result.stdout).toContain("TEST-123");
+  });
+
+  test("worker --query points at workspace.toml", async () => {
+    const result = await runCLI(["worker", "--query", "status=todo"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("has been removed");
+    expect(result.stderr).toContain("[defaults].task_query");
+  });
+
+  test("worker --workspace requires a path", async () => {
+    const result = await runCLI(["worker", "--workspace"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--workspace requires a path");
+  });
+
+  test("worker requires a workspace", async () => {
+    const emptyWorkspaceDir = join(
+      tmpdir(),
+      `cli-no-workspace-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(emptyWorkspaceDir, { recursive: true });
+
+    try {
+      const result = await runCLI(["worker"], {
+        env: { DEVINTERN_WORKSPACE_DIR: emptyWorkspaceDir },
+      });
+      expect(result.stderr).toContain("No workspace configured");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      rmSync(emptyWorkspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("worker --workspace starts without a team-tier license", async () => {
+    // Empty workspace: getting past the license gate lands on the
+    // "No repos configured" startup error instead of a tier upgrade wall.
+    const wsDir = join(
+      tmpdir(),
+      `cli-ws-gate-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(wsDir, { recursive: true });
+    const configPath = join(wsDir, "workspace.toml");
+    writeFileSync(configPath, '[defaults]\ntracker = "markdown"\ntask_query = "status=todo"\n');
+
+    try {
+      const result = await runCLI(["worker", "--workspace", configPath]);
+      expect(result.timedOut).toBe(false);
+      const output = result.stdout + result.stderr;
+      expect(output).not.toContain("team automation subscription");
+      expect(output).not.toContain("single-repo automation only");
+      expect(output).toContain("No repos configured");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      try {
+        rmSync(wsDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   });
 });
 

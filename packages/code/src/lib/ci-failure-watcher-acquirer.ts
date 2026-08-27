@@ -205,8 +205,8 @@ export function truncateCiLogs(
  * @param prNumber - Pull request number
  * @param feedbackPath - Path to the CI feedback JSON file
  * @param opts - Working directory and environment for the subprocess;
- *               workspace mode runs from the repo's base worktree with
- *               per-repo env, single-repo mode inherits both
+ *               the workspace worker runs from the repo's base worktree
+ *               with its composed per-repo environment
  */
 export function runCiFixViaCli(
   repo: string,

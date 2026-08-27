@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/pm",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Turn rough notes, logs, and Figma into codebase-grounded tracker tickets with any coding agent. Self-hosted, BYOK.",
   "type": "module",
   "bin": {

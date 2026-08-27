@@ -316,7 +316,10 @@ describe("Default branch detection", () => {
 
     const result = await Utils.executeGitCommand(["status"], {
       cwd: repoDir,
-      timeoutMs: 250,
+      // Generous on purpose: the shim only needs to start and write its pid
+      // before the timeout fires. A tight budget races process spawn under
+      // full-suite load and can kill the shim before it wrote anything.
+      timeoutMs: 2_000,
       env: {
         PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}`,
         BUN_EXEC_PATH: process.execPath,
@@ -326,8 +329,17 @@ describe("Default branch detection", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe("Git command timed out after 250ms");
-    const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+    expect(result.error).toBe("Git command timed out after 2000ms");
+    // The shim writes the pid within milliseconds of starting; poll briefly
+    // instead of racing its startup.
+    let childPid = NaN;
+    for (let attempt = 0; attempt < 50 && Number.isNaN(childPid); attempt++) {
+      try {
+        childPid = Number(readFileSync(childPidFile, "utf8").trim());
+      } catch {
+        await Bun.sleep(20);
+      }
+    }
     let childIsAlive = true;
     for (let attempt = 0; attempt < 50 && childIsAlive; attempt++) {
       try {

@@ -9,6 +9,7 @@
 import type { ChildProcess } from "child_process";
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable, reapTree } from "../process-reaper.js";
@@ -107,6 +108,18 @@ export async function runAgentNode(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+
+    const stopOnUsageLimit = (): void => {
+      if (usageLimit?.limited) {
+        return;
+      }
+      const detected = detectUsageLimit(stdout, stderr);
+      if (detected.limited) {
+        usageLimit = detected;
+        reapTree(proc, "SIGTERM");
+      }
+    };
 
     const markOutput = (stream: "stdout" | "stderr", chunk: string): void => {
       if (!gotOutput && chunk.length > 0) {
@@ -138,6 +151,7 @@ export async function runAgentNode(
       proc.stdout.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stdout += chunk;
+        stopOnUsageLimit();
         markOutput("stdout", chunk);
         if (options.displayRealtime) {
           process.stdout.write(chunk);
@@ -149,6 +163,7 @@ export async function runAgentNode(
       proc.stderr.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stderr += chunk;
+        stopOnUsageLimit();
         markOutput("stderr", chunk);
         if (options.displayRealtime) {
           process.stderr.write(chunk);
@@ -174,6 +189,8 @@ export async function runAgentNode(
       clearTimeout(timeout);
       if (timedOut) {
         reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+      } else if (usageLimit?.limited) {
+        reject(new UsageLimitError(usageLimit.resetsAt));
       } else {
         resolve({
           stdout,

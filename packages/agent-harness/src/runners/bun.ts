@@ -11,9 +11,10 @@
 
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
-import { spawnReapable } from "../process-reaper.js";
+import { spawnReapable, reapTree } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
 
@@ -74,12 +75,25 @@ export async function runAgentBun(
 
   let stdout = "";
   let stderr = "";
+  let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+  const stopOnUsageLimit = (): void => {
+    if (usageLimit?.limited) {
+      return;
+    }
+    const detected = detectUsageLimit(stdout, stderr);
+    if (detected.limited) {
+      usageLimit = detected;
+      reapTree(proc, "SIGTERM");
+    }
+  };
   proc.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
+    stopOnUsageLimit();
   });
   proc.stderr?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
     stderr += text;
+    stopOnUsageLimit();
     options.onStderr?.(text);
   });
 
@@ -87,6 +101,10 @@ export async function runAgentBun(
     proc.on("close", (code) => resolve(code ?? 1));
     proc.on("error", reject);
   });
+
+  if (usageLimit?.limited) {
+    throw new UsageLimitError(usageLimit.resetsAt);
+  }
 
   return {
     stdout,
