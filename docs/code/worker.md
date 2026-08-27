@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-26
+dateModified: 2026-08-27
 ---
 
 # Worker Daemon
@@ -146,6 +146,22 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
+## Working windows (quiet hours)
+
+The drain of ready tasks can be limited to wall-clock windows — nights only is the classic case — using `[worker.schedule]` in `workspace.toml`:
+
+```toml
+[worker.schedule]
+active = ["22:00-06:00"]   # pickup allowed only inside these daily windows
+blocked = []               # subtract from active windows; wins on conflict
+timezone = ""              # optional IANA name; blank = machine local time
+catch_up_missed = true     # one catch-up drain if a whole window elapsed unused
+```
+
+Windows are wall-clock per day, may cross midnight (`start` greater than `end`), union when multiple are set, and resolve overlaps toward staying quiet (`blocked` always wins). Only **new-task pickup** pauses: review replies, @mentions, recurring automations, and relay events run normally, and any task already picked up finishes even after its window closes.
+
+Timezone and DST details, missed-window catch-up, and status surfaces (startup banner, one-log-line-per-flip, dashboard strip) are described in [Working windows](./automated-task-processing.md#working-windows-quiet-hours). To force an immediate drain without touching the schedule, run `devintern worker run-now`.
+
 ## Options
 
 The daemon itself takes almost no flags. Durable settings live in `workspace.toml`:
@@ -212,7 +228,7 @@ Every run is recorded stage by stage in the local database. The worker serves th
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you need a wall-clock window instead of a resident process, see [Night-only CLI runs](./automated-task-processing.md#night-only-cli-runs).
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## License
 

@@ -3,6 +3,8 @@ import { readFileSync } from "fs";
 import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
 import { parseAutomationEntries } from "../automation-config";
 import type { AutomationConfig } from "../automation-config";
+import { parseWorkerScheduleSection } from "../schedule";
+import type { WorkerScheduleConfig } from "../schedule";
 import { parseToml } from "./toml";
 
 /** Workspace-wide settings from the `[workspace]` table. */
@@ -55,9 +57,19 @@ export interface RoutingRule {
   labels: string[];
 }
 
+/** Worker-scoped settings from the `[worker]` table. */
+export interface WorkerSettings {
+  /**
+   * Working windows (quiet hours) gating new-task pickup; null when the
+   * `[worker.schedule]` table is absent or empty (pickup unrestricted).
+   */
+  schedule: WorkerScheduleConfig | null;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  worker: WorkerSettings;
   defaults: WorkspaceDefaults;
   repos: RepoConfig[];
   routing: RoutingRule[];
@@ -325,12 +337,17 @@ export function parseWorkspaceConfig(
   });
   errors.push(...automationResult.errors);
 
+  const workerTable = asTable(document.worker, "[worker]", errors);
+  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
+  errors.push(...schedule.errors);
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
   return {
     workspace: { worktreesTtlDays, dashboard, dashboardPort },
+    worker: { schedule: schedule.config },
     defaults,
     repos,
     routing,

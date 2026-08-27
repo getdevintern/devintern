@@ -254,6 +254,71 @@ repo = "missing"
   });
 });
 
+describe("parseWorkspaceConfig [worker.schedule] (quiet hours)", () => {
+  test("parses working windows into config.worker.schedule", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker.schedule]
+active = ["22:00-06:00", "12:00-13:00"]
+blocked = ["01:30-02:30"]
+timezone = "Europe/Berlin"
+catch_up_missed = false
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+
+    expect(config.worker.schedule?.active.map((w) => w.spec)).toEqual([
+      "22:00-06:00",
+      "12:00-13:00",
+    ]);
+    expect(config.worker.schedule?.blocked.map((w) => w.spec)).toEqual(["01:30-02:30"]);
+    expect(config.worker.schedule?.timezone).toBe("Europe/Berlin");
+    expect(config.worker.schedule?.catchUpMissed).toBe(false);
+  });
+
+  test("no [worker] section leaves the schedule disabled", () => {
+    const config = parseWorkspaceConfig(VALID_CONFIG);
+    expect(config.worker.schedule).toBeNull();
+  });
+
+  test("an empty [worker.schedule] section stays disabled", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker.schedule]
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.schedule).toBeNull();
+  });
+
+  test("schedule problems are collected alongside other errors", () => {
+    let message = "";
+    try {
+      parseWorkspaceConfig(`
+[defaults]
+tracker = ""
+
+[worker.schedule]
+active = ["25:99-06:00"]
+timezone = "Nowhere/Land"
+`);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/\[worker\.schedule\]\.active/);
+    expect(message).toMatch(/is not a valid IANA timezone/);
+    expect(message).toMatch(/tracker is required/);
+  });
+});
+
 describe("workspace paths", () => {
   let workspaceDir: string;
   let previousOverride: string | undefined;

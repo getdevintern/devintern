@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-26
+dateModified: 2026-08-27
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -58,6 +58,12 @@ repo = "frontend"
 project = "WEB"
 labels = ["frontend"]
 
+[worker.schedule]
+active = ["22:00-06:00"]     # optional quiet hours: drain new tasks only at night
+blocked = []                 # subtract from active windows (conflicts resolve to quiet)
+timezone = ""                # blank = worker machine's local time
+catch_up_missed = true
+
 [[automations]]
 id = "backend-maintenance"
 enabled = true
@@ -76,6 +82,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
+- `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Automated Task Processing → Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 
 ### How workspace automations differ from single-repo ones
@@ -121,7 +128,9 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The fleet query comes from `[defaults].task_query`. A workspace with automations can omit the query and run as an automation-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace and automation configuration is loaded at startup; restart the worker after editing it. Schedule state and leases for automations live in the central workspace database.
+The fleet query comes from `[defaults].task_query`. A workspace with automations can omit the query and run as an automation-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. All configuration — schedule included — is loaded at startup; restart the worker after editing it. Schedule state, leases, and the last-drain timestamp for catch-up live in the central workspace database.
+
+While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 
 `devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 

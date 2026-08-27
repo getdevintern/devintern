@@ -14,6 +14,7 @@
 import { LockManager } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import type { ScheduleSnapshot } from "./schedule";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
 import { WorkerState } from "./worker-state";
 import type { Cursor } from "./worker-state";
@@ -50,6 +51,11 @@ export interface DashboardDataOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Live working-window snapshot from the worker process (embedded
+   * dashboard only; standalone servers return null).
+   */
+  scheduleSnapshot?: () => ScheduleSnapshot | null;
 }
 
 interface Stores {
@@ -69,10 +75,12 @@ export class DashboardData {
   readonly dbPath: string;
   readonly workingDir: string;
   private stores: Stores | null = null;
+  private readonly scheduleSnapshot: () => ScheduleSnapshot | null;
 
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
   }
 
   /** Open (or reuse) the read-only stores; null while the DB file is missing. */
@@ -148,6 +156,15 @@ export class DashboardData {
 
   getCursors(): Cursor[] {
     return this.read([], (stores) => stores.state.listCursors());
+  }
+
+  /** Working-window status from the worker process, or null when disabled. */
+  getScheduleSnapshot(): ScheduleSnapshot | null {
+    try {
+      return this.scheduleSnapshot();
+    } catch {
+      return null;
+    }
   }
 
   /** Close the underlying SQLite connections (tests, shutdown). */
@@ -249,6 +266,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
         lock === null ? null : { running: lock.running, pid: lock.pid, startedAt: lock.startedAt },
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
+      schedule: data.getScheduleSnapshot(),
       cursors: data.getCursors().map((cursor) => ({
         source: cursor.source,
         cursorValue: cursor.cursorValue,

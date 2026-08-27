@@ -30,6 +30,8 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Live working-window snapshot provider (embedded dashboard). */
+  scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -87,7 +89,11 @@ export function startDashboardServer(
   const port =
     options.port ?? parseInt(process.env.DASHBOARD_PORT || String(DEFAULT_DASHBOARD_PORT), 10);
   const host = options.host ?? "127.0.0.1";
-  const data = new DashboardData({ dbPath: options.dbPath, workingDir: options.workingDir });
+  const data = new DashboardData({
+    dbPath: options.dbPath,
+    workingDir: options.workingDir,
+    scheduleSnapshot: options.scheduleSnapshot,
+  });
   const uiDir = resolveUiDir();
 
   if (host !== "127.0.0.1" && host !== "localhost") {

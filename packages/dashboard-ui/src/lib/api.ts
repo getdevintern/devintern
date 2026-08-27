@@ -83,10 +83,23 @@ export interface StatsResponse {
   } | null;
 }
 
+/** Working-window (quiet hours) status from the worker process. */
+export interface ScheduleSnapshot {
+  enabled: boolean;
+  pickupAllowed: boolean;
+  active: string[];
+  blocked: string[];
+  timezone: string;
+  catchUpMissed: boolean;
+  manualRequested: boolean;
+  nextChange?: { at: number; kind: "open" | "close" };
+}
+
 export interface WorkerResponse {
   worker: { running: boolean; pid?: number; startedAt?: string } | null;
   queue: { pending: number; processing: number; failed: number };
   agentPrs: { open: number; closed: number };
+  schedule?: ScheduleSnapshot | null;
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;

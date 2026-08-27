@@ -1,8 +1,27 @@
-import { Activity, CircleCheck, CircleOff, GitPullRequest, Inbox } from "lucide-react";
+import { Activity, CircleCheck, CircleOff, Clock, GitPullRequest, Inbox } from "lucide-react";
 
 import { usePoll } from "@/lib/api";
-import type { WorkerResponse } from "@/lib/api";
+import type { ScheduleSnapshot, WorkerResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+function formatClockTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function scheduleLabel(schedule: ScheduleSnapshot): string {
+  const windows = schedule.active.length > 0 ? schedule.active.join(", ") : "unrestricted";
+  if (schedule.manualRequested) {
+    return `manual run requested (${windows})`;
+  }
+  if (schedule.pickupAllowed) {
+    return schedule.nextChange
+      ? `working window ${windows} — closes ${formatClockTime(schedule.nextChange.at)}`
+      : `working window ${windows}`;
+  }
+  return schedule.nextChange
+    ? `outside working window ${windows} — opens ${formatClockTime(schedule.nextChange.at)}`
+    : `outside working window (${windows})`;
+}
 
 function Item({
   icon,
@@ -47,6 +66,16 @@ export function StatusStrip() {
         label={running ? `worker running (pid ${data.worker?.pid})` : "worker stopped"}
         className={running ? "text-foreground" : undefined}
       />
+      {data.schedule?.enabled ? (
+        <Item
+          icon={
+            <Clock
+              className={cn("size-4", !data.schedule.pickupAllowed && "text-muted-foreground/50")}
+            />
+          }
+          label={scheduleLabel(data.schedule)}
+        />
+      ) : null}
       <Item icon={<Inbox className="size-4" />} label={queueLabel} />
       <Item
         icon={<GitPullRequest className="size-4" />}

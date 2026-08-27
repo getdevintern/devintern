@@ -101,4 +101,20 @@ describe("workspace state", () => {
     frontend.release();
     expect(createRepoRunLock("backend", workspaceDir).acquire().success).toBe(true);
   });
+
+  test("worker meta round-trips and upserts (task-drain catch-up bookkeeping)", () => {
+    const state = openWorkspaceState(workspaceDir);
+    try {
+      expect(state.workerState.getMeta("task-poll:last-drain-at")).toBeNull();
+      state.workerState.setMeta("task-poll:last-drain-at", "1000");
+      state.workerState.setMeta("task-poll:last-drain-at", "2000");
+      state.workerState.setMeta("other-key", "x");
+
+      expect(state.workerState.getMeta("task-poll:last-drain-at")).toBe("2000");
+      expect(state.workerState.getMeta("other-key")).toBe("x");
+      expect(state.workerState.getMeta("missing")).toBeNull();
+    } finally {
+      state.close();
+    }
+  });
 });

@@ -19,6 +19,8 @@
 import { spawn } from "child_process";
 
 import type { ChangeDetector } from "./change-detector";
+import type { PickupGate } from "./schedule";
+import { TASK_POLL_LAST_DRAIN_KEY } from "./worker-state";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
@@ -52,6 +54,13 @@ export interface TaskPollingAcquirerOptions {
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
   /** Execute step: process, fail, or defer one ready task (injected for tests). */
   executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
+  /**
+   * Working-window gate (quiet hours). When closed, ticks start no new
+   * detection/evaluation/execution; an in-flight tick finishes naturally
+   * because execution is sequential. Manual overrides and startup catch-up
+   * are the gate's decisions surfaced as one-shot bypasses.
+   */
+  gate?: PickupGate;
   verbose?: boolean;
 }
 
@@ -99,6 +108,7 @@ export class TaskPollingAcquirer implements Acquirer {
   private options: TaskPollingAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  private readonly gateErrors = new Set<string>();
 
   constructor(options: TaskPollingAcquirerOptions) {
     this.options = options;
@@ -111,8 +121,27 @@ export class TaskPollingAcquirer implements Acquirer {
       `🔎 Polling ${this.options.trackerType} every ${this.options.intervalSeconds}s ` +
         `(query: ${this.options.query})`,
     );
-    await this.tick();
+    const lastDrainAt = this.readLastDrainAt();
+    if (this.options.gate?.shouldCatchUpOnStart(lastDrainAt)) {
+      // The laptop slept through the entire previous window; drain once now
+      // instead of waiting for the next one.
+      console.log(`🌙 [${this.name}] working window(s) elapsed while idle; running catch-up drain`);
+      await this.tick({ ignoreGate: true });
+    } else {
+      await this.tick();
+    }
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+  }
+
+  private readLastDrainAt(): number | null {
+    try {
+      const raw = this.options.workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY);
+      if (!raw) return null;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Stop polling (an in-flight tick finishes its current task). */
@@ -123,11 +152,29 @@ export class TaskPollingAcquirer implements Acquirer {
     }
   }
 
-  /** One detect → evaluate → dedupe → execute cycle. Skipped while busy. */
-  async tick(): Promise<void> {
+  /**
+   * One detect → evaluate → dedupe → execute cycle. Skipped while busy, and
+   * skipped while the working-window gate is closed (unless overridden for a
+   * manual run or startup catch-up).
+   */
+  async tick(bypass: { ignoreGate?: boolean } = {}): Promise<void> {
     if (this.busy) {
       return;
     }
+
+    const gate = this.options.gate;
+    if (!bypass.ignoreGate && gate) {
+      const manual = this.scheduleGuard(() => gate.consumeManualPickup(), false);
+      if (manual) {
+        console.log(`▶️  [${this.name}] manual run requested; draining now`);
+      } else if (!this.scheduleGuard(() => gate.pickupAllowed(), true)) {
+        // Outside the working window: no detection, no evaluation, no new
+        // tasks. Whatever is already running finishes before this check even
+        // happens, and no cursor moves while gated out.
+        return;
+      }
+    }
+
     this.busy = true;
 
     const { detector, workerState, queue, query, searchTasks, executeTask, verbose } = this.options;
@@ -178,6 +225,12 @@ export class TaskPollingAcquirer implements Acquirer {
         }
 
         this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
+        // Remember that a drain ran so working-window catch-up can tell an
+        // elapsed-but-idle window apart from one that was already served.
+        this.scheduleGuard(
+          () => workerState.setMeta(TASK_POLL_LAST_DRAIN_KEY, String(Date.now())),
+          undefined,
+        );
       }
 
       if (!tickDeferred && detection.nextCursor !== null && detection.nextCursor !== cursor) {
@@ -187,6 +240,23 @@ export class TaskPollingAcquirer implements Acquirer {
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
       this.busy = false;
+    }
+  }
+
+  /**
+   * Scheduling must never break polling: gate or bookkeeping failures are
+   * downgraded to a single warning per error identity.
+   */
+  private scheduleGuard<T>(operation: () => T, fallback: T): T {
+    try {
+      return operation();
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!this.gateErrors.has(message)) {
+        this.gateErrors.add(message);
+        console.warn(`⚠️  [${this.name}] schedule check failed: ${message}`);
+      }
+      return fallback;
     }
   }
 
