@@ -73,6 +73,48 @@ describe("detectUsageLimit", () => {
     expect(result.resetsAt).toBe("9am");
   });
 
+  test("detects Codex's usage-limit upgrade message and extracts its reset", () => {
+    const out =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 6:03 PM.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("6:03 PM");
+  });
+
+  test("detects Codex named limits, workspace credits, and spend caps", () => {
+    const messages = [
+      "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 8:10 PM.",
+      "Your workspace is out of credits. Add credits to continue.",
+      "Your workspace is out of credits. Ask your workspace owner to add credits.",
+      "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+      "You hit your spend cap set in your workspace. Ask your workspace owner to increase the spend cap.",
+      "Quota exceeded. Check your plan and billing details.",
+      "To use Codex with your ChatGPT plan, upgrade to Plus at https://chatgpt.com/pricing.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("detects current Claude Code credit and allocation exhaustion messages", () => {
+    const messages = [
+      "You're out of usage credits",
+      "Your org is out of usage · add funds to continue",
+      "Your org is out of usage · contact your admin",
+      "Your seat type doesn't include usage credits",
+      "Your usage allocation has been disabled by your admin",
+      "Your group's usage limit is set to $0",
+      "You're out of extra usage",
+      "You've hit your Opus limit · resets in 3h 20m",
+      "You've reached your Fable 5 limit · resets at 9pm",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit(message, "").limited).toBe(true);
+    }
+  });
+
   test("detects on stderr", () => {
     expect(detectUsageLimit("", "Error: 429 Too Many Requests").limited).toBe(true);
   });
@@ -123,6 +165,16 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(source, "").limited).toBe(false);
     // Codex writes its formatted tool transcript to stderr.
     expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores Codex and Claude exhaustion phrases embedded in transcript prose", () => {
+    const transcript = [
+      "The fixture says Your workspace is out of credits. Add credits to continue.",
+      "Expected: You're out of usage credits; received: socket closed.",
+      'const message = "Your org is out of usage · contact your admin";',
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
   });
 
   test("ignores compact diff additions without whitespace after the marker", () => {
