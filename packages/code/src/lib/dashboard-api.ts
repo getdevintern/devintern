@@ -1,10 +1,10 @@
 /**
  * Dashboard API
  *
- * Read-only JSON handlers over the worker's SQLite state (run records, agent
- * PRs, cursors, queue counts). Pure functions over a lazily opened read-only
- * database so they are testable without HTTP; `dashboard-server.ts` maps them
- * to routes.
+ * Read-only JSON handlers over the worker's local state (SQLite run records,
+ * agent PRs, cursors, queue counts, plus the tailed worker capture files).
+ * Pure functions over a lazily opened read-only database so they are testable
+ * without HTTP; `dashboard-server.ts` maps them to routes.
  *
  * The database may not exist yet (fresh install, worker never run) or may
  * predate some tables (older versions). Every handler degrades to an empty
@@ -14,7 +14,10 @@
 import { LockManager } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import { readWorkerLogs } from "./worker-logs";
+import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
+import { resolveWorkspaceDir } from "./workspace/paths";
 import { WorkerState } from "./worker-state";
 import type { Cursor } from "./worker-state";
 
@@ -38,6 +41,10 @@ const STATS_WINDOWS: Record<string, number | null> = {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+const LOG_LEVELS: (WorkerLogLevel | "all")[] = ["all", "info", "warn", "error"];
+const DEFAULT_LOG_LIMIT = 500;
+const MAX_LOG_LIMIT = 1000;
+
 /** Name of the worker daemon's lock file (see `startWorker`). */
 const WORKER_LOCK_FILE = ".worker.lock";
 
@@ -50,12 +57,22 @@ export interface DashboardDataOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Directories to search for worker capture files (primary first). */
+  logDirs?: string[];
+  /** Tail window per capture file; tests shrink this for truncation cases. */
+  maxLogBytesPerFile?: number;
 }
 
 interface Stores {
   runs: RunStore;
   state: WorkerState;
   queue: WebhookQueue;
+}
+
+/** A log entry extended with the latest matching run, when one exists. */
+export interface EnrichedLogEntry extends LogEntry {
+  runId?: number;
+  runStatus?: RunStatus;
 }
 
 /**
@@ -68,11 +85,27 @@ interface Stores {
 export class DashboardData {
   readonly dbPath: string;
   readonly workingDir: string;
+  private readonly logDirs: string[];
+  private readonly maxLogBytesPerFile: number | undefined;
   private stores: Stores | null = null;
 
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    if (options.logDirs !== undefined) {
+      // Explicit dirs keep tests hermetic; the workspace home is not probed.
+      this.logDirs = options.logDirs;
+    } else {
+      const dirs = [this.workingDir];
+      const workspaceDir = resolveWorkspaceDir();
+      if (!dirs.includes(workspaceDir)) {
+        // Standalone `devintern dashboard` often runs outside the workspace
+        // home where the daemon's service definition drops its capture files.
+        dirs.push(workspaceDir);
+      }
+      this.logDirs = dirs;
+    }
+    this.maxLogBytesPerFile = options.maxLogBytesPerFile;
   }
 
   /** Open (or reuse) the read-only stores; null while the DB file is missing. */
@@ -148,6 +181,48 @@ export class DashboardData {
 
   getCursors(): Cursor[] {
     return this.read([], (stores) => stores.state.listCursors());
+  }
+
+  /**
+   * Tail the worker's capture files and link entries to their latest run.
+   * File reads are bounded (see `readWorkerLogs`); a missing DB only skips
+   * the run enrichment, never breaks the response.
+   */
+  getWorkerLogs(
+    filter: { limit?: number; level?: WorkerLogLevel | "all" } = {},
+  ): WorkerLogsResult & {
+    entries: EnrichedLogEntry[];
+  } {
+    const result = readWorkerLogs({
+      dirs: this.logDirs,
+      limit: filter.limit,
+      level: filter.level,
+      maxBytesPerFile: this.maxLogBytesPerFile,
+    });
+    const runsByKey = new Map<string, { id: number; status: RunStatus | undefined }>();
+    const keys = new Set(result.entries.flatMap((entry) => (entry.taskKey ? [entry.taskKey] : [])));
+    for (const key of keys) {
+      const matches = this.read<RunRecord[]>([], (stores) =>
+        stores.runs.listRuns({ taskKey: key, limit: 1 }),
+      );
+      const latest = matches[0];
+      if (latest) {
+        runsByKey.set(key, { id: latest.id, status: latest.status });
+      }
+    }
+    if (runsByKey.size === 0) {
+      return { ...result, entries: result.entries };
+    }
+    return {
+      ...result,
+      entries: result.entries.map((entry): EnrichedLogEntry => {
+        const linkedRun = entry.taskKey ? runsByKey.get(entry.taskKey) : undefined;
+        if (!linkedRun) {
+          return entry;
+        }
+        return { ...entry, runId: linkedRun.id, runStatus: linkedRun.status };
+      }),
+    };
   }
 
   /** Close the underlying SQLite connections (tests, shutdown). */
@@ -257,5 +332,29 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbPath: data.dbPath,
       dbMissing: data.dbMissing,
     },
+  };
+}
+
+/**
+ * `GET /api/logs` — the most recent worker log entries, tailed from the
+ * capture files with an entry-count bound.
+ *
+ * @param data - Dashboard data source
+ * @param params - Query params: `limit` (1..1000, default 500) and
+ *                 `level` (all | info | warn | error, default all)
+ */
+export function handleLogs(data: DashboardData, params: URLSearchParams): ApiResponse {
+  const rawLimit = params.get("limit");
+  const limit = rawLimit === null ? DEFAULT_LOG_LIMIT : parseInt(rawLimit, 10);
+  if (!Number.isFinite(limit) || limit < 1 || limit > MAX_LOG_LIMIT) {
+    return badRequest(`limit must be between 1 and ${MAX_LOG_LIMIT}`);
+  }
+  const rawLevel = params.get("level") ?? "all";
+  if (!LOG_LEVELS.includes(rawLevel as WorkerLogLevel | "all")) {
+    return badRequest(`level must be one of: ${LOG_LEVELS.join(", ")}`);
+  }
+  return {
+    status: 200,
+    body: data.getWorkerLogs({ limit, level: rawLevel as WorkerLogLevel | "all" }),
   };
 }
