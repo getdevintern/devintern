@@ -126,9 +126,11 @@ When a run cannot finish, devintern posts an "Implementation Incomplete" comment
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
-- **Delete the bot's incomplete comment** from the ticket.
+- **Delete the bot's failure comment** from the ticket.
 
-Either action bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. Each attempt gets its own branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
+The gate ignores the automation's own comments: posting the failure comment (and moving the ticket back) updates the tracker's timestamp, but neither of those counts as a change, so a failed ticket sits still until a human edits it. This applies to every failure kind — incomplete implementations as well as crash, interrupt, and usage-limit comments.
+
+Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. Each attempt gets its own branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 

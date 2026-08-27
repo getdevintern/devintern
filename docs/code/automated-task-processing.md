@@ -152,6 +152,8 @@ If you run @devintern/code under cron on Linux and want the same daemon-proof gu
 
 A failed run never ends silently. When processing a task fails after it was moved to "In Progress" — an agent timeout, a usage limit, a crash, or the process being killed by `SIGTERM`/`SIGINT` (for example when a scheduler stops the job) — @devintern/code posts a comment on the ticket explaining that no pull request was created, the reason for the failure, and where partial work may live (the `feature/<key>` branch or a git stash). The ticket is also moved back to its To Do status so the next scheduled run can retry it.
 
+The failure comment will not cause a retry loop: posting it does bump the tracker's update stamp, but the retry gate ignores the harness's own comments and records the attempt, so the ticket is only re-run after you edit the description, post your own comment, or delete the failure comment (see [worker polling](./worker.md#re-running-a-task)).
+
 Pass `--skip-comments` to disable all tracker comments, including failure feedback.
 
 ### Linear schedules

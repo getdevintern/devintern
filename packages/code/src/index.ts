@@ -81,7 +81,8 @@ import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
-import { formatProcessingFailureMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
+import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
+import { reportTaskFailure } from "./lib/failure-feedback";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -1262,32 +1263,26 @@ let activeTaskContext: {
  * was created and move the ticket back to its To Do status so the next
  * scheduled run can retry. Never throws — feedback must not mask the
  * original error.
+ *
+ * After posting, the attempt is recorded for the retry gate so posting the
+ * comment (which bumps the ticket's `updated` stamp) does not itself cause
+ * an immediate re-pickup loop.
  */
 async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
   const context = activeTaskContext;
   if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
 
-  const { tracker, projectKey } = context;
-  try {
-    await tracker.postComment(taskKey, {
-      format: "markdown",
-      body: formatProcessingFailureMarkdown(taskKey, reason),
-    });
-    console.log(`💬 Posted a failure comment to ${taskKey}`);
-  } catch (commentError) {
-    console.warn(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
-  }
-
-  if (!context.movedToInProgress) return;
-  try {
-    const todoStatus = getTodoStatusForProject(projectKey, loadProjectSettings());
-    if (todoStatus && todoStatus.trim()) {
-      await tracker.transitionStatus(taskKey, todoStatus.trim());
-      console.log(`🔄 Moved ${taskKey} back to '${todoStatus}' so it can be retried`);
-    }
-  } catch (transitionError) {
-    console.warn(`⚠️  Failed to move ${taskKey} back to To Do: ${transitionError}`);
-  }
+  await reportTaskFailure({
+    taskKey,
+    reason,
+    tracker: context.tracker,
+    trackerType: process.env.TASK_TRACKER || "jira",
+    projectKey: context.projectKey,
+    movedToInProgress: context.movedToInProgress,
+    getTodoStatus: () => getTodoStatusForProject(context.projectKey, loadProjectSettings()),
+    log: console.log,
+    warn: console.warn,
+  });
 }
 
 /**
@@ -3465,12 +3460,9 @@ async function runAgentHarness(
 
             if (tracker && !skipComments && taskKey) {
               try {
-                const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
                 await tracker.postComment(taskKey, {
                   format: "markdown",
-                  body:
-                    `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
-                    `Answer in the task description or a comment, then re-run devintern.`,
+                  body: formatAgentInputNeededMarkdown(openQuestions.questions),
                 });
                 console.log("💬 Posted the questions as a comment on the task");
               } catch (commentError) {

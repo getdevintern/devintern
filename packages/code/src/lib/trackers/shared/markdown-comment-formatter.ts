@@ -8,12 +8,20 @@
  * across trackers.
  */
 
+/** Heading identifying a processing-failure comment (crash / usage limit / interrupt). */
+export const PROCESSING_FAILURE_MARKER = "Automated implementation did not complete";
+
+/** Identifying phrase of the agent-needs-input questions comment. */
+export const AGENT_INPUT_NEEDED_MARKER = "The agent needs input";
+
 /** Marker strings identifying comments posted by @devintern/code automation. */
 export const DEVINTERN_MARKERS = [
   "Implementation Completed by @devintern/code",
   "Automated Task Feasibility Assessment",
   "Implementation Incomplete",
   "Automated Story Points Estimation",
+  PROCESSING_FAILURE_MARKER,
+  AGENT_INPUT_NEEDED_MARKER,
 ];
 
 /** Marker identifying an automated estimation comment (find/update flows). */
@@ -149,11 +157,35 @@ export function formatIncompleteImplementationCommentMarkdown(
 /** Format the crash / interrupt / usage-limit failure comment body. */
 export function formatProcessingFailureMarkdown(taskKey: string, reason: string): string {
   return (
-    `🤖 **Automated implementation did not complete** — no pull request was created for this attempt.\n\n` +
+    `🤖 **${PROCESSING_FAILURE_MARKER}** — no pull request was created for this attempt.\n\n` +
     `**Reason:** ${reason}\n\n` +
     `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.\n\n` +
     formatRetryPickupMarkdown()
   );
+}
+
+/** Format the agent-needs-input questions comment body. */
+export function formatAgentInputNeededMarkdown(questions: string[]): string {
+  const questionList = questions.map((q) => `- ${q}`).join("\n");
+  return (
+    `🤖 ${AGENT_INPUT_NEEDED_MARKER} before it can implement this task:\n\n${questionList}\n\n` +
+    "Answer in the task description or a comment, then re-run devintern."
+  );
+}
+
+/** True when `text` looks like a previously posted processing-failure comment. */
+export function isProcessingFailureCommentText(text: string): boolean {
+  return text.includes(PROCESSING_FAILURE_MARKER);
+}
+
+/**
+ * True when `text` is any automation failure comment (incomplete implementation
+ * or processing failure). These mark a ticket whose last attempt failed, so
+ * they are excluded from "user changed the ticket" detection and unlock a
+ * retry when removed.
+ */
+export function isAutomationFailureCommentText(text: string): boolean {
+  return isIncompleteImplementationCommentText(text) || isProcessingFailureCommentText(text);
 }
 
 /** Format the assessment-failure comment body. */
