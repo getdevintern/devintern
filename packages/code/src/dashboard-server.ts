@@ -16,11 +16,13 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleRetryRun,
   handleRuns,
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
 } from "./lib/dashboard-api";
+import type { RetryHandlerDeps } from "./lib/dashboard-api";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 
@@ -30,6 +32,8 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Collaborator overrides for the retry action (tests). */
+  retryDeps?: RetryHandlerDeps;
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -98,15 +102,20 @@ export function startDashboardServer(
   }
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
 
   const server = Bun.serve({
     port,
     hostname: host,
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
+        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
+        if (retry) {
+          return json(await handleRetryRun(data, retry[1], options.retryDeps));
+        }
         if (request.method !== "GET") {
           return json({ status: 405, body: { error: "method not allowed" } });
         }

@@ -61,6 +61,49 @@ export interface RunsResponse {
 export interface RunDetailResponse {
   run: RunRecord;
   stages: RunStageRecord[];
+  /** Retry action metadata for this run (eligibility + audit trail). */
+  retry: RetryInfo;
+}
+
+/** One audited dashboard retry of a run. */
+export interface RetryAuditEntry {
+  id: number;
+  runId: number;
+  taskKey?: string;
+  actor: string;
+  action: "triggered" | "failed";
+  command?: string;
+  pid?: number;
+  message?: string;
+  createdAt: number;
+}
+
+/** Retry metadata embedded in a run-detail response. */
+export interface RetryInfo {
+  eligible: boolean;
+  reason?: string;
+  /** Recent dashboard retries of this run, most recent first. */
+  audit: RetryAuditEntry[];
+}
+
+/**
+ * Trigger the same underlying flow as `devintern <TASK> --force` for a run.
+ * Resolves with the parsed JSON body regardless of status; callers should
+ * branch on `response.ok`.
+ */
+export async function triggerRunRetry(
+  runId: number,
+): Promise<{ ok: boolean; body: { error?: string; command?: string; pid?: number } }> {
+  const response = await fetch(`/api/runs/${runId}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    command?: string;
+    pid?: number;
+  };
+  return { ok: response.ok, body };
 }
 
 export interface StatsResponse {

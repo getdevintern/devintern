@@ -1,14 +1,14 @@
 ---
 title: "Observability Dashboard"
-description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, and aggregate stats"
+description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, aggregate stats, and run retries"
 section: "Server Automation"
 order: 2
-dateModified: 2026-08-24
+dateModified: 2026-08-27
 ---
 
 # Observability Dashboard
 
-`devintern dashboard` serves a local web dashboard over the worker's run history: every task, PR mention, and scheduled automation the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), and aggregate stats like success rate and runs per week.
+`devintern dashboard` serves a local web dashboard over the worker's run history: every task, PR mention, and scheduled automation the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), aggregate stats like success rate and runs per week, and a retry action for failed runs.
 
 All data is read from the worker's local database (`.devintern-code/queue.db`). Nothing is uploaded anywhere: the dashboard runs on your machine and binds to localhost by default.
 
@@ -35,6 +35,30 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
 
+## Retrying a run
+
+Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a **Retry this run** action on the run detail page. Confirming it runs the same flow a support engineer would run by hand:
+
+```bash
+devintern PROJ-123 --force
+```
+
+The dashboard server spawns that command as its own subprocess, so branch selection, worktree handling, comments, and `--force`'s bypass of the incomplete-attempt retry gate behave exactly like the CLI. Because the full pipeline runs in that subprocess, the new attempt appears as a fresh run in the run list within moments of triggering; the dashboard shows success/failure feedback for the trigger itself plus the new run's progress through its stages.
+
+Safeguards:
+
+- A confirmation prompt states exactly what will be re-run before anything starts.
+- The actor must be signed in (`devintern login`); when `DASHBOARD_RETRY_EMAILS` is set, only those support-role email addresses may trigger retries.
+- Retries are serialized per task: while a just-triggered retry is starting or another attempt is still in progress (including one recorded by the worker), further triggers are refused.
+- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`): who retried, when, with which command and pid, and against which original run. The run detail page lists this history under "Retry history".
+
+### Environment variables
+
+| Variable                  | Description                                                                                     |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| `DASHBOARD_PORT`          | Port to listen on when `--port` is not given                                                     |
+| `DASHBOARD_RETRY_EMAILS`  | Comma-separated allowlist of emails authorized to trigger retries; unset means any signed-in user |
+
 ## Options
 
 | Option          | Description                                           |
@@ -50,13 +74,14 @@ With `devintern worker`, set `[workspace].dashboard = false` to disable the embe
 
 The dashboard is backed by a small read-only JSON API you can use directly, for example from scripts:
 
-| Endpoint                    | Returns                                                               |
-| --------------------------- | --------------------------------------------------------------------- |
-| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
-| `GET /api/runs/:id`         | One run with its stage timeline                                       |
-| `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
-| `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
-| `GET /api/health`           | Health check                                                          |
+| Endpoint                        | Returns                                                               |
+| ------------------------------- | --------------------------------------------------------------------- |
+| `GET /api/runs`                 | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
+| `GET /api/runs/:id`             | One run with its stage timeline and retry metadata                    |
+| `POST /api/runs/:id/retry`      | Re-run the task behind a failed/escalated/abandoned run (`--force` flow; requires sign-in) |
+| `GET /api/stats?window=30d`     | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
+| `GET /api/worker`               | Worker liveness, queue counts, agent PRs, poll cursors                |
+| `GET /api/health`               | Health check                                                          |
 
 ## License
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, RefreshCcw } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
@@ -7,11 +7,11 @@ import { StageDetailFields } from "@/components/StageDetailFields";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Markdown } from "@/lib/markdown";
-import { usePoll } from "@/lib/api";
-import type { RunDetailResponse, RunStageRecord } from "@/lib/api";
+import { triggerRunRetry, usePoll } from "@/lib/api";
+import type { RetryAuditEntry, RunDetailResponse, RunStageRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { parseStageDetail } from "@/lib/stage-detail";
-import { formatDuration, formatTime } from "@/lib/utils";
+import { cn, formatDuration, formatTime } from "@/lib/utils";
 
 const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
   feasibility: "Feasibility check",
@@ -99,9 +99,121 @@ function MetaItem({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+/** Outcome banner after a retry attempt (success and failure are terminal). */
+function RetryFeedback({ kind, message }: { kind: "success" | "error"; message: string }) {
+  return (
+    <div
+      role="status"
+      className={cn(
+        "rounded-md border px-3 py-2 text-sm",
+        kind === "success"
+          ? "border-chart-4/30 bg-chart-4/10 text-chart-4"
+          : "border-destructive/30 bg-destructive/10 text-destructive",
+      )}
+    >
+      {message}
+    </div>
+  );
+}
+
+/** Inline confirmation strip shown between the first click and the POST. */
+function RetryConfirm({
+  taskKey,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  taskKey?: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="rounded-md border bg-muted/50 px-3 py-2">
+      <p className="text-xs text-muted-foreground">
+        Start a fresh run of {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"}{" "}
+        with <code className="font-mono">--force</code>? This skips the retry gate and runs the full
+        implementation pipeline again.
+      </p>
+      <div className="mt-2 flex gap-2">
+        <Button size="sm" variant="destructive" onClick={onConfirm} disabled={busy}>
+          {busy ? "Retrying…" : "Yes, retry"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Audited retry history: who re-ran this run's task, when, and how. */
+function RetryAuditList({ entries }: { entries: RetryAuditEntry[] }) {
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <Card>
+      <CardHeader className="text-sm font-medium">Retry history</CardHeader>
+      <CardContent className="space-y-2">
+        {entries.map((entry) => (
+          <div key={entry.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
+            <span className={entry.action === "failed" ? "text-destructive" : "text-chart-4"}>
+              {entry.action}
+            </span>
+            <span>by {entry.actor}</span>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {formatTime(entry.createdAt)}
+            </span>
+            {entry.pid !== undefined ? (
+              <span className="text-xs tabular-nums text-muted-foreground">pid {entry.pid}</span>
+            ) : null}
+            {entry.message ? (
+              <span className="basis-full pl-4 text-xs text-muted-foreground">{entry.message}</span>
+            ) : null}
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 /** One run: metadata card plus a stage-by-stage timeline. */
 export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => void }) {
-  const { data, error, loading } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
+  const { data, error, loading, refresh } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
+  const [confirming, setConfirming] = useState(false);
+  const [posting, setPosting] = useState(false);
+  const [feedback, setFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(
+    null,
+  );
+
+  async function handleRetry() {
+    if (!data) {
+      return;
+    }
+    setPosting(true);
+    try {
+      const { ok, body } = await triggerRunRetry(data.run.id);
+      if (ok) {
+        const pidSuffix = body.pid !== undefined ? ` (pid ${body.pid})` : "";
+        setFeedback({
+          kind: "success",
+          message: `Retry triggered${pidSuffix}. A fresh run for ${data.run.taskKey} will appear in the run list shortly.`,
+        });
+        setConfirming(false);
+        refresh();
+      } else {
+        setFeedback({ kind: "error", message: body.error ?? "Could not trigger the retry." });
+      }
+    } catch (cause: unknown) {
+      setFeedback({
+        kind: "error",
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setPosting(false);
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -124,9 +236,41 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                     (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)}
                 </h2>
                 <StatusBadge status={data.run.status} />
+                {data.retry.eligible && !confirming ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setFeedback(null);
+                      setConfirming(true);
+                    }}
+                  >
+                    <RefreshCcw /> Retry this run
+                  </Button>
+                ) : null}
               </div>
+              {!data.retry.eligible && data.retry.reason ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Not retriable: {data.retry.reason}
+                </p>
+              ) : null}
+              {confirming ? (
+                <div className="mt-2">
+                  <RetryConfirm
+                    taskKey={data.run.taskKey}
+                    busy={posting}
+                    onCancel={() => setConfirming(false)}
+                    onConfirm={() => void handleRetry()}
+                  />
+                </div>
+              ) : null}
+              {feedback ? (
+                <div className="mt-2">
+                  <RetryFeedback {...feedback} />
+                </div>
+              ) : null}
               {data.run.outcomeReason ? (
-                <p className="text-sm text-muted-foreground">{data.run.outcomeReason}</p>
+                <p className="mt-1 text-sm text-muted-foreground">{data.run.outcomeReason}</p>
               ) : null}
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
@@ -154,6 +298,8 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               />
             </CardContent>
           </Card>
+
+          <RetryAuditList entries={data.retry.audit} />
 
           <div className="space-y-0">
             {data.stages.map((stage, index) => (
