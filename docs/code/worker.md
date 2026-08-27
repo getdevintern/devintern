@@ -21,7 +21,9 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, and can generate a native user service for Linux or macOS. Polling is always on. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, offers the DevIntern [GitHub App](#mention-the-bot-on-any-pr) when this repo has a GitHub remote, and can generate a native user service for Linux or macOS. Polling is always on. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+
+The GitHub App step explains what changes: review polling on PRs the worker created itself works with just your `GITHUB_TOKEN`, while `@mention` handling on any other PR needs App auth. Accepting opens <https://github.com/apps/devintern-ai>; once you confirm the install, the pairing is recorded in `.devintern-code/github-app.json` inside the workspace home. Skipping records that App events are disabled, and the wizard's closing summary reminds you how to enable them later. Re-running `worker init` detects an existing connection (pairing record or `GITHUB_APP_ID` credentials in the environment) and only re-runs setup if you ask it to.
 
 Or configure by hand and start directly:
 
@@ -126,9 +128,11 @@ When a run cannot finish, devintern posts an "Implementation Incomplete" comment
 
 - **Edit the description** with more detail, or
 - **Post any comment** on the ticket (a one-line clarification is enough), or
-- **Delete the bot's incomplete comment** from the ticket.
+- **Delete the bot's failure comment** from the ticket.
 
-Either action bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. Each attempt gets its own branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
+The gate ignores the automation's own comments: posting the failure comment (and moving the ticket back) updates the tracker's timestamp, but neither of those counts as a change, so a failed ticket sits still until a human edits it. This applies to every failure kind — incomplete implementations as well as crash, interrupt, and usage-limit comments.
+
+Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. Each attempt gets its own branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
@@ -191,7 +195,7 @@ Guardrails apply before the agent acts:
 - The worker never force-pushes; if a human pushed to the branch meanwhile, the push is rejected instead of overwriting.
 - Mentions posted before the worker first started are not dug up.
 
-Mention matching requires a resolvable bot identity, so this team/automation feature needs GitHub App auth (`GITHUB_APP_ID` plus a private key — the same requirement as webhook mention handling). A personal `GITHUB_TOKEN` is enough for review polling on the agent's own PRs, but not for `@mentions` on other people's PRs. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
+Mention matching requires a resolvable bot identity, so this team/automation feature needs GitHub App auth (`GITHUB_APP_ID` plus a private key — the same requirement as webhook mention handling). A personal `GITHUB_TOKEN` is enough for review polling on the agent's own PRs, but not for `@mentions` on other people's PRs. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/). When this repo has a GitHub remote, `worker init` offers to install and connect the App as part of setup (see [Quick Start](#quick-start)); no separate manual configuration is required.
 
 ## How events are handled
 

@@ -2,14 +2,19 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ANALYTICS_CONFIG_DIR_ENV,
   flushAnalytics,
   isAnonymousIdNewlyCreated,
   isAnalyticsEnabled,
   isTelemetryDisabledByEnv,
   readAnalyticsEnabledFromSettings,
+  resolveWorkerMode,
+  RUN_ORIGIN_ENV,
   scrubProps,
   setAnalyticsSenderForTests,
   track,
+  trackWorkerStarted,
+  trackWorkerTaskRun,
 } from "../src/lib/analytics";
 
 const tmpDirs: string[] = [];
@@ -28,6 +33,8 @@ afterEach(() => {
   setAnalyticsSenderForTests(undefined);
   delete process.env.POSTHOG_API_KEY;
   delete process.env.DEVINTERN_TELEMETRY_DISABLED;
+  delete process.env[RUN_ORIGIN_ENV];
+  delete process.env[ANALYTICS_CONFIG_DIR_ENV];
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -162,6 +169,109 @@ describe("track", () => {
   });
 });
 
+describe("trackWorkerTaskRun", () => {
+  test("emits one terminal event for worker task subprocesses", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[RUN_ORIGIN_ENV] = "worker";
+    const received: unknown[] = [];
+    setAnalyticsSenderForTests({
+      send: async (payload) => {
+        received.push(payload);
+      },
+    });
+
+    expect(trackWorkerTaskRun("succeeded", { cliVersion: "2.5.0", tracker: "linear" })).toBe(true);
+    await Promise.resolve();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      event: "worker_task_run",
+      properties: {
+        cli_version: "2.5.0",
+        tracker: "linear",
+        outcome: "succeeded",
+        worker_trigger: "task",
+      },
+    });
+  });
+
+  test("attributes scheduled worker tasks without identifiers", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[RUN_ORIGIN_ENV] = "scheduled";
+    let received: unknown;
+    setAnalyticsSenderForTests({
+      send: async (payload) => {
+        received = payload;
+      },
+    });
+
+    expect(trackWorkerTaskRun("deferred", { cliVersion: "2.5.0", tracker: "markdown" })).toBe(true);
+    await Promise.resolve();
+
+    expect(received).toMatchObject({
+      event: "worker_task_run",
+      properties: {
+        outcome: "deferred",
+        worker_trigger: "scheduled",
+      },
+    });
+    expect((received as { properties: Record<string, unknown> }).properties).not.toHaveProperty(
+      "task_key",
+    );
+  });
+
+  test("does not emit for manual CLI task runs", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    let called = false;
+    setAnalyticsSenderForTests({
+      send: async () => {
+        called = true;
+      },
+    });
+
+    expect(trackWorkerTaskRun("failed", { cliVersion: "2.5.0", tracker: "jira" })).toBe(false);
+    await Promise.resolve();
+    expect(called).toBe(false);
+  });
+});
+
+describe("worker startup analytics", () => {
+  test.each([
+    { names: ["poll:jira", "poll:reviews"], expected: "polling" },
+    { names: ["relay"], expected: "relay" },
+    { names: ["poll:linear", "relay"], expected: "hybrid" },
+    { names: ["scheduled-automations"], expected: "scheduled" },
+  ])("classifies $expected mode", ({ names, expected }) => {
+    expect(resolveWorkerMode(names)).toBe(expected);
+  });
+
+  test("emits one startup event with the aggregate mode", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    let received: unknown;
+    setAnalyticsSenderForTests({
+      send: async (payload) => {
+        received = payload;
+      },
+    });
+
+    trackWorkerStarted({
+      cliVersion: "2.5.0",
+      tracker: "jira",
+      acquirerNames: ["poll:jira", "poll:reviews", "relay"],
+    });
+    await Promise.resolve();
+
+    expect(received).toMatchObject({
+      event: "worker_started",
+      properties: {
+        cli_version: "2.5.0",
+        tracker: "jira",
+        worker_mode: "hybrid",
+      },
+    });
+  });
+});
+
 describe("anonymous id persistence", () => {
   test("first run reports new, subsequent runs do not", async () => {
     process.env.POSTHOG_API_KEY = "phc_test";
@@ -174,5 +284,16 @@ describe("anonymous id persistence", () => {
 
   test("flushAnalytics resolves without pending sends", async () => {
     await expect(flushAnalytics(10)).resolves.toBeUndefined();
+  });
+
+  test("worker subprocesses use the workspace telemetry directory", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    const dir = makeConfigDir();
+    process.env[ANALYTICS_CONFIG_DIR_ENV] = dir;
+    setAnalyticsSenderForTests({ send: async () => {} });
+
+    expect(isAnonymousIdNewlyCreated()).toBe(true);
+    await track("worker_task_run", { outcome: "succeeded" });
+    expect(isAnonymousIdNewlyCreated()).toBe(false);
   });
 });

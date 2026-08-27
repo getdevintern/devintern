@@ -85,4 +85,39 @@ describe("JiraClient.hasIncompleteImplementationMarker", () => {
     const result = await client.hasIncompleteImplementationMarker(issueKey);
     expect(result).toBe(true);
   });
+
+  test("recognizes a processing-failure comment as an automation failure marker", async () => {
+    client.jiraApiCall = async (method, url) => {
+      if (method === "GET" && url.includes("/comment")) {
+        return {
+          comments: [
+            {
+              id: "1",
+              renderedBody:
+                "<p><strong>Automated implementation did not complete</strong> — no pull request was created.</p>",
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [
+                      {
+                        type: "text",
+                        text: "**Automated implementation did not complete** — no pull request was created.",
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected API call: ${method} ${url}`);
+    };
+
+    const result = await client.hasIncompleteImplementationMarker(issueKey);
+    expect(result).toBe(true);
+  });
 });

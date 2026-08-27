@@ -15,7 +15,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing, and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing plus the DevIntern GitHub App (`@mention` handling on any PR; skipped App steps are reminded in the summary), and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
 
 Do not schedule `devintern --query` every few minutes. That is what the worker already does.
 
@@ -151,6 +151,8 @@ If you run @devintern/code under cron on Linux and want the same daemon-proof gu
 ### Failure feedback on the task tracker
 
 A failed run never ends silently. When processing a task fails after it was moved to "In Progress" — an agent timeout, a usage limit, a crash, or the process being killed by `SIGTERM`/`SIGINT` (for example when a scheduler stops the job) — @devintern/code posts a comment on the ticket explaining that no pull request was created, the reason for the failure, and where partial work may live (the `feature/<key>` branch or a git stash). The ticket is also moved back to its To Do status so the next scheduled run can retry it.
+
+The failure comment will not cause a retry loop: posting it does bump the tracker's update stamp, but the retry gate ignores the harness's own comments and records the attempt, so the ticket is only re-run after you edit the description, post your own comment, or delete the failure comment (see [worker polling](./worker.md#re-running-a-task)).
 
 Pass `--skip-comments` to disable all tracker comments, including failure feedback.
 
