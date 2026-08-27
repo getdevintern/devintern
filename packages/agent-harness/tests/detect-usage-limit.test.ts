@@ -229,6 +229,54 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("Error: quota exceeded for this API key", "").limited).toBe(true);
   });
 
+  test("detects Antigravity individual quota and its adjacent reset line", () => {
+    const out = [
+      "⚠ Individual quota reached. Please upgrade your subscription to increase your limits.",
+      "Resets in 143h57m55s.",
+    ].join("\n");
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("143h57m55s");
+  });
+
+  test("detects Antigravity RESOURCE_EXHAUSTED quota diagnostics", () => {
+    const out =
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Contact your administrator to enable overages. Resets in 167h39m40s.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("167h39m40s");
+  });
+
+  test("detects Kilo gateway insufficient-balance diagnostics", () => {
+    const messages = [
+      "Error: Insufficient balance. Please add credits to continue.",
+      '{"error":{"message":"Insufficient balance. Please add credits to continue.","code":402}}',
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("does not borrow a non-adjacent reset from transcript content", () => {
+    const out = [
+      "⚠ Individual quota reached. Please upgrade your subscription to increase your limits.",
+      "The task inspected retry scheduling behavior.",
+      "Resets in 143h57m55s.",
+    ].join("\n");
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBeUndefined();
+  });
+
+  test("ignores balance language embedded in source and prose", () => {
+    const out = [
+      'const error = "Insufficient balance. Please add credits to continue.";',
+      "The docs explain that insufficient balance may require adding credits.",
+    ].join("\n");
+    expect(detectUsageLimit("", out).limited).toBe(false);
+  });
+
   test("extracts a retry-after hint", () => {
     const result = detectUsageLimit("Too Many Requests. Retry after 30s", "");
     expect(result.limited).toBe(true);
