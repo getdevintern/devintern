@@ -1151,7 +1151,8 @@ Subcommands:
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
   worker               Run the workspace worker daemon;
-                       'worker init' writes a workspace and ready-tasks query
+                        'worker init' writes a workspace, ready-tasks query,
+                        relay pairing, and the GitHub App (@mentions)
   dashboard            Serve the local observability dashboard (run history and stats)
   webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request

@@ -2,8 +2,10 @@
  * Interactive `devintern worker init`: guided unattended-worker setup.
  *
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
- * `.env`, dry-runs the ready-tasks query, and checks any automation license.
- * Polling is always on; direct webhooks run as a separate advanced service.
+ * `.env`, dry-runs the ready-tasks query, checks any automation license,
+ * offers relay pairing plus the DevIntern GitHub App (@mention events), and
+ * can emit a native service definition. Polling is always on; direct webhooks
+ * run as a separate advanced service.
  *
  * Prompt-loop mechanics come from `@devintern/task-trackers` (shared with
  * `devintern init`); everything effectful is injectable for tests.
@@ -23,6 +25,13 @@ import {
 import { defaultProbe, parseEnvContent } from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
+import {
+  GITHUB_APP_INSTALL_URL,
+  GitHubAppRecord,
+  hasGitHubAppCredentials,
+  loadGitHubAppRecord,
+  saveGitHubAppRecord,
+} from "./github-app-setup";
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
 import { runWorkerConnect } from "./relay-connect";
@@ -196,6 +205,15 @@ export interface WorkerInitDeps {
     trackerType: string;
     log: LogFn;
   }) => Promise<boolean>;
+  /** Override GitHub remote detection for the App step (`owner/name` or null). */
+  detectGithubRepo?: () => Promise<string | null>;
+  /** Override the install/connect flow of the GitHub App step. */
+  setupGitHubApp?: (ctx: {
+    repo: string;
+    workspaceDir: string;
+    prompt: PromptFn;
+    log: LogFn;
+  }) => Promise<boolean>;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -299,6 +317,51 @@ async function defaultConnectRelay(options: {
   }
 
   return ok;
+}
+
+/**
+ * Default GitHub App connect flow: point at the hosted install page, wait for
+ * the user to finish the install, then record the pairing with the workspace.
+ */
+async function defaultSetupGitHubApp(ctx: {
+  repo: string;
+  workspaceDir: string;
+  prompt: PromptFn;
+  log: LogFn;
+}): Promise<boolean> {
+  ctx.log(`   Open ${GITHUB_APP_INSTALL_URL} and install the DevIntern AI GitHub App`);
+  ctx.log(`   on ${ctx.repo} (grant it access to every repo the worker should watch).`);
+  await ctx.prompt("Press Enter once the App is installed: ");
+  saveGitHubAppRecord(
+    { repo: ctx.repo, enabled: true, connectedAt: new Date().toISOString() },
+    ctx.workspaceDir,
+  );
+  ctx.log(
+    `💾 Recorded the App pairing in ${join(ctx.workspaceDir, ".devintern-code", "github-app.json")}`,
+  );
+  return true;
+}
+
+/** Run the (overridable) install flow; logs a warning when it throws. */
+async function runGitHubAppSetup(
+  deps: WorkerInitDeps,
+  workspaceDir: string,
+  repo: string,
+  prompt: PromptFn,
+  log: LogFn,
+): Promise<boolean> {
+  const setup = deps.setupGitHubApp ?? defaultSetupGitHubApp;
+  try {
+    const ok = await setup({ repo, workspaceDir, prompt, log });
+    if (ok) {
+      log("✅ GitHub App events enabled (@mentions on any PR, PR comment events).");
+    }
+    return ok;
+  } catch (error) {
+    log(`⚠️  GitHub App setup failed: ${(error as Error).message}`);
+    log("   Polling still works; you can connect later with `devintern worker init`.");
+    return false;
+  }
 }
 
 /**
@@ -489,9 +552,78 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
     }
 
-    // 6. Write, but do not install, the native user-service definition. The
+    // 6. GitHub App: @mention handling on PRs the agent did not create (and
+    // instant PR comment events through the relay) need App auth; a personal
+    // GITHUB_TOKEN already covers review polling on the agent's own PRs.
+    let githubAppOutcome: "connected" | "existing" | "skipped" | "unavailable" = "unavailable";
+    const detectGithubRepo = deps.detectGithubRepo ?? detectGitHubRepo;
+    let githubRepo: string | null = null;
+    try {
+      githubRepo = await detectGithubRepo();
+    } catch {
+      githubRepo = null;
+    }
+
+    if (!githubRepo) {
+      log("\n6️⃣  GitHub App (@mentions)");
+      log("   No GitHub remote detected; skipping the GitHub App step.");
+    } else {
+      log(`\n6️⃣  GitHub App on ${githubRepo} (@mentions)`);
+      log(
+        "   Without it, review polling and replies work on PRs this worker created (via your GITHUB_TOKEN).",
+      );
+      log(
+        "   With it, @devintern-ai mentions on any PR — including other people's — react through the relay in seconds.",
+      );
+      const existing = loadGitHubAppRecord(workspaceDir);
+      const credentials = hasGitHubAppCredentials();
+      if ((existing?.enabled ?? false) || credentials) {
+        githubAppOutcome = "existing";
+        if (existing?.enabled && existing.repo !== githubRepo) {
+          log(
+            `   Existing pairing is for ${existing.repo}; reconfigure to point it at ${githubRepo}.`,
+          );
+        } else if (existing?.enabled) {
+          log(
+            `✅ GitHub App already connected to ${existing.repo} (${existing.connectedAt ?? "unknown date"}).`,
+          );
+        } else {
+          log("✅ GitHub App credentials found in the environment.");
+        }
+        const reconfigure = (
+          await prompt("Reconfigure or replace the GitHub App connection? [y/N]: ")
+        )
+          .trim()
+          .toLowerCase();
+        if (reconfigure === "y" || reconfigure === "yes") {
+          githubAppOutcome = (await runGitHubAppSetup(deps, workspaceDir, githubRepo, prompt, log))
+            ? "connected"
+            : "existing";
+        }
+      } else {
+        const installAnswer = (
+          await prompt("Install and connect the DevIntern GitHub App now? [Y/n]: ")
+        )
+          .trim()
+          .toLowerCase();
+        if (installAnswer === "n" || installAnswer === "no") {
+          githubAppOutcome = "skipped";
+          saveGitHubAppRecord({ repo: githubRepo, enabled: false }, workspaceDir);
+          log(`   Noted: GitHub App events stay off for ${githubRepo}.`);
+        } else {
+          githubAppOutcome = (await runGitHubAppSetup(deps, workspaceDir, githubRepo, prompt, log))
+            ? "connected"
+            : "skipped";
+          if (githubAppOutcome === "skipped") {
+            saveGitHubAppRecord({ repo: githubRepo, enabled: false }, workspaceDir);
+          }
+        }
+      }
+    }
+
+    // 7. Write, but do not install, the native user-service definition. The
     // foreground command remains an honest supported path on every platform.
-    log("\n6️⃣  Background service (optional)");
+    log("\n7️⃣  Background service (optional)");
     const serviceAnswer = (await prompt("Write a background service definition? [Y/n]: "))
       .trim()
       .toLowerCase();
@@ -530,6 +662,15 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     log("   1. Run `devintern worker`.");
     log("   2. Open http://localhost:4400 to see worker status and runs.");
     log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
+    if (githubAppOutcome === "skipped") {
+      log("\n⚠️  GitHub App events are not enabled:");
+      log(
+        `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
+      );
+      log(
+        "   on your repository, then re-run `devintern worker init` (or `devintern worker connect`).",
+      );
+    }
     return { ok: true };
   } finally {
     rl?.close();
