@@ -138,6 +138,21 @@ If a run completes but you want a different result, move the ticket back to your
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
+### Interrupted runs are recovered on startup
+
+A graceful stop (Ctrl-C, `SIGTERM`) comments on an in-flight ticket and moves it back to To Do. A hard crash — power cut, kernel panic, `kill -9`, a laptop that died — skips that cleanup, which used to leave the ticket stranded in "In Progress".
+
+The worker now bridges that gap on startup. Before any new tickets are acquired, it detects task runs left `in_progress` by the previous (dead) worker instance and gives each affected ticket the same treatment a graceful shutdown would have: the processing-failure comment is posted (explaining that the worker exited unexpectedly before a pull request could be created, and how to unlock a retry), and the ticket is moved back to your To Do status so it is no longer stranded. Each recovery is logged.
+
+Recovery respects the retry gate: the requeued ticket is not re-run on restart (no duplicate execution). It sits in To Do like any other ticket whose last attempt failed, and runs again when the ticket changes — an edited description, a new comment, or `--force`.
+
+Two guards keep the recovery from making noise or causing harm:
+
+- **Tickets that moved on are left alone.** If a ticket is no longer in your configured In Progress status (someone closed it, moved it to review, or otherwise handled it after the crash), the worker does not comment on or move it.
+- **Very old orphans are not announced.** Runs started more than 7 days ago are marked failed in the database but produce no comment or transition, on the assumption they were already handled manually. Set `WORKER_ORPHAN_MAX_AGE_HOURS` in the workspace `.env` to change the cutoff (`0` disables the feedback for every orphan).
+
+Runs from scheduled automations and PR reviews are not part of this: automations recover through their own claim machinery (the next occurrence picks up after a stale lease), and PR runs have their own comment flows.
+
 ### Ticket matches the query but is not picked up
 
 The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
@@ -204,6 +219,7 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 ## How events are handled
 
 - Events are persisted to a local SQLite queue (`.devintern-code/queue.db`) before processing, so a crash or restart never loses accepted work.
+- Runs interrupted by a dead worker are recovered on startup: their tickets get the failure comment and move back to To Do before new work is picked up.
 - Duplicate webhook deliveries are detected by GitHub's delivery id and skipped.
 - Review feedback is processed before new task pickup: a human waiting on feedback beats a ticket that can wait a minute.
 - One task or scheduled automation runs at a time per repository.
