@@ -50,7 +50,13 @@ import {
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
-import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/analytics";
+import {
+  flushAnalytics,
+  isAnonymousIdNewlyCreated,
+  RUN_ORIGIN_ENV,
+  track,
+  trackWorkerTaskRun,
+} from "./lib/analytics";
 import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentModel } from "./lib/agent-model";
@@ -79,6 +85,7 @@ import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import type { RunStatus } from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatProcessingFailureMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
@@ -138,6 +145,26 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
     estimate: options.estimate === true,
     sandbox: KNOWN_SANDBOX_PROVIDERS.has(sandboxProvider ?? "") ? sandboxProvider : undefined,
   };
+}
+
+function isWorkerTaskProcess(): boolean {
+  const origin = process.env[RUN_ORIGIN_ENV];
+  return origin === "worker" || origin === "scheduled";
+}
+
+/** Finish the local run record and emit exactly one outcome event for worker tasks. */
+async function finishTaskRun(
+  status: Exclude<RunStatus, "in_progress">,
+  reason?: string,
+): Promise<void> {
+  endRun(status, reason);
+  const tracked = trackWorkerTaskRun(status, {
+    cliVersion: VERSION,
+    tracker: process.env.TASK_TRACKER || "jira",
+  });
+  if (tracked) {
+    await flushAnalytics();
+  }
 }
 
 /**
@@ -716,6 +743,7 @@ if (process.argv[2] === "init") {
     await runWorkspaceWorker({
       workspacePath,
       verbose,
+      cliVersion: VERSION,
     });
     return;
   })();
@@ -1634,7 +1662,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.error(`   devintern ${taskKey} --no-git`);
         }
 
-        endRun("abandoned", "feature branch creation failed");
+        await finishTaskRun("abandoned", "feature branch creation failed");
         // Release lock before exiting
         if (lockManager) {
           lockManager.release();
@@ -1689,7 +1717,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
               `\n⚠️  Task ${workflowKey} failed clarity assessment but continuing with batch processing...`,
             );
           } else {
-            endRun("abandoned", "failed feasibility assessment");
+            await finishTaskRun("abandoned", "failed feasibility assessment");
             if (lockManager) {
               lockManager.release();
             }
@@ -1840,9 +1868,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       await tracker.markDoneIfSuccessful(workflowKey, taskDir);
     }
     if (implementationIncomplete) {
-      endRun("escalated", "implementation incomplete; handed back to a human");
+      await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
     } else {
-      endRun("succeeded");
+      await finishTaskRun("succeeded");
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
@@ -1851,7 +1879,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
-      endRun("deferred", error.message);
+      await finishTaskRun("deferred", error.message);
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       // The ticket may already be "In Progress": leave feedback and move it
       // back so the deferred retry can actually pick it up.
@@ -1870,7 +1898,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     const err = error as Error;
-    endRun("failed", err.message);
+    await finishTaskRun("failed", err.message);
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
     console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
     if (options.verbose && err.stack) {
@@ -1936,13 +1964,15 @@ async function main(): Promise<void> {
     // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
     // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
     // analytics.enabled: false in .devintern-code/settings.json.
-    const firstTelemetryRun = isAnonymousIdNewlyCreated();
-    void track("cli_run", buildCliRunProps(activeTrackerType));
-    if (firstTelemetryRun && !isAutomatedEnvironment()) {
-      console.log(
-        "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
-          "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
-      );
+    if (!isWorkerTaskProcess()) {
+      const firstTelemetryRun = isAnonymousIdNewlyCreated();
+      void track("cli_run", buildCliRunProps(activeTrackerType));
+      if (firstTelemetryRun && !isAutomatedEnvironment()) {
+        console.log(
+          "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
+            "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
+        );
+      }
     }
 
     // Validate environment — skip when every argument is a local markdown file path

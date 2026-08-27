@@ -34,6 +34,7 @@ import { RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -290,7 +291,10 @@ export function createFleetTaskExecutor(
 
       const ok = await runTask(taskKey, extraArgs, {
         cwd: worktree,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: {
+          ...buildRepoEnv(repo, workspaceDir),
+          [RUN_ORIGIN_ENV]: "worker",
+        },
       });
 
       if (ok) {
@@ -314,6 +318,8 @@ export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
   verbose?: boolean;
+  /** CLI release attached to anonymous worker startup analytics. */
+  cliVersion?: string;
 }
 
 /**
@@ -457,6 +463,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     {
       lock: createWorkspaceLock(workspaceDir),
       label: workspaceDir,
+      onStarted: async (acquirerNames) => {
+        trackWorkerStarted({
+          cliVersion: options.cliVersion ?? "0.0.0",
+          tracker: config.defaults.tracker,
+          acquirerNames,
+          configDir: workspaceDir,
+        });
+        await flushAnalytics();
+      },
     },
     acquirers,
   );

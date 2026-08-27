@@ -18,6 +18,8 @@ export interface WorkerOptions {
   lock?: LockManager;
   /** What this worker serves, for the startup banner (defaults to cwd). */
   label?: string;
+  /** Called once after every configured event source starts successfully. */
+  onStarted?: (acquirerNames: string[]) => Promise<void> | void;
 }
 
 /**
@@ -70,6 +72,7 @@ export async function startWorker(
   for (const acquirer of acquirers) {
     await acquirer.start();
   }
+  await options.onStarted?.(acquirers.map((acquirer) => acquirer.name));
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
