@@ -47,6 +47,14 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     estimate: true,
     poll: true,
   },
+  gitlab: {
+    displayName: "GitLab",
+    requiredEnv: ["GITLAB_TOKEN", "GITLAB_PROJECT"],
+    query: true,
+    queryExample: "is:open label:bug",
+    estimate: true,
+    poll: true,
+  },
   "azure-devops": {
     displayName: "Azure DevOps",
     requiredEnv: ["AZURE_DEVOPS_ORG", "AZURE_DEVOPS_PAT", "AZURE_DEVOPS_PROJECT"],

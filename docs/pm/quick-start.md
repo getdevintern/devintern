@@ -47,7 +47,7 @@ devpm init
 In a terminal, this starts an interactive setup wizard that:
 
 - Detects an existing @devintern/code configuration (`.devintern-code/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation
-- Asks which tracker you use (Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, or markdown files)
+- Asks which tracker you use (Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, GitLab, or markdown files)
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Writes your answers to `.devintern-pm/.env` and updates your `.gitignore` to exclude `.devintern-pm/.env` (to prevent leaking secrets)

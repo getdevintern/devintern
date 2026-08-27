@@ -322,6 +322,9 @@ function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
   if (trackerType === "github" && process.env.GITHUB_REPO) {
     return process.env.GITHUB_REPO;
   }
+  if (trackerType === "gitlab" && process.env.GITLAB_PROJECT) {
+    return process.env.GITLAB_PROJECT;
+  }
   if (trackerType === "azure-devops" && process.env.AZURE_DEVOPS_PROJECT) {
     return process.env.AZURE_DEVOPS_PROJECT;
   }
@@ -1134,7 +1137,7 @@ program
   .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
   .option(
     "--estimate",
-    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub posts comment-only estimates)",
+    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub and GitLab post comment-only estimates)",
   )
   .option(
     "--sandbox <provider>",
@@ -1160,6 +1163,11 @@ Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
 Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
   devintern 123 --create-pr
   devintern https://github.com/acme/webapp/issues/123 --create-pr
+  devintern --query "is:open label:bug" --create-pr
+
+Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
+  devintern 123 --create-pr
+  devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
 Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
