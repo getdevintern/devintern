@@ -4,7 +4,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { buildConflictPrompt, resolveConflictsOnPr } from "../src/lib/conflict-resolver";
+import {
+  buildConflictPrompt,
+  resolveConflictsOnPr,
+  sanitizeErrorForPublicComment,
+} from "../src/lib/conflict-resolver";
 import type { PullRequestInfo } from "../src/lib/github-reviews";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
@@ -27,12 +31,55 @@ describe("buildConflictPrompt", () => {
   });
 });
 
+describe("sanitizeErrorForPublicComment", () => {
+  test("redacts URL credentials", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      "fatal: unable to access 'https://ci-bot:ghs_secret123@github.com/acme/widgets.git/': 403",
+    );
+    expect(sanitized).not.toContain("ghs_secret123");
+    expect(sanitized).toContain("https://***@github.com/acme/widgets.git/");
+  });
+
+  test("redacts bare user:token@ pairs without a scheme", () => {
+    const sanitized = sanitizeErrorForPublicComment("auth failed for ci-bot:ghp_abc@github.com");
+    expect(sanitized).not.toContain("ghp_abc");
+    expect(sanitized).toContain("ci-bot:***@github.com");
+  });
+
+  test("strips absolute local paths but keeps relative refs and URLs", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      "could not lock /home/dev/repo/.git/config; merging origin/main from https://github.com/acme/widgets/pull/7",
+    );
+    expect(sanitized).not.toContain("/home/dev");
+    expect(sanitized).toContain("[path]; merging");
+    expect(sanitized).toContain("origin/main");
+    expect(sanitized).toContain("https://github.com/acme/widgets/pull/7");
+  });
+
+  test("strips windows drive-letter paths", () => {
+    const sanitized = sanitizeErrorForPublicComment(
+      `worktree at C:\\Users\\dev\\repo\\.git broken`,
+    );
+    expect(sanitized).not.toContain("Users");
+    expect(sanitized).toContain("[path]");
+  });
+
+  test("collapses whitespace and truncates to a bounded length", () => {
+    const long = `push failed:\n${"x".repeat(1000)}`;
+    const sanitized = sanitizeErrorForPublicComment(long);
+    expect(sanitized).toHaveLength(301); // bound + ellipsis
+    expect(sanitized.endsWith("…")).toBe(true);
+    expect(sanitized).not.toContain("\n");
+  });
+});
+
 describe("resolveConflictsOnPr", () => {
   let testDir: string;
   let originDir: string;
   let repoDir: string;
   let seedDir: string;
   const savedWorktreeBase = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
+  const savedGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
 
   function prInfo(overrides: Partial<PullRequestInfo> = {}): PullRequestInfo {
     return {
@@ -40,9 +87,17 @@ describe("resolveConflictsOnPr", () => {
       title: "Test PR",
       body: null,
       state: "open",
-      head: { ref: "feature/change", sha: "unused", repo: { full_name: "acme/widgets" } },
+      // Default to live origin state (read straight from the bare repo so
+      // pushes made from the review worktree are visible) for post-push
+      // verification, which re-fetches the PR; individual tests override.
+      head: {
+        ref: "feature/change",
+        sha: git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim(),
+        repo: { full_name: "acme/widgets" },
+      },
       base: { ref: "main", sha: "base-sha" },
       html_url: PR_URL,
+      mergeable_state: "clean",
       ...overrides,
     };
   }
@@ -50,6 +105,10 @@ describe("resolveConflictsOnPr", () => {
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "devintern-conflict-"));
     process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(testDir, "review-worktree");
+    // Ignore the developer's global git config (rerere, hooks, aliases):
+    // retry behavior must not depend on whether rerere auto-resolves a
+    // repeated conflict. The dedicated rerere path has its own test.
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 
     // Bare origin with main + a conflicting feature branch, plus the worker's
     // source checkout. One shell call keeps per-test git spawn overhead low.
@@ -93,6 +152,8 @@ describe("resolveConflictsOnPr", () => {
   afterEach(() => {
     if (savedWorktreeBase === undefined) delete process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     else process.env.DEVINTERN_REVIEW_WORKTREE_PATH = savedWorktreeBase;
+    if (savedGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = savedGitConfigGlobal;
     rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -208,6 +269,7 @@ describe("resolveConflictsOnPr", () => {
   });
 
   test("defers before touching git when expected head or base changed", async () => {
+    const currentHead = git(seedDir, "rev-parse origin/feature/change").trim();
     const headChanged = await resolveConflictsOnPr(PR_URL, {
       fetchPr: async () => prInfo(),
       expectedHeadSha: "stale-head",
@@ -220,7 +282,7 @@ describe("resolveConflictsOnPr", () => {
 
     const baseChanged = await resolveConflictsOnPr(PR_URL, {
       fetchPr: async () => prInfo(),
-      expectedHeadSha: "unused",
+      expectedHeadSha: currentHead,
       expectedBaseSha: "stale-base",
       noComment: true,
     });
@@ -267,21 +329,30 @@ describe("resolveConflictsOnPr", () => {
     // against the reported SHA.
     const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
     const staleBaseSha = git(seedDir, "rev-parse origin/main").trim();
+    let fetches = 0;
     const result = await resolveConflictsOnPr(PR_URL, {
       cwd: repoDir,
       noComment: true,
+      verifyAttempts: 1,
       expectedHeadSha,
       expectedBaseSha: staleBaseSha,
       fetchPr: async () => {
-        git(seedDir, "checkout main");
-        writeFileSync(join(seedDir, "base-race.txt"), "moved\n");
-        git(seedDir, "add .");
-        git(seedDir, 'commit -m "concurrent base push"');
-        git(seedDir, "push origin main");
+        // Only the first fetch (eligibility) races the base forward; later
+        // fetches model GitHub's post-push view of the PR.
+        if (fetches++ === 0) {
+          git(seedDir, "checkout main");
+          writeFileSync(join(seedDir, "base-race.txt"), "moved\n");
+          git(seedDir, "add .");
+          git(seedDir, 'commit -m "concurrent base push"');
+          git(seedDir, "push origin main");
+        }
         return prInfo({
           head: {
             ref: "feature/change",
-            sha: expectedHeadSha,
+            sha:
+              fetches === 1
+                ? expectedHeadSha
+                : git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim(),
             repo: { full_name: "acme/widgets" },
           },
           base: { ref: "main", sha: staleBaseSha },
@@ -377,5 +448,504 @@ describe("resolveConflictsOnPr", () => {
     expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
       ancestorSha,
     );
+  });
+
+  test("posts a failure comment on the PR when the push fails", async () => {
+    const untouchedHead = git(seedDir, "rev-parse origin/feature/change").trim();
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(hookPath, "#!/bin/sh\necho 'hook exploded' >&2\nexit 1\n", { mode: 0o755 });
+
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("push");
+    // The failure is announced on the PR itself, not just in the terminal.
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain("could not publish the merge");
+    expect(comments[0]).toContain("manual action needed");
+
+    // Origin's feature branch never received the merge.
+    expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
+  });
+
+  test("redacts credentials and local paths from the public failure comment", async () => {
+    const untouchedHead = git(seedDir, "rev-parse origin/feature/change").trim();
+    const leakyPath = join(testDir, "leaky-worktree");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh
+echo "fatal: unable to access 'https://ci-bot:ghs_supersecret@github.com/acme/widgets.git/': 403" >&2
+echo "hint: check the worktree at ${leakyPath}/.git" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(comments).toHaveLength(1);
+    // Nothing sensitive reaches the public PR comment...
+    expect(comments[0]).not.toContain("ghs_supersecret");
+    expect(comments[0]).not.toContain(leakyPath);
+    expect(comments[0]).toContain("***@");
+    expect(comments[0]).toContain("[path]");
+    expect(comments[0]).toContain("manual action needed");
+    // ...while the full detail stays available locally.
+    expect(result.message).toContain("ghs_supersecret");
+    expect(result.message).toContain(leakyPath);
+
+    // Origin's feature branch never received the merge.
+    expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
+  });
+
+  test("retries the whole merge when a transient push rejection clears", async () => {
+    const marker = join(testDir, "rejected-once");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh
+if [ -f "${marker}" ]; then exit 0; fi
+touch "${marker}"
+echo "! [rejected]        feature/change -> feature/change (non-fast-forward)" >&2
+echo "error: failed to push some refs to 'origin'" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    let agentRuns = 0;
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        agentRuns++;
+        writeFileSync(join(workDir, "greeting.txt"), `resolved run ${agentRuns}\n`);
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    // The merge+push cycle restarted and the agent resolved again.
+    expect(agentRuns).toBe(2);
+    expect(comments).toEqual([
+      expect.stringContaining("devintern resolved them and pushed the merge"),
+    ]);
+
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-retry-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe("resolved run 2\n");
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("incorporates a human push that lands mid-resolution and still lands the fix", async () => {
+    const expectedHeadSha = git(seedDir, "rev-parse origin/feature/change").trim();
+
+    // Stage a human commit on top of the current branch tip in origin without
+    // moving the branch yet: push it to a throwaway ref (transferring the
+    // object), delete the ref, and record the SHA for the hook to publish.
+    execSync(
+      [
+        "set -e",
+        `cd ${seedDir}`,
+        "git checkout -q -B stage-human origin/feature/change",
+        "printf 'human change\\n' > human.txt",
+        "git add .",
+        'git commit -qm "human lands mid-resolution"',
+        "git push -q origin HEAD:refs/heads/_staged_human",
+        "git push -q origin :refs/heads/_staged_human",
+      ].join("\n"),
+      { stdio: "ignore" },
+    );
+    const humanSha = git(seedDir, "rev-parse HEAD").trim();
+    expect(humanSha).not.toBe(expectedHeadSha);
+
+    const movedMarker = join(testDir, "moved-once");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh
+if [ -f "${movedMarker}" ]; then exit 0; fi
+touch "${movedMarker}"
+# A human pushed to the branch while the agent was resolving.
+git --git-dir="${originDir}" update-ref refs/heads/feature/change "${humanSha}"
+echo "! [rejected]        feature/change -> feature/change (stale info)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    let agentRuns = 0;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      verifyAttempts: 1,
+      expectedHeadSha,
+      fetchPr: async () =>
+        prInfo({
+          head: {
+            ref: "feature/change",
+            sha:
+              agentRuns === 0
+                ? expectedHeadSha
+                : git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim(),
+            repo: { full_name: "acme/widgets" },
+          },
+        }),
+      agentRunner: async (_prompt, workDir) => {
+        agentRuns++;
+        writeFileSync(join(workDir, "greeting.txt"), `resolved after move ${agentRuns}\n`);
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(agentRuns).toBe(2);
+
+    // The published branch contains both the human's commits and the merge.
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-forward-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(existsSync(join(shipped, "clone", "human.txt"))).toBe(true);
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe(
+      "resolved after move 2\n",
+    );
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("fails instead of claiming success when GitHub still reports conflicts after the push", async () => {
+    let fetches = 0;
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 2,
+      verifyDelayMs: 0,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => {
+        fetches++;
+        if (fetches === 1) return prInfo({ mergeable_state: "dirty" });
+        // Post-push: our commit is on the PR but GitHub insists it conflicts.
+        return prInfo({ mergeable_state: "dirty" });
+      },
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("still reports merge conflicts");
+    expect(fetches).toBe(3); // initial + 2 verification polls
+    expect(comments).toHaveLength(1);
+    // The push landed; the comment must not claim nothing was published.
+    expect(comments[0]).toContain("pushed a merge");
+    expect(comments[0]).not.toContain("No changes landed");
+  });
+
+  test("reports success with a caveat when GitHub keeps recomputing mergeability", async () => {
+    let fetches = 0;
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 2,
+      verifyDelayMs: 0,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => {
+        fetches++;
+        if (fetches === 1) return prInfo({ mergeable_state: "unknown" });
+        return prInfo({ mergeable_state: "unknown" });
+      },
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    // The push landed; unconfirmed mergeability must not fail the command...
+    expect(result.outcome).toBe("resolved");
+    expect(result.message).toContain("has not confirmed mergeability yet");
+    // ...and the usual success comment is still posted.
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain("devintern resolved them and pushed the merge");
+  });
+
+  test("fails when the PR head does not include the pushed merge commit", async () => {
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () =>
+        prInfo({
+          head: {
+            ref: "feature/change",
+            sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            repo: { full_name: "acme/widgets" },
+          },
+        }),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("does not include the pushed merge commit");
+    // The push landed; the comment must not claim nothing was published.
+    expect(comments[0]).toContain("pushed a merge");
+    expect(comments[0]).not.toContain("No changes landed");
+  });
+
+  test("completes a rerere-auto-resolved retry without re-running the agent", async () => {
+    // Environments with `git rerere` + autoUpdate record attempt one's
+    // resolution; on a retry the merge auto-stages it and exits non-zero
+    // with no unmerged paths. The resolver must finish that merge instead
+    // of aborting.
+    git(repoDir, "config rerere.enabled true");
+    git(repoDir, "config rerere.autoUpdate true");
+
+    const marker = join(testDir, "rejected-once-rerere");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh
+if [ -f "${marker}" ]; then exit 0; fi
+touch "${marker}"
+echo "! [rejected]        feature/change -> feature/change (non-fast-forward)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    let agentRuns = 0;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      verifyAttempts: 1,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        agentRuns++;
+        writeFileSync(join(workDir, "greeting.txt"), "rerere resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(agentRuns).toBe(1);
+
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-rerere-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe("rerere resolved\n");
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("verification tolerates a lagging PR read before confirming success", async () => {
+    let fetches = 0;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      verifyAttempts: 3,
+      verifyDelayMs: 0,
+      fetchPr: async () => {
+        fetches++;
+        // The initial pre-run fetch consumes the first call; the three
+        // verification polls then see a stale conflict, a lagging head
+        // while GitHub recomputes, and finally the healthy PR.
+        if (fetches === 2) return prInfo({ mergeable_state: "dirty" });
+        if (fetches === 3) {
+          return prInfo({
+            head: {
+              ref: "feature/change",
+              sha: "0000000000000000000000000000000000000000",
+              repo: { full_name: "acme/widgets" },
+            },
+            mergeable_state: "unknown",
+          });
+        }
+        if (fetches >= 5) throw new Error("unexpected extra fetch");
+        return prInfo({ mergeable_state: "clean" });
+      },
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(result.message).toContain("verified conflict-free");
+    // initial fetch + two lagging verification polls + the confirming one
+    expect(fetches).toBe(4);
+  });
+
+  test("verification treats transient PR fetch errors as unverified, not failure", async () => {
+    let fetches = 0;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      verifyAttempts: 2,
+      verifyDelayMs: 0,
+      fetchPr: async () => {
+        fetches++;
+        if (fetches >= 2) throw new Error("API rate limit exceeded");
+        return prInfo();
+      },
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    // A landed push must not be reported as failed because of rate limits.
+    expect(result.outcome).toBe("resolved");
+    expect(result.message).toContain("has not confirmed mergeability yet");
+  });
+
+  test("reports success when reading the pushed SHA fails after an accepted push", async () => {
+    // Simulate a local `rev-parse HEAD` failure after the push was accepted:
+    // a pre-push hook arms a marker, then the reference-transaction hook that
+    // fires for the push's remote-tracking ref update corrupts the worktree
+    // git-dir HEAD. The old sentinel behavior compared GitHub's head against
+    // "" and deterministically reported head-moved even though the merge
+    // landed.
+    const marker = join(testDir, "push-started");
+    writeFileSync(join(repoDir, ".git", "hooks", "pre-push"), `#!/bin/sh\ntouch "${marker}"\n`, {
+      mode: 0o755,
+    });
+    const refTxHook = [
+      "#!/bin/sh",
+      "while read -r _old _new ref; do",
+      '  case "$ref" in refs/remotes/origin/feature/change)',
+      '    [ "$1" = "committed" ] && [ -f "' + marker + '" ] || exit 0',
+      '    git_dir="$(git rev-parse --absolute-git-dir)"',
+      "    printf 'corrupted\\n' > \"$git_dir/HEAD\"",
+      "    ;;",
+      "esac",
+      "done",
+      "exit 0",
+    ].join("\n");
+    writeFileSync(join(repoDir, ".git", "hooks", "reference-transaction"), refTxHook, {
+      mode: 0o755,
+    });
+
+    const comments: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    // The push landed; an unreadable local SHA must degrade to unverified,
+    // never claim the pushed merge commit is missing.
+    expect(result.outcome).toBe("resolved");
+    expect(result.message).toContain("has not confirmed mergeability yet");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain("devintern resolved them and pushed the merge");
+
+    // And the merge genuinely is on origin's feature branch.
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-sha-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe("resolved\n");
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("an already-up-to-date branch stays quiet and posts nothing", async () => {
+    // Make the branch genuinely contain main: a real (resolved) merge commit.
+    const fix = join(testDir, "uptodate");
+    execSync(`git clone ${originDir} ${fix}`, { stdio: "ignore" });
+    git(fix, "config user.email t@t.co");
+    git(fix, "config user.name T");
+    git(fix, "checkout feature/change");
+    try {
+      git(fix, "merge origin/main"); // conflicts; resolved below
+    } catch {
+      // execSync throws on git's non-zero conflict exit.
+    }
+    writeFileSync(join(fix, "greeting.txt"), "both\n");
+    git(fix, "add -A");
+    git(fix, "commit --no-edit");
+    git(fix, "push origin HEAD:refs/heads/feature/change");
+
+    const comments: string[] = [];
+    let agentCalled = false;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      verifyAttempts: 1,
+      prCommenter: async (body) => {
+        comments.push(body);
+      },
+      fetchPr: async () => prInfo(),
+      agentRunner: async () => {
+        agentCalled = true;
+        return { success: true, output: "" };
+      },
+    });
+
+    expect(result.outcome).toBe("skipped");
+    expect(agentCalled).toBe(false);
+    expect(comments).toEqual([]);
   });
 });

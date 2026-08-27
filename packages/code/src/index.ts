@@ -972,6 +972,17 @@ if (process.argv[2] === "init") {
       }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
+      } else if (result.outcome === "failed") {
+        // A landed-but-unconfirmed failure means the merge commit IS on the
+        // PR branch even though verification failed; only the other failure
+        // kinds leave the PR untouched.
+        const untouchedHint =
+          result.failureKind === "landed-but-unconfirmed"
+            ? "The merge commit is on the branch; see the PR for details."
+            : "No changes landed on the PR; see the PR comment for details.";
+        console.error(`❌ Failed: ${result.message}. ${untouchedHint}`);
+      } else if (result.outcome === "deferred") {
+        console.log(`⏳ Deferred: ${result.message}`);
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
