@@ -439,6 +439,22 @@ devintern worker
 
 See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). Cron of the CLI remains only as a gap filler for a wall-clock window (for example only at night) until the worker has quiet hours, and for `--estimate` schedules.
 
+### Built-in automation preset: docs-drift-guard
+
+For recurring documentation checks you do not need to write a prompt. In `workspace.toml`, name the built-in preset instead:
+
+```toml
+[[automations]]
+id = "docs-drift"
+enabled = true
+repo = "web-app"
+preset = "docs-drift-guard"
+output_mode = "ticket"      # or "pull_request"
+cron = "0 5 * * *"
+```
+
+The preset analyzes newly merged default-branch commits against `docs/**`, `AGENTS.md`, `CLAUDE.md`, and `README*`, keeps a per-repository checkpoint so each run only looks at new commits, and publishes findings as deduplicated tracker tickets (`ticket` mode; GitHub Issues or GitLab required) or a documentation-only pull request (`pull_request` mode; GitHub remote required). See the [Docs Drift Guard guide](https://devintern.com/docs/code/docs-drift-guard) for options (`doc_paths`, `baseline_sha`), checkpoint/retry behavior, and prerequisites.
+
 ```bash
 # Night-only drain, if you are not running the worker
 0 22 * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1

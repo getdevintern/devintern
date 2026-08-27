@@ -20,6 +20,8 @@ export interface TrackerCapabilities {
   estimate: boolean;
   /** Supports worker Mode 1 polling (a change detector is implemented). */
   poll: boolean;
+  /** Supports creating new issues (`IssueCreatableClient`). */
+  createIssues: boolean;
 }
 
 export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
@@ -30,6 +32,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `project = PROJ AND status = 'To Do'`,
     estimate: true,
     poll: true,
+    createIssues: false,
   },
   linear: {
     displayName: "Linear",
@@ -38,6 +41,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `{"state":{"name":{"eq":"Todo"}}}`,
     estimate: true,
     poll: true,
+    createIssues: false,
   },
   github: {
     displayName: "GitHub",
@@ -46,6 +50,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "is:open label:bug",
     estimate: true,
     poll: true,
+    createIssues: true,
   },
   gitlab: {
     displayName: "GitLab",
@@ -54,6 +59,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "is:open label:bug",
     estimate: true,
     poll: true,
+    createIssues: true,
   },
   "azure-devops": {
     displayName: "Azure DevOps",
@@ -62,6 +68,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'",
     estimate: true,
     poll: true,
+    createIssues: false,
   },
   asana: {
     displayName: "Asana",
@@ -70,6 +77,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `project:1200000000000000 section:"To Do" completed:false`,
     estimate: true,
     poll: true,
+    createIssues: false,
   },
   trello: {
     displayName: "Trello",
@@ -78,6 +86,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `list:"To Do" is:open`,
     estimate: false,
     poll: true,
+    createIssues: false,
   },
   markdown: {
     displayName: "markdown",
@@ -86,6 +95,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "status=todo",
     estimate: false,
     poll: true,
+    createIssues: false,
   },
 };
 
@@ -122,4 +132,9 @@ export function supportsPolling(trackerType: string): boolean {
 /** Trackers that support worker polling, for help/error text. */
 export function trackersSupportingPolling(): string[] {
   return Object.keys(TRACKER_CAPABILITIES).filter((t) => TRACKER_CAPABILITIES[t].poll);
+}
+
+/** Trackers that can create issues, for feature detection and error text. */
+export function supportsIssueCreation(): string[] {
+  return Object.keys(TRACKER_CAPABILITIES).filter((t) => TRACKER_CAPABILITIES[t].createIssues);
 }

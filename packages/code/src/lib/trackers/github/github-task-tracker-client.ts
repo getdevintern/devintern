@@ -93,6 +93,18 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
     };
   }
 
+  /**
+   * Create a new issue in the configured repository (issue-creation
+   * capability used by preset automations; see `IssueCreatableClient`).
+   */
+  async createIssue(input: { title: string; body: string; labels?: string[] }): Promise<{
+    key: string;
+    url?: string;
+  }> {
+    const issue = await this.githubClient.createIssue(input.title, input.body, input.labels);
+    return { key: String(issue.number), url: issue.html_url };
+  }
+
   async getComments(taskKey: string): Promise<Comment[]> {
     const comments = await this.githubClient.listIssueComments(this.toIssueNumber(taskKey));
     const filtered = comments.filter((c) => !isDevInternCommentText(c.body || ""));

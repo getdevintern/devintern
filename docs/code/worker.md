@@ -58,7 +58,23 @@ For each flaky test, add a short comment explaining the suspected race condition
 Do not change production code."""
 ```
 
-Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
+Every entry needs a stable unique `id`, boolean `enabled`, and exactly one schedule. Prompt automations also need a non-empty `prompt`; preset automations name a `preset` instead (see [Docs Drift Guard](./docs-drift-guard.md)). Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
+
+### Built-in presets: docs-drift-guard
+
+Instead of maintaining your own prompt for recurring documentation checks, use the built-in `docs-drift-guard` preset. It compares newly merged default-branch commits against the repository's documentation set (`docs/**`, `AGENTS.md`, `CLAUDE.md`, `README*`) and publishes drift either as deduplicated tracker tickets or as a documentation-only pull request:
+
+```toml
+[[automations]]
+id = "docs-drift"
+enabled = true
+repo = "web-app"
+preset = "docs-drift-guard"
+output_mode = "ticket"   # or "pull_request"
+cron = "0 5 * * *"
+```
+
+Presets checkpoint per repository, so each run examines only newly merged commits and retries the same range after a failure. See the [Docs Drift Guard guide](./docs-drift-guard.md) for output modes, prerequisites, checkpoint semantics, and configuration options.
 
 Configuration is validated as a group at worker startup and changes require a restart. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 

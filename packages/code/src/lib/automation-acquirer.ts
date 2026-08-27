@@ -47,6 +47,14 @@ export interface AutomationAcquirerOptions {
   resolveContext: (automation: AutomationConfig) => Promise<AutomationRunContext | null>;
   now?: () => number;
   spawnRun?: (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun;
+  /**
+   * Override the default preset execution (in-process preset `run`). Tests
+   * inject fakes; production uses the registry-defined runner.
+   */
+  presetRunner?: (
+    automation: AutomationConfig,
+    context: AutomationRunContext,
+  ) => SpawnedAutomationRun;
   leaseMs?: number;
   heartbeatMs?: number;
   terminationGraceMs?: number;
@@ -193,12 +201,17 @@ export class AutomationAcquirer implements Acquirer {
         console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
-          : defaultSpawnRun(
-              automation,
-              context,
-              this.options.extraArgs ?? workerTaskArgs(),
-              this.options.terminationGraceMs,
-            );
+          : automation.preset
+            ? (this.options.presetRunner ?? makeDefaultPresetSpawnRun(this.options.dbPath))(
+                automation,
+                context,
+              )
+            : defaultSpawnRun(
+                automation,
+                context,
+                this.options.extraArgs ?? workerTaskArgs(),
+                this.options.terminationGraceMs,
+              );
         const active: ActiveAutomationRun = {
           run,
           lifecycle: Promise.resolve(),
@@ -295,7 +308,7 @@ export function writeAutomationTaskFile(
     "",
     `# ${automation.id}`,
     "",
-    automation.prompt.trim(),
+    (automation.prompt ?? "").trim(),
     "",
   ].join("\n");
   writeFileSync(filePath, body);
@@ -323,6 +336,72 @@ function defaultSpawnRun(
       terminationGraceMs,
     },
   );
+}
+
+/**
+ * Execute a preset automation in-process through its registry definition.
+ *
+ * Preset runs bypass the markdown-task pipeline: the definition owns prompt
+ * construction, validation, side effects, and checkpointing, while this
+ * acquirer still owns scheduling, leasing, overlap protection, and run
+ * attribution. `terminate()` cooperatively aborts via signal — the runner
+ * checks it between phases instead of killing a possibly mid-publication
+ * process tree.
+ */
+export function makeDefaultPresetSpawnRun(
+  dbPath: string,
+): (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun {
+  return (automation, context) => {
+    const controller = new AbortController();
+    const completion = (async (): Promise<boolean> => {
+      const { getPreset } = await import("./automations/presets");
+      const definition = getPreset(automation.preset ?? "");
+      if (!definition) {
+        console.error(
+          `❌ [automation:${automation.id}] unknown preset "${automation.preset}"; skipping run`,
+        );
+        return false;
+      }
+      const resolved = {
+        name: definition.name,
+        version: definition.version,
+        outputMode: automation.outputMode ?? definition.defaultOutputMode,
+        options: {
+          ...(automation.docPaths ? { docPaths: automation.docPaths } : {}),
+          ...(automation.baselineSha ? { baselineSha: automation.baselineSha } : {}),
+        },
+      };
+      const errors: string[] = [];
+      definition.checkPrerequisites?.({
+        cwd: context.cwd,
+        trackerType: (process.env.TASK_TRACKER || "jira").toLowerCase(),
+        resolved,
+        error: (message) => errors.push(message),
+      });
+      if (errors.length > 0) {
+        console.error(
+          `❌ [automation:${automation.id}] preset prerequisites not met:\n- ${errors.join("\n- ")}`,
+        );
+        return false;
+      }
+      if (!definition.run) {
+        console.error(`❌ [automation:${automation.id}] preset "${definition.name}" has no runner`);
+        return false;
+      }
+      return definition.run({
+        automationId: automation.id,
+        resolved,
+        cwd: context.cwd,
+        repoName: context.repo,
+        dbPath,
+        signal: controller.signal,
+      });
+    })();
+    return {
+      completion,
+      terminate: () => controller.abort(),
+    };
+  };
 }
 
 /**

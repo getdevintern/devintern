@@ -17,6 +17,37 @@ import type {
   TaskTrackerCommentContent,
 } from "../types/task-tracker";
 
+// --------------------------------------------------------------------
+// Issue creation (optional capability — see {@linkcode IssueCreatableClient})
+// --------------------------------------------------------------------
+
+/** Normalized payload for creating a tracker issue. */
+export interface CreateIssueInput {
+  title: string;
+  /** Markdown body. */
+  body: string;
+  labels?: string[];
+}
+
+/** Normalized result of a created tracker issue. */
+export interface CreatedIssue {
+  /** Tracker-native key (issue number, iid, ...). */
+  key: string;
+  url?: string;
+}
+
+/**
+ * Optional capability interface for trackers that can create issues.
+ *
+ * Implementations ({@link GitHubTaskTrackerClient},
+ * {@link GitLabTaskTrackerClient}) duck-type against
+ * {@link TaskTrackerClient}; callers feature-detect with
+ * `supportsIssueCreation()` before casting.
+ */
+export interface IssueCreatableClient {
+  createIssue(input: CreateIssueInput): Promise<CreatedIssue>;
+}
+
 export interface TaskTrackerClient {
   // ------------------------------------------------------------------
   // Core task operations

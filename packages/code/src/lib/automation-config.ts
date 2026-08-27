@@ -4,11 +4,22 @@ import { join } from "path";
 import { CronExpressionParser } from "cron-parser";
 
 import { parseToml } from "./workspace/toml";
+import { getPreset } from "./automations/presets";
+import { listPresetNames, resolvePresetOutputMode } from "./automations/preset-registry";
+import type { PresetOutputMode } from "./automations/preset-registry";
 
 export interface AutomationConfig {
   id: string;
   enabled: boolean;
-  prompt: string;
+  prompt?: string;
+  /** Built-in preset name; mutually exclusive with {@linkcode prompt}. */
+  preset?: string;
+  /** Preset output channel (`ticket` or `pull_request`). */
+  outputMode?: PresetOutputMode;
+  /** Preset-specific documentation path overrides (docs-drift-guard). */
+  docPaths?: string[];
+  /** Preset-specific first-run starting SHA (docs-drift-guard). */
+  baselineSha?: string;
   cron?: string;
   interval?: string;
   intervalMs?: number;
@@ -35,7 +46,14 @@ export function parseAutomationInterval(value: string, nowMs = Date.now()): numb
   return intervalMs;
 }
 
-/** Validate and normalize `[[automations]]` tables, collecting every error. */
+/**
+ * Validate and normalize `[[automations]]` tables, collecting every error.
+ *
+ * Entries either carry a `prompt` (free-form automation) or name a `preset`
+ * (built-in behavior with typed defaults). Unknown presets, unsupported
+ * output modes, invalid path overrides, and prompt/preset mixing are all
+ * rejected with actionable errors while parsing continues for other entries.
+ */
 export function parseAutomationEntries(
   value: unknown,
   options: { sourceLabel: string; repoNames?: Set<string> },
@@ -74,8 +92,52 @@ export function parseAutomationEntries(
 
     const enabledValue = table.enabled;
     if (typeof enabledValue !== "boolean") errors.push(`${label}.enabled must be a boolean.`);
+
+    const presetName = stringValue("preset");
     const prompt = stringValue("prompt");
-    if (!prompt) errors.push(`${label}.prompt is required.`);
+    if (presetName && prompt) {
+      errors.push(
+        `${label} cannot combine prompt and preset; preset entries get their prompt from the preset definition.`,
+      );
+    }
+    if (!presetName && !prompt) errors.push(`${label}.prompt is required.`);
+
+    let presetConfig: {
+      preset: string;
+      outputMode?: PresetOutputMode;
+      docPaths?: string[];
+      baselineSha?: string;
+    } | null = null;
+    if (presetName) {
+      const definition = getPreset(presetName);
+      if (!definition) {
+        errors.push(
+          `${label}.preset "${presetName}" is not a known automation preset. Known presets: ${listPresetNames().join(", ")}.`,
+        );
+      } else {
+        const entryErrors: string[] = [];
+        const outputMode = resolvePresetOutputMode(definition, table, (message) =>
+          entryErrors.push(message),
+        );
+        if (outputMode) presetConfig = { preset: presetName, outputMode };
+        definition.validateOptions?.({
+          table,
+          error: (message) => entryErrors.push(message),
+        });
+        for (const message of entryErrors) errors.push(`${label}: ${message}`);
+        if (outputMode && entryErrors.length === 0) {
+          presetConfig = {
+            ...presetConfig,
+            preset: presetName,
+            outputMode,
+            ...(Array.isArray(table.doc_paths) ? { docPaths: table.doc_paths as string[] } : {}),
+            ...(typeof table.baseline_sha === "string"
+              ? { baselineSha: table.baseline_sha.trim().toLowerCase() }
+              : {}),
+          };
+        }
+      }
+    }
 
     const cron = stringValue("cron");
     const interval = stringValue("interval");
@@ -103,17 +165,26 @@ export function parseAutomationEntries(
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
 
-    if (
-      id &&
+    const entryIsValid =
+      id !== undefined &&
       typeof enabledValue === "boolean" &&
-      prompt &&
       Boolean(cron) !== Boolean(interval) &&
-      (!interval || intervalMs !== null)
-    ) {
+      (!interval || intervalMs !== null) &&
+      // Exactly one of prompt / preset, with the preset side fully valid.
+      (presetName ? presetConfig !== null : prompt !== undefined);
+
+    if (entryIsValid) {
       automations.push({
-        id,
+        id: id as string,
         enabled: enabledValue,
-        prompt,
+        ...(presetName
+          ? {
+              preset: (presetConfig as { preset: string }).preset,
+              outputMode: (presetConfig as { outputMode: PresetOutputMode }).outputMode,
+              docPaths: presetConfig?.docPaths,
+              baselineSha: presetConfig?.baselineSha,
+            }
+          : { prompt: prompt as string }),
         cron,
         interval,
         intervalMs: intervalMs ?? undefined,

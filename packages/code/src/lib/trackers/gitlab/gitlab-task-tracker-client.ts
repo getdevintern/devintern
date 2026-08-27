@@ -109,6 +109,18 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
     };
   }
 
+  /**
+   * Create a new issue in the configured project (issue-creation capability
+   * used by preset automations; see `IssueCreatableClient`).
+   */
+  async createIssue(input: { title: string; body: string; labels?: string[] }): Promise<{
+    key: string;
+    url?: string;
+  }> {
+    const issue = await this.gitlabClient.createIssue(input.title, input.body, input.labels);
+    return { key: String(issue.iid), url: issue.web_url };
+  }
+
   async getComments(taskKey: string): Promise<Comment[]> {
     const comments = await this.gitlabClient.listIssueComments(this.toIssueIid(taskKey));
     const filtered = comments.filter((c) => !isDevInternCommentText(c.body || ""));
