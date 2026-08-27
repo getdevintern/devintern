@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Workspace worker probes push access at startup**: each configured GitHub HTTPS remote gets a side-effect-free `git push --dry-run` against its bare clone, so an under-scoped token (fine-grained PAT without `Contents: Read and write`, or a `$GITHUB_TOKEN` that silently overrides the keyring login via `gh auth git-credential`) is reported as a clear startup warning instead of burning task pickups on 403 pushes
+
 ### Changed
 
 - **`devintern worker init` is the complete unattended setup**: the wizard reuses tracker config from `devintern init` (or runs that subset), imports the current repo into `~/.devintern/workspace.toml` as a 1-repo workspace, dry-runs the ready-tasks query into `[defaults].task_query`, checks any automation license, offers zero-port relay pairing, and generates a user-level systemd unit or macOS launchd agent. It no longer asks about `--listen` or writes worker env vars
