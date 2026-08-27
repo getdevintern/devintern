@@ -227,12 +227,22 @@ describe("OpencodeHarness modes", () => {
   test("plan/readonly use --agent plan without skip-permissions", () => {
     expect(h.buildArgs({ mode: "plan", skipPermissions: true, workingDir: "/tmp/wt" })).toEqual([
       "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
       "--agent",
       "plan",
       "--dir",
       "/tmp/wt",
     ]);
-    expect(h.buildArgs({ mode: "readonly" })).toEqual(["run", "--agent", "plan"]);
+    expect(h.buildArgs({ mode: "readonly" })).toEqual([
+      "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--agent",
+      "plan",
+    ]);
   });
 });
 

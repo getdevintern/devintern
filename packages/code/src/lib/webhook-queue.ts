@@ -357,24 +357,17 @@ export class WebhookQueue {
     );
   }
 
-  /** Configured retry ceiling, shared by webhook and base-sync work. */
-  getMaxRetries(): number {
-    return this.maxRetries;
-  }
-
-  /**
-   * Roll back a dedupe record for work that was accepted but never started
-   * (graceful-shutdown cancellation), so the next worker start re-acquires
-   * it instead of skipping it as already handled.
-   *
-   * @param source - Event origin (e.g. the fleet query's tracker source)
-   * @param externalId - Provider delivery/comment/review/task id
-   */
-  removeProcessed(source: string, externalId: string): void {
+  /** Release a provisional processed marker when work was deferred before execution. */
+  unmarkProcessed(source: string, externalId: string): void {
     this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
       source,
       externalId,
     ]);
+  }
+
+  /** Configured retry ceiling, shared by webhook and base-sync work. */
+  getMaxRetries(): number {
+    return this.maxRetries;
   }
 
   /**

@@ -18,7 +18,7 @@ import {
   runTaskViaCli,
   workerTaskArgs,
 } from "../task-polling-acquirer";
-import type { ReadyTask } from "../task-polling-acquirer";
+import type { ReadyTask, TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
@@ -37,6 +37,7 @@ import { RepoBusyError, SchedulerStoppedError, WorkspaceScheduler } from "./sche
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
+import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
 
@@ -137,6 +138,53 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
+const PUSH_PERMISSION_HINT =
+  "Pushes use the ambient git credential chain — when GITHUB_TOKEN is exported, " +
+  "'gh auth git-credential' serves it instead of your keyring login. Grant " +
+  "'Contents: Read and write' to that token (or switch the remote to SSH).";
+
+/**
+ * Probe push access for every configured GitHub HTTPS remote at worker
+ * startup. GitHub read APIs cannot detect an under-scoped fine-grained PAT
+ * (role APIs report the user's permissions, not the token's), so pushes are
+ * exercised directly via a side-effect-free dry run against each bare clone.
+ *
+ * Never throws: auth problems are warnings, not startup failures —
+ * review-only setups legitimately cannot push.
+ */
+export async function warnOnPushAuthIssues(
+  config: WorkspaceConfig,
+  repoManager: RepoManagerLike,
+): Promise<void> {
+  for (const repo of config.repos) {
+    if (!/^https:\/\/github\.com\//i.test(repo.remote)) {
+      continue;
+    }
+    try {
+      const clonePath = await repoManager.ensureBareClone(repo);
+      const probe = await probePushAccess({ cwd: clonePath });
+      if (probe.status === "ok") {
+        console.log(`✅ [fleet] push access verified for ${repo.name}`);
+        continue;
+      }
+      const reason = probe.message ? `: ${probe.message}` : "";
+      if (probe.status === "permission") {
+        console.warn(`⚠️  [fleet] ${repo.name} rejects pushes${reason}`);
+        console.warn(`   💡 ${PUSH_PERMISSION_HINT}`);
+      } else if (probe.status === "network") {
+        console.warn(
+          `⚠️  [fleet] could not verify push access for ${repo.name} (network)${reason}`,
+        );
+      } else {
+        console.warn(`⚠️  [fleet] unexpected push-probe result for ${repo.name}${reason}`);
+      }
+    } catch (error) {
+      // Clone failures surface later as real task errors; stay silent here.
+      console.warn(`⚠️  [fleet] skipping push probe for ${repo.name}: ${(error as Error).message}`);
+    }
+  }
+}
+
 /**
  * Build the fleet task acquirer: detect-then-evaluate (reusing
  * {@link TaskPollingAcquirer}) with routing between evaluate and execute.
@@ -162,7 +210,8 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
   const routableFor = (taskKey: string): RoutableTask =>
     routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] });
 
-  const executeTask = (taskKey: string): Promise<boolean> => execute(taskKey, routableFor(taskKey));
+  const executeTask = (taskKey: string): Promise<TaskExecutionResult> =>
+    execute(taskKey, routableFor(taskKey));
 
   const sourceLabel = `poll:${config.defaults.tracker}`;
 
@@ -213,12 +262,13 @@ export async function dispatchBatchViaScheduler(
   tasks: ReadyTask[],
   helpers: {
     markProcessed: (externalId: string) => void;
-    removeProcessed: (externalId: string) => void;
+    unmarkProcessed: (externalId: string) => void;
   },
   scheduler: WorkspaceScheduler,
   sourceLabel: string,
-  run: (taskKey: string) => Promise<boolean>,
-): Promise<void> {
+  run: (taskKey: string) => Promise<TaskExecutionResult>,
+): Promise<boolean> {
+  let deferred = false;
   await Promise.all(
     tasks.map(async (task) => {
       const externalId = processedTaskId(task);
@@ -228,15 +278,22 @@ export async function dispatchBatchViaScheduler(
       helpers.markProcessed(externalId);
       console.log(`\n📌 [${sourceLabel}] picking up ${task.key}`);
       try {
-        const ok = await run(task.key);
-        console.log(
-          ok
-            ? `✅ [${sourceLabel}] ${task.key} completed`
-            : `⚠️  [${sourceLabel}] ${task.key} did not complete cleanly`,
-        );
+        const result = await run(task.key);
+        if (result === "deferred") {
+          helpers.unmarkProcessed(externalId);
+          deferred = true;
+          console.log(`⏳ [${sourceLabel}] ${task.key} deferred; will retry next poll`);
+        } else {
+          console.log(
+            result
+              ? `✅ [${sourceLabel}] ${task.key} completed`
+              : `⚠️  [${sourceLabel}] ${task.key} did not complete cleanly`,
+          );
+        }
       } catch (error) {
         if (error instanceof SchedulerStoppedError) {
-          helpers.removeProcessed(externalId);
+          helpers.unmarkProcessed(externalId);
+          deferred = true;
           console.warn(
             `⏸️  [${sourceLabel}] ${task.key} deferred to next start (worker shutting down)`,
           );
@@ -246,6 +303,7 @@ export async function dispatchBatchViaScheduler(
       }
     }),
   );
+  return deferred;
 }
 
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
@@ -277,7 +335,7 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-): (taskKey: string, routable: RoutableTask) => Promise<boolean> {
+): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
@@ -310,7 +368,7 @@ export function createFleetTaskExecutor(
       return false;
     }
 
-    const runInRepo = async (): Promise<boolean> => {
+    const runInRepo = async (): Promise<TaskExecutionResult> => {
       const lock = repoLock(repo.name);
       const lockResult = lock.acquire();
       if (!lockResult.success) {
@@ -320,9 +378,9 @@ export function createFleetTaskExecutor(
           throw new RepoBusyError(repo.name, lockResult.message);
         }
         console.warn(
-          `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
+          `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
         );
-        return false;
+        return "deferred";
       }
 
       try {
@@ -355,7 +413,7 @@ export function createFleetTaskExecutor(
     if (!deps.scheduler) {
       return runInRepo();
     }
-    return deps.scheduler.schedule<boolean>(repo.name, { label: taskKey }, runInRepo);
+    return deps.scheduler.schedule<TaskExecutionResult>(repo.name, { label: taskKey }, runInRepo);
   };
 }
 
@@ -452,6 +510,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
     }
   }
+
+  await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
 

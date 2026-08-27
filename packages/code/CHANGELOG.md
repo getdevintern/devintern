@@ -6,6 +6,7 @@
 
 - **Parallel execution across workspace repos (opt-in)**: `[workspace].parallel_across_repos = true` lets tasks routed to different repositories run concurrently while work within one repo stays strictly FIFO and serialized — task polling, relay task events, PR review runs, and mention-triggered runs all join the same per-repo lane through one bounded scheduler, so independent acquirers can never overlap in a repo. `[workspace].max_concurrency` (positive integer, default 4) caps total concurrent fleet runs; excess ready tasks queue and start as slots free up. Serial-by-default behavior is unchanged when the key is omitted or false. The per-repo lock file remains the cross-process boundary: contention defers the run with automatic retries instead of consuming its dedupe record, so contended tasks are not lost or miscounted as attempts
 - **Fleet activity in the dashboard and `GET /api/worker`**: the worker persists a per-repo snapshot (`idle` / `queued` / `running`, current task key or PR, start time) plus aggregate active/max concurrency to the central database on every scheduling transition; the dashboard header renders live per-repo chips. Snapshots written by a process that is no longer running are flagged stale (and never presented as live), a graceful shutdown clears them, and databases from older versions degrade gracefully to an empty fleet section
+- **Workspace worker probes push access at startup**: each configured GitHub HTTPS remote gets a side-effect-free `git push --dry-run` against its bare clone, so an under-scoped token (fine-grained PAT without `Contents: Read and write`, or a `$GITHUB_TOKEN` that silently overrides the keyring login via `gh auth git-credential`) is reported as a clear startup warning instead of burning task pickups on 403 pushes
 
 ### Changed
 
@@ -18,6 +19,7 @@
 
 ### Fixed
 
+- **OpenCode usage limits stop runs immediately instead of hanging**: headless OpenCode invocations mirror ERROR-level provider logs to stderr, recognize timestamped `AI_APICallError` five-hour-limit diagnostics, terminate the otherwise-stuck CLI process as soon as the limit arrives, and propagate the shared usage-limit error through implementation, analysis, review, auto-review, and hook-fix paths
 - **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
 - **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
 

@@ -21,6 +21,7 @@ import {
   spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
+  UsageLimitError,
 } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
 import { parseEnvInteger } from "./lib/env-integer";
@@ -82,14 +83,6 @@ let rateLimitResumeTimer: ReturnType<typeof setTimeout> | null = null;
 // Cleanup rate limiter periodically
 setInterval(() => rateLimiter.cleanup(), 60000);
 // Note: We use a single reusable worktree, so no periodic cleanup needed
-
-/** Thrown by processing when the agent hit a usage limit; deferred, not failed. */
-class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
-    super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
-    this.name = "UsageLimitError";
-  }
-}
 
 /** Name of the agent harness this server drives (e.g. `claude-code`). */
 function currentHarnessName(): string {
@@ -1279,6 +1272,7 @@ async function runAgentHarnessForReview(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -1286,6 +1280,15 @@ async function runAgentHarnessForReview(
         spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(agent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -1309,6 +1312,7 @@ async function runAgentHarnessForReview(
         agent.stdout.on("data", (data: Buffer) => {
           const output = data.toString();
           stdoutOutput += output;
+          stopOnUsageLimit();
           process.stdout.write(output);
         });
       }
@@ -1317,6 +1321,7 @@ async function runAgentHarnessForReview(
         agent.stderr.on("data", (data: Buffer) => {
           const output = data.toString();
           stderrOutput += output;
+          stopOnUsageLimit();
           process.stderr.write(output);
         });
       }
@@ -1337,7 +1342,7 @@ async function runAgentHarnessForReview(
           stderrOutput,
           harness.supportsMaxTurns === true,
         );
-        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         const output = stdoutOutput + stderrOutput;
 
         if (timedOut) {
