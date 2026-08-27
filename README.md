@@ -98,6 +98,38 @@ devintern PROJ-123 --create-pr
 
 Product guides are available locally for [Code](docs/code/quick-start.md) and [PM](docs/pm/quick-start.md). The same guides are rendered at [devintern.com/docs](https://devintern.com/docs/code/quick-start/).
 
+## Run it interactively
+
+Use DevIntern on demand while you stay in control of what runs and when. Interactive use is free forever.
+
+| Command                                                               | Outcome                                                                |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `devintern doctor`                                                    | Check the runtime, agent, tracker, authentication, and license setup   |
+| `devintern PROJ-123 --create-pr`                                      | Turn one tracker ticket into an implemented, committed pull request    |
+| `devintern ./tasks/feature.md --create-pr`                            | Run a local Markdown task with no tracker credentials                  |
+| `devintern PROJ-123 --create-pr --auto-review`                        | Review and improve the generated diff before handing the PR to a human |
+| `devintern --query "project = PROJ AND status = 'To Do'" --create-pr` | Process a selected batch; query syntax follows your configured tracker |
+| `devintern address-review <pr-url>`                                   | Apply human review feedback, push the changes, and reply on the PR     |
+| `devintern resolve-conflicts <pr-url>`                                | Bring a PR up to date and let the agent resolve merge conflicts safely |
+
+See the [usage guide](docs/code/usage.md) for tracker-specific query examples and optional flags.
+
+## Put routine engineering work on autopilot
+
+Once the interactive loop fits your workflow, **worker mode** turns it into an always-on teammate running on your own infrastructure. Your team marks work ready; DevIntern picks it up, creates the PR, and keeps that PR moving while people focus on decisions and review.
+
+```bash
+devintern worker init       # guided setup for repositories and ready-work queries
+devintern worker            # start the unattended worker
+```
+
+- **Drain ready queues automatically:** poll Jira, Linear, GitHub Issues, Trello, Asana, Azure DevOps, or Markdown tasks and route work across one or many repositories.
+- **Close the review loop:** respond to requested changes and inline comments, update stale branches, and resolve conflicts without force-pushing.
+- **Schedule recurring maintenance:** run focused prompts for dependency health, flaky-test triage, TODO sweeps, or other repeatable work—even without a tracker ticket.
+- **Operate with confidence:** durable local queues survive restarts, repository-level concurrency prevents collisions, configurable sandboxing can limit agent access, and a local dashboard shows run history and outcomes.
+
+Worker mode is additive: keep using free interactive commands whenever you want direct control, and add unattended automation where it saves the team time. It runs on a laptop, VM, or container and requires an automation license. See the [worker guide](docs/code/worker.md) for setup and examples.
+
 ## Why teams use it
 
 | Capability                | What it does                                                                      |
