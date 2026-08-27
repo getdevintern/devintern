@@ -1,5 +1,11 @@
 [test]
-# Preloaded before every test. Bans process.chdir so tests cannot leave the
-# process inside a scratch git repo (which caused junk branches to be pushed to
-# the real remote). See tests/setup/guard-git-state.ts.
-preload = ["./tests/setup/guard-git-state.ts"]
+# Preloaded before every test. Two guards:
+#
+# guard-git-state.ts bans process.chdir so tests cannot leave the process
+# inside a scratch git repo (which caused junk branches to be pushed to the
+# real remote).
+#
+# guard-queue-db.ts pins WEBHOOK_QUEUE_DB to a unique temp database and fails
+# the run if any real .devintern-code/queue.db is mutated, so tests can never
+# write into a developer's live state database.
+preload = ["./tests/setup/guard-git-state.ts", "./tests/setup/guard-queue-db.ts"]

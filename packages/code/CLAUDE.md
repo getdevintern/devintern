@@ -88,3 +88,13 @@ Everything under the output directory is a write-only debug artifact. Durable st
   - Branch scoping is also a safety property: the base path `/tmp/devintern-review-worktree` is what project test suites target, so a PR whose own tests call `prepareReviewWorktree` (e.g. devintern reviewing its own PRs) can never delete the worktree the review is running in
   - Automatically cleans up stale worktree registrations from old paths (e.g., `.devintern-code/review-worktree/`)
 - **Dependency installation**: Auto-detects package managers (bun/pnpm/npm/poetry/etc.) when preparing worktrees
+
+## Testing: state database isolation
+
+Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state). Three layers enforce this:
+
+1. `tests/run-tests.ts` (the `bun run test` entry) sets `WEBHOOK_QUEUE_DB` to a temp path before launching `bun test`, so even subprocesses spawned without an explicit env option inherit a safe value.
+2. `tests/setup/guard-queue-db.ts` (bunfig preload) re-pins `WEBHOOK_QUEUE_DB` to a unique mkdtemp db per test-file process, covering every default-resolution code path (`new RunStore()`, `new WorkerState()`, `resolveQueueDbPath()`), and removes it at exit. Bun children that thread `{ ...process.env }` inherit the pin; children without an explicit env option get the start environment, which layer 1 pinned.
+3. The same preload hashes every `.devintern-code/queue.db` reachable by the ancestor walk from cwd and fails the suite if one is created, deleted, or mutated.
+
+When adding tests, keep following the per-test pattern in `webhook-queue.test.ts` / `worker-state.test.ts`: create a unique `mkdtempSync` directory under `os.tmpdir()`, pass an explicit `dbPath` / set `WEBHOOK_QUEUE_DB`, and clean up in `afterEach`. `AutomationStateStore` has no default path and requires an explicit argument by design. See `tests/state-db-isolation.test.ts` for the contract these guarantees make.
