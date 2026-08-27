@@ -4,7 +4,8 @@
 
 ### Added
 
-- **Opt-in base sync for teammates' open PRs (`WORKER_BASE_SYNC_TEAM_PRS`, fleet: `sync_team_prs` per repo)**: setting it extends the worker's automatic merge-conflict/base-behind sync from just the agent's own PRs to open, non-draft PRs authored by the repository's own team (`author_association` OWNER/MEMBER/COLLABORATOR/MAINTAIN) — useful when teammates' long-lived branches fall behind their base. Enabling it requires `AGENT_SANDBOX`: the worker refuses to start otherwise. Outside contributors and fork PRs are never auto-synced; discovery uses ETag-cached open-PR list polling (rate-limit friendly, first 100 open PRs per repo); review feedback stays an own-PR feature; every foreign sync is logged and recorded as a `conflict_resolution` run. Default remains off
+- **Opt-in base sync for teammates' open PRs (`sync_team_prs` per workspace repo)**: setting it extends the worker's automatic merge-conflict/base-behind sync from just the agent's own PRs to open, non-draft PRs authored by the repository's own team (`author_association` OWNER/MEMBER/COLLABORATOR/MAINTAIN) — useful when teammates' long-lived branches fall behind their base. Enabling it requires `AGENT_SANDBOX`: the worker refuses to start otherwise. Outside contributors and fork PRs are never auto-synced; discovery uses ETag-cached open-PR list polling (rate-limit friendly, first 100 open PRs per repo); review feedback stays an own-PR feature; every foreign sync is logged and recorded as a `conflict_resolution` run. Default remains off
+- **Workspace worker probes push access at startup**: each configured GitHub HTTPS remote gets a side-effect-free `git push --dry-run` against its bare clone, so an under-scoped token (fine-grained PAT without `Contents: Read and write`, or a `$GITHUB_TOKEN` that silently overrides the keyring login via `gh auth git-credential`) is reported as a clear startup warning instead of burning task pickups on 403 pushes
 
 ### Changed
 
@@ -15,6 +16,7 @@
 
 ### Fixed
 
+- **OpenCode usage limits stop runs immediately instead of hanging**: headless OpenCode invocations mirror ERROR-level provider logs to stderr, recognize timestamped `AI_APICallError` five-hour-limit diagnostics, terminate the otherwise-stuck CLI process as soon as the limit arrives, and propagate the shared usage-limit error through implementation, analysis, review, auto-review, and hook-fix paths
 - **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
 - **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent
 

@@ -41,7 +41,7 @@ export interface RepoConfig {
   envFile?: string;
   /**
    * Extend automatic base sync to this repo's open, non-draft PRs authored
-   * by team members (`WORKER_BASE_SYNC_TEAM_PRS` equivalent). Requires a
+   * by team members. Requires a
    * sandboxed agent; off by default.
    */
   syncTeamPrs?: boolean;

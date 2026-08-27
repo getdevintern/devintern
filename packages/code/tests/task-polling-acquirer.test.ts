@@ -216,6 +216,51 @@ describe("TaskPollingAcquirer", () => {
     expect(executed).toEqual(["TASK-1"]);
   });
 
+  test("a deferred task retries while completed tasks stay deduped", async () => {
+    const executed: string[] = [];
+    const seenCursors: (string | null)[] = [];
+    let deferredOnce = false;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        async changesSince(cursor) {
+          seenCursors.push(cursor);
+          return { changed: true, nextCursor: "100" };
+        },
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({
+        tasks: [
+          { key: "TASK-1", updated: "a" },
+          { key: "TASK-2", updated: "b" },
+        ],
+      }),
+      executeTask: async (key) => {
+        executed.push(key);
+        if (key === "TASK-2" && !deferredOnce) {
+          deferredOnce = true;
+          return "deferred";
+        }
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(workerState.getCursor("markdown")).toBeNull();
+    expect(queue.hasProcessed("markdown", "task:TASK-1:a")).toBe(true);
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(false);
+
+    await acquirer.tick();
+    expect(executed).toEqual(["TASK-1", "TASK-2", "TASK-2"]);
+    expect(seenCursors).toEqual([null, null]);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(true);
+  });
+
   test("resumes from the persisted cursor", async () => {
     workerState.setCursor("markdown", "42");
     const executed: string[] = [];

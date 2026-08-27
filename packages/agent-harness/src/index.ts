@@ -121,7 +121,12 @@ export {
 export { detectMaxTurnsReached, findMaxTurnsReachedLine } from "./detect-max-turns.js";
 
 // Usage/rate-limit detection
-export { detectUsageLimit, resetHintToMs, type UsageLimitResult } from "./detect-usage-limit.js";
+export {
+  UsageLimitError,
+  detectUsageLimit,
+  resetHintToMs,
+  type UsageLimitResult,
+} from "./detect-usage-limit.js";
 
 // Incomplete implementation detection
 export {

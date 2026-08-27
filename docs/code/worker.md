@@ -139,6 +139,7 @@ Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's curso
 The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
 
 - `📌 picking up KEY` — it was claimed on this tick.
+- `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
@@ -179,12 +180,11 @@ When a watched PR falls behind its base branch, the worker catches the branch up
 
 This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
 
-### Syncing teammates' open PRs (`WORKER_BASE_SYNC_TEAM_PRS` / `sync_team_prs`)
+### Syncing teammates' open PRs (`sync_team_prs`)
 
 By default only the agent's own PRs are synced, as described above. To also keep human teammates' long-lived branches caught up with their base, enable team-PR sync:
 
-- Single-repo mode: set `WORKER_BASE_SYNC_TEAM_PRS=true` in `.devintern-code/.env`.
-- Workspace (fleet) mode: set `sync_team_prs = true` on the relevant `[[repos]]` entry in `workspace.toml`.
+Set `sync_team_prs = true` on the relevant `[[repos]]` entry in `workspace.toml`.
 
 Behavior with the flag enabled:
 
@@ -228,8 +228,8 @@ Every run is recorded stage by stage in the local database. The worker serves th
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md).
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you need a wall-clock window instead of a resident process, see [Night-only CLI runs](./automated-task-processing.md#night-only-cli-runs).
 
 ## License
 
-The worker is unattended automation and requires an automation license (Supporter, Team, or Business), the same requirement scheduled runs have. Interactive runs stay free under the FSL license.
+The worker is unattended automation and requires an automation license (Supporter, Team, or Business). Interactive runs stay free under the FSL license.

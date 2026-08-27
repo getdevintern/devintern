@@ -4,7 +4,7 @@ sidebarLabel: "Quick Start"
 description: "Install @devintern/code and turn your first tracker ticket into a pull request."
 section: "Code"
 order: 1
-dateModified: 2026-08-02
+dateModified: 2026-08-26
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
@@ -114,4 +114,4 @@ Every run:
 ## What's Next?
 
 - [Usage](./usage.md): CLI flags, query-based batch runs, git, and pull requests
-- [Automated task processing](./automated-task-processing.md): scheduled runs with systemd or cron
+- [Automated task processing](./automated-task-processing.md): drain the backlog with the worker daemon

@@ -336,6 +336,14 @@ export class WebhookQueue {
     );
   }
 
+  /** Release a provisional processed marker when work was deferred before execution. */
+  unmarkProcessed(source: string, externalId: string): void {
+    this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+      source,
+      externalId,
+    ]);
+  }
+
   /** Configured retry ceiling, shared by webhook and base-sync work. */
   getMaxRetries(): number {
     return this.maxRetries;

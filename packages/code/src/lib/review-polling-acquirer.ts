@@ -135,8 +135,8 @@ export interface ReviewPollingAcquirerOptions {
   /**
    * GitHub slugs (`owner/repo`) where automatic base sync extends beyond the
    * agent's own PRs to the repo's open, non-draft PRs authored by team
-   * members (fleet: `sync_team_prs = true` per `[[repos]]`; single-repo:
-   * `WORKER_BASE_SYNC_TEAM_PRS=true`). Empty/omitted keeps the default
+   * members (`sync_team_prs = true` per workspace `[[repos]]`). Empty or
+   * omitted keeps the default
    * own-PR-only behavior. Requires `github.listOpenPullRequests`.
    *
    * Foreign PR branches are untrusted input; see `sweepRepoOpenPrs` for
@@ -200,7 +200,7 @@ export function assertAgentSandboxForTeamPrSync(): void {
   const sandbox = process.env.AGENT_SANDBOX?.trim();
   if (sandbox && sandbox.toLowerCase() !== "none") return;
   throw new Error(
-    "WORKER_BASE_SYNC_TEAM_PRS / sync_team_prs requires a sandboxed agent " +
+    "sync_team_prs requires a sandboxed agent " +
       "(AGENT_SANDBOX), because base-syncing foreign PRs can hand attacker- or " +
       `teammate-authored code to the coding agent. Set AGENT_SANDBOX (see \`devintern sandbox\`), ` +
       "or disable team-PR base sync.",
@@ -538,8 +538,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       }
 
       if (this.syncAllActive) {
-        // Sweep only the repos explicitly opted in (fleet `sync_team_prs` /
-        // single-repo env), never every managed repo by accident.
+        // Sweep only the workspace repos explicitly opted in with
+        // `sync_team_prs`, never every managed repo by accident.
         for (const repo of this.syncTeamPrsRepos) {
           try {
             await this.sweepRepoOpenPrs(repo, watchedKeys);

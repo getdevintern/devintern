@@ -28,6 +28,9 @@ export interface ReadyTask {
   updated?: string;
 }
 
+/** A deferred task was not attempted and must be evaluated again next tick. */
+export type TaskExecutionResult = boolean | "deferred";
+
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
   return `task:${task.key}:${task.updated?.trim() ?? ""}`;
@@ -47,8 +50,8 @@ export interface TaskPollingAcquirerOptions {
   queue: WebhookQueue;
   /** Evaluate step: run the user's query (injected for tests). */
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
-  /** Execute step: process one ready task; returns success (injected for tests). */
-  executeTask: (taskKey: string) => Promise<boolean>;
+  /** Execute step: process, fail, or defer one ready task (injected for tests). */
+  executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
   verbose?: boolean;
 }
 
@@ -131,6 +134,7 @@ export class TaskPollingAcquirer implements Acquirer {
     try {
       const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursor);
+      let tickDeferred = false;
 
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
@@ -156,18 +160,27 @@ export class TaskPollingAcquirer implements Acquirer {
 
           pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
-          const ok = await executeTask(task.key);
-          console.log(
-            ok
-              ? `✅ [${this.name}] ${task.key} completed`
-              : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
-          );
+          const result = await executeTask(task.key);
+          if (result === "deferred") {
+            // The task never started. Release the provisional claim and retain
+            // the detector cursor so this same tracker change is evaluated on
+            // the next tick. Other tasks completed in this tick stay deduped.
+            queue.unmarkProcessed(detector.source, externalId);
+            tickDeferred = true;
+            console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+          } else {
+            console.log(
+              result
+                ? `✅ [${this.name}] ${task.key} completed`
+                : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+            );
+          }
         }
 
         this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
       }
 
-      if (detection.nextCursor !== null && detection.nextCursor !== cursor) {
+      if (!tickDeferred && detection.nextCursor !== null && detection.nextCursor !== cursor) {
         workerState.setCursor(detector.source, detection.nextCursor);
       }
     } catch (error) {

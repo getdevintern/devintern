@@ -13,6 +13,7 @@ import { dirname, join, resolve } from "path";
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
+import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
@@ -30,6 +31,7 @@ import type { RoutableTask } from "./router";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { RepoManager } from "./repo-manager";
+import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
 
@@ -124,6 +126,53 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
+const PUSH_PERMISSION_HINT =
+  "Pushes use the ambient git credential chain — when GITHUB_TOKEN is exported, " +
+  "'gh auth git-credential' serves it instead of your keyring login. Grant " +
+  "'Contents: Read and write' to that token (or switch the remote to SSH).";
+
+/**
+ * Probe push access for every configured GitHub HTTPS remote at worker
+ * startup. GitHub read APIs cannot detect an under-scoped fine-grained PAT
+ * (role APIs report the user's permissions, not the token's), so pushes are
+ * exercised directly via a side-effect-free dry run against each bare clone.
+ *
+ * Never throws: auth problems are warnings, not startup failures —
+ * review-only setups legitimately cannot push.
+ */
+export async function warnOnPushAuthIssues(
+  config: WorkspaceConfig,
+  repoManager: RepoManagerLike,
+): Promise<void> {
+  for (const repo of config.repos) {
+    if (!/^https:\/\/github\.com\//i.test(repo.remote)) {
+      continue;
+    }
+    try {
+      const clonePath = await repoManager.ensureBareClone(repo);
+      const probe = await probePushAccess({ cwd: clonePath });
+      if (probe.status === "ok") {
+        console.log(`✅ [fleet] push access verified for ${repo.name}`);
+        continue;
+      }
+      const reason = probe.message ? `: ${probe.message}` : "";
+      if (probe.status === "permission") {
+        console.warn(`⚠️  [fleet] ${repo.name} rejects pushes${reason}`);
+        console.warn(`   💡 ${PUSH_PERMISSION_HINT}`);
+      } else if (probe.status === "network") {
+        console.warn(
+          `⚠️  [fleet] could not verify push access for ${repo.name} (network)${reason}`,
+        );
+      } else {
+        console.warn(`⚠️  [fleet] unexpected push-probe result for ${repo.name}${reason}`);
+      }
+    } catch (error) {
+      // Clone failures surface later as real task errors; stay silent here.
+      console.warn(`⚠️  [fleet] skipping push probe for ${repo.name}: ${(error as Error).message}`);
+    }
+  }
+}
+
 /**
  * Build the fleet task acquirer: detect-then-evaluate (reusing
  * {@link TaskPollingAcquirer}) with routing between evaluate and execute.
@@ -141,7 +190,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
   // task's routing fields from the evaluate step of the same tick.
   const routables = new Map<string, RoutableTask>();
 
-  const executeTask = (taskKey: string): Promise<boolean> =>
+  const executeTask = (taskKey: string): Promise<TaskExecutionResult> =>
     execute(
       taskKey,
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
@@ -191,7 +240,7 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-): (taskKey: string, routable: RoutableTask) => Promise<boolean> {
+): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
@@ -228,9 +277,9 @@ export function createFleetTaskExecutor(
     const lockResult = lock.acquire();
     if (!lockResult.success) {
       console.warn(
-        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
+        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
       );
-      return false;
+      return "deferred";
     }
 
     try {
@@ -321,6 +370,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
     }
   }
+
+  await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
 

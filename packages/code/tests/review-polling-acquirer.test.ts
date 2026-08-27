@@ -745,7 +745,7 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
-  test("foreign open PRs are not synced by default (WORKER_BASE_SYNC_TEAM_PRS off)", async () => {
+  test("foreign open PRs are not synced by default (sync_team_prs off)", async () => {
     const gh = dirtyState();
     const made = makeAcquirer(gh, {
       openPrs: [{ number: 7, author_association: "MEMBER" }],

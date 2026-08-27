@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
 section: "Code"
 order: 2
-dateModified: 2026-08-17
+dateModified: 2026-08-26
 ---
 
 # @devintern/code Configuration
@@ -53,7 +53,7 @@ LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
 
 Create a Personal API key at [https://linear.app/settings/api](https://linear.app/settings/api). Story points are written to Linear's built-in `estimate` field, so no custom field ID is required.
 
-See the [Linear Integration guide](./linear-integration.md) for state transitions, JSON `IssueFilter` batch runs, and cron examples.
+See the [Linear Integration guide](./linear-integration.md) for state transitions and JSON `IssueFilter` batch runs. For unattended drains, use the [worker](./worker.md).
 
 ### Trello
 
@@ -115,8 +115,20 @@ GITHUB_TOKEN=your-github-token
 ```
 
 - **Classic token**: Requires `repo` scope
-- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
+- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
+
+> **`Contents` must be *Read and write*, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
+
+#### How git picks push credentials
+
+Pushes use git's ambient credential chain — devintern does not inject tokens into `git push`:
+
+1. If `gh auth git-credential` is configured (typical with the GitHub CLI) and `$GITHUB_TOKEN` is exported in the environment, **the environment variable wins over your keyring login**. An under-scoped `GITHUB_TOKEN` therefore silently overrides a working `gho_…` login.
+2. Otherwise the keyring/token-helper credentials apply.
+3. SSH remotes use your SSH keys.
+
+The worker dry-runs a push against each configured GitHub HTTPS remote at startup and warns when it is rejected (`✅ [fleet] push access verified for <repo>` / a `⚠️ [fleet] … rejects pushes` line), so credential problems surface before the first task burns its pickup.
 
 ### GitHub App Authentication
 
@@ -141,7 +153,7 @@ Both the ID and a private key are required.
 
 1. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
 2. Set repository permissions:
-   - **Contents:** Read
+   - **Contents:** Read and write
    - **Pull requests:** Read and write
 3. Generate and save a private key
 4. Install the App on your repositories

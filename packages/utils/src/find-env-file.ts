@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 export interface FindEnvFileOptions {
   /** Optional config directory name to check first (e.g. '.devintern-code', '.devintern-pm') */
@@ -23,8 +23,21 @@ function walkUpDirectories(options: WalkUpOptions, onDir: (currentDir: string) =
 
   let currentDir = resolve(startDir);
   const homeDir = process.env.HOME ? resolve(process.env.HOME) : null;
+  const gitCeilings = new Set(
+    (process.env.GIT_CEILING_DIRECTORIES ?? "")
+      .split(delimiter)
+      .filter(Boolean)
+      .map((directory) => resolve(directory)),
+  );
 
   while (true) {
+    // Match Git discovery semantics: a ceiling directory itself is not
+    // inspected. This also prevents sandbox-injected ancestor markers (for
+    // example `/tmp/.git`) from capturing isolated fixtures below the ceiling.
+    if (gitCeilings.has(currentDir)) {
+      break;
+    }
+
     if (onDir(currentDir)) {
       return;
     }
