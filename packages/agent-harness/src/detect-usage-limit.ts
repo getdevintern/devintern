@@ -41,6 +41,8 @@ const USAGE_LIMIT_PATTERNS = [
   /^(?:error:\s*)?you(?:'|’)ve hit your (?:session|usage|account|weekly|monthly|fast|5[- ]?hour) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   /^(?:error:\s*)?you have reached your (?:usage|session|account|weekly|monthly|fast) (?:spend )?limit(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[- ]hour\s+)?(?:usage|session|account|fast|usage credit) limit reached|claude (?:ai )?usage limit(?: reached)?)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
+  /^(?:⚠\s*)?individual quota reached\.\s+please upgrade your subscription to increase your limits[.]?$/i,
+  /^resource_exhausted\s*\(code 429\):\s*individual quota reached\.\s+contact your administrator to enable overages(?:\.\s+resets?\b[^\n]*)?[.]?$/i,
 ] as const;
 
 // These are intentionally evaluated line-by-line and only when the line looks
@@ -52,6 +54,7 @@ const PROVIDER_LIMIT_PATTERNS = [
   /\brate_limit(?:_error)?\b/i,
   /\btoo many requests\b/i,
   /\bquota exceeded\b/i,
+  /\binsufficient balance\b/i,
   // Require an HTTP/status/error context below before accepting a 429.
   /\b429\b/,
 ] as const;
@@ -117,7 +120,7 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
     /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
     /^HTTP\s*429\b/i.test(trimmed) ||
-    /^\s*[{"[].*(?:rate_limit|quota).*[}\]]\s*$/i.test(trimmed) ||
+    /^\s*[{"[].*(?:rate_limit|quota|insufficient balance|add credits).*[}\]]\s*$/i.test(trimmed) ||
     /\b(?:last error|provider (?:error|response)|response status|returned (?:an? )?(?:error|status)|request failed|retrying)\b/i.test(
       trimmed,
     )
@@ -127,9 +130,26 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
 
   // Preserve concise provider messages such as "rate limit exceeded" while
   // rejecting longer prose/source lines that merely mention the phrase.
-  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:http\s*)?429(?:\s+too many requests)?)\s*[.!]?$/i.test(
+  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:error:\s*)?insufficient balance\.\s+please add credits to continue|(?:http\s*)?429(?:\s+too many requests)?)\s*[.!]?$/i.test(
     trimmed,
   );
+}
+
+/** Read a reset-only line immediately following the matched diagnostic. */
+function extractAdjacentResetHint(
+  stdout: string,
+  stderr: string,
+  matchedLine: OutputLine,
+): string | undefined {
+  for (const stream of [stderr, stdout]) {
+    const lines = outputLines(stream);
+    const index = lines.findIndex((line) => line.raw === matchedLine.raw);
+    const nextLine = index >= 0 ? lines[index + 1]?.normalized.trim() : undefined;
+    if (nextLine && /^resets?\s+(?:at\s+|in\s+)?[0-9][^\n]*[.]?$/i.test(nextLine)) {
+      return extractResetHint(nextLine);
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -245,7 +265,9 @@ export function detectUsageLimit(stdout: string, stderr: string): UsageLimitResu
     // Only extract a reset hint from the matched diagnostic line. Searching
     // the entire transcript can borrow an unrelated "try again" from source
     // code or a tool result, as happened with the Cloudflare tunnel bundle.
-    resetsAt: extractResetHint(matchedLine.normalized),
+    resetsAt:
+      extractResetHint(matchedLine.normalized) ||
+      extractAdjacentResetHint(stdout, stderr, matchedLine),
     matchedLine: matchedLine.raw.trim(),
   };
 }
