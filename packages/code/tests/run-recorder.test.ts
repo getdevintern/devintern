@@ -120,6 +120,46 @@ describe("RunStore", () => {
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
   });
 
+  test("createRun persists the derived ticket URL and setRunTicket snapshots the description", () => {
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-10",
+      tracker: "jira",
+      ticketKey: "PROJ-10",
+      ticketUrl: "https://acme.atlassian.net/browse/PROJ-10",
+    });
+    expect(store.getRun(id)?.ticketUrl).toBe("https://acme.atlassian.net/browse/PROJ-10");
+
+    store.setRunTicket(id, { description: "# Task\n\nBuild it." });
+
+    const run = store.getRun(id);
+    expect(run?.taskDescription).toBe("# Task\n\nBuild it.");
+  });
+
+  test("setRunTicket fills missing fields without erasing them and skips blank descriptions", () => {
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-11",
+      ticketUrl: "https://acme.atlassian.net/browse/PROJ-11",
+    });
+    // No URL passed: the existing one must survive.
+    store.setRunTicket(id, { key: "PROJ-11" });
+    store.setRunTicket(id, { description: "   \n\t  " });
+
+    const run = store.getRun(id);
+    expect(run?.ticketKey).toBe("PROJ-11");
+    expect(run?.ticketUrl).toBe("https://acme.atlassian.net/browse/PROJ-11");
+    expect(run?.taskDescription).toBeUndefined();
+  });
+
+  test("huge task descriptions are truncated, not rejected", () => {
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-12" });
+    store.setRunTicket(id, { description: "x".repeat(100_000) });
+
+    const run = store.getRun(id);
+    expect(run?.taskDescription?.length).toBe(20_000);
+  });
+
   test("finishRun marks the run terminal and appends an outcome stage", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-5" });
     store.finishRun(id, "escalated", "implementation incomplete");
@@ -205,6 +245,13 @@ describe("RunStore", () => {
     expect(migrated.getRun(id)?.attempt).toBe(2);
     const scheduled = migrated.createRun({ origin: "scheduled", automationId: "new-schedule" });
     expect(migrated.getRun(scheduled)?.automationId).toBe("new-schedule");
+    // Description snapshots (and their column) work on migrated databases too.
+    migrated.setRunTicket(id, {
+      url: "https://acme.atlassian.net/browse/OLD-1",
+      description: "doc",
+    });
+    expect(migrated.getRun(id)?.ticketUrl).toBe("https://acme.atlassian.net/browse/OLD-1");
+    expect(migrated.getRun(id)?.taskDescription).toBe("doc");
     migrated.close();
     for (const suffix of ["", "-wal", "-shm"]) {
       rmSync(`${legacyPath}${suffix}`, { force: true });

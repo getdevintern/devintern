@@ -84,8 +84,16 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunPr,
+  recordRunStage,
+  recordRunTicket,
+} from "./lib/run-recorder";
 import type { RunStatus } from "./lib/run-recorder";
+import { buildTicketUrl } from "./lib/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
@@ -1428,11 +1436,19 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Scheduled automations run through this same pipeline with their prompt
     // materialized as a markdown task; env markers attribute those runs.
     const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
+    const trackerName = process.env.TASK_TRACKER || "jira";
     beginRun({
       origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
-      tracker: process.env.TASK_TRACKER || "jira",
+      tracker: trackerName,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+      // Ticket link for remote trackers only: markdown-file inputs and
+      // materialized automation prompts have no tracker page, and deriving
+      // URLs from their synthetic keys would point nowhere.
+      ticketUrl:
+        markdownInput || scheduledAutomationId
+          ? undefined
+          : buildTicketUrl(trackerName, workflowKey),
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
@@ -1475,6 +1491,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.error("❌ Error formatting task details:", formatError);
       throw formatError;
     }
+
+    // Snapshot the ticket's description as markdown for the run record so the
+    // dashboard shows what was asked even if the ticket changes or is deleted.
+    recordRunTicket({
+      description: TaskFormatter.buildTaskDescriptionMarkdown(taskDetails),
+    });
 
     // Display summary
     console.log("\n📋 Task Summary:");
