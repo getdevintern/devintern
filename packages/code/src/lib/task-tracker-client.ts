@@ -94,8 +94,10 @@ export interface TaskTrackerClient {
   ): Promise<void>;
 
   /**
-   * Check whether an incomplete-implementation marker comment exists on the
-   * task (retry bookkeeping itself lives in lib/retry-state.ts).
+   * Check whether an automation failure marker comment (incomplete
+   * implementation or processing failure) exists on the task. The retry gate
+   * treats its absence as "the ticket's failure comment was removed", which
+   * unlocks a retry. Bookkeeping lives in lib/retry-state.ts.
    */
   hasIncompleteImplementationMarker(taskKey: string): Promise<boolean>;
 

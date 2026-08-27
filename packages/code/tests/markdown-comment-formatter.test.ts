@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+  formatAgentInputNeededMarkdown,
   formatAssessmentFailureMarkdown,
   formatClarityAssessmentMarkdown,
   formatEstimationCommentMarkdown,
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
   formatProcessingFailureMarkdown,
+  isAutomationFailureCommentText,
   isDevInternCommentText,
+  isProcessingFailureCommentText,
   RETRY_PICKUP_BODY,
 } from "../src/lib/trackers/shared/markdown-comment-formatter";
 
@@ -91,6 +94,35 @@ describe("markdown-comment-formatter - comment bodies", () => {
     expect(body).toContain("Agent exited with code 1");
     expect(body).toContain("feature/dev-87");
     expect(body).toContain(RETRY_PICKUP_BODY);
+    expect(isDevInternCommentText(body)).toBe(true);
+  });
+
+  test("agent-input-needed comment is recognizable as automation", () => {
+    const body = formatAgentInputNeededMarkdown(["Which port should the server use?"]);
+    expect(body).toContain("The agent needs input");
+    expect(body).toContain("- Which port should the server use?");
+    expect(body).toContain("Answer in the task description or a comment");
+    expect(isDevInternCommentText(body)).toBe(true);
+    expect(isAutomationFailureCommentText(body)).toBe(false);
+  });
+
+  test("automation failure detection covers both failure comment kinds", () => {
+    const incomplete = formatIncompleteImplementationCommentMarkdown("Partial work");
+    const processingFailure = formatProcessingFailureMarkdown("DEV-87", "killed by SIGTERM");
+
+    expect(isProcessingFailureCommentText(processingFailure)).toBe(true);
+    expect(isAutomationFailureCommentText(incomplete)).toBe(true);
+    expect(isAutomationFailureCommentText(processingFailure)).toBe(true);
+
+    // Automation comments must not masquerade as user-initiated activity.
+    for (const body of [incomplete, processingFailure]) {
+      expect(isDevInternCommentText(body)).toBe(true);
+    }
+  });
+
+  test("non-automation text does not trip the failure markers", () => {
+    expect(isAutomationFailureCommentText("Looks good, ship it!")).toBe(false);
+    expect(isProcessingFailureCommentText("The implementation was fine")).toBe(false);
   });
 
   test("assessment failure bodies name the reason", () => {

@@ -218,6 +218,40 @@ describe("GitHubTaskTrackerClient.getComments", () => {
   });
 });
 
+describe("GitHubTaskTrackerClient.hasIncompleteImplementationMarker", () => {
+  test("recognizes processing-failure comments as automation failure markers", async () => {
+    const adapter = makeAdapter({
+      listIssueComments: async () => [
+        {
+          id: 1,
+          body: "🤖 **Automated implementation did not complete** — no pull request was created.",
+          user: { login: "bot" },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    expect(await adapter.hasIncompleteImplementationMarker("123")).toBe(true);
+  });
+
+  test("returns false when only human comments exist", async () => {
+    const adapter = makeAdapter({
+      listIssueComments: async () => [
+        {
+          id: 1,
+          body: "Manual review looks fine now",
+          user: { login: "ada" },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    expect(await adapter.hasIncompleteImplementationMarker("123")).toBe(false);
+  });
+});
+
 describe("GitHubTaskTrackerClient estimation", () => {
   test("has no estimation field", async () => {
     const adapter = makeAdapter({});
