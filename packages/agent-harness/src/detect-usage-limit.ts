@@ -51,6 +51,13 @@ const USAGE_LIMIT_PATTERNS = [
   /^you hit your spend cap set in your workspace\.\s+(?:increase your spend cap to continue|ask your workspace owner to increase the spend cap)[.]?$/i,
   /^quota exceeded\.\s+check your plan and billing details[.]?$/i,
   /^to use codex with your chatgpt plan, upgrade to plus\b[^\n]*$/i,
+  // Grok Build translates account/team exhaustion to these headless messages.
+  /^you(?:'|’)ve hit the rate limit for your plan\.\s+upgrade your account or try again later[.]?$/i,
+  /^you(?:'|’)ve hit your team(?:'|’)s api rate limit\.\s+ask a team admin to purchase more credits for higher limits, or try again later\.\s+see https:\/\/docs\.x\.ai\/developers\/rate-limits#rate-limit-tiers$/i,
+  /^you(?:'|’)ve reached your free grok build usage limit for now\.\s+get supergrok for much higher limits, or try again later:\s+https:\/\/grok\.com\/supergrok\?referrer=grok-build$/i,
+  /^resource-exhausted:\s+too many requests for team [^.]+\.\s+see https:\/\/console\.x\.ai\/team\/default\/rate-limits[.]?$/i,
+  // Goose maps provider HTTP 402 responses to this error and can exit zero.
+  /^(?:error:\s*)?credits exhausted:\s+[^\n]+$/i,
   /^(?:⚠\s*)?individual quota reached\.\s+please upgrade your subscription to increase your limits[.]?$/i,
   /^resource_exhausted\s*\(code 429\):\s*individual quota reached\.\s+contact your administrator to enable overages(?:\.\s+resets?\b[^\n]*)?[.]?$/i,
 ] as const;
@@ -128,6 +135,7 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
   // inherently trust stderr: Codex uses it for its complete tool transcript.
   if (
     /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
+    /^\[API Error:\s*429\b[^\n]*\]$/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
     /^HTTP\s*429\b/i.test(trimmed) ||
     /^\s*[{"[].*(?:rate_limit|quota|insufficient balance|add credits).*[}\]]\s*$/i.test(trimmed) ||
