@@ -14,7 +14,30 @@ import type { SandboxPolicy } from "../src/sandbox/types.js";
 mock.module("child_process", () => ({
   execSync,
   spawn: nodeSpawn,
-  spawnSync: () => ({ status: 0, stdout: "", stderr: "" }),
+  spawnSync: (
+    command: string,
+    args: string[] = [],
+    options: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  ) => {
+    if (command === "nono") {
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    try {
+      const result = Bun.spawnSync([command, ...args], {
+        cwd: options.cwd,
+        env: options.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        status: result.exitCode,
+        stdout: result.stdout.toString(),
+        stderr: result.stderr.toString(),
+      };
+    } catch (error) {
+      return { status: null, stdout: "", stderr: "", error };
+    }
+  },
 }));
 
 const { NonoSandboxProvider, parseDenyOverlaps, refineGrantsAgainstDenies } =
