@@ -53,7 +53,7 @@ Configure status transitions in `.devintern-code/settings.json` using the board 
 
 **Personal / interactive:** a `GITHUB_TOKEN` (personal access token). Enough for free CLI use from your terminal.
 
-**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). Needed for `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). Needed for `@mention` matching, `devintern webhook serve`, and `slug[bot]` commit attribution. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
 
 The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
 
@@ -70,7 +70,7 @@ Set both when you run mention-driven automation and also use GitHub Issues as a 
 **Precedence when both are set:**
 
 - CLI and PR creation use `GITHUB_TOKEN`
-- `devintern worker --listen` and the webhook server prefer the App so the bot identity resolves
+- `devintern webhook serve` prefers the App so the bot identity resolves
 
 Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
 
@@ -114,7 +114,7 @@ To create a GitHub token:
 
 ### GitHub App Authentication
 
-For team / unattended automation (mention-driven worker, webhook / `worker --listen`, `slug[bot]` attribution), create a GitHub App.
+For team / unattended automation (mention-driven worker, `webhook serve`, `slug[bot]` attribution), create a GitHub App.
 
 **Required App permissions (PR creation):**
 
@@ -127,7 +127,7 @@ Mention matching and the webhook server also need **Pull request review comments
 
 1. Go to your organization's Settings → Developer settings → GitHub Apps → New GitHub App
 2. Set repository permissions: Contents (Read), Pull requests (Read and write)
-3. Disable webhooks unless you are running `devintern worker --listen`
+3. Disable webhooks unless you are running `devintern webhook serve`
 4. Generate a private key after creating the App
 5. Install the App on your repositories
 6. Configure **both** the ID and the key in your `.env`:

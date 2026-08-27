@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/change-detector";
-import { TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
+import { processedTaskId, TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
 import type { ReadyTask } from "../src/lib/task-polling-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
@@ -216,6 +216,51 @@ describe("TaskPollingAcquirer", () => {
     expect(executed).toEqual(["TASK-1"]);
   });
 
+  test("a deferred task retries while completed tasks stay deduped", async () => {
+    const executed: string[] = [];
+    const seenCursors: (string | null)[] = [];
+    let deferredOnce = false;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        async changesSince(cursor) {
+          seenCursors.push(cursor);
+          return { changed: true, nextCursor: "100" };
+        },
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({
+        tasks: [
+          { key: "TASK-1", updated: "a" },
+          { key: "TASK-2", updated: "b" },
+        ],
+      }),
+      executeTask: async (key) => {
+        executed.push(key);
+        if (key === "TASK-2" && !deferredOnce) {
+          deferredOnce = true;
+          return "deferred";
+        }
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(workerState.getCursor("markdown")).toBeNull();
+    expect(queue.hasProcessed("markdown", "task:TASK-1:a")).toBe(true);
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(false);
+
+    await acquirer.tick();
+    expect(executed).toEqual(["TASK-1", "TASK-2", "TASK-2"]);
+    expect(seenCursors).toEqual([null, null]);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(true);
+  });
+
   test("resumes from the persisted cursor", async () => {
     workerState.setCursor("markdown", "42");
     const executed: string[] = [];
@@ -227,6 +272,88 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(seenCursors).toEqual(["42"]);
+  });
+
+  test("processedTaskId is empty-stamp when updated is missing", () => {
+    expect(processedTaskId({ key: "DEV-87" })).toBe("task:DEV-87:");
+    expect(processedTaskId({ key: "DEV-87", updated: "  " })).toBe("task:DEV-87:");
+    expect(processedTaskId({ key: "DEV-87", updated: "2026-08-25T18:14:06.827+0700" })).toBe(
+      "task:DEV-87:2026-08-25T18:14:06.827+0700",
+    );
+  });
+
+  test("logs when every matching task is skipped as already processed", async () => {
+    const executed: string[] = [];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [
+        { changed: true, nextCursor: "100" },
+        { changed: true, nextCursor: "200" },
+      ],
+      tasks: [{ key: "DEV-87", updated: "a" }],
+      executed,
+    });
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+      logs.length = 0;
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(executed).toEqual(["DEV-87"]);
+    expect(
+      logs.some((line) => line.includes("skipping DEV-87") && line.includes("already processed")),
+    ).toBe(true);
+  });
+
+  test("a later stamp retriggers after an empty-stamp claim", async () => {
+    const executed: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "DEV-87" }];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [
+        { changed: true, nextCursor: "100" },
+        { changed: true, nextCursor: "200" },
+      ],
+      tasks,
+      executed,
+    });
+
+    await acquirer.tick();
+    tasks[0] = { key: "DEV-87", updated: "2026-08-25T18:14:06.827+0700" };
+    await acquirer.tick();
+    expect(executed).toEqual(["DEV-87", "DEV-87"]);
+  });
+
+  test("warns when a matching task has no update stamp", async () => {
+    const executed: string[] = [];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [{ changed: true, nextCursor: "100" }],
+      tasks: [{ key: "DEV-87" }],
+      executed,
+    });
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await acquirer.tick();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(executed).toEqual(["DEV-87"]);
+    expect(
+      warnings.some(
+        (line) =>
+          line.includes("DEV-87") &&
+          line.includes("no update stamp") &&
+          line.includes("will not retrigger"),
+      ),
+    ).toBe(true);
   });
 
   test("a detector error is contained and does not advance the cursor", async () => {

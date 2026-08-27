@@ -11,7 +11,13 @@
 import { execSync } from "child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
+import {
+  UsageLimitError,
+  detectUsageLimit,
+  spawnAgent,
+  reapTree,
+  resolveExecutablePathWithRetry,
+} from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "./agent-json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
@@ -343,6 +349,18 @@ async function runAgentPrompt(
       let stdout = "";
       let stderr = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) {
+          return;
+        }
+        const detected = detectUsageLimit(stdout, stderr);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(agentProcess, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -363,10 +381,12 @@ async function runAgentPrompt(
 
       agentProcess.stdout?.on("data", (data) => {
         stdout += data.toString();
+        stopOnUsageLimit();
       });
 
       agentProcess.stderr?.on("data", (data) => {
         stderr += data.toString();
+        stopOnUsageLimit();
       });
 
       agentProcess.on("close", (code) => {
@@ -376,6 +396,8 @@ async function runAgentPrompt(
         recordSessionOutput(harness.name, stdout, stderr);
         if (timedOut) {
           reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+        } else if (usageLimit?.limited) {
+          reject(new UsageLimitError(usageLimit.resetsAt));
         } else if (code !== 0) {
           reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
         } else {
@@ -711,6 +733,9 @@ export async function runAutoReviewLoop(
     try {
       await runAgentPrompt(fixPrompt, workingDir, harness, executablePath);
     } catch (error) {
+      if (error instanceof UsageLimitError) {
+        throw error;
+      }
       console.error(`⚠️  Error running Agent for fixes: ${error}`);
       // Continue to next iteration even if fixes fail
     }

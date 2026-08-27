@@ -6,6 +6,7 @@
 
 import {
   detectMaxTurnsReached,
+  detectUsageLimit,
   resolveHarness,
   spawnAgent,
   reapTree,
@@ -149,6 +150,7 @@ export async function runAgent(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimited = false;
 
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -156,6 +158,14 @@ export async function runAgent(
         spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimited) return;
+        if (detectUsageLimit(stdoutOutput, stderrOutput).limited) {
+          usageLimited = true;
+          reapTree(agent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -178,6 +188,7 @@ export async function runAgent(
         agent.stdout.on("data", (data: Buffer) => {
           const text = data.toString();
           stdoutOutput += text;
+          stopOnUsageLimit();
           process.stdout.write(text);
         });
       }
@@ -186,6 +197,7 @@ export async function runAgent(
         agent.stderr.on("data", (data: Buffer) => {
           const text = data.toString();
           stderrOutput += text;
+          stopOnUsageLimit();
           process.stderr.write(text);
         });
       }
@@ -211,7 +223,7 @@ export async function runAgent(
         const output = stdoutOutput + stderrOutput;
 
         resolve({
-          success: code === 0 && !maxTurnsReached && !timedOut,
+          success: code === 0 && !maxTurnsReached && !timedOut && !usageLimited,
           output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
           maxTurnsReached,
         });

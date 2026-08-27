@@ -35,8 +35,14 @@ describe("AzureDevOpsClient.queryWorkItems", () => {
       }
       return {
         value: [
-          { id: 1, fields: { "System.Title": "First" } },
-          { id: 2, fields: { "System.Title": "Second" } },
+          {
+            id: 1,
+            fields: { "System.Title": "First", "System.ChangedDate": "2026-01-02T00:00:00Z" },
+          },
+          {
+            id: 2,
+            fields: { "System.Title": "Second", "System.ChangedDate": "2026-01-03T00:00:00Z" },
+          },
         ],
       };
     });
@@ -48,8 +54,13 @@ describe("AzureDevOpsClient.queryWorkItems", () => {
     expect(calls[0].url).toContain("$top=100");
     expect(calls[0].body).toEqual({ query: wiql });
     expect(calls[1].url).toContain("ids=1,2");
+    expect(calls[1].url).toContain("System.ChangedDate");
     expect(result.total).toBe(2);
-    expect(result.workItems[0]).toMatchObject({ id: 1, title: "First" });
+    expect(result.workItems[0]).toMatchObject({
+      id: 1,
+      title: "First",
+      changedDate: "2026-01-02T00:00:00Z",
+    });
   });
 
   test("returns empty result without a batch fetch when no matches", async () => {

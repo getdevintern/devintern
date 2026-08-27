@@ -10,18 +10,21 @@ describe("Default branch detection", () => {
   const remoteDirs: string[] = [];
 
   function configureOrigin(defaultBranch: string): string {
-    execSync(`git branch -M ${defaultBranch}`, { cwd: repoDir });
-
     const remoteDir = join(
       tmpdir(),
       `default-branch-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     remoteDirs.push(remoteDir);
     mkdirSync(remoteDir, { recursive: true });
-    execSync("git init --bare", { cwd: remoteDir });
-    execSync(`git symbolic-ref HEAD refs/heads/${defaultBranch}`, { cwd: remoteDir });
-    execSync(`git remote add origin ${remoteDir}`, { cwd: repoDir });
-    execSync(`git push -u origin ${defaultBranch}`, { cwd: repoDir });
+    // Single shell call keeps per-test git spawn overhead low.
+    const script = [
+      `git branch -M ${defaultBranch}`,
+      `git -C "${remoteDir}" init --bare`,
+      `git -C "${remoteDir}" symbolic-ref HEAD refs/heads/${defaultBranch}`,
+      `git remote add origin "${remoteDir}"`,
+      `git push -qu origin ${defaultBranch}`,
+    ].join(" && ");
+    execSync(script, { cwd: repoDir });
     return remoteDir;
   }
 
@@ -32,12 +35,15 @@ describe("Default branch detection", () => {
     );
     mkdirSync(repoDir, { recursive: true });
 
-    execSync("git init", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test User'", { cwd: repoDir });
     writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
-    execSync("git add .", { cwd: repoDir });
-    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
+    const script = [
+      "git init",
+      "git config user.email 'test@test.com'",
+      "git config user.name 'Test User'",
+      "git add .",
+      "git commit -qm 'Initial commit'",
+    ].join(" && ");
+    execSync(script, { cwd: repoDir });
   });
 
   afterEach(() => {
@@ -310,7 +316,10 @@ describe("Default branch detection", () => {
 
     const result = await Utils.executeGitCommand(["status"], {
       cwd: repoDir,
-      timeoutMs: 250,
+      // Generous on purpose: the shim only needs to start and write its pid
+      // before the timeout fires. A tight budget races process spawn under
+      // full-suite load and can kill the shim before it wrote anything.
+      timeoutMs: 2_000,
       env: {
         PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}`,
         BUN_EXEC_PATH: process.execPath,
@@ -320,8 +329,17 @@ describe("Default branch detection", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe("Git command timed out after 250ms");
-    const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+    expect(result.error).toBe("Git command timed out after 2000ms");
+    // The shim writes the pid within milliseconds of starting; poll briefly
+    // instead of racing its startup.
+    let childPid = NaN;
+    for (let attempt = 0; attempt < 50 && Number.isNaN(childPid); attempt++) {
+      try {
+        childPid = Number(readFileSync(childPidFile, "utf8").trim());
+      } catch {
+        await Bun.sleep(20);
+      }
+    }
     let childIsAlive = true;
     for (let attempt = 0; attempt < 50 && childIsAlive; attempt++) {
       try {

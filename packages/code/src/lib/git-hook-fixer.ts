@@ -5,7 +5,12 @@
  */
 
 import { existsSync } from "fs";
-import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
+import {
+  detectUsageLimit,
+  spawnAgent,
+  reapTree,
+  resolveExecutablePathWithRetry,
+} from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
@@ -255,6 +260,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimited = false;
 
       const agentArgs = buildHeadlessAgentArgs(harness, fixPrompt, {
         maxTurns,
@@ -273,6 +279,14 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         spawnOptions: { stdio: HEADLESS_AGENT_STDIO, cwd: workingDir },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimited) return;
+        if (detectUsageLimit(stdoutOutput, stderrOutput).limited) {
+          usageLimited = true;
+          reapTree(agent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -296,6 +310,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         agent.stdout.on("data", (data: Buffer) => {
           const output = data.toString();
           stdoutOutput += output;
+          stopOnUsageLimit();
           process.stdout.write(output);
         });
       }
@@ -305,6 +320,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         agent.stderr.on("data", (data: Buffer) => {
           const output = data.toString();
           stderrOutput += output;
+          stopOnUsageLimit();
           process.stderr.write(output);
         });
       }
@@ -324,6 +340,11 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           console.error(
             `❌ ${harness.displayName} timed out after ${timeoutMinutes} minutes while fixing git hook`,
           );
+          resolve(false);
+          return;
+        }
+        if (usageLimited) {
+          console.error(`❌ ${harness.displayName} hit a usage limit while fixing the git hook`);
           resolve(false);
           return;
         }

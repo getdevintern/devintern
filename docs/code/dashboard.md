@@ -19,7 +19,7 @@ All data is read from the worker's local database (`.devintern-code/queue.db`). 
 devintern dashboard
 
 # Or serve it alongside the worker daemon
-devintern worker --query "status=todo" --ui
+devintern worker # dashboard starts alongside the worker by default
 ```
 
 Then open http://localhost:4400.
@@ -48,7 +48,7 @@ Token/cost accounting depends on what each harness CLI reports: usage is capture
 
 The dashboard has no authentication. It binds to localhost by default; binding to another host means anyone who can reach that address can read your run history, so keep it on your own machine or behind something that handles access for you.
 
-With `devintern worker --ui`, use `--ui-port` to change the dashboard port (the worker's own `--port` belongs to the webhook listener).
+With `devintern worker`, set `[workspace].dashboard = false` to disable the embedded dashboard or `[workspace].dashboard_port` to change its port. A dashboard startup failure is reported but does not stop task processing.
 
 ## JSON API
 

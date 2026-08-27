@@ -98,15 +98,63 @@ devintern PROJ-123 --create-pr
 
 Product guides are available locally for [Code](docs/code/quick-start.md) and [PM](docs/pm/quick-start.md). The same guides are rendered at [devintern.com/docs](https://devintern.com/docs/code/quick-start/).
 
-## Why teams use it
+## Interactive commands
 
-| Capability                | What it does                                                                      |
-| ------------------------- | --------------------------------------------------------------------------------- |
-| **Ticket drafting**       | Desktop app turns a prompt, log, or Figma frame into a ticket before Code runs it |
-| **Feasibility gate**      | Vague tickets get questions back on the tracker instead of a confidently wrong PR |
-| **Self-review loop**      | The agent reviews and fixes its own diff before a human sees it                   |
-| **Unattended automation** | Scheduled pickup; review comments become commits on the same branch               |
-| **Real-world resilience** | Persistent queue, crash recovery, rate-limit pause/resume                         |
+One CLI covers the whole loop — point it at a ticket and get a reviewed diff back. Interactive use is free forever: no signup, no time limit.
+
+| Command                                            | What you get                                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `devintern PROJ-123 --create-pr`                   | Ticket → feature branch → implemented diff → PR, with a summary posted back to the tracker        |
+| `devintern ./tasks/my-task.md --create-pr`         | The same loop from a local markdown file — zero tracker credentials                               |
+| `devintern --query 'status = "To Do"' --create-pr` | Batch mode: every ticket matching your JQL / Linear filter / GitHub search, run one after another |
+| `devintern PROJ-123 --create-pr --auto-review`     | The agent critiques its own PR diff and commits fixes before any human has to look                |
+| `devintern address-review <pr-url>`                | Review comments on a pull request become addressed commits on its branch                          |
+| `devintern resolve-conflicts <pr-url>`             | The base branch is merged in and the agent resolves the conflicted files sensibly                 |
+| `devintern doctor`                                 | Pre-flight check for runtime, git, agent CLIs, tracker credentials — with a fix hint per problem  |
+
+And when a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR.
+
+Full flag reference: [Usage](docs/code/usage.md).
+
+## Put your backlog on autopilot (worker mode)
+
+Everything above was you driving one task at a time. `devintern worker` flips it around: a single long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy — while your team writes specs, reviews code, or sleeps. Your code, credentials, and agent execution never leave your machine.
+
+Once it's running, the worker:
+
+- **Drains the backlog** — picks up every ticket matching your ready-tasks query (`task_query`) and runs the full pipeline per repo, one at a time; attempts that come up incomplete bounce back to the tracker with an explanation instead of disappearing.
+- **Keeps up with review feedback** — watches the PRs it created; when someone requests changes or comments, the same pipeline addresses the feedback and pushes commits. No webhook plumbing needed in polling mode.
+- **Resolves merge conflicts itself** — merges the base branch tip into a lagging PR branch and asks the agent to fix conflicts semantically, never force-pushing over human work.
+- **Takes orders by @mention** — comment `@devintern address the review feedback` on _any_ PR in the repo and it handles it (only users with push access can direct the bot).
+- **Runs scheduled chores** — automations turn a cron schedule plus a prompt into the full ticket→PR pipeline, like dependency upgrades or flaky-test triage on Monday mornings. The prompt is the task: nothing needs to exist in your tracker.
+- **Survives reality** — accepted work persists to a local SQLite queue across restarts, retries are capped, and rate limits pause rather than break runs.
+- **Shows its work** — every run is recorded stage-by-stage in a built-in dashboard at `http://localhost:4400`; routing rules and automations span a whole fleet of repositories from one `workspace.toml`.
+
+Set it up once:
+
+```bash
+devintern worker init    # guided setup: reuses tracker config, checks license, pairs relay, can install systemd/launchd service
+devintern worker         # keeps running: polling, reviews, automations, dashboard
+```
+
+A slice of `workspace.toml` shows most of the story:
+
+```toml
+[defaults]
+task_query = "status=todo"
+worker_task_args = "--create-pr"
+poll_interval = 60
+
+[[automations]]
+id = "dependency-health"
+enabled = true
+interval = "6h"
+prompt = """Pick one outdated dependency and upgrade it within the same major version."""
+```
+
+For teams this changes what "keeping the repo healthy" costs: maintenance tickets stop rotting in the backlog, review cycles close themselves while reviewers stay in the loop where their input actually matters, and recurring chores run like cron jobs whose output arrives as reviewed pull requests rather than good intentions.
+
+Unattended automation uses the paid automation tier (one-time Supporter license or Team/Business subscription) — interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
 
 <!-- Optional: secondary visuals (feasibility comment on a ticket, self-review, worker dashboard)
 <p align="center">
@@ -115,7 +163,9 @@ Product guides are available locally for [Code](docs/code/quick-start.md) and [P
 </p>
 -->
 
-Write the ticket first with **[DevIntern PM](https://devintern.com/pm-desktop/)** (desktop, free, no signup) or **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) in the terminal, then run it with `devintern`.
+## Write the ticket first
+
+Worker mode is only as good as the work you feed it. Write the ticket first with **[DevIntern PM](https://devintern.com/pm-desktop/)** (desktop, free, no signup) or **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) in the terminal — turn a prompt, error log, or Figma frame into a well-specified ticket — then run it with `devintern`.
 
 <p align="center">
   <a href="https://devintern.com/pm-desktop/">
@@ -150,13 +200,13 @@ Website and control plane live elsewhere; this repo is the tool packages.
 
 Install dependencies with `bun install`, then use the root commands below. Turborepo runs package tasks in parallel where it is safe and orders workspace builds according to their package dependencies.
 
-| Command                | Purpose                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------- |
-| `bun run build`        | Build every workspace and its dependencies                                   |
+| Command                | Purpose                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| `bun run build`        | Build every workspace and its dependencies                                    |
 | `bun run test`         | Run all package test suites                                                   |
-| `bun run lint`         | Lint all packages                                                            |
+| `bun run lint`         | Lint all packages                                                             |
 | `bun run typecheck`    | Type-check all packages                                                       |
-| `bun run format:check` | Check formatting without changing files                                      |
+| `bun run format:check` | Check formatting without changing files                                       |
 | `bun run format`       | Format all packages; this write task is intentionally not cached              |
 | `bun run dev`          | Start the dashboard and desktop watch tasks; stop them with <kbd>Ctrl+C</kbd> |
 
