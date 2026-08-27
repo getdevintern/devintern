@@ -61,9 +61,10 @@ describe("buildRepoEnv", () => {
     expect(env.INLINE_ONLY).toBe("inline");
   });
 
-  test("pins WEBHOOK_QUEUE_DB to the central workspace DB", () => {
+  test("pins durable state and analytics identity to the workspace", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {
