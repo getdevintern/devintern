@@ -112,10 +112,11 @@ export function parseTimestampPrefix(line: string): { timestampMs: number; rest:
 
 /**
  * Classify a line's severity. Explicit markers win over the stream heuristic,
- * because the daemon writes warnings through console.error too.
+ * because the daemon writes warnings through console.error too. The line must
+ * already be ANSI-stripped (see {@link stripAnsi}); callers pass the same
+ * stripped line they keep as the message, so levels always match what renders.
  */
-export function classifyLevel(stream: LogStream, rawLine: string): WorkerLogLevel {
-  const line = stripAnsi(rawLine);
+export function classifyLevel(stream: LogStream, line: string): WorkerLogLevel {
   if (line.includes("❌") || /\b(?:FATAL|ERROR)\b/i.test(line)) {
     return "error";
   }

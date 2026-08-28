@@ -12,6 +12,14 @@ type LevelFilter = WorkerLogLevel | "all";
 
 const LEVEL_FILTERS = ["all", "warn", "error"] as const;
 
+/**
+ * Rows rendered initially and added per "Show older" click. The server window
+ * is bounded by the API limit, but at 1000 entries every 5s poll would
+ * re-render/reconcile the full list; the cap keeps the DOM small and grows
+ * only when the user asks for older history.
+ */
+const RENDER_STEP = 400;
+
 function levelFilterLabel(level: LevelFilter): string {
   if (level === "all") {
     return "everything";
@@ -37,12 +45,25 @@ export function LogsView() {
   );
   const counts = useMemo(() => severityCounts(data?.entries ?? []), [data]);
 
+  const [renderCap, setRenderCap] = useState(RENDER_STEP);
+  // Newest entries stay pinned to the bottom (follow mode), so the cap hides
+  // the oldest ones. Filters change what matters, so restart the window there.
+  const rendered = useMemo(
+    () => (visible.length > renderCap ? visible.slice(visible.length - renderCap) : visible),
+    [visible, renderCap],
+  );
+  const hiddenCount = visible.length - rendered.length;
+
+  useEffect(() => {
+    setRenderCap(RENDER_STEP);
+  }, [query, level]);
+
   useEffect(() => {
     if (!followRef.current || !scrollRef.current) {
       return;
     }
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [visible]);
+  }, [rendered]);
 
   const onScroll = (): void => {
     const el = scrollRef.current;
@@ -123,12 +144,21 @@ export function LogsView() {
 
       {data && data.available && visible.length > 0 ? (
         <Card className="py-0">
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setRenderCap((cap) => cap + RENDER_STEP)}
+              className="w-full border-b border-border/50 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent"
+            >
+              ↑ Show {Math.min(RENDER_STEP, hiddenCount)} older entries
+            </button>
+          ) : null}
           <div
             ref={scrollRef}
             onScroll={onScroll}
             className="max-h-[60vh] overflow-auto font-mono text-xs leading-relaxed"
           >
-            {visible.map((entry) => (
+            {rendered.map((entry) => (
               <div
                 key={entry.index}
                 className="flex gap-3 border-b border-border/50 px-3 py-1 last:border-b-0"
@@ -181,6 +211,7 @@ export function LogsView() {
           {query ? `Matching ${visible.length} of ` : ""}
           {data.entries.length}
           {data.entries.length === 1 ? " entry" : " entries"} read from disk.
+          {hiddenCount > 0 ? ` Showing the newest ${rendered.length}.` : ""}
           {data.truncated ? " Older history beyond this tail window is not loaded." : null}
           {data.sources.some((source) => source.error) ? (
             <>

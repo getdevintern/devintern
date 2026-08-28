@@ -199,17 +199,22 @@ export class DashboardData {
       level: filter.level,
       maxBytesPerFile: this.maxLogBytesPerFile,
     });
-    const runsByKey = new Map<string, { id: number; status: RunStatus | undefined }>();
-    const keys = new Set(result.entries.flatMap((entry) => (entry.taskKey ? [entry.taskKey] : [])));
-    for (const key of keys) {
-      const matches = this.read<RunRecord[]>([], (stores) =>
-        stores.runs.listRuns({ taskKey: key, limit: 1 }),
-      );
-      const latest = matches[0];
-      if (latest) {
-        runsByKey.set(key, { id: latest.id, status: latest.status });
-      }
-    }
+    const keys = [
+      ...new Set(result.entries.flatMap((entry) => (entry.taskKey ? [entry.taskKey] : []))),
+    ];
+    // One batched lookup for all keys (see RunStore.latestRunByTaskKey) —
+    // per-key queries here would mean up to MAX_LOG_LIMIT queries per poll.
+    const runsByKey = this.read<Map<string, { id: number; status: RunStatus | undefined }>>(
+      new Map(),
+      (stores) => {
+        const latest = stores.runs.latestRunByTaskKey(keys);
+        const trimmed = new Map<string, { id: number; status: RunStatus | undefined }>();
+        for (const [key, run] of latest) {
+          trimmed.set(key, { id: run.id, status: run.status });
+        }
+        return trimmed;
+      },
+    );
     if (runsByKey.size === 0) {
       return { ...result, entries: result.entries };
     }
