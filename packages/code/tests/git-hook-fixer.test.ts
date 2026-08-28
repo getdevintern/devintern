@@ -184,6 +184,22 @@ describe("verifyPushHookFix", () => {
     expect(result.message).toContain("already on remote");
   });
 
+  test("pushCurrentBranch reports the hook stdout in the failure message", async () => {
+    // A failing pre-push hook prints its diagnostics to stdout while git
+    // itself only adds one stderr line ("error: failed to push some refs").
+    // The returned message must include both so failures are diagnosable.
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    installFailingPrePushHook(repoDir);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Failed to push branch");
+    expect(result.message).toContain("pre-push hook declined (intentional test failure)");
+    expect(result.message).toContain("failed to push some refs");
+    expect(result.hookError).toContain("pre-push hook declined (intentional test failure)");
+  });
+
   test("remoteTrackingRefMatchesHead is false after a local-only commit", async () => {
     expect(await Utils.remoteTrackingRefMatchesHead("feature/dev-74", { cwd: repoDir })).toBe(true);
 

@@ -61,9 +61,10 @@ describe("buildRepoEnv", () => {
     expect(env.INLINE_ONLY).toBe("inline");
   });
 
-  test("pins WEBHOOK_QUEUE_DB to the central workspace DB", () => {
+  test("pins durable state and analytics identity to the workspace", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {
@@ -77,6 +78,20 @@ describe("buildRepoEnv", () => {
       workspaceDir,
     );
     expect(nonGitHub.GITHUB_REPO).toBe(process.env.GITHUB_REPO);
+  });
+
+  test("injects PR_LABELS from repo pr_labels", () => {
+    const env = buildRepoEnv(repo({ prLabels: ["devintern", "auto-pr"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("devintern,auto-pr");
+  });
+
+  test("repo pr_labels overrides a PR_LABELS carried by env layers", () => {
+    writeFileSync(join(workspaceDir, ".env"), "PR_LABELS=from-env\n");
+    const env = buildRepoEnv(repo({ prLabels: ["from-config"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("from-config");
+
+    const unset = buildRepoEnv(repo(), workspaceDir);
+    expect(unset.PR_LABELS).toBe("from-env");
   });
 
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {

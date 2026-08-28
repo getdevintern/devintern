@@ -8,6 +8,7 @@
 
 import { runAgent as defaultRunAgent } from "../agent.js";
 import { dumpAgentOutput } from "../agent-debug.js";
+import type { AgentRunResult } from "@devintern/agent-harness";
 import {
   attachmentsGuidanceBlurb,
   cleanupAttachmentStaging,
@@ -47,6 +48,17 @@ export type { CreatedTask, LabelListResult, LabelRef } from "../backends/index.j
 
 /** Fallback issue types when a supporting backend cannot provide a list. */
 export { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes };
+
+/**
+ * Appended to the one corrective re-run when an agent reply fails to parse.
+ * Keeps the ask narrow: the same payload, strictly canonical JSON.
+ */
+const STRICT_JSON_REMINDER = [
+  "IMPORTANT: Your previous reply could not be parsed as JSON.",
+  "Respond again with ONLY the JSON object this task requires — no narration,",
+  "no markdown fences, no comments, no trailing commas. Quote every key with",
+  'double quotes and escape any double quotes inside values as \\".',
+].join(" ");
 
 export interface GenerateStoryInput {
   source: SourceInput;
@@ -205,7 +217,8 @@ export async function createEngine(
     config.trello?.defaultBoardId ||
     config.azureDevOps?.defaultProject ||
     config.asana?.defaultProjectGid ||
-    config.github?.repository;
+    config.github?.repository ||
+    config.gitlab?.projectPath;
 
   /** Session cache of listLabels results — avoids re-paginating on createTask. */
   const labelsByProject = new Map<string, LabelListResult>();
@@ -232,38 +245,70 @@ export async function createEngine(
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
     const onAgentChunk = events?.onAgentChunk;
-    const result = await runAgent(config.agent.harness, config.agent.path, prompt, {
-      maxTurns: 100,
-      skipPermissions: true,
-      model,
-      silent: true,
-      attachmentPaths: agentFiles?.attachmentPaths,
-      imagePaths: agentFiles?.imagePaths,
-      onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
-      onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
-    });
-
     const dumpContext = { harness: config.agent.harness.name, cliPath: config.agent.path };
 
-    if (result.exitCode !== 0) {
-      const dumpFile = await dumpAgentOutput(label, result, dumpContext);
-      throw new EngineError(
-        "agent-failed",
-        failureMessage,
-        result.stderr.trim() || "Unknown agent error",
-        dumpFile ?? undefined,
-      );
+    type AttemptOutcome =
+      | { ok: true; payload: T }
+      | { ok: false; stage: "agent"; error: EngineError }
+      | { ok: false; stage: "parse"; error: EngineError; rawResult: AgentRunResult };
+
+    async function attemptParse(currentPrompt: string): Promise<AttemptOutcome> {
+      const result = await runAgent(config.agent.harness, config.agent.path, currentPrompt, {
+        maxTurns: 100,
+        skipPermissions: true,
+        model,
+        silent: true,
+        attachmentPaths: agentFiles?.attachmentPaths,
+        imagePaths: agentFiles?.imagePaths,
+        onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
+        onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
+      });
+
+      if (result.exitCode !== 0) {
+        const dumpFile = await dumpAgentOutput(label, result, dumpContext);
+        return {
+          ok: false,
+          stage: "agent",
+          error: new EngineError(
+            "agent-failed",
+            failureMessage,
+            result.stderr.trim() || "Unknown agent error",
+            dumpFile ?? undefined,
+          ),
+        };
+      }
+
+      try {
+        return { ok: true, payload: extractJsonPayload(result.stdout, validate, invalidMessage) };
+      } catch (error) {
+        if (!(error instanceof EngineError)) throw error;
+        return { ok: false, stage: "parse", error, rawResult: result };
+      }
     }
 
-    try {
-      return extractJsonPayload(result.stdout, validate, invalidMessage);
-    } catch (error) {
-      if (error instanceof EngineError) {
-        const dumpFile = await dumpAgentOutput(`${label}-parse`, result, dumpContext);
-        throw new EngineError(error.code, error.message, error.detail, dumpFile ?? undefined);
-      }
-      throw error;
-    }
+    /**
+     * Agent runs are by far the slowest part of a generation, so give
+     * malformed output one corrective re-run before giving up. The re-run
+     * appends a strict-output reminder to the same prompt; whatever still
+     * fails is dumped and raised as `parse-failed`.
+     */
+    const first = await attemptParse(prompt);
+    if (first.ok) return first.payload;
+    if (first.stage === "agent") throw first.error;
+
+    const retry = await attemptParse(`${prompt}\n\n${STRICT_JSON_REMINDER}`);
+    if (retry.ok) return retry.payload;
+    if (retry.stage === "agent") throw retry.error;
+
+    // Both attempts failed to parse — surface the latest failure alongside a
+    // dump of the final attempt so users can inspect exactly what came back.
+    const dumpFile = await dumpAgentOutput(`${label}-parse`, retry.rawResult, dumpContext);
+    throw new EngineError(
+      retry.error.code,
+      retry.error.message,
+      retry.error.detail,
+      dumpFile ?? undefined,
+    );
   }
 
   return {

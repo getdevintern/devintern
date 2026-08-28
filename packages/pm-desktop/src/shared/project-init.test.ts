@@ -30,6 +30,9 @@ describe("setup field helpers (shared with wizard UI)", () => {
   });
 
   test("every tracker in SETUP is reachable from the desktop menu order", () => {
-    expect(Object.keys(PM_TRACKER_SETUP).length).toBeGreaterThanOrEqual(7);
+    expect(Object.keys(PM_TRACKER_SETUP).length).toBeGreaterThanOrEqual(8);
+    // GitLab must appear alongside the other remote trackers so the setup
+    // wizard and tracker switcher pick it up without desktop-side changes.
+    expect(Object.keys(PM_TRACKER_SETUP)).toContain("gitlab");
   });
 });

@@ -50,7 +50,13 @@ import {
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
-import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/analytics";
+import {
+  flushAnalytics,
+  isAnonymousIdNewlyCreated,
+  RUN_ORIGIN_ENV,
+  track,
+  trackWorkerTaskRun,
+} from "./lib/analytics";
 import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentModel } from "./lib/agent-model";
@@ -79,9 +85,11 @@ import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
 import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import type { RunStatus } from "./lib/run-recorder";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
-import { formatProcessingFailureMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
+import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
+import { reportTaskFailure } from "./lib/failure-feedback";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -138,6 +146,26 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
     estimate: options.estimate === true,
     sandbox: KNOWN_SANDBOX_PROVIDERS.has(sandboxProvider ?? "") ? sandboxProvider : undefined,
   };
+}
+
+function isWorkerTaskProcess(): boolean {
+  const origin = process.env[RUN_ORIGIN_ENV];
+  return origin === "worker" || origin === "scheduled";
+}
+
+/** Finish the local run record and emit exactly one outcome event for worker tasks. */
+async function finishTaskRun(
+  status: Exclude<RunStatus, "in_progress">,
+  reason?: string,
+): Promise<void> {
+  endRun(status, reason);
+  const tracked = trackWorkerTaskRun(status, {
+    cliVersion: VERSION,
+    tracker: process.env.TASK_TRACKER || "jira",
+  });
+  if (tracked) {
+    await flushAnalytics();
+  }
 }
 
 /**
@@ -293,6 +321,9 @@ function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
   }
   if (trackerType === "github" && process.env.GITHUB_REPO) {
     return process.env.GITHUB_REPO;
+  }
+  if (trackerType === "gitlab" && process.env.GITLAB_PROJECT) {
+    return process.env.GITLAB_PROJECT;
   }
   if (trackerType === "azure-devops" && process.env.AZURE_DEVOPS_PROJECT) {
     return process.env.AZURE_DEVOPS_PROJECT;
@@ -716,6 +747,7 @@ if (process.argv[2] === "init") {
     await runWorkspaceWorker({
       workspacePath,
       verbose,
+      cliVersion: VERSION,
     });
     return;
   })();
@@ -943,6 +975,17 @@ if (process.argv[2] === "init") {
       }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
+      } else if (result.outcome === "failed") {
+        // A landed-but-unconfirmed failure means the merge commit IS on the
+        // PR branch even though verification failed; only the other failure
+        // kinds leave the PR untouched.
+        const untouchedHint =
+          result.failureKind === "landed-but-unconfirmed"
+            ? "The merge commit is on the branch; see the PR for details."
+            : "No changes landed on the PR; see the PR comment for details.";
+        console.error(`❌ Failed: ${result.message}. ${untouchedHint}`);
+      } else if (result.outcome === "deferred") {
+        console.log(`⏳ Deferred: ${result.message}`);
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
@@ -1094,7 +1137,7 @@ program
   .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
   .option(
     "--estimate",
-    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub posts comment-only estimates)",
+    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub and GitLab post comment-only estimates)",
   )
   .option(
     "--sandbox <provider>",
@@ -1120,6 +1163,11 @@ Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
 Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
   devintern 123 --create-pr
   devintern https://github.com/acme/webapp/issues/123 --create-pr
+  devintern --query "is:open label:bug" --create-pr
+
+Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
+  devintern 123 --create-pr
+  devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
 Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
@@ -1151,7 +1199,8 @@ Subcommands:
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
   worker               Run the workspace worker daemon;
-                       'worker init' writes a workspace and ready-tasks query
+                        'worker init' writes a workspace, ready-tasks query,
+                        relay pairing, and the GitHub App (@mentions)
   dashboard            Serve the local observability dashboard (run history and stats)
   webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request
@@ -1262,32 +1311,26 @@ let activeTaskContext: {
  * was created and move the ticket back to its To Do status so the next
  * scheduled run can retry. Never throws — feedback must not mask the
  * original error.
+ *
+ * After posting, the attempt is recorded for the retry gate so posting the
+ * comment (which bumps the ticket's `updated` stamp) does not itself cause
+ * an immediate re-pickup loop.
  */
 async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
   const context = activeTaskContext;
   if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
 
-  const { tracker, projectKey } = context;
-  try {
-    await tracker.postComment(taskKey, {
-      format: "markdown",
-      body: formatProcessingFailureMarkdown(taskKey, reason),
-    });
-    console.log(`💬 Posted a failure comment to ${taskKey}`);
-  } catch (commentError) {
-    console.warn(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
-  }
-
-  if (!context.movedToInProgress) return;
-  try {
-    const todoStatus = getTodoStatusForProject(projectKey, loadProjectSettings());
-    if (todoStatus && todoStatus.trim()) {
-      await tracker.transitionStatus(taskKey, todoStatus.trim());
-      console.log(`🔄 Moved ${taskKey} back to '${todoStatus}' so it can be retried`);
-    }
-  } catch (transitionError) {
-    console.warn(`⚠️  Failed to move ${taskKey} back to To Do: ${transitionError}`);
-  }
+  await reportTaskFailure({
+    taskKey,
+    reason,
+    tracker: context.tracker,
+    trackerType: process.env.TASK_TRACKER || "jira",
+    projectKey: context.projectKey,
+    movedToInProgress: context.movedToInProgress,
+    getTodoStatus: () => getTodoStatusForProject(context.projectKey, loadProjectSettings()),
+    log: console.log,
+    warn: console.warn,
+  });
 }
 
 /**
@@ -1634,7 +1677,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.error(`   devintern ${taskKey} --no-git`);
         }
 
-        endRun("abandoned", "feature branch creation failed");
+        await finishTaskRun("abandoned", "feature branch creation failed");
         // Release lock before exiting
         if (lockManager) {
           lockManager.release();
@@ -1689,7 +1732,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
               `\n⚠️  Task ${workflowKey} failed clarity assessment but continuing with batch processing...`,
             );
           } else {
-            endRun("abandoned", "failed feasibility assessment");
+            await finishTaskRun("abandoned", "failed feasibility assessment");
             if (lockManager) {
               lockManager.release();
             }
@@ -1840,9 +1883,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       await tracker.markDoneIfSuccessful(workflowKey, taskDir);
     }
     if (implementationIncomplete) {
-      endRun("escalated", "implementation incomplete; handed back to a human");
+      await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
     } else {
-      endRun("succeeded");
+      await finishTaskRun("succeeded");
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
@@ -1851,7 +1894,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
-      endRun("deferred", error.message);
+      await finishTaskRun("deferred", error.message);
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       // The ticket may already be "In Progress": leave feedback and move it
       // back so the deferred retry can actually pick it up.
@@ -1870,7 +1913,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     const err = error as Error;
-    endRun("failed", err.message);
+    await finishTaskRun("failed", err.message);
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
     console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
     if (options.verbose && err.stack) {
@@ -1936,13 +1979,15 @@ async function main(): Promise<void> {
     // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
     // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
     // analytics.enabled: false in .devintern-code/settings.json.
-    const firstTelemetryRun = isAnonymousIdNewlyCreated();
-    void track("cli_run", buildCliRunProps(activeTrackerType));
-    if (firstTelemetryRun && !isAutomatedEnvironment()) {
-      console.log(
-        "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
-          "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
-      );
+    if (!isWorkerTaskProcess()) {
+      const firstTelemetryRun = isAnonymousIdNewlyCreated();
+      void track("cli_run", buildCliRunProps(activeTrackerType));
+      if (firstTelemetryRun && !isAutomatedEnvironment()) {
+        console.log(
+          "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
+            "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
+        );
+      }
     }
 
     // Validate environment — skip when every argument is a local markdown file path
@@ -3465,12 +3510,9 @@ async function runAgentHarness(
 
             if (tracker && !skipComments && taskKey) {
               try {
-                const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
                 await tracker.postComment(taskKey, {
                   format: "markdown",
-                  body:
-                    `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
-                    `Answer in the task description or a comment, then re-run devintern.`,
+                  body: formatAgentInputNeededMarkdown(openQuestions.questions),
                 });
                 console.log("💬 Posted the questions as a comment on the task");
               } catch (commentError) {

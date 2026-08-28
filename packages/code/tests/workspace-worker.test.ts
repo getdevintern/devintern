@@ -163,6 +163,7 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(ran[0].cwd).toContain(join("worktrees", "backend"));
     expect(ran[0].env.GITHUB_REPO).toBe("acme/backend");
     expect(ran[0].env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(ran[0].env.DEVINTERN_RUN_ORIGIN).toBe("worker");
 
     // Successful run: worktree removed.
     expect(existsSync(ran[0].cwd)).toBe(false);
@@ -237,6 +238,24 @@ describe("createWorkspaceTaskAcquirer", () => {
     // Released afterwards.
     const after = createRepoRunLock("backend", workspaceDir).acquire();
     expect(after.success).toBe(true);
+  });
+
+  test("a task deferred by a busy repo retries on the next poll", async () => {
+    tasks = [{ key: "T-6", updated: "u1", labels: ["backend"] }];
+    const heldLock = createRepoRunLock("backend", workspaceDir);
+    expect(heldLock.acquire().success).toBe(true);
+    const acquirer = makeAcquirer();
+
+    await acquirer.tick();
+    expect(ran).toHaveLength(0);
+    expect(state.workerState.getCursor("markdown")).toBeNull();
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(false);
+
+    heldLock.release();
+    await acquirer.tick();
+    expect(ran.map((run) => run.taskKey)).toEqual(["T-6"]);
+    expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
   });
 });
 

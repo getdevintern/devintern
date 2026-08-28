@@ -38,6 +38,8 @@ tracker = "jira"
 # task_query = "sprint in openSprints() AND labels = devintern"
 # Extra CLI flags per task run.
 worker_task_args = "--create-pr"
+# Labels applied to created PRs (GitHub only). Override per repo.
+# pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
 default_branch = "main"

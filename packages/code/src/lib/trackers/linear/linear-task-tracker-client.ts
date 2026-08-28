@@ -27,7 +27,7 @@ import {
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
-  isIncompleteImplementationCommentText,
+  isAutomationFailureCommentText,
 } from "../shared/markdown-comment-formatter";
 import type {
   ClarityAssessmentLike,
@@ -290,7 +290,7 @@ export class LinearTaskTrackerClient implements TaskTrackerClient {
   async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
       const comments = await this.fetchRawComments(taskKey);
-      return comments.some((c) => isIncompleteImplementationCommentText(c.body));
+      return comments.some((c) => isAutomationFailureCommentText(c.body));
     } catch (error) {
       console.warn(`Failed to check for duplicate comments: ${error}`);
       return false;

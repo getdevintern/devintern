@@ -13,6 +13,7 @@ import {
   AsanaClient,
   AzureDevOpsClient,
   GitHubClient,
+  GitLabClient,
   JiraClient,
   LinearClient,
   TrelloClient,
@@ -74,6 +75,13 @@ export async function defaultProbe(trackerId: string, env: Record<string, string
       }).getRepositories();
       return;
     }
+    case "gitlab":
+      await new GitLabClient({
+        token: env.GITLAB_TOKEN ?? "",
+        projectPath: env.GITLAB_PROJECT ?? "",
+        baseUrl: env.GITLAB_BASE_URL,
+      }).getCurrentUser();
+      return;
     case "azure-devops":
       await new AzureDevOpsClient({
         organization: env.AZURE_DEVOPS_ORG ?? "",

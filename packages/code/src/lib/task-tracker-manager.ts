@@ -12,6 +12,7 @@ import { JiraTaskTrackerClient } from "./trackers/jira/jira-task-tracker-client"
 import { AsanaTaskTrackerClient } from "./trackers/asana/asana-task-tracker-client";
 import { AzureDevOpsTaskTrackerClient } from "./trackers/azure-devops/azure-devops-task-tracker-client";
 import { GitHubTaskTrackerClient } from "./trackers/github/github-task-tracker-client";
+import { GitLabTaskTrackerClient } from "./trackers/gitlab/gitlab-task-tracker-client";
 import { LinearTaskTrackerClient } from "./trackers/linear/linear-task-tracker-client";
 import { MarkdownTaskTrackerClient } from "./trackers/markdown/markdown-task-tracker-client";
 import { TrelloTaskTrackerClient } from "./trackers/trello/trello-task-tracker-client";
@@ -126,6 +127,28 @@ export class TaskTrackerManager {
         break;
       }
 
+      case "gitlab": {
+        const token = process.env.GITLAB_TOKEN;
+        const projectPath = process.env.GITLAB_PROJECT;
+
+        if (!token || !projectPath) {
+          throw new Error(
+            "Missing required GitLab credentials. Set GITLAB_TOKEN and GITLAB_PROJECT (group/repo) environment variables.",
+          );
+        }
+
+        const gitlabStatusLabels = (process.env.GITLAB_STATUS_LABELS || "")
+          .split(",")
+          .map((label) => label.trim())
+          .filter(Boolean);
+
+        this.client = new GitLabTaskTrackerClient(token, projectPath, {
+          baseUrl: process.env.GITLAB_BASE_URL,
+          statusLabels: gitlabStatusLabels,
+        });
+        break;
+      }
+
       case "trello": {
         const apiKey = process.env.TRELLO_API_KEY;
         const apiToken = process.env.TRELLO_API_TOKEN;
@@ -157,7 +180,7 @@ export class TaskTrackerManager {
 
       default:
         throw new Error(
-          `Unsupported task tracker: "${trackerType}". Supported values: jira, linear, github, azure-devops, asana, trello, markdown`,
+          `Unsupported task tracker: "${trackerType}". Supported values: jira, linear, github, gitlab, azure-devops, asana, trello, markdown`,
         );
     }
 

@@ -1,14 +1,16 @@
 /**
  * Normalize CLI task-key arguments for the active tracker.
  *
- * Linear / GitHub / Azure DevOps / Asana accept both bare ids and full URLs;
- * Trello always rewrites the argument (short link, URL, or 24-char id).
+ * Linear / GitHub / GitLab / Azure DevOps / Asana accept both bare ids and
+ * full URLs; Trello always rewrites the argument (short link, URL, or
+ * 24-char id).
  */
 
 import { parseTrelloCardReference } from "@devintern/task-trackers";
 import { parseAsanaTaskReference } from "./trackers/asana/asana-task-tracker-client";
 import { parseAzureDevOpsWorkItemReference } from "./trackers/azure-devops/azure-devops-task-tracker-client";
 import { parseGitHubIssueReference } from "./trackers/github/github-task-tracker-client";
+import { parseGitLabIssueReference } from "./trackers/gitlab/gitlab-task-tracker-client";
 import { parseLinearIssueReference } from "./trackers/linear/linear-task-tracker-client";
 
 /**
@@ -28,6 +30,9 @@ export function normalizeTaskKeys(keys: string[], trackerType: string): string[]
   }
   if (tracker === "github") {
     return keys.map((key) => parseGitHubIssueReference(key) ?? key);
+  }
+  if (tracker === "gitlab") {
+    return keys.map((key) => parseGitLabIssueReference(key) ?? key);
   }
   if (tracker === "azure-devops") {
     return keys.map((key) => parseAzureDevOpsWorkItemReference(key) ?? key);

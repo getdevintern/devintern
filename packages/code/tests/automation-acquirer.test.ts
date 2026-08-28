@@ -128,6 +128,10 @@ describe("AutomationAcquirer", () => {
   test("falls back to the run cwd's config dir when no parent config exists", () => {
     const worktree = join(tmpdir(), `acquirer-fallback-${Date.now()}-${Math.random()}`);
     mkdirSync(worktree, { recursive: true });
+    // A real worktree carries a .git entry; without it the config-dir lookup
+    // would walk past tmpdir and bind to any ambient ancestor config
+    // (e.g. /tmp/.devintern-code) instead of exercising the fallback.
+    mkdirSync(join(worktree, ".git"), { recursive: true });
 
     const filePath = writeAutomationTaskFile(
       {

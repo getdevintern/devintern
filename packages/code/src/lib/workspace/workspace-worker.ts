@@ -8,14 +8,24 @@
  * in the central workspace DB.
  */
 
+import { existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
+import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
+import {
+  loadProjectSettingsFrom,
+  recoverOrphanedTaskRuns,
+  resolveStatusName,
+} from "../orphan-recovery";
+import { RunStore } from "../run-recorder";
+import { RetryStateStore } from "../retry-state";
+import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, parseEnvFile } from "./env";
@@ -24,15 +34,88 @@ import {
   workspaceConfigPath,
   workspaceDbPath,
   workspaceEnvPath,
+  worktreesDir,
 } from "./paths";
 import { routeTask, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { WorkspaceConfigReloader } from "./config-reload";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
-import { RepoManager } from "./repo-manager";
+import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
+import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+
+/** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
+function orphanMaxAgeMs(): number {
+  return parseEnvInteger("WORKER_ORPHAN_MAX_AGE_HOURS", 24 * 7, { min: 0 }) * 60 * 60 * 1000;
+}
+
+/**
+ * Recover task runs left in progress by a previous (dead) worker before any
+ * acquirer picks up new tickets: reap them and give their tickets the
+ * graceful-shutdown feedback (failure comment + move back to To Do).
+ *
+ * Replaces the old reap-only startup sweep, which also only ran when GitHub
+ * credentials were configured; recovery here covers every workspace.
+ */
+export async function recoverOrphanedWorkspaceRuns(options: {
+  config: WorkspaceConfig;
+  workspaceDir: string;
+  dbPath: string;
+}): Promise<void> {
+  const { config, workspaceDir, dbPath } = options;
+  const runStore = new RunStore(dbPath);
+  let retryStore: RetryStateStore | null = null;
+  try {
+    const hasTaskOrphans =
+      runStore.listRuns({ status: "in_progress", origin: "task", limit: 1 }).length > 0;
+
+    let tracker: TaskTrackerClient | undefined;
+    if (hasTaskOrphans) {
+      try {
+        const { TaskTrackerManager } = await import("../task-tracker-manager");
+        tracker = new TaskTrackerManager().getClient();
+      } catch (error) {
+        console.warn(
+          `⚠️  [fleet] could not initialize the tracker to recover orphaned tickets: ${
+            (error as Error).message
+          }`,
+        );
+      }
+    }
+
+    // Fleet tasks run in per-repo worktrees, so their status names come from
+    // each repo's checked-in settings; the base worktrees hold a checked-out
+    // copy. Never triggers git work here — only existing directories are read.
+    const settingsDirs = [
+      ...config.repos
+        .map((repo) => join(worktreesDir(workspaceDir), repo.name, BASE_WORKTREE_NAME))
+        .filter(existsSync),
+      workspaceDir,
+    ];
+    const settings = loadProjectSettingsFrom(settingsDirs);
+    const trackerType = config.defaults.tracker;
+    retryStore = new RetryStateStore(dbPath);
+
+    await recoverOrphanedTaskRuns({
+      runStore,
+      tracker,
+      trackerType,
+      getInProgressStatus: (projectKey) =>
+        resolveStatusName(settings, trackerType, projectKey, "inProgressStatus"),
+      getTodoStatus: (projectKey) =>
+        resolveStatusName(settings, trackerType, projectKey, "todoStatus"),
+      recordAttempt: (taskKey, type, description) =>
+        retryStore?.recordIncompleteAttempt(taskKey, type, description),
+      maxAgeMs: orphanMaxAgeMs(),
+    });
+  } finally {
+    retryStore?.close();
+    runStore.close();
+  }
+}
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -125,6 +208,53 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
+const PUSH_PERMISSION_HINT =
+  "Pushes use the ambient git credential chain — when GITHUB_TOKEN is exported, " +
+  "'gh auth git-credential' serves it instead of your keyring login. Grant " +
+  "'Contents: Read and write' to that token (or switch the remote to SSH).";
+
+/**
+ * Probe push access for every configured GitHub HTTPS remote at worker
+ * startup. GitHub read APIs cannot detect an under-scoped fine-grained PAT
+ * (role APIs report the user's permissions, not the token's), so pushes are
+ * exercised directly via a side-effect-free dry run against each bare clone.
+ *
+ * Never throws: auth problems are warnings, not startup failures —
+ * review-only setups legitimately cannot push.
+ */
+export async function warnOnPushAuthIssues(
+  config: WorkspaceConfig,
+  repoManager: RepoManagerLike,
+): Promise<void> {
+  for (const repo of config.repos) {
+    if (!/^https:\/\/github\.com\//i.test(repo.remote)) {
+      continue;
+    }
+    try {
+      const clonePath = await repoManager.ensureBareClone(repo);
+      const probe = await probePushAccess({ cwd: clonePath });
+      if (probe.status === "ok") {
+        console.log(`✅ [fleet] push access verified for ${repo.name}`);
+        continue;
+      }
+      const reason = probe.message ? `: ${probe.message}` : "";
+      if (probe.status === "permission") {
+        console.warn(`⚠️  [fleet] ${repo.name} rejects pushes${reason}`);
+        console.warn(`   💡 ${PUSH_PERMISSION_HINT}`);
+      } else if (probe.status === "network") {
+        console.warn(
+          `⚠️  [fleet] could not verify push access for ${repo.name} (network)${reason}`,
+        );
+      } else {
+        console.warn(`⚠️  [fleet] unexpected push-probe result for ${repo.name}${reason}`);
+      }
+    } catch (error) {
+      // Clone failures surface later as real task errors; stay silent here.
+      console.warn(`⚠️  [fleet] skipping push probe for ${repo.name}: ${(error as Error).message}`);
+    }
+  }
+}
+
 /**
  * Enabled-and-shape-valid automations for the current fleet, plus any
  * semantic problems. Shared by worker startup (problems are fatal) and the
@@ -177,7 +307,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
   // task's routing fields from the evaluate step of the same tick.
   const routables = new Map<string, RoutableTask>();
 
-  const executeTask = (taskKey: string): Promise<boolean> =>
+  const executeTask = (taskKey: string): Promise<TaskExecutionResult> =>
     execute(
       taskKey,
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
@@ -227,7 +357,7 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-): (taskKey: string, routable: RoutableTask) => Promise<boolean> {
+): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
@@ -265,9 +395,9 @@ export function createFleetTaskExecutor(
     const lockResult = lock.acquire();
     if (!lockResult.success) {
       console.warn(
-        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} will retry when the task changes.`,
+        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
       );
-      return false;
+      return "deferred";
     }
 
     try {
@@ -278,7 +408,10 @@ export function createFleetTaskExecutor(
 
       const ok = await runTask(taskKey, extraArgs, {
         cwd: worktree,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: {
+          ...buildRepoEnv(repo, workspaceDir),
+          [RUN_ORIGIN_ENV]: "worker",
+        },
       });
 
       if (ok) {
@@ -302,6 +435,8 @@ export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
   verbose?: boolean;
+  /** CLI release attached to anonymous worker startup analytics. */
+  cliVersion?: string;
 }
 
 /**
@@ -353,6 +488,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
 
+  // Recover what the previous worker left behind before acquiring new work.
+  await recoverOrphanedWorkspaceRuns({
+    config,
+    workspaceDir,
+    dbPath: state.dbPath,
+  });
+
   for (const repo of config.repos) {
     const removed = await repoManager.sweepStaleWorktrees(
       repo.name,
@@ -362,6 +504,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
     }
   }
+
+  await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
 
@@ -477,6 +621,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     {
       lock: createWorkspaceLock(workspaceDir),
       label: workspaceDir,
+      onStarted: async (acquirerNames) => {
+        trackWorkerStarted({
+          cliVersion: options.cliVersion ?? "0.0.0",
+          tracker: config.defaults.tracker,
+          acquirerNames,
+          configDir: workspaceDir,
+        });
+        await flushAnalytics();
+      },
     },
     acquirers,
   );
@@ -553,14 +706,7 @@ export async function buildFleetEventAcquirers(options: {
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
-    const { RunStore } = await import("../run-recorder");
     const runStore = new RunStore(state.dbPath);
-    const reapedRuns = runStore.reapOrphanedRuns();
-    if (reapedRuns > 0) {
-      console.warn(
-        `⚠️  Marked ${reapedRuns} in-progress run(s) as failed: previous worker exited before they finished`,
-      );
-    }
     acquirers.push(
       new ReviewPollingAcquirer({
         intervalSeconds,

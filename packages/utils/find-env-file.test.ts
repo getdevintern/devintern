@@ -127,15 +127,19 @@ describe("findEnvFile", () => {
 
 describe("findConfigDir", () => {
   let tempRoot: string;
+  let originalGitCeilings: string | undefined;
   let originalHome: string | undefined;
 
   beforeEach(() => {
     tempRoot = mkdtempSync(join(tmpdir(), "find-config-dir-"));
+    originalGitCeilings = process.env.GIT_CEILING_DIRECTORIES;
     originalHome = process.env.HOME;
     process.env.HOME = tempRoot;
   });
 
   afterEach(() => {
+    if (originalGitCeilings === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = originalGitCeilings;
     process.env.HOME = originalHome;
     rmSync(tempRoot, { recursive: true, force: true });
   });
@@ -188,19 +192,34 @@ describe("findConfigDir", () => {
     const result = findConfigDir({ startDir: tempRoot, configDirName: ".devintern-test" });
     expect(result).toBeNull();
   });
+
+  test("does not inspect a config directory at a Git ceiling", () => {
+    const ceilingDir = join(tempRoot, "ceiling");
+    const childDir = join(ceilingDir, "fixture");
+    mkdirSync(join(ceilingDir, ".devintern-test"), { recursive: true });
+    mkdirSync(childDir, { recursive: true });
+    process.env.GIT_CEILING_DIRECTORIES = ceilingDir;
+
+    const result = findConfigDir({ startDir: childDir, configDirName: ".devintern-test" });
+    expect(result).toBeNull();
+  });
 });
 
 describe("findProjectRoot", () => {
   let tempRoot: string;
+  let originalGitCeilings: string | undefined;
   let originalHome: string | undefined;
 
   beforeEach(() => {
     tempRoot = mkdtempSync(join(tmpdir(), "find-project-root-"));
+    originalGitCeilings = process.env.GIT_CEILING_DIRECTORIES;
     originalHome = process.env.HOME;
     process.env.HOME = tempRoot;
   });
 
   afterEach(() => {
+    if (originalGitCeilings === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = originalGitCeilings;
     process.env.HOME = originalHome;
     rmSync(tempRoot, { recursive: true, force: true });
   });
@@ -228,5 +247,16 @@ describe("findProjectRoot", () => {
   test("falls back to the start directory outside a repository", () => {
     const result = findProjectRoot({ startDir: tempRoot });
     expect(result).toBe(tempRoot);
+  });
+
+  test("ignores an ambient .git marker at a Git ceiling", () => {
+    const ceilingDir = join(tempRoot, "ceiling");
+    const childDir = join(ceilingDir, "fixture");
+    mkdirSync(join(ceilingDir, ".git"), { recursive: true });
+    mkdirSync(childDir, { recursive: true });
+    process.env.GIT_CEILING_DIRECTORIES = ceilingDir;
+
+    const result = findProjectRoot({ startDir: childDir });
+    expect(result).toBe(childDir);
   });
 });
