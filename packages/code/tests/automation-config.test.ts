@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseAutomationConfig, parseAutomationInterval } from "../src/lib/automation-config";
+import {
+  nextScheduleOccurrence,
+  parseAutomationConfig,
+  parseAutomationInterval,
+  parseCronOrIntervalSchedule,
+} from "../src/lib/automation-config";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 
 describe("automation configuration", () => {
@@ -84,5 +89,65 @@ prompt = "work"
 repo = "web"
 `),
     ).toThrow(/does not match any \[\[repos\]\] name/);
+  });
+});
+
+describe("parseCronOrIntervalSchedule", () => {
+  test("normalizes a valid cron schedule", () => {
+    const errors: string[] = [];
+    const schedule = parseCronOrIntervalSchedule({ cron: " 0 3 * * * " }, { label: "[x]" }, errors);
+    expect(errors).toEqual([]);
+    expect(schedule).toEqual({ cron: "0 3 * * *", interval: undefined, intervalMs: undefined });
+  });
+
+  test("honors renamed keys in error messages", () => {
+    const errors: string[] = [];
+    parseCronOrIntervalSchedule(
+      {},
+      {
+        label: "[workspace]",
+        cronKey: "conflict_resolution_cron",
+        intervalKey: "conflict_resolution_interval",
+      },
+      errors,
+    );
+    expect(errors).toEqual([
+      "[workspace] must set exactly one of conflict_resolution_cron or conflict_resolution_interval.",
+    ]);
+  });
+
+  test("collects every schedule problem", () => {
+    const errors: string[] = [];
+    const schedule = parseCronOrIntervalSchedule(
+      { cron: "bad", interval: "2w" },
+      { label: "[[automations]][0]" },
+      errors,
+    );
+    expect(schedule).toBeUndefined();
+    expect(errors).toEqual([
+      "[[automations]][0] must set exactly one of cron or interval.",
+      "[[automations]][0].cron must be a five-field cron expression.",
+      "[[automations]][0].interval must use a positive duration such as 15m, 6h, or 1d.",
+    ]);
+  });
+});
+
+describe("nextScheduleOccurrence", () => {
+  test("interval schedules are relative to the given time", () => {
+    const start = 1_750_000_000_000;
+    expect(nextScheduleOccurrence({ interval: "6h", intervalMs: 6 * 3_600_000 }, start)).toBe(
+      start + 6 * 3_600_000,
+    );
+  });
+
+  test("cron occurrences are strictly after the given time", () => {
+    const start = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const next = nextScheduleOccurrence({ cron: "0 3 * * *" }, start);
+    expect(next).toBeGreaterThan(start);
+    expect(next - start).toBeLessThanOrEqual(29 * 3_600_000);
+  });
+
+  test("throws without any schedule", () => {
+    expect(() => nextScheduleOccurrence({}, 0)).toThrow(/no cron expression/);
   });
 });

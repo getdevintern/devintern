@@ -143,6 +143,114 @@ poll_interval = 0
     ).toThrow(/poll_interval must be a positive integer/);
   });
 
+  test("defaults conflict resolution to auto without a schedule", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("auto");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("parses scheduled conflict resolution with cron", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ cron: "0 3 * * *" });
+  });
+
+  test("parses scheduled conflict resolution with an interval", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ interval: "1d", intervalMs: 86_400_000 });
+  });
+
+  test("scheduled conflict resolution requires exactly one schedule key", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+  });
+
+  test("rejects invalid scheduled conflict resolution schedules", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "99 bad"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/five-field cron expression/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "30s"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/positive duration such as 15m, 6h, or 1d/);
+  });
+
+  test("rejects unknown conflict resolution modes", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "nightly"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must be "auto" or "scheduled"/);
+  });
+
+  test("rejects schedule keys without scheduled mode", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "auto"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
   test("rejects invalid TOML", () => {
     expect(() => parseWorkspaceConfig("[defaults\ntracker=")).toThrow(/Failed to parse/);
   });

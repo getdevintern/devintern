@@ -13,6 +13,7 @@ import type {
   PolledPr,
   PolledReview,
 } from "../src/lib/review-polling-acquirer";
+import type { CronOrIntervalSchedule } from "../src/lib/automation-config";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { RunStore } from "../src/lib/run-recorder";
 import { WorkerState } from "../src/lib/worker-state";
@@ -62,6 +63,8 @@ describe("ReviewPollingAcquirer", () => {
       quietPeriodSeconds?: number;
       now?: () => number;
       allowedRepos?: string[];
+      conflictSchedule?: CronOrIntervalSchedule;
+      conflictWindowGraceMs?: number;
     } = {},
   ) {
     const addressed: string[] = [];
@@ -113,6 +116,8 @@ describe("ReviewPollingAcquirer", () => {
       runStore: options.runStore,
       now: options.now,
       allowedRepos: options.allowedRepos,
+      conflictSchedule: options.conflictSchedule,
+      conflictWindowGraceMs: options.conflictWindowGraceMs,
     });
     return { acquirer, addressed, resolved };
   }
@@ -730,6 +735,154 @@ describe("ReviewPollingAcquirer", () => {
     });
     expect(run?.harness).toBeTruthy();
     runStore.close();
+  });
+
+  const DAY_MS = 86_400_000;
+  const dailySchedule: CronOrIntervalSchedule = { interval: "1d", intervalMs: DAY_MS };
+
+  function conflictGh(): FakeGitHubState {
+    return {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      reviews: [],
+      comments: [],
+    };
+  }
+
+  function windowState(): { nextWindowAt: number; windowOpenUntil: number } {
+    const raw = workerState.getCursor("worker:conflict-window")?.cursorValue;
+    expect(raw).toBeTruthy();
+    return JSON.parse(raw!);
+  }
+
+  test("scheduled mode queues conflicts without invoking the resolver before the window", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const start = 1_750_000_000_000;
+    let now = start;
+    const made = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe("pending");
+
+    // Enabling scheduled mode only schedules the first window; nothing runs now.
+    const state = windowState();
+    expect(state.nextWindowAt).toBe(start + DAY_MS);
+    expect(state.windowOpenUntil).toBe(0);
+  });
+
+  test("queued conflicts resolve when the window arrives and queue again after it closes", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // The occurrence arrives: the queued conflict resolves in this tick.
+    now += DAY_MS + 1;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
+    expect(windowState().nextWindowAt).toBe(now + DAY_MS);
+
+    // A new conflict while the window's grace period is open resolves too.
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42", "acme/widgets#42"]);
+
+    // After the grace period closes, conflicts queue for the next window.
+    now += 61 * 60_000;
+    gh.baseSha = "base3";
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(2);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base3:head1")?.status).toBe("pending");
+  });
+
+  test("a window missed while the worker was down catches up on the first tick after restart", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Model a restart: a fresh acquirer over the same durable state, much later.
+    now += 2 * DAY_MS;
+    const restarted = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await restarted.acquirer.tick();
+    expect(restarted.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("a PR resolved manually never triggers the queued window run", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Someone (e.g. `devintern resolve-conflicts <pr-url>`) fixed it out of band.
+    gh.mergeableState = "clean";
+    now += DAY_MS + 1;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+  });
+
+  test("start() surfaces the active conflict-resolution mode", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    try {
+      const scheduled = makeAcquirer(
+        { prState: "open", reviews: [], comments: [] },
+        {
+          conflictSchedule: { cron: "0 3 * * *" },
+        },
+      );
+      await scheduled.acquirer.start();
+      scheduled.acquirer.stop();
+
+      const auto = makeAcquirer({ prState: "open", reviews: [], comments: [] });
+      await auto.acquirer.start();
+      auto.acquirer.stop();
+    } finally {
+      console.log = original;
+    }
+    expect(
+      logs.some((line) => line.includes('conflict resolution: scheduled (cron "0 3 * * *")')),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("conflict resolution: auto"))).toBe(true);
   });
 
   test("start() unwatches open rows for repos outside allowedRepos", async () => {
