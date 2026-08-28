@@ -89,11 +89,17 @@ export function renderCreated(
  */
 export function renderError(error: unknown): OutgoingMessage {
   if (error instanceof EngineError) {
+    if (error.code === "parse-failed") {
+      const dumpHint = error.dumpFile ? ` Full output was saved to \`${error.dumpFile}\`.` : "";
+      return {
+        text:
+          "⚠️ The AI agent returned malformed output I couldn't turn into a draft. " +
+          `Try again, or ask the host to switch harness/model.${dumpHint}`,
+      };
+    }
     const text = {
       "agent-failed":
         "⚠️ The AI agent failed to run on the host machine. Check the `devpm serve` logs, then send your request again.",
-      "parse-failed":
-        "⚠️ The AI agent returned something I couldn't parse into a draft. Try rephrasing your request.",
       "backend-failed": `⚠️ The task tracker rejected the request: ${error.message}`,
     }[error.code];
     return { text };

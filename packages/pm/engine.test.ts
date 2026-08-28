@@ -130,6 +130,9 @@ describe("extractJsonPayload", () => {
     expect(caught).toBeInstanceOf(EngineError);
     expect((caught as EngineError).code).toBe("parse-failed");
     expect((caught as EngineError).detail).toContain("could not produce JSON");
+    // Friendly, actionable headline — the low-level parser message stays out.
+    expect((caught as EngineError).message).toContain("malformed output");
+    expect((caught as EngineError).message).toContain("Retry");
   });
 
   test("throws parse-failed with invalidMessage when fields are missing", () => {
@@ -263,6 +266,103 @@ describe("createEngine", () => {
     expect(caught).toBeInstanceOf(EngineError);
     expect((caught as EngineError).code).toBe("agent-failed");
     expect((caught as EngineError).detail).toBe("boom");
+  });
+
+  test("generateStory retries once with a corrective reminder after malformed output", async () => {
+    const prompts: string[] = [];
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, prompt) => {
+          prompts.push(prompt);
+          calls += 1;
+          return {
+            stdout:
+              calls === 1
+                ? "Utter word salad, no object here."
+                : '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory({
+      source: { type: "prompt", content: "x" },
+      promptStyle: "pm",
+    });
+    expect(draft).toEqual({ summary: "S", description: "D" });
+    expect(calls).toBe(2);
+    expect(prompts[1]).toContain("could not be parsed as JSON");
+    expect(prompts[1]).toContain(prompts[0] ?? "");
+  });
+
+  test("generateStory reports malformed output with a dump after exhausting the retry", async () => {
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async () => {
+          calls += 1;
+          return {
+            stdout: `Still unparsable attempt ${calls}.`,
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "pm",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(calls).toBe(2);
+    expect(caught).toBeInstanceOf(EngineError);
+    expect((caught as EngineError).code).toBe("parse-failed");
+    expect((caught as EngineError).message).toContain("malformed output");
+    expect((caught as EngineError).dumpFile).toContain("devpm-story-generation-parse-");
+    expect((caught as EngineError).detail).toContain("Still unparsable attempt 2.");
+  });
+
+  test("generateStory does not retry when the agent itself fails", async () => {
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async () => {
+          calls += 1;
+          return { stdout: "", stderr: "boom\n", exitCode: 1, maxTurnsReached: false };
+        },
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "pm",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(calls).toBe(1);
+    expect((caught as EngineError).code).toBe("agent-failed");
   });
 
   test("generateStory streams agent chunks through events", async () => {

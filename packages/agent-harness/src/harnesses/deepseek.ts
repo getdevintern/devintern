@@ -25,12 +25,14 @@ export class DeepSeekHarness implements AgentHarness {
   readonly defaultPath = "reasonix";
   /** No native plan/read-only enforcement documented for headless `reasonix run`. */
   readonly supportedModes = [] as const;
+  /** `--output-format json` emits one final result object (verified in docs/CLI.md). */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `reasonix run` flags for non-interactive execution.
    *
-   * @param options - Supports `model`. `skipPermissions` and `maxTurns` are not
-   *   exposed as CLI flags for `reasonix run`.
+   * @param options - Supports `model` and `structuredOutput`. `skipPermissions`
+   *   and `maxTurns` are not exposed as CLI flags for `reasonix run`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -42,6 +44,10 @@ export class DeepSeekHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Reasonix turn limits are configured via max_steps in reasonix.toml /

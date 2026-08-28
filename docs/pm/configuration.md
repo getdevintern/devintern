@@ -267,3 +267,9 @@ Update-check state (last check time, seen version) is cached per package in `~/.
 - Check `AGENT_HARNESS` spelling (use kebab-case, e.g. `claude-code`, `grok`, `deepseek`)
 - The error lists every valid harness name; pick one from that list
 - Ensure the matching CLI is installed and on your `PATH`, or set `AGENT_CLI_PATH` / `<HARNESS>_CLI_PATH`
+
+**"Failed to parse story from agent output" / "malformed output"**
+
+- devpm automatically repairs common agent-output drift (markdown fences, narration, comments, trailing commas, unquoted keys, stray quotes) and re-runs the agent once with a strict-JSON reminder when repair isn't possible
+- If parsing still fails, the full agent output is saved to `/tmp/devpm-<step>-<timestamp>.log` — check the log to see what came back, then retry
+- Persistent failures usually mean the harness/model emits non-canonical JSON around long descriptions; switching harness (or pinning a different model) resolves it

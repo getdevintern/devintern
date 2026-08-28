@@ -40,6 +40,7 @@ This file provides guidance to Claude Code when working with this repository.
 - `GITHUB_TOKEN` - Personal / interactive GitHub PAT (required for `TASK_TRACKER=github`; enough for free CLI PRs and own-PR review polling)
 - `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Team / unattended-automation GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, `devintern webhook serve` uses App first). See https://devintern.com/pricing/
 - `BITBUCKET_TOKEN` - Bitbucket auth
+- `PR_LABELS` - Optional comma-separated labels applied to created PRs (GitHub only). Set per repo in workspace.toml (`pr_labels`) for fleet mode
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)
 - `AGENT_SANDBOX` - OS-level sandbox for spawned agent processes: `none` (default), `auto`, `native`, `nono`, `srt`, `docker`, or `smolvm`; overridden per-run by the `--sandbox <name>` CLI flag. Run `devintern sandbox` for a doctor report (detected providers, setup steps, what `auto` would pick)

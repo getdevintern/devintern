@@ -24,6 +24,7 @@ describe("ClaudeCodeHarness", () => {
     expect(h.defaultPath).toBe("claude");
     expect(h.promptFlag).toBe("-p");
     expect(h.supportsMaxTurns).toBe(true);
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
@@ -43,6 +44,13 @@ describe("ClaudeCodeHarness", () => {
   test("buildArgs partial options", () => {
     expect(h.buildArgs({ model: "sonnet" })).toEqual(["--model", "sonnet"]);
   });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["--output-format", "json"]);
+    expect(
+      h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true }),
+    ).toEqual(["--dangerously-skip-permissions", "--model", "opus", "--output-format", "json"]);
+  });
 });
 
 describe("ClineHarness", () => {
@@ -53,6 +61,7 @@ describe("ClineHarness", () => {
     expect(h.displayName).toBe("Cline");
     expect(h.defaultPath).toBe("cline");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
@@ -67,6 +76,15 @@ describe("ClineHarness", () => {
       "gpt-4",
     ]);
   });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["task", "--json"]);
+    expect(h.buildArgs({ skipPermissions: true, structuredOutput: true })).toEqual([
+      "task",
+      "--yolo",
+      "--json",
+    ]);
+  });
 });
 
 describe("CodexHarness", () => {
@@ -78,10 +96,19 @@ describe("CodexHarness", () => {
     expect(h.defaultPath).toBe("codex");
     expect(h.promptFlag).toBeUndefined();
     expect(h.supportsMaxTurns).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["exec", "--skip-git-repo-check"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "--json",
+    ]);
   });
 
   test("buildArgs with all options", () => {
@@ -114,10 +141,15 @@ describe("CursorHarness", () => {
     expect(h.displayName).toBe("Cursor");
     expect(h.defaultPath).toBe("cursor-agent");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["-p"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["-p", "--output-format", "json"]);
   });
 
   test("buildArgs with all options", () => {
@@ -140,10 +172,15 @@ describe("AntigravityHarness", () => {
     expect(h.displayName).toBe("Antigravity CLI");
     expect(h.defaultPath).toBe("agy");
     expect(h.promptFlag).toBe("-p");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual([]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["--output-format", "json"]);
   });
 
   test("buildArgs with skipPermissions", () => {
@@ -192,10 +229,15 @@ describe("GooseHarness", () => {
     expect(h.displayName).toBe("Goose");
     expect(h.defaultPath).toBe("goose");
     expect(h.promptFlag).toBe("-t");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["run"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["run", "--output-format", "json"]);
   });
 
   test("buildArgs with all options", () => {
@@ -216,10 +258,15 @@ describe("KiloCodeHarness", () => {
     expect(h.displayName).toBe("Kilo Code");
     expect(h.defaultPath).toBe("kilo");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["run"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["run", "--format", "json"]);
   });
 
   test("buildArgs with all options", () => {
@@ -240,10 +287,19 @@ describe("KimiHarness", () => {
     expect(h.displayName).toBe("Kimi CLI");
     expect(h.defaultPath).toBe("kimi");
     expect(h.promptFlag).toBe("--prompt");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["--print"]);
+  });
+
+  test("buildArgs structured output (stream-json is Kimi's only structured format)", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual([
+      "--print",
+      "--output-format",
+      "stream-json",
+    ]);
   });
 
   test("buildArgs with all options", () => {
@@ -264,10 +320,22 @@ describe("OpencodeHarness", () => {
     expect(h.displayName).toBe("Opencode");
     expect(h.defaultPath).toBe("opencode");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["run", "--print-logs", "--log-level", "ERROR"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual([
+      "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--format",
+      "json",
+    ]);
   });
 
   test("buildArgs with all options", () => {
@@ -304,10 +372,21 @@ describe("PiHarness", () => {
     expect(h.displayName).toBe("Pi");
     expect(h.defaultPath).toBe("pi");
     expect(h.promptFlag).toBe("-p");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual([]);
+  });
+
+  test("buildArgs structured output (--mode json pairs with the -p prompt flag)", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["--mode", "json"]);
+    expect(h.buildArgs({ model: "claude-sonnet-4-6:high", structuredOutput: true })).toEqual([
+      "--model",
+      "claude-sonnet-4-6:high",
+      "--mode",
+      "json",
+    ]);
   });
 
   test("buildArgs with model", () => {
@@ -326,10 +405,15 @@ describe("QwenCodeHarness", () => {
     expect(h.displayName).toBe("Qwen Code");
     expect(h.defaultPath).toBe("qwen");
     expect(h.promptFlag).toBe("-p");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual([]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["--output-format", "json"]);
   });
 
   test("buildArgs with skipPermissions", () => {
@@ -357,10 +441,19 @@ describe("GrokHarness", () => {
     expect(h.displayName).toBe("Grok Build");
     expect(h.defaultPath).toBe("grok");
     expect(h.promptFlag).toBe("-p");
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["--no-auto-update"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual([
+      "--no-auto-update",
+      "--output-format",
+      "json",
+    ]);
   });
 
   test("buildArgs with all options", () => {
@@ -386,10 +479,15 @@ describe("DeepSeekHarness", () => {
     expect(h.displayName).toBe("Reasonix");
     expect(h.defaultPath).toBe("reasonix");
     expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
   });
 
   test("buildArgs empty", () => {
     expect(h.buildArgs({})).toEqual(["run"]);
+  });
+
+  test("buildArgs structured output", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["run", "--output-format", "json"]);
   });
 
   test("buildArgs with model", () => {

@@ -22,11 +22,14 @@ export class GooseHarness implements AgentHarness {
   readonly promptFlag = "-t";
   /** No native plan/read-only enforcement documented for headless `goose run`. */
   readonly supportedModes = [] as const;
+  /** `--output-format json` emits structured session/results output after completion. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `goose run` flags for non-interactive (`-t`) execution.
    *
-   * @param options - Supports `skipPermissions` (`--no-session`) and `model`.
+   * @param options - Supports `skipPermissions` (`--no-session`), `model`, and
+   *   `structuredOutput`.
    * @returns Args starting with `run`; prompt is supplied via {@link promptFlag}.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -42,6 +45,10 @@ export class GooseHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Goose does not currently support --max-turns via CLI flag.
