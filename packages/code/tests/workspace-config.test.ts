@@ -31,11 +31,13 @@ tracker = "jira"
 task_query = "labels = devintern"
 worker_task_args = "--create-pr"
 default_branch = "main"
+pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
 default_branch = "develop"
+pr_labels = ["backend"]
 env_file = "env/backend.env"
   [repos.env]
   GITHUB_REPO = "acme/backend"
@@ -65,16 +67,19 @@ describe("parseWorkspaceConfig", () => {
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
     expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
+    expect(config.defaults.prLabels).toEqual(["devintern", "auto-pr"]);
 
     const backend = findRepo(config, "backend");
     expect(backend?.remote).toBe("git@github.com:acme/backend.git");
     expect(backend?.defaultBranch).toBe("develop");
+    expect(backend?.prLabels).toEqual(["backend"]);
     expect(backend?.envFile).toBe("env/backend.env");
     expect(backend?.env).toEqual({ GITHUB_REPO: "acme/backend" });
 
     // frontend has no default_branch of its own: inherits [defaults].
     const frontend = findRepo(config, "frontend");
     expect(frontend?.defaultBranch).toBe("main");
+    expect(frontend?.prLabels).toEqual(["devintern", "auto-pr"]);
     expect(frontend?.env).toEqual({});
 
     expect(config.routing).toHaveLength(2);
@@ -94,6 +99,7 @@ tracker = "markdown"
     expect(config.workspace.worktreesTtlDays).toBe(DEFAULT_WORKTREES_TTL_DAYS);
     expect(config.workspace.dashboard).toBe(DEFAULT_DASHBOARD);
     expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
+    expect(config.defaults.prLabels).toBeUndefined();
     expect(config.repos).toEqual([]);
     expect(config.routing).toEqual([]);
   });
@@ -274,6 +280,28 @@ conflict_resolution_cron = "0 3 * * *"
 tracker = "markdown"
 `),
     ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
+  test("rejects invalid pr_labels values", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+pr_labels = "devintern"
+`),
+    ).toThrow(/\[defaults\]\.pr_labels must be an array of non-empty strings/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+pr_labels = [""]
+`),
+    ).toThrow(/\[\[repos\]\]\[0\]\.pr_labels must be an array of non-empty strings/);
   });
 
   test("rejects invalid TOML", () => {
