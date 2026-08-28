@@ -656,8 +656,10 @@ export async function buildFleetEventAcquirers(options: {
           },
         },
         addressPr: fleetAddressPr,
-        resolveConflicts,
+        resolveConflicts:
+          config.workspace.conflictResolution === "disabled" ? undefined : resolveConflicts,
         conflictSchedule: config.workspace.conflictSchedule,
+        conflictResolution: config.workspace.conflictResolution,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore,
         allowedRepos: slugs,

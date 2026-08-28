@@ -235,7 +235,32 @@ conflict_resolution = "nightly"
 [defaults]
 tracker = "markdown"
 `),
-    ).toThrow(/must be "auto" or "scheduled"/);
+    ).toThrow(/must be "auto", "scheduled", or "disabled"/);
+  });
+
+  test("parses disabled conflict resolution", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("disabled");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("rejects schedule keys with disabled conflict resolution", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
   });
 
   test("rejects schedule keys without scheduled mode", () => {

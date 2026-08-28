@@ -31,6 +31,7 @@ import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
+import type { ConflictResolutionMode } from "./workspace/config";
 import type { Acquirer } from "../worker";
 
 export interface PolledReview {
@@ -117,6 +118,14 @@ export interface ReviewPollingAcquirerOptions {
    * mode: resolve as soon as a conflict is detected (default).
    */
   conflictSchedule?: CronOrIntervalSchedule;
+  /**
+   * Workspace conflict-resolution mode (`[workspace].conflict_resolution`),
+   * surfaced in the startup log. `"disabled"` means the caller omits
+   * `resolveConflicts`, so base-sync detection never runs and conflicts
+   * stay for manual resolution. Defaults to `"scheduled"` when
+   * `conflictSchedule` is set, else `"auto"`.
+   */
+  conflictResolution?: ConflictResolutionMode;
   /**
    * How long a scheduled window stays open for resolution attempts once it
    * arrives (covers quiet-period waits, retry backoff, and a serial pass
@@ -827,6 +836,14 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   /** Surface the active conflict-resolution mode on worker startup. */
   private logConflictMode(): void {
+    const mode =
+      this.options.conflictResolution ?? (this.options.conflictSchedule ? "scheduled" : "auto");
+    if (mode === "disabled") {
+      console.log(
+        `⏸️  [${this.name}] conflict resolution: disabled (conflicts stay for manual resolution)`,
+      );
+      return;
+    }
     if (!this.options.conflictSchedule) {
       console.log(
         `🔀 [${this.name}] conflict resolution: auto (immediately when a conflict is detected)`,

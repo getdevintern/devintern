@@ -6,7 +6,7 @@ import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-con
 import { parseToml } from "./toml";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
-export type ConflictResolutionMode = "auto" | "scheduled";
+export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
 
 /** Workspace-wide settings from the `[workspace]` table. */
 export interface WorkspaceSettings {
@@ -19,7 +19,9 @@ export interface WorkspaceSettings {
   /**
    * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
    * they are detected; `scheduled` queues them during polling and resolves
-   * them in the configured window (see {@link WorkspaceSettings.conflictSchedule}).
+   * them in the configured window (see {@link WorkspaceSettings.conflictSchedule});
+   * `disabled` turns automatic conflict resolution off entirely — conflicts
+   * stay for manual resolution (`devintern resolve-conflicts <pr-url>`).
    */
   conflictResolution: ConflictResolutionMode;
   /**
@@ -271,8 +273,10 @@ export function parseWorkspaceConfig(
       },
       errors,
     );
+  } else if (conflictResolutionRaw === "disabled") {
+    conflictResolution = "disabled";
   } else if (conflictResolutionRaw && conflictResolutionRaw !== "auto") {
-    errors.push(`[workspace].conflict_resolution must be "auto" or "scheduled".`);
+    errors.push(`[workspace].conflict_resolution must be "auto", "scheduled", or "disabled".`);
   }
   if (conflictResolutionRaw !== "scheduled") {
     for (const key of ["conflict_resolution_cron", "conflict_resolution_interval"] as const) {

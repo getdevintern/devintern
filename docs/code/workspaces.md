@@ -33,6 +33,7 @@ dashboard = true
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"         # exactly one of cron / interval
+# Or turn it off entirely: conflict_resolution = "disabled"
 
 [defaults]
 tracker = "jira"
@@ -82,7 +83,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 
-### Automatic conflict resolution: `auto` vs `scheduled`
+### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
 
 When a watched PR conflicts with its base branch, the worker normally resolves it right away (`conflict_resolution = "auto"`, the default — no behavior change on upgrade). Every resolution hands the conflicted files to the AI agent, which consumes tokens — even at 3am when nobody is reviewing the PR anyway.
 
@@ -99,6 +100,8 @@ The schedule uses the same format as `[[automations]]`: a five-field cron expres
 Two things are never delayed by scheduled mode: review feedback on the agent's PRs is addressed immediately as usual, and you can always run `devintern resolve-conflicts <pr-url>` by hand to fix one PR without waiting for the window — once GitHub reports the PR conflict-free, the queued event never triggers an agent run.
 
 The setting is workspace-wide (per-repo overrides are not supported in v1) and, like the rest of `workspace.toml`, requires a worker restart to take effect. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
+
+Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
 
 ### How workspace automations differ from single-repo ones
 

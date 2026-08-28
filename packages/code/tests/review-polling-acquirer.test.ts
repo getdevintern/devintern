@@ -17,6 +17,7 @@ import type { CronOrIntervalSchedule } from "../src/lib/automation-config";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { RunStore } from "../src/lib/run-recorder";
 import { WorkerState } from "../src/lib/worker-state";
+import type { ConflictResolutionMode } from "../src/lib/workspace/config";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -65,6 +66,8 @@ describe("ReviewPollingAcquirer", () => {
       allowedRepos?: string[];
       conflictSchedule?: CronOrIntervalSchedule;
       conflictWindowGraceMs?: number;
+      conflictResolution?: ConflictResolutionMode;
+      disableResolveConflicts?: boolean;
     } = {},
   ) {
     const addressed: string[] = [];
@@ -108,16 +111,19 @@ describe("ReviewPollingAcquirer", () => {
         addressed.push(`${repo}#${n}`);
         return true;
       },
-      resolveConflicts: async (repo, n) => {
-        resolved.push(`${repo}#${n}`);
-        return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
-      },
+      resolveConflicts: options.disableResolveConflicts
+        ? undefined
+        : async (repo, n) => {
+            resolved.push(`${repo}#${n}`);
+            return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
+          },
       quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
       runStore: options.runStore,
       now: options.now,
       allowedRepos: options.allowedRepos,
       conflictSchedule: options.conflictSchedule,
       conflictWindowGraceMs: options.conflictWindowGraceMs,
+      conflictResolution: options.conflictResolution,
     });
     return { acquirer, addressed, resolved };
   }
@@ -856,6 +862,18 @@ describe("ReviewPollingAcquirer", () => {
     expect(made.resolved).toEqual([]);
   });
 
+  test("disabled mode never detects or resolves conflicts", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(conflictGh(), {
+      disableResolveConflicts: true,
+      conflictResolution: "disabled",
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+  });
+
   test("start() surfaces the active conflict-resolution mode", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const logs: string[] = [];
@@ -876,6 +894,16 @@ describe("ReviewPollingAcquirer", () => {
       const auto = makeAcquirer({ prState: "open", reviews: [], comments: [] });
       await auto.acquirer.start();
       auto.acquirer.stop();
+
+      const disabled = makeAcquirer(
+        { prState: "open", reviews: [], comments: [] },
+        {
+          disableResolveConflicts: true,
+          conflictResolution: "disabled",
+        },
+      );
+      await disabled.acquirer.start();
+      disabled.acquirer.stop();
     } finally {
       console.log = original;
     }
@@ -883,6 +911,7 @@ describe("ReviewPollingAcquirer", () => {
       logs.some((line) => line.includes('conflict resolution: scheduled (cron "0 3 * * *")')),
     ).toBe(true);
     expect(logs.some((line) => line.includes("conflict resolution: auto"))).toBe(true);
+    expect(logs.some((line) => line.includes("conflict resolution: disabled"))).toBe(true);
   });
 
   test("start() unwatches open rows for repos outside allowedRepos", async () => {
