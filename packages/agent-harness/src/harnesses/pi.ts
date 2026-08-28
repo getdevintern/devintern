@@ -19,15 +19,19 @@ export class PiHarness implements AgentHarness {
   readonly promptFlag = "-p";
   /** No native plan/read-only enforcement documented for headless `pi`. */
   readonly supportedModes = [] as const;
+  /** `--mode json` emits the session event stream as JSON lines. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `pi` CLI flags for non-interactive (`-p`) execution.
    *
    * Supports `model` (`--model <pattern>`; accepts a model ID, `provider/id`,
-   * or `<id>:<thinking>`). Pi's CLI does not currently expose turns or
-   * permission flags.
+   * or `<id>:<thinking>`) and `structuredOutput` (`--mode json`, which pairs
+   * with the `-p` prompt flag: print mode with JSON event output). Pi's CLI
+   * does not currently expose turns or permission flags.
    *
-   * @param options - Accepted for interface compatibility; only `model` is used.
+   * @param options - Accepted for interface compatibility; only `model` and
+   *   `structuredOutput` are used.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -36,6 +40,10 @@ export class PiHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--mode", "json");
     }
 
     // Pi does not currently expose --max-turns or

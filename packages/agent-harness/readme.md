@@ -45,13 +45,15 @@ constrained modes).
   the count and add your id, or the suite fails.
 - [`tests/harnesses.test.ts`](tests/harnesses.test.ts) has a `describe` block
   per harness asserting metadata (`name`, `displayName`, `defaultPath`,
-  `promptFlag`, `supportsMaxTurns`) and exact `buildArgs()` output for empty /
-  partial / full option sets, including mode combinations. Mirror that layout.
+  `promptFlag`, `supportsMaxTurns`, `supportsStructuredOutput`) and exact
+  `buildArgs()` output for empty / partial / full option sets, including mode
+  combinations. Mirror that layout.
 - If you extend shared behavior (prompt delivery, attachments, limit
-  patterns), the relevant suites live alongside:
+  patterns, structured output), the relevant suites live alongside:
   [`tests/prompt-args.test.ts`](tests/prompt-args.test.ts),
   [`tests/attachments.test.ts`](tests/attachments.test.ts),
-  [`tests/detect-usage-limit.test.ts`](tests/detect-usage-limit.test.ts), etc.
+  [`tests/detect-usage-limit.test.ts`](tests/detect-usage-limit.test.ts),
+  [`tests/structured-output.test.ts`](tests/structured-output.test.ts), etc.
 
 ## Capability flags that matter
 
@@ -62,6 +64,7 @@ See [`AgentHarness`](src/types.ts) for full semantics. Quick decision table:
 | `name` / `displayName` / `defaultPath` | Always. `defaultPath` is the binary looked up on `PATH` (override-able via resolver env vars). |
 | [`supportedModes`](src/modes.ts) | List only plan/readonly modes the CLI can **natively enforce** via flags. If you cannot enforce them, leave empty (or omit) — requests fail closed via `assertModeSupported` inside `buildArgs`. Never fake a mode by ignoring it. |
 | `supportsMaxTurns` | Set `true` only if the CLI accepts a turn-limit flag *and* emits a recognizable diagnostic on exhaustion. Callers skip transcript scanning when this is false/unset, so tool output cannot be mistaken for a turn-limit error. |
+| [`supportsStructuredOutput`](src/structured-output.ts) | Set `true` only if the CLI has a documented JSON output mode (verify upstream docs — don't assume). Supporting harnesses emit the flag in `buildArgs` when `options.structuredOutput` is set; runners fail closed with `UnsupportedStructuredOutputError` when it is false/unset. See the per-CLI flag table in [Structured (JSON) output](#structured-json-output). |
 | `constrainedModeAllowsExternalTools` | Set `true` only if your constrained mode still permits network + MCP tools. No built-in harness sets it today (Codex's read-only sandbox disables network; Claude's plan mode denies non-annotated MCP tools, which aborts headless runs). Callers whose agents need web/MCP access skip constrained modes unless this is true. |
 | `promptFlag` | Set when the prompt must arrive as a flag value (`kimi --prompt "..."`). Omit for positional prompts (`codex exec "..."`). Prefer argv over stdin — see below. |
 | `imageInput` / `buildImageArgs` | `"path"` (default): images go into the prompt as markdown paths only. `"native"`: also emit CLI flags via `buildImageArgs(paths)` after the prompt (Codex `-i`). Runners call [`preparePromptWithAttachments`](src/attachments.ts); paths should also appear in `attachmentPaths`. |
@@ -70,6 +73,55 @@ Inside `buildArgs`: always call `assertModeSupported(this, options.mode)`
 first; use [`effectiveSkipPermissions`](src/modes.ts) instead of reading
 `options.skipPermissions` directly — constrained modes always suppress YOLO /
 bypass flags. When `mode` is plan/readonly, never emit write-capable flags.
+
+## Structured (JSON) output
+
+[`src/structured-output.ts`](src/structured-output.ts) lets callers request
+machine-readable output per run: pass `structuredOutput: true` in
+[`AgentRunOptions`](src/types.ts). This is **opt-in** — the plain-text default
+keeps transcript scanning (usage-limit, max-turns, incomplete-implementation,
+open-question detectors) working exactly as before.
+
+- **Capability.** A harness sets `supportsStructuredOutput = true` only when
+  its CLI documents a JSON output mode; supporting harnesses emit the flag in
+  `buildArgs` when the option is requested. Runners call
+  `assertStructuredOutputSupported` before spawning, so requesting JSON from
+  an unsupported harness throws [`UnsupportedStructuredOutputError`](src/structured-output.ts)
+  instead of silently returning styled text (same fail-closed contract as
+  `UnsupportedAgentModeError`).
+- **Result.** `AgentRunResult.structured` (`StructuredOutputResult`) carries
+  the parsed payload: `{ ok: true, value }` where `value` is the single JSON
+  document (Claude/Cursor/Grok/agy envelopes, Qwen message arrays) or an
+  array of NDJSON event objects (Codex/Opencode/Kilo/Cline/Kimi/Pi streams).
+  On failure it is `{ ok: false, error }` — empty output, no JSON found, or a
+  malformed/truncated payload. Fail closed: partial NDJSON is **not**
+  returned as a complete result; `stdout`/`stderr` always remain for
+  diagnostics. The field is absent when the option is unset, so existing
+  callers are unaffected.
+- **Per-CLI flags wired into `buildArgs`** (verified against upstream docs):
+
+  | Harness | Flag | Shape |
+  | --- | --- | --- |
+  | claude-code | `--output-format json` | single result envelope |
+  | cline | `--json` | NDJSON messages |
+  | codex | `--json` | JSONL events |
+  | cursor | `--output-format json` | single result object |
+  | opencode | `--format json` | JSONL events |
+  | grok | `--output-format json` | single result object |
+  | goose | `--output-format json` | single result object |
+  | antigravity (agy, v1.1.8+) | `--output-format json` | single JSON envelope |
+  | qwen | `--output-format json` | JSON array of messages |
+  | kilo-code | `--format json` | JSONL events |
+  | kimi | `--output-format stream-json` | JSONL messages |
+  | pi | `--mode json` (pairs with `-p`) | JSONL events |
+  | deepseek (reasonix) | `--output-format json` | single result object |
+
+- **Detectors & streaming.** Usage-limit and max-turns detectors keep
+  scanning the raw streams (JSON event lines can still match
+  provider-diagnostic patterns, e.g. `{"error":{...}}`). `onStdout` /
+  `onStderr` callbacks and Bun/Node runner behavior are identical in both
+  modes; parsing happens once after exit. Callers needing live deltas should
+  consume the streaming callbacks as today.
 
 ## Prompt & input conventions
 

@@ -18,11 +18,14 @@ export class KiloCodeHarness implements AgentHarness {
   readonly defaultPath = "kilo";
   /** No native plan/read-only enforcement documented for headless `kilo run`. */
   readonly supportedModes = [] as const;
+  /** `--format json` streams raw JSON events (one object per line) to stdout. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `kilo run` subcommand flags for non-interactive execution.
    *
-   * @param options - Supports `skipPermissions` (`--auto`) and `model`.
+   * @param options - Supports `skipPermissions` (`--auto`), `model`, and
+   *   `structuredOutput`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -35,6 +38,10 @@ export class KiloCodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--format", "json");
     }
 
     // Kilo Code does not currently support --max-turns.
