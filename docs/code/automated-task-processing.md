@@ -154,6 +154,8 @@ A failed run never ends silently. When processing a task fails after it was move
 
 The failure comment will not cause a retry loop: posting it does bump the tracker's update stamp, but the retry gate ignores the harness's own comments and records the attempt, so the ticket is only re-run after you edit the description, post your own comment, or delete the failure comment (see [worker polling](./worker.md#re-running-a-task)).
 
+That covers graceful stops. When the worker itself dies mid-task (power cut, crash, `kill -9`), no comment could be posted at the time — so on its next startup the worker detects the runs left in flight, comments on their tickets with the same failure explanation, and moves them back to To Do. Tickets that moved on after the crash and orphans older than `WORKER_ORPHAN_MAX_AGE_HOURS` (default 168) are left alone. See [Interrupted runs are recovered on startup](./worker.md#interrupted-runs-are-recovered-on-startup).
+
 Pass `--skip-comments` to disable all tracker comments, including failure feedback.
 
 ### Linear schedules
