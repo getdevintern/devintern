@@ -21,7 +21,20 @@ describe("tracker-meta", () => {
   test("getTrackerDisplayName returns human-readable names", () => {
     expect(getTrackerDisplayName("jira")).toBe("Jira");
     expect(getTrackerDisplayName("github")).toBe("GitHub Issues");
+    expect(getTrackerDisplayName("gitlab")).toBe("GitLab");
     expect(getTrackerDisplayName("mystery")).toBe("mystery");
+  });
+
+  test("gitlab is configured without GITLAB_BASE_URL (defaults apply)", () => {
+    expect(
+      isTrackerConfigured("gitlab", {
+        GITLAB_TOKEN: "glpat_x",
+        GITLAB_PROJECT: "acme/my-app",
+      }),
+    ).toBe(true);
+    expect(isTrackerConfigured("gitlab", { GITLAB_TOKEN: "glpat_x" })).toBe(false);
+    expect(getProjectKeyEnvVar("gitlab")).toBe("GITLAB_PROJECT");
+    expect(getMissingRequiredEnv("gitlab", {})).toEqual(["GITLAB_TOKEN", "GITLAB_PROJECT"]);
   });
 
   test("listConfiguredTrackers returns only fully configured trackers", () => {

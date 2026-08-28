@@ -18,6 +18,7 @@ export const TRACKER_DOCS: Record<string, string> = {
   jira: "https://devintern.com/docs/code/jira-integration",
   linear: "https://devintern.com/docs/code/linear-integration",
   github: "https://devintern.com/docs/code/github-issues-integration",
+  gitlab: "https://devintern.com/docs/code/gitlab-integration",
   "azure-devops": "https://devintern.com/docs/code/azure-devops-integration",
   asana: "https://devintern.com/docs/code/asana-integration",
   trello: "https://devintern.com/docs/code/trello-integration",
@@ -72,6 +73,31 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "GITHUB_REPO", label: "Target repository", example: "owner/repo" },
     {
       key: "GITHUB_STATUS_LABELS",
+      label: "Comma-separated status label names",
+      example: "todo,in progress,in review",
+      optional: true,
+    },
+  ],
+  gitlab: [
+    {
+      key: "GITLAB_BASE_URL",
+      label: "GitLab instance URL (press Enter for https://gitlab.com)",
+      example: "https://gitlab.example.com",
+      optional: true,
+      defaultValue: "https://gitlab.com",
+    },
+    {
+      key: "GITLAB_TOKEN",
+      label: "GitLab personal access token (scopes: api)",
+      link: (values) => {
+        const host = (values.GITLAB_BASE_URL || "https://gitlab.com").replace(/\/+$/, "");
+        const origin = /^https?:\/\//i.test(host) ? host : `https://${host}`;
+        return `${origin}/-/user_settings/personal_access_tokens?name=DevIntern&scopes=api`;
+      },
+    },
+    { key: "GITLAB_PROJECT", label: "Target project path", example: "group/sub/repo" },
+    {
+      key: "GITLAB_STATUS_LABELS",
       label: "Comma-separated status label names",
       example: "todo,in progress,in review",
       optional: true,
@@ -411,6 +437,15 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
           inProgressStatus: "in progress",
           todoStatus: "todo",
           prStatus: "in review",
+        },
+      },
+    },
+    gitlab: {
+      projects: {
+        "PROJECT-KEY": {
+          inProgressStatus: "In Progress",
+          todoStatus: "To Do",
+          prStatus: "In Review",
         },
       },
     },

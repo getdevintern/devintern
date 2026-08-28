@@ -8,6 +8,7 @@
  * in the central workspace DB.
  */
 
+import { existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { LockManager } from "../lock-manager";
@@ -19,6 +20,14 @@ import { createPickupGate } from "../schedule";
 import type { PickupGate, ScheduleSnapshot } from "../schedule";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
+import {
+  loadProjectSettingsFrom,
+  recoverOrphanedTaskRuns,
+  resolveStatusName,
+} from "../orphan-recovery";
+import { RunStore } from "../run-recorder";
+import { RetryStateStore } from "../retry-state";
+import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, parseEnvFile } from "./env";
@@ -27,17 +36,88 @@ import {
   workspaceConfigPath,
   workspaceDbPath,
   workspaceEnvPath,
+  worktreesDir,
   workspaceRunNowPath,
 } from "./paths";
 import { routeTask, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
-import { RepoManager } from "./repo-manager";
+import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+
+/** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
+function orphanMaxAgeMs(): number {
+  return parseEnvInteger("WORKER_ORPHAN_MAX_AGE_HOURS", 24 * 7, { min: 0 }) * 60 * 60 * 1000;
+}
+
+/**
+ * Recover task runs left in progress by a previous (dead) worker before any
+ * acquirer picks up new tickets: reap them and give their tickets the
+ * graceful-shutdown feedback (failure comment + move back to To Do).
+ *
+ * Replaces the old reap-only startup sweep, which also only ran when GitHub
+ * credentials were configured; recovery here covers every workspace.
+ */
+export async function recoverOrphanedWorkspaceRuns(options: {
+  config: WorkspaceConfig;
+  workspaceDir: string;
+  dbPath: string;
+}): Promise<void> {
+  const { config, workspaceDir, dbPath } = options;
+  const runStore = new RunStore(dbPath);
+  let retryStore: RetryStateStore | null = null;
+  try {
+    const hasTaskOrphans =
+      runStore.listRuns({ status: "in_progress", origin: "task", limit: 1 }).length > 0;
+
+    let tracker: TaskTrackerClient | undefined;
+    if (hasTaskOrphans) {
+      try {
+        const { TaskTrackerManager } = await import("../task-tracker-manager");
+        tracker = new TaskTrackerManager().getClient();
+      } catch (error) {
+        console.warn(
+          `⚠️  [fleet] could not initialize the tracker to recover orphaned tickets: ${
+            (error as Error).message
+          }`,
+        );
+      }
+    }
+
+    // Fleet tasks run in per-repo worktrees, so their status names come from
+    // each repo's checked-in settings; the base worktrees hold a checked-out
+    // copy. Never triggers git work here — only existing directories are read.
+    const settingsDirs = [
+      ...config.repos
+        .map((repo) => join(worktreesDir(workspaceDir), repo.name, BASE_WORKTREE_NAME))
+        .filter(existsSync),
+      workspaceDir,
+    ];
+    const settings = loadProjectSettingsFrom(settingsDirs);
+    const trackerType = config.defaults.tracker;
+    retryStore = new RetryStateStore(dbPath);
+
+    await recoverOrphanedTaskRuns({
+      runStore,
+      tracker,
+      trackerType,
+      getInProgressStatus: (projectKey) =>
+        resolveStatusName(settings, trackerType, projectKey, "inProgressStatus"),
+      getTodoStatus: (projectKey) =>
+        resolveStatusName(settings, trackerType, projectKey, "todoStatus"),
+      recordAttempt: (taskKey, type, description) =>
+        retryStore?.recordIncompleteAttempt(taskKey, type, description),
+      maxAgeMs: orphanMaxAgeMs(),
+    });
+  } finally {
+    retryStore?.close();
+    runStore.close();
+  }
+}
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -424,6 +504,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
 
+  // Recover what the previous worker left behind before acquiring new work.
+  await recoverOrphanedWorkspaceRuns({
+    config,
+    workspaceDir,
+    dbPath: state.dbPath,
+  });
+
   // Working windows (quiet hours): gate only the ready-task drain; reviews,
   // mentions, automations, and relay events stay on their normal paths.
   const pickupGate = createPickupGate(config.worker.schedule, {
@@ -610,14 +697,7 @@ export async function buildFleetEventAcquirers(options: {
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
-    const { RunStore } = await import("../run-recorder");
     const runStore = new RunStore(state.dbPath);
-    const reapedRuns = runStore.reapOrphanedRuns();
-    if (reapedRuns > 0) {
-      console.warn(
-        `⚠️  Marked ${reapedRuns} in-progress run(s) as failed: previous worker exited before they finished`,
-      );
-    }
     acquirers.push(
       new ReviewPollingAcquirer({
         intervalSeconds,

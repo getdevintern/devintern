@@ -36,6 +36,7 @@ export const TRACKER_IDS: readonly TrackerId[] = [
   "azure-devops",
   "asana",
   "github",
+  "gitlab",
   "markdown",
 ] as const;
 
@@ -76,6 +77,14 @@ export const TRACKER_META: Record<TrackerId, TrackerMeta> = {
     displayName: "GitHub Issues",
     requiredEnv: ["GITHUB_TOKEN", "GITHUB_REPO"],
     projectKeyEnv: "GITHUB_REPO",
+  },
+  gitlab: {
+    id: "gitlab",
+    displayName: "GitLab",
+    // GITLAB_BASE_URL is optional (defaults to https://gitlab.com) so
+    // self-hosted instances are supported without extra ceremony.
+    requiredEnv: ["GITLAB_TOKEN", "GITLAB_PROJECT"],
+    projectKeyEnv: "GITLAB_PROJECT",
   },
   markdown: {
     id: "markdown",

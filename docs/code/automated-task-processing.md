@@ -15,7 +15,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing, and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing plus the DevIntern GitHub App (`@mention` handling on any PR; skipped App steps are reminded in the summary), and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
 
 Do not schedule `devintern --query` every few minutes. That is what the worker already does.
 
@@ -137,5 +137,7 @@ systemd-run --user --scope --collect devintern --estimate --query '...' >> /tmp/
 A failed run never ends silently. When processing a task fails after it was moved to "In Progress" — an agent timeout, a usage limit, a crash, or the process being killed by `SIGTERM`/`SIGINT` (for example when a machine powers off) — @devintern/code posts a comment on the ticket explaining that no pull request was created, the reason for the failure, and where partial work may live (the `feature/<key>` branch or a git stash). The ticket is also moved back to its To Do status so the next pickup can retry it.
 
 The failure comment will not cause a retry loop: posting it does bump the tracker's update stamp, but the retry gate ignores the harness's own comments and records the attempt, so the ticket is only re-run after you edit the description, post your own comment, or delete the failure comment (see [worker polling](./worker.md#re-running-a-task)).
+
+That covers graceful stops. When the worker itself dies mid-task (power cut, crash, `kill -9`), no comment could be posted at the time — so on its next startup the worker detects the runs left in flight, comments on their tickets with the same failure explanation, and moves them back to To Do. Tickets that moved on after the crash and orphans older than `WORKER_ORPHAN_MAX_AGE_HOURS` (default 168) are left alone. See [Interrupted runs are recovered on startup](./worker.md#interrupted-runs-are-recovered-on-startup).
 
 Pass `--skip-comments` to disable all tracker comments, including failure feedback.

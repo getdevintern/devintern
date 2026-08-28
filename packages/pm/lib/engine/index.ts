@@ -205,7 +205,8 @@ export async function createEngine(
     config.trello?.defaultBoardId ||
     config.azureDevOps?.defaultProject ||
     config.asana?.defaultProjectGid ||
-    config.github?.repository;
+    config.github?.repository ||
+    config.gitlab?.projectPath;
 
   /** Session cache of listLabels results — avoids re-paginating on createTask. */
   const labelsByProject = new Map<string, LabelListResult>();
