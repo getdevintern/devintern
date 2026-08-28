@@ -9,6 +9,27 @@ export interface PRInfo {
   sourceBranch: string;
   targetBranch: string;
   repository: string;
+  /** Labels to apply to the created PR (GitHub only; other platforms ignore them). */
+  labels?: string[];
+}
+
+/**
+ * Parse a comma-separated `PR_LABELS` value into label names.
+ *
+ * @param value - Raw env value, e.g. `"devintern, auto-pr"`
+ */
+export function parsePrLabels(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((label) => label.trim())
+    .filter(Boolean);
+}
+
+/** Extract the PR number from a PR html_url (`…/pull/123`). */
+function prNumberFromUrl(url: string | undefined): number | undefined {
+  const parsed = Number(url?.match(/\/pull\/(\d+)/)?.[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 export interface PRResult {
@@ -170,6 +191,7 @@ export class GitHubPRClient extends PRClient {
         if (response.status === 422) {
           const existingUrl = await this.findExistingPrUrl(owner, repo, prInfo.sourceBranch);
           if (existingUrl) {
+            await this.applyLabels(owner, repo, prNumberFromUrl(existingUrl), prInfo.labels);
             return {
               success: true,
               url: existingUrl,
@@ -185,6 +207,7 @@ export class GitHubPRClient extends PRClient {
       }
 
       const data = (await response.json()) as any;
+      await this.applyLabels(owner, repo, data.number, prInfo.labels);
       return {
         success: true,
         url: data.html_url,
@@ -195,6 +218,46 @@ export class GitHubPRClient extends PRClient {
         success: false,
         message: `GitHub PR creation failed: ${(error as Error).message}`,
       };
+    }
+  }
+
+  /**
+   * Label a PR (PRs are issues in the GitHub API). Best-effort: labeling is
+   * decoration on top of a successful create, so failures warn but never
+   * fail the run.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param prNumber - PR number
+   * @param labels - Label names to apply
+   */
+  private async applyLabels(
+    owner: string,
+    repo: string,
+    prNumber: number | undefined,
+    labels?: string[],
+  ): Promise<void> {
+    if (!labels || labels.length === 0 || !prNumber) return;
+
+    try {
+      const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${prNumber}/labels`;
+      const response = await Utils.fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+          "User-Agent": "devintern",
+        },
+        body: JSON.stringify({ labels }),
+      });
+      if (!response.ok) {
+        console.warn(
+          `⚠️  Could not label PR #${prNumber}: ${response.status} ${response.statusText}`,
+        );
+      }
+    } catch (error) {
+      console.warn(`⚠️  Could not label PR #${prNumber}: ${(error as Error).message}`);
     }
   }
 
@@ -405,12 +468,15 @@ export class PRManager {
    * @param sourceBranch - Head/feature branch name
    * @param targetBranch - Base branch (default `main`)
    * @param implementationSummary - Optional summary appended to PR body
+   * @param labels - Labels to apply to the PR; defaults to the comma-separated
+   *   `PR_LABELS` environment variable (GitHub only)
    */
   async createPullRequest(
     task: Task | JiraIssue,
     sourceBranch: string,
     targetBranch = "main",
     implementationSummary?: string,
+    labels: string[] = parsePrLabels(process.env.PR_LABELS),
   ): Promise<PRResult> {
     const repoInfo = await this.detectRepository();
 
@@ -430,6 +496,7 @@ export class PRManager {
       sourceBranch,
       targetBranch,
       repository: repoInfo.repository,
+      ...(labels.length > 0 ? { labels } : {}),
     };
 
     // A transient network blip between push and PR creation used to leave the
