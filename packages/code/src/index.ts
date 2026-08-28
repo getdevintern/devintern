@@ -1432,6 +1432,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
       tracker: process.env.TASK_TRACKER || "jira",
+      harness: resolvedAgent.harness.name,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
     });
 

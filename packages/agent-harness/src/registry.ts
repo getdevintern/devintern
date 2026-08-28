@@ -22,6 +22,9 @@ import {
 
 const registry = new Map<string, AgentHarness>();
 
+/** Default harness when no harness is configured (e.g. `AGENT_HARNESS` unset). */
+export const DEFAULT_HARNESS_NAME = "claude-code";
+
 /**
  * Alias map: alternate harness ids → canonical registered name.
  *

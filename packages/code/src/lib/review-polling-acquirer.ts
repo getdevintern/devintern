@@ -25,6 +25,8 @@
 
 import { spawn } from "child_process";
 
+import { parseHarnessList } from "@devintern/agent-harness";
+
 import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
@@ -631,7 +633,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           repo,
           prNumber,
           branch: fresh.head.ref,
-          harness: this.options.harness ?? process.env.AGENT_HARNESS ?? "claude-code",
+          harness: this.options.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
           attempt,
         }) ?? null;
     } catch (error) {
