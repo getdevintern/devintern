@@ -97,6 +97,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                 <TableHead className="px-4">Work</TableHead>
                 <TableHead className="px-4">Origin</TableHead>
                 <TableHead className="px-4">Harness</TableHead>
+                <TableHead className="px-4">Branch</TableHead>
                 <TableHead className="px-4">Result</TableHead>
                 <TableHead className="px-4">Duration</TableHead>
                 <TableHead className="px-4">Started</TableHead>
@@ -123,6 +124,13 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                   </TableCell>
                   <TableCell className="px-4 py-2.5 text-muted-foreground">
                     {run.harness ?? "–"}
+                  </TableCell>
+                  <TableCell className="px-4 py-2.5">
+                    {run.branch ? (
+                      <code className="font-mono text-xs">{run.branch}</code>
+                    ) : (
+                      <span className="text-muted-foreground">–</span>
+                    )}
                   </TableCell>
                   <TableCell className="px-4 py-2.5">
                     <RunResult run={run} />

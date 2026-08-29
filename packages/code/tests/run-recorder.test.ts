@@ -216,6 +216,20 @@ describe("RunStore", () => {
     reopened.close();
   });
 
+  test("setRunBranch attaches the working branch without clobbering", () => {
+    // Task runs learn their branch only after createFeatureBranch succeeds
+    // (the name can gain an attempt suffix), so it is attached post-hoc.
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-11", harness: "claude-code" });
+    store.setRunBranch(id, "feature/proj-11");
+    expect(store.getRun(id)?.branch).toBe("feature/proj-11");
+
+    // pr_mention runs record their branch at beginRun; a late write must not
+    // replace it.
+    const mention = store.createRun({ origin: "pr_mention", branch: "agent/task" });
+    store.setRunBranch(mention, "feature/proj-11");
+    expect(store.getRun(mention)?.branch).toBe("agent/task");
+  });
+
   test("attempt numbers count per task key", () => {
     const first = store.createRun({ origin: "task", taskKey: "PROJ-9" });
     const second = store.createRun({ origin: "task", taskKey: "PROJ-9" });

@@ -631,6 +631,7 @@ export async function buildFleetEventAcquirers(options: {
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
+    const { isGitHubNotFound } = await import("../github-reviews");
     const runStore = new RunStore(state.dbPath);
     acquirers.push(
       new ReviewPollingAcquirer({
@@ -638,8 +639,24 @@ export async function buildFleetEventAcquirers(options: {
         workerState: state.workerState,
         queue: state.queue,
         github: {
-          fetchPr: (repo, n, etag) =>
-            gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
+          fetchPr: async (repo, n, etag) => {
+            try {
+              return await gh.conditionalGet(
+                `/repos/${repo}/pulls/${n}`,
+                ownerOf(repo),
+                nameOf(repo),
+                etag,
+              );
+            } catch (error) {
+              if (isGitHubNotFound(error)) {
+                // Renamed/transferred/deleted repo or PR (or lost App
+                // access): report gone so the reconciler unregisters the
+                // row instead of erroring on every tick.
+                return { data: null, notModified: false, gone: true };
+              }
+              throw error;
+            }
+          },
           fetchReviews: (repo, n, etag) =>
             gh.conditionalGet(
               `/repos/${repo}/pulls/${n}/reviews?per_page=100`,

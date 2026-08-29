@@ -14,6 +14,7 @@
 import { LockManager } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import { buildTicketUrl } from "./ticket-url";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
@@ -73,6 +74,29 @@ interface Stores {
 export interface EnrichedLogEntry extends LogEntry {
   runId?: number;
   runStatus?: RunStatus;
+}
+
+/** Worker liveness as reported by `GET /api/worker`. */
+export type WorkerLiveness = "running" | "stopped" | "unknown";
+
+export interface WorkerStatusView {
+  status: WorkerLiveness;
+  pid?: number;
+  startedAt?: string;
+  /** Lock file the status was read from; absent when undeterminable. */
+  lockFile?: string;
+}
+
+/** One open agent PR as served by `GET /api/agent-prs`. */
+export interface OpenAgentPrView {
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  branch?: string;
+  taskKey?: string;
+  ticketUrl?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /**
@@ -183,6 +207,28 @@ export class DashboardData {
 
   getAgentPrCounts(): { open: number; closed: number } {
     return this.read({ open: 0, closed: 0 }, (stores) => stores.state.countAgentPrs());
+  }
+
+  /**
+   * Open agent-created PRs with their GitHub URLs (`GET /api/agent-prs`).
+   * Ticket links derive from the configured tracker and are dropped when no
+   * URL can be built (the UI falls back to plain text).
+   */
+  getOpenAgentPrs(): OpenAgentPrView[] {
+    return this.read([], (stores) =>
+      stores.state.listOpenAgentPrs().map((pr) => ({
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+        prUrl: `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+        branch: pr.branch,
+        taskKey: pr.taskKey,
+        ticketUrl: pr.taskKey
+          ? buildTicketUrl(process.env.TASK_TRACKER || "jira", pr.taskKey)
+          : undefined,
+        createdAt: pr.createdAt,
+        updatedAt: pr.updatedAt,
+      })),
+    );
   }
 
   getCursors(): Cursor[] {
@@ -322,17 +368,42 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 }
 
 /**
+ * Resolve worker liveness from the daemon's lock file.
+ *
+ * The worker writes `.worker.lock` under `.devintern-code/` of its working
+ * directory (simple mode) or directly into the workspace home (fleet mode),
+ * so both locations are consulted — a dashboard started from a different
+ * directory than the worker must not report the worker as stopped. When no
+ * readable lock file exists in either location, liveness is `unknown`: the
+ * worker may be running elsewhere, and claiming "stopped" would be wrong.
+ *
+ * @param workingDir - Project root the dashboard was started from
+ */
+function resolveWorkerStatus(workingDir: string): WorkerStatusView {
+  const lock =
+    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE) ??
+    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true });
+  if (!lock) {
+    return { status: "unknown" };
+  }
+  return {
+    status: lock.running ? "running" : "stopped",
+    pid: lock.pid,
+    startedAt: lock.startedAt,
+    lockFile: lock.path,
+  };
+}
+
+/**
  * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors.
  *
  * @param data - Dashboard data source
  */
 export function handleWorkerStatus(data: DashboardData): ApiResponse {
-  const lock = LockManager.readLockStatus(data.workingDir, WORKER_LOCK_FILE);
   return {
     status: 200,
     body: {
-      worker:
-        lock === null ? null : { running: lock.running, pid: lock.pid, startedAt: lock.startedAt },
+      worker: resolveWorkerStatus(data.workingDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       cursors: data.getCursors().map((cursor) => ({
@@ -344,6 +415,18 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbMissing: data.dbMissing,
     },
   };
+}
+
+/**
+ * `GET /api/agent-prs` — open agent-created PRs with GitHub links.
+ *
+ * The registry is reconciled with GitHub by the worker's review polling, so
+ * PRs merged or closed outside the worker drop out within one poll cycle.
+ *
+ * @param data - Dashboard data source
+ */
+export function handleAgentPrs(data: DashboardData): ApiResponse {
+  return { status: 200, body: { prs: data.getOpenAgentPrs() } };
 }
 
 /**
