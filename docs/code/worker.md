@@ -106,6 +106,8 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
 | Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
 | Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
+| A run failed and you need to know why | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)). |
+| The dashboard Logs tab is empty | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
 
 ## Polling mode
 

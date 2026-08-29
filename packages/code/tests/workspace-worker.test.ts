@@ -11,6 +11,8 @@ import {
   createWorkspaceTaskAcquirer,
   fleetTaskArgs,
   resolveWorkspaceAutomationContext,
+  startWorktreeSweeper,
+  sweepAllWorktrees,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
@@ -448,5 +450,54 @@ describe("resolveWorkspaceAutomationContext", () => {
     expect(context?.taskFileDir).toBe(join(workspaceDir, "automations"));
     expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
     rmSync(workspaceDir, { recursive: true, force: true });
+  });
+});
+
+describe("worktree sweeping", () => {
+  const REPOS: RepoConfig[] = [
+    { name: "backend", remote: "https://github.com/acme/backend.git", env: {} },
+    { name: "frontend", remote: "https://github.com/acme/frontend.git", env: {} },
+  ];
+
+  function fakeSweeper(removedPerRepo: Record<string, string[]>) {
+    const swept: Array<{ repo: string; ttlDays: number }> = [];
+    return {
+      swept,
+      repoManager: {
+        sweepStaleWorktrees: async (repoName: string, ttlDays: number) => {
+          swept.push({ repo: repoName, ttlDays });
+          return removedPerRepo[repoName] ?? [];
+        },
+      } as unknown as RepoManagerLike,
+    };
+  }
+
+  test("sweepAllWorktrees sweeps every repo and counts removals", async () => {
+    const { swept, repoManager } = fakeSweeper({ backend: ["/tmp/wt-a", "/tmp/wt-b"] });
+
+    const removed = await sweepAllWorktrees(REPOS, repoManager, 7);
+
+    expect(removed).toBe(2);
+    expect(swept).toEqual([
+      { repo: "backend", ttlDays: 7 },
+      { repo: "frontend", ttlDays: 7 },
+    ]);
+  });
+
+  test("startWorktreeSweeper sweeps periodically until cleared", async () => {
+    const { swept, repoManager } = fakeSweeper({});
+
+    const timer = startWorktreeSweeper(REPOS, repoManager, 7, 10);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(swept.length).toBeGreaterThanOrEqual(REPOS.length);
+      expect(swept.every((entry) => entry.ttlDays === 7)).toBe(true);
+    } finally {
+      clearInterval(timer);
+    }
+
+    const countAfterClear = swept.length;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(swept.length).toBe(countAfterClear);
   });
 });

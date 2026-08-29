@@ -2,14 +2,15 @@ import { useEffect, useState } from "react";
 
 import { StatusStrip } from "@/components/StatusStrip";
 import { buttonVariants } from "@/components/ui/button";
+import { LogsView } from "@/views/LogsView";
 import { RunDetailView } from "@/views/RunDetailView";
 import { RunsView } from "@/views/RunsView";
 import { StatsView } from "@/views/StatsView";
 import { cn } from "@/lib/utils";
 
-type Route = { view: "runs" } | { view: "run"; id: number } | { view: "stats" };
+type Route = { view: "runs" } | { view: "run"; id: number } | { view: "stats" } | { view: "logs" };
 
-/** Parse the location hash (#/, #/runs/:id, #/stats) into a route. */
+/** Parse the location hash (#/, #/runs/:id, #/stats, #/logs) into a route. */
 function parseHash(): Route {
   const hash = window.location.hash;
   const runMatch = hash.match(/^#\/runs\/(\d+)$/);
@@ -18,6 +19,9 @@ function parseHash(): Route {
   }
   if (hash === "#/stats") {
     return { view: "stats" };
+  }
+  if (hash === "#/logs") {
+    return { view: "logs" };
   }
   return { view: "runs" };
 }
@@ -32,8 +36,9 @@ export function App() {
   }, []);
 
   const tabs = [
-    { label: "Runs", hash: "#/", active: route.view !== "stats" },
+    { label: "Runs", hash: "#/", active: route.view === "runs" || route.view === "run" },
     { label: "Stats", hash: "#/stats", active: route.view === "stats" },
+    { label: "Logs", hash: "#/logs", active: route.view === "logs" },
   ];
 
   return (
@@ -70,6 +75,7 @@ export function App() {
         <RunDetailView runId={route.id} onBack={() => (window.location.hash = "#/")} />
       ) : null}
       {route.view === "stats" ? <StatsView /> : null}
+      {route.view === "logs" ? <LogsView /> : null}
     </div>
   );
 }
