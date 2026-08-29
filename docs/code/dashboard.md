@@ -40,27 +40,33 @@ The ticket link and description snapshot work for remote trackers whose web URLs
 
 ## Retrying a run
 
-Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a **Retry this run** action on the run detail page. Confirming it runs the same flow a support engineer would run by hand:
+Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a **Retry this run** action on the run detail page. Confirming it schedules the same flow a support engineer would run by hand:
 
 ```bash
 devintern PROJ-123 --force
 ```
 
-The dashboard server spawns that command as its own subprocess, so branch selection, worktree handling, comments, and `--force`'s bypass of the incomplete-attempt retry gate behave exactly like the CLI. Because the full pipeline runs in that subprocess, the new attempt appears as a fresh run in the run list within moments of triggering; the dashboard shows success/failure feedback for the trigger itself plus the new run's progress through its stages.
+How the retry executes depends on where the dashboard runs:
+
+- **Workspace worker (fleet mode)** — the default dashboard served by `devintern worker` inserts the retry into the shared workspace database, and the worker's retry-queue acquirer picks it up (default every 5 seconds, tunable with `WORKER_RETRY_INTERVAL_SECONDS`). The retry then runs through exactly the same pipeline as any fleet task: routing rules pick the repo, the task gets a disposable worktree from the bare clone, the per-repo environment applies, and the repo run lock serializes concurrent work. `--force` bypasses the incomplete-attempt retry gate, like the manual CLI flow.
+- **Standalone `devintern dashboard`** — when the dashboard runs by itself inside a repo checkout, it spawns `devintern <TASK> --force` as its own subprocess instead, mirroring the manual CLI flow; branch selection, worktree handling, and comments behave exactly like the CLI.
+
+In both modes the new attempt appears as a fresh run in the run list; the dashboard shows success/failure feedback for the trigger itself plus the new run's progress through its stages.
 
 Safeguards:
 
 - A confirmation prompt states exactly what will be re-run before anything starts.
 - The actor must be signed in (`devintern login`); when `DASHBOARD_RETRY_EMAILS` is set, only those support-role email addresses may trigger retries.
-- Retries are serialized per task: while a just-triggered retry is starting or another attempt is still in progress (including one recorded by the worker), further triggers are refused.
-- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`): who retried, when, with which command and pid, and against which original run. The run detail page lists this history under "Retry history".
+- Retries are serialized per task: while a retry is already scheduled or running (including an attempt recorded by the worker), further triggers are refused.
+- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`): who retried, when, and against which original run. The run detail page lists this history under "Retry history".
 
 ### Environment variables
 
-| Variable                 | Description                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------- |
-| `DASHBOARD_PORT`         | Port to listen on when `--port` is not given                                                      |
-| `DASHBOARD_RETRY_EMAILS` | Comma-separated allowlist of emails authorized to trigger retries; unset means any signed-in user |
+| Variable                        | Description                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `DASHBOARD_PORT`                | Port to listen on when `--port` is not given                                                      |
+| `DASHBOARD_RETRY_EMAILS`        | Comma-separated allowlist of emails authorized to trigger retries; unset means any signed-in user |
+| `WORKER_RETRY_INTERVAL_SECONDS` | How often the workspace worker drains scheduled dashboard retries (default 5, minimum 1)          |
 
 ## Where the logs come from
 
@@ -100,7 +106,7 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 | --------------------------- | --------------------------------------------------------------------- |
 | `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
 | `GET /api/runs/:id`         | One run with its stage timeline and retry metadata                     |
-| `POST /api/runs/:id/retry`  | Re-run the task behind a failed/escalated/abandoned run (`--force` flow; requires sign-in) |
+| `POST /api/runs/:id/retry`  | Schedule a re-run of the task behind a failed/escalated/abandoned run (requires sign-in) |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
 | `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
 | `GET /api/logs`             | Recent worker log entries (`limit` 1–1000, default 500; `level` all/info/warn/error) |

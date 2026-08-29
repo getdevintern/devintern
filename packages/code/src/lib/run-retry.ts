@@ -95,7 +95,7 @@ export interface RunRetryAuditEntry {
   runId: number;
   taskKey?: string;
   actor: string;
-  action: "triggered" | "failed";
+  action: "triggered" | "scheduled" | "failed";
   command?: string;
   pid?: number;
   message?: string;
@@ -120,7 +120,8 @@ function rowToEntry(row: AuditRow): RunRetryAuditEntry {
     runId: row.run_id,
     taskKey: row.task_key ?? undefined,
     actor: row.actor,
-    action: row.action === "failed" ? "failed" : "triggered",
+    action:
+      row.action === "failed" ? "failed" : row.action === "scheduled" ? "scheduled" : "triggered",
     command: row.command ?? undefined,
     pid: row.pid ?? undefined,
     message: row.message ?? undefined,
@@ -228,6 +229,198 @@ export interface SpawnedRetryProcess {
   pid?: number;
   /** Human-readable command line used for the audit log. */
   command: string;
+}
+
+/** A dashboard-scheduled retry waiting for (or being run by) the worker. */
+export interface ScheduledRetry {
+  id: number;
+  taskKey: string;
+  runId?: number;
+  actor: string;
+  status: "pending" | "running" | "done" | "failed";
+  message?: string;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+interface ScheduledRetryRow {
+  id: number;
+  task_key: string;
+  run_id: number | null;
+  actor: string;
+  status: string;
+  message: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+function rowToScheduledRetry(row: ScheduledRetryRow): ScheduledRetry {
+  return {
+    id: row.id,
+    taskKey: row.task_key,
+    runId: row.run_id ?? undefined,
+    actor: row.actor,
+    status: row.status as ScheduledRetry["status"],
+    message: row.message ?? undefined,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    finishedAt: row.finished_at ?? undefined,
+  };
+}
+
+/**
+ * Durable queue of dashboard-scheduled retries, stored in the workspace DB
+ * (`scheduled_retries` table). The dashboard handler inserts a pending row;
+ * the worker's retry acquirer drains rows through the normal fleet pipeline
+ * (routing, per-repo worktree, env, repo lock) instead of the dashboard
+ * spawning a bare CLI subprocess from the workspace home.
+ */
+export class ScheduledRetryStore {
+  private db: Database | null = null;
+
+  constructor(private dbPath: string) {}
+
+  private ensureDb(): Database {
+    if (this.db) {
+      return this.db;
+    }
+    prepareQueueDbDirectory(this.dbPath);
+    this.db = new Database(this.dbPath);
+    this.db.run("PRAGMA busy_timeout = 5000");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS scheduled_retries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_key TEXT NOT NULL,
+        run_id INTEGER,
+        actor TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      )
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_scheduled_retries_status ON scheduled_retries(status)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_scheduled_retries_task ON scheduled_retries(task_key)",
+    );
+    return this.db;
+  }
+
+  /**
+   * Schedule a retry; refuses while an active (pending/running) row already
+   * exists for the task, so double-clicks cannot double-run.
+   */
+  schedule(entry: { taskKey: string; runId?: number; actor: string; createdAt?: number }): {
+    scheduled: boolean;
+    reason?: string;
+  } {
+    const db = this.ensureDb();
+    if (this.hasActive(entry.taskKey)) {
+      return { scheduled: false, reason: "a retry is already scheduled or running" };
+    }
+    db.run(
+      `INSERT INTO scheduled_retries (task_key, run_id, actor, status, created_at)
+       VALUES (?, ?, ?, 'pending', ?)`,
+      [entry.taskKey, entry.runId ?? null, entry.actor, entry.createdAt ?? Date.now()],
+    );
+    return { scheduled: true };
+  }
+
+  /** Whether a pending or running retry exists for the task. */
+  hasActive(taskKey: string): boolean {
+    try {
+      const row = this.ensureDb()
+        .query(
+          "SELECT 1 AS one FROM scheduled_retries WHERE task_key = ? AND status IN ('pending', 'running') LIMIT 1",
+        )
+        .get(taskKey);
+      return row !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Claim the oldest pending retry atomically (safe against concurrent
+   * claimers): the subquery only matches a still-pending row.
+   */
+  claimNext(): ScheduledRetry | null {
+    const db = this.ensureDb();
+    const row = db
+      .query(
+        `UPDATE scheduled_retries
+         SET status = 'running', started_at = ?
+         WHERE id = (
+           SELECT id FROM scheduled_retries WHERE status = 'pending'
+           ORDER BY created_at ASC, id ASC LIMIT 1
+         )
+         RETURNING *`,
+      )
+      .get(Date.now()) as ScheduledRetryRow | null;
+    return row ? rowToScheduledRetry(row) : null;
+  }
+
+  /** Mark a claimed retry finished (`done` or `failed` with a message). */
+  finish(id: number, outcome: "done" | "failed", message?: string): void {
+    this.ensureDb().run(
+      `UPDATE scheduled_retries
+       SET status = ?, message = ?, finished_at = ?
+       WHERE id = ? AND status = 'running'`,
+      [outcome, message ?? null, Date.now(), id],
+    );
+  }
+
+  /** Return a claimed retry to the queue (the repo was busy; try next tick). */
+  requeue(id: number): void {
+    this.ensureDb().run(
+      `UPDATE scheduled_retries
+       SET status = 'pending', started_at = NULL
+       WHERE id = ? AND status = 'running'`,
+      [id],
+    );
+  }
+
+  /**
+   * Settle every row left `running` by a dead worker (startup orphan
+   * recovery). Rows are marked failed rather than requeued: the orphaned run
+   * itself already gets graceful-shutdown feedback, and silently re-running a
+   * forced retry on every worker restart could loop. Returns the settled rows
+   * for logging.
+   */
+  failRunning(message: string): ScheduledRetry[] {
+    const db = this.ensureDb();
+    const rows = db
+      .query(
+        `UPDATE scheduled_retries
+         SET status = 'failed', message = ?, finished_at = ?
+         WHERE status = 'running'
+         RETURNING *`,
+      )
+      .all(message, Date.now()) as ScheduledRetryRow[];
+    return rows.map(rowToScheduledRetry);
+  }
+
+  /** Whether any pending retry exists (worker startup diagnostics). */
+  hasPending(): boolean {
+    try {
+      const row = this.ensureDb()
+        .query("SELECT 1 AS one FROM scheduled_retries WHERE status = 'pending' LIMIT 1")
+        .get();
+      return row !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  close(): void {
+    this.db?.close();
+    this.db = null;
+  }
 }
 
 /**

@@ -33,6 +33,12 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Retry execution mode (default `spawn`). The workspace worker passes
+   * `schedule` so dashboard retries are drained through the fleet pipeline;
+   * a standalone `devintern dashboard` keeps the detached-CLI spawn.
+   */
+  retryMode?: "spawn" | "schedule";
   /** Collaborator overrides for the retry action (tests). */
   retryDeps?: RetryHandlerDeps;
   /** Directories to search for worker capture files (primary first). */
@@ -97,6 +103,7 @@ export function startDashboardServer(
   const data = new DashboardData({
     dbPath: options.dbPath,
     workingDir: options.workingDir,
+    retryMode: options.retryMode,
     logDirs: options.logDirs,
   });
   const uiDir = resolveUiDir();

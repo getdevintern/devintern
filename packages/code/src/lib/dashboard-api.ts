@@ -18,6 +18,7 @@ import {
   isRunRetriable,
   resolveDashboardActor,
   RunRetryAuditStore,
+  ScheduledRetryStore,
   spawnCliForceRetry,
 } from "./run-retry";
 import type { RetryActor, RunRetryAuditEntry, SpawnedRetryProcess } from "./run-retry";
@@ -65,6 +66,15 @@ export interface DashboardDataOptions {
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
   /**
+   * How a retry is executed. `spawn` (default) starts a detached CLI
+   * subprocess — correct for a standalone `devintern dashboard` running
+   * inside a repo. `schedule` inserts a row into the workspace DB that the
+   * workspace worker drains through its normal fleet pipeline (routing,
+   * per-repo worktree, env, repo lock); used when the dashboard runs
+   * alongside the fleet worker.
+   */
+  retryMode?: "spawn" | "schedule";
+  /**
    * How long a triggered retry blocks further retries of its task
    * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
    */
@@ -105,11 +115,14 @@ export interface EnrichedLogEntry extends LogEntry {
 export class DashboardData {
   readonly dbPath: string;
   readonly workingDir: string;
+  readonly retryMode: "spawn" | "schedule";
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
   private stores: Stores | null = null;
   /** Lazy read-write connection for the retry audit trail. */
   private retryAuditStore: RunRetryAuditStore | null = null;
+  /** Lazy read-write connection for scheduled retries (schedule mode). */
+  private scheduledRetryStore: ScheduledRetryStore | null = null;
   /**
    * Task keys with a dashboard-triggered retry in flight (task key → claimed
    * at). The spawned CLI needs a moment to create its run row, so claims are
@@ -121,6 +134,7 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
@@ -230,6 +244,14 @@ export class DashboardData {
     return this.retryAuditStore;
   }
 
+  /** Store backing the schedule mode of the retry action. */
+  getScheduledRetryStore(): ScheduledRetryStore {
+    if (!this.scheduledRetryStore) {
+      this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
+    }
+    return this.scheduledRetryStore;
+  }
+
   /** Claim the retry slot for a task; false when one is already held. */
   claimRetry(taskKey: string): boolean {
     this.pruneInflightRetries();
@@ -321,6 +343,8 @@ export class DashboardData {
     }
     this.retryAuditStore?.close();
     this.retryAuditStore = null;
+    this.scheduledRetryStore?.close();
+    this.scheduledRetryStore = null;
   }
 }
 
@@ -367,8 +391,7 @@ export function resolveAllowedRetryEmails(env: NodeJS.ProcessEnv = process.env):
 const INFLIGHT_RETRY_TTL_MS = 60_000;
 
 /**
- * `POST /api/runs/:id/retry` — re-run this run's task via the same flow as
- * `devintern <TASK> --force`.
+ * `POST /api/runs/:id/retry` — re-run this run's task.
  *
  * Safeguards, in order:
  * 1. the run must exist,
@@ -378,8 +401,15 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
  * 4. no other retry may be in flight for the task (dashboard or worker — an
  *    `in_progress` run for the same task key also blocks).
  *
- * Returns 202 once the CLI subprocess has been detached; the new attempt then
- * shows up in the run list like any other run.
+ * Two execution modes, picked by the server options:
+ * - `schedule` (workspace worker): inserts a `pending` row into the
+ *   `scheduled_retries` table; the worker drains it through the normal fleet
+ *   pipeline (routing, per-repo worktree, env, repo lock) with `--force`.
+ * - `spawn` (standalone dashboard, default): spawns `devintern <TASK>
+ *   --force` as a detached subprocess of the dashboard server.
+ *
+ * Returns 202 once the retry is queued; the new attempt then shows up in the
+ * run list like any other run.
  *
  * @param data - Dashboard data source (also owns the in-flight guard)
  * @param idParam - Raw id path segment
@@ -424,7 +454,11 @@ export async function handleRetryRun(
 
   // Concurrent retries: another dashboard retry for this task, or a live run
   // for the task (the worker records one as soon as it picks the ticket up).
-  if (data.hasInflightRetry(taskKey)) {
+  if (data.retryMode === "schedule") {
+    if (data.getScheduledRetryStore().hasActive(taskKey)) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+  } else if (data.hasInflightRetry(taskKey)) {
     return conflict(`a retry of ${taskKey} was just triggered and is starting`);
   }
   const activeRun = data
@@ -434,6 +468,29 @@ export async function handleRetryRun(
     return conflict(
       `${taskKey} already has a run in progress (run ${activeRun.id}); wait for it to finish`,
     );
+  }
+
+  if (data.retryMode === "schedule") {
+    const store = data.getScheduledRetryStore();
+    const scheduled = store.schedule({ taskKey, runId: id, actor: actor.email ?? "unknown" });
+    if (!scheduled.scheduled) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+    data.getRetryAuditStore().record({
+      runId: id,
+      taskKey,
+      actor: actor.email ?? "unknown",
+      action: "scheduled",
+      message: "queued for the worker",
+    });
+    return {
+      status: 202,
+      body: {
+        status: "scheduled",
+        runId: id,
+        taskKey,
+      },
+    };
   }
 
   if (!data.claimRetry(taskKey)) {

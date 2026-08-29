@@ -133,13 +133,14 @@ function RetryConfirm({
   return (
     <div className="rounded-md border bg-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
-        Start a fresh run of {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"}{" "}
-        with <code className="font-mono">--force</code>? This skips the retry gate and runs the full
-        implementation pipeline again.
+        Schedule a fresh run of{" "}
+        {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"} with{" "}
+        <code className="font-mono">--force</code>? The worker picks it up through its normal
+        pipeline (routing, worktree, per-repo environment) and skips the retry gate.
       </p>
       <div className="mt-2 flex gap-2">
         <Button size="sm" variant="destructive" onClick={onConfirm} disabled={busy}>
-          {busy ? "Retrying…" : "Yes, retry"}
+          {busy ? "Scheduling…" : "Yes, schedule retry"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
@@ -197,10 +198,13 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
     try {
       const { ok, body } = await triggerRunRetry(data.run.id);
       if (ok) {
+        const scheduled = body.status === "scheduled";
         const pidSuffix = body.pid !== undefined ? ` (pid ${body.pid})` : "";
         setFeedback({
           kind: "success",
-          message: `Retry triggered${pidSuffix}. A fresh run for ${data.run.taskKey} will appear in the run list shortly.`,
+          message: scheduled
+            ? `Retry scheduled. The worker will start a fresh run for ${data.run.taskKey} shortly.`
+            : `Retry triggered${pidSuffix}. A fresh run for ${data.run.taskKey} will appear in the run list shortly.`,
         });
         setConfirming(false);
         refresh();

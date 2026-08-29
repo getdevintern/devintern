@@ -72,7 +72,7 @@ export interface RetryAuditEntry {
   runId: number;
   taskKey?: string;
   actor: string;
-  action: "triggered" | "failed";
+  action: "triggered" | "scheduled" | "failed";
   command?: string;
   pid?: number;
   message?: string;
@@ -88,19 +88,22 @@ export interface RetryInfo {
 }
 
 /**
- * Trigger the same underlying flow as `devintern <TASK> --force` for a run.
- * Resolves with the parsed JSON body regardless of status; callers should
- * branch on `response.ok`.
+ * Trigger a retry of a run: the fleet worker drains it through the normal
+ * pipeline (`schedule` mode) or the dashboard spawns `devintern <TASK>
+ * --force` (`triggered`, standalone dashboard). Resolves with the parsed JSON
+ * body regardless of status; callers should branch on `response.ok`.
  */
-export async function triggerRunRetry(
-  runId: number,
-): Promise<{ ok: boolean; body: { error?: string; command?: string; pid?: number } }> {
+export async function triggerRunRetry(runId: number): Promise<{
+  ok: boolean;
+  body: { error?: string; status?: string; command?: string; pid?: number };
+}> {
   const response = await fetch(`/api/runs/${runId}/retry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
   const body = (await response.json().catch(() => ({}))) as {
     error?: string;
+    status?: string;
     command?: string;
     pid?: number;
   };
