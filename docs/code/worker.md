@@ -221,6 +221,22 @@ Transient push problems recover on their own: a rejection caused by concurrent f
 
 This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
 
+#### Scheduled conflict resolution
+
+By default resolution runs as soon as a conflict is detected. Because each resolution is an agent run (and therefore token spend), workspaces on metered AI plans can batch it off-peak instead with `[workspace].conflict_resolution` in `workspace.toml`:
+
+```toml
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d"
+```
+
+In scheduled mode the poller still detects every conflict on the first tick it appears and queues it durably (a pending base-sync event), but the agent is not invoked. When the scheduled window arrives — cron uses the worker host timezone, intervals are relative — the worker resolves all queued conflicts in one pass and logs the active mode and next window at startup. The window stays open for a grace period (`WORKER_RESOLVE_WINDOW_GRACE_MINUTES`, default 60) so quiet-period waits and retry backoffs inside the pass can still complete; anything unresolved when it closes waits for the next window. A window that arrives while the worker is down (missed nightly run) catches up on the first tick after restart. Stale resolutions cannot happen: before invoking the agent the worker re-fetches the PR, and closed/merged PRs or a conflict that resolved itself are dropped from the queue without spending tokens. The manual `devintern resolve-conflicts <pr-url>` command always works on demand, and once GitHub reports a PR conflict-free its queued event never triggers an agent run.
+
+The setting applies to the whole workspace and takes effect on worker restart, like the rest of `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
+
+To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
+
 ## Mention the bot on any PR
 
 The worker also reacts to mentions on pull requests it did not create. When a teammate writes a comment like `@devintern address the review feedback` on any PR in the repository, the worker picks it up on the next poll and handles it through the same pipeline. Detection is a repository-wide sweep of new comments (two requests per interval, regardless of how many PRs are open), so mentions work without any webhook setup.

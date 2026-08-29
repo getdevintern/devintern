@@ -1,6 +1,6 @@
 ---
 title: "Observability Dashboard"
-description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, aggregate stats, and worker logs"
+description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, aggregate stats, run retries, and worker logs"
 section: "Server Automation"
 order: 2
 dateModified: 2026-08-27
@@ -8,7 +8,7 @@ dateModified: 2026-08-27
 
 # Observability Dashboard
 
-`devintern dashboard` serves a local web dashboard over the worker's run history: every task, PR mention, and scheduled automation the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), aggregate stats like success rate and runs per week, and the worker's own log output.
+`devintern dashboard` serves a local web dashboard over the worker's run history: every task, PR mention, and scheduled automation the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), aggregate stats like success rate and runs per week, a retry action for failed runs, and the worker's own log output.
 
 All data is read from the worker's local database (`.devintern-code/queue.db`). Nothing is uploaded anywhere: the dashboard runs on your machine and binds to localhost by default.
 
@@ -28,13 +28,45 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs).
-- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs).
+- **Run detail**: the task key header (linked to its tracker ticket when possible) plus a snapshot of the original task description — captured when the run started and rendered as markdown — followed by a stage-by-stage timeline: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Logs**: the most recent worker log lines (timestamp, severity, message), filterable by level (`everything` / `warnings` / `errors`) with a search box over the loaded window. Lines that mention a task key link straight to that task's latest run in the Runs view.
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
 
 Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
+
+The ticket link and description snapshot work for remote trackers whose web URLs can be derived from base configuration plus the task key (Jira, GitHub Issues, GitLab, Azure DevOps, Asana, Trello). Linear issue links need the organization slug, so those keys stay plain text there; markdown-file runs (including scheduled automations) have no tracker page at all. Descriptions are persisted when the run begins, so history keeps showing what was asked even if the ticket is later edited or deleted.
+
+## Retrying a run
+
+Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a **Retry this run** action on the run detail page. Confirming it schedules the same flow a support engineer would run by hand:
+
+```bash
+devintern PROJ-123 --force
+```
+
+How the retry executes depends on where the dashboard runs:
+
+- **Workspace worker (fleet mode)** — the default dashboard served by `devintern worker` inserts the retry into the shared workspace database, and the worker's retry-queue acquirer picks it up (default every 5 seconds, tunable with `WORKER_RETRY_INTERVAL_SECONDS`). The retry then runs through exactly the same pipeline as any fleet task: routing rules pick the repo, the task gets a disposable worktree from the bare clone, the per-repo environment applies, and the repo run lock serializes concurrent work. `--force` bypasses the incomplete-attempt retry gate, like the manual CLI flow.
+- **Standalone `devintern dashboard`** — when the dashboard runs by itself inside a repo checkout, it spawns `devintern <TASK> --force` as its own subprocess instead, mirroring the manual CLI flow; branch selection, worktree handling, and comments behave exactly like the CLI.
+
+In both modes the new attempt appears as a fresh run in the run list; the dashboard shows success/failure feedback for the trigger itself plus the new run's progress through its stages.
+
+Safeguards:
+
+- A confirmation prompt states exactly what will be re-run before anything starts.
+- The actor must be signed in (`devintern login`); when `DASHBOARD_RETRY_EMAILS` is set, only those support-role email addresses may trigger retries.
+- Retries are serialized per task: while a retry is already scheduled or running (including an attempt recorded by the worker), further triggers are refused.
+- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`): who retried, when, and against which original run. The run detail page lists this history under "Retry history".
+
+### Environment variables
+
+| Variable                        | Description                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `DASHBOARD_PORT`                | Port to listen on when `--port` is not given                                                      |
+| `DASHBOARD_RETRY_EMAILS`        | Comma-separated allowlist of emails authorized to trigger retries; unset means any signed-in user |
+| `WORKER_RETRY_INTERVAL_SECONDS` | How often the workspace worker drains scheduled dashboard retries (default 5, minimum 1)          |
 
 ## Where the logs come from
 
@@ -73,7 +105,8 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 | Endpoint                    | Returns                                                               |
 | --------------------------- | --------------------------------------------------------------------- |
 | `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
-| `GET /api/runs/:id`         | One run with its stage timeline                                       |
+| `GET /api/runs/:id`         | One run with its stage timeline and retry metadata                     |
+| `POST /api/runs/:id/retry`  | Schedule a re-run of the task behind a failed/escalated/abandoned run (requires sign-in) |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
 | `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
 | `GET /api/logs`             | Recent worker log entries (`limit` 1–1000, default 500; `level` all/info/warn/error) |

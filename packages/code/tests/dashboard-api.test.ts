@@ -135,6 +135,26 @@ describe("dashboard API", () => {
     expect(handleRunDetail(data, "abc").status).toBe(400);
   });
 
+  test("run detail includes the ticket description snapshot; the runs list strips it", () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-2",
+      tracker: "jira",
+      ticketUrl: "https://acme.atlassian.net/browse/PROJ-2",
+    });
+    store.setRunTicket(id, { description: "# Task\n\nBuild the thing." });
+    store.close();
+
+    const detail = handleRunDetail(data, String(id));
+    const detailBody = detail.body as { run: { taskDescription?: string } };
+    expect(detailBody.run.taskDescription).toBe("# Task\n\nBuild the thing.");
+
+    const listed = handleRuns(data, new URLSearchParams({ limit: "10" }));
+    const listBody = listed.body as { runs: { taskDescription?: string }[] };
+    expect(listBody.runs[0].taskDescription).toBeUndefined();
+  });
+
   test("handleStats computes rates over terminal runs only", () => {
     const store = new RunStore(dbPath);
     seedRun(store, { status: "succeeded", prUrl: "https://github.com/a/b/pull/1" });
@@ -415,5 +435,91 @@ describe("dashboard server", () => {
     const bare = handleWorkerStatus(plain);
     plain.close();
     expect((bare.body as { schedule: unknown }).schedule).toBeNull();
+  });
+
+  test("POST /api/runs/:id/retry triggers the CLI flow end-to-end", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-9" });
+    store.finishRun(id, "failed");
+    store.close();
+
+    const spawned: string[] = [];
+    const server = startDashboardServer({
+      port: 0,
+      dbPath,
+      workingDir: dir,
+      retryDeps: {
+        resolveActor: async () => ({ email: "sup@example.com" }),
+        spawn: (taskKey: string) => {
+          spawned.push(taskKey);
+          return { pid: 1234, command: `bun devintern ${taskKey} --force` };
+        },
+      },
+    });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+
+      // GET exposes retry metadata on the detail payload.
+      const detail = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { eligible: boolean; audit: unknown[] };
+      };
+      expect(detail.retry.eligible).toBe(true);
+      expect(detail.retry.audit).toEqual([]);
+
+      const response = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { status: string; taskKey?: string; pid?: number };
+      expect(body.status).toBe("triggered");
+      expect(body.taskKey).toBe("PROJ-9");
+      expect(body.pid).toBe(1234);
+      expect(spawned).toEqual(["PROJ-9"]);
+
+      // The audit entry is now visible on the detail payload.
+      const after = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { audit: { action: string }[] };
+      };
+      expect(after.retry.audit.map((entry) => entry.action)).toEqual(["triggered"]);
+
+      // A second POST immediately afterwards hits the in-flight guard.
+      const repeat = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(repeat.status).toBe(409);
+
+      // Unauthorized requests are refused before anything spawns.
+      const deniedId = (() => {
+        const s = new RunStore(dbPath);
+        const failed = s.createRun({ origin: "task", taskKey: "PROJ-10" });
+        s.finishRun(failed, "failed");
+        s.close();
+        return failed;
+      })();
+      const noAuth = startDashboardServer({
+        port: 0,
+        dbPath,
+        workingDir: dir,
+        retryDeps: { resolveActor: async () => null, spawn: () => ({ command: "" }) },
+      });
+      try {
+        const denied = await fetch(`http://127.0.0.1:${noAuth.port}/api/runs/${deniedId}/retry`, {
+          method: "POST",
+        });
+        expect(denied.status).toBe(403);
+      } finally {
+        noAuth.stop(true);
+      }
+
+      // GET is not allowed on the retry route.
+      const wrongMethod = await fetch(`${base}/api/runs/${id}/retry`);
+      expect(wrongMethod.status).toBe(404);
+    } finally {
+      server.stop(true);
+    }
   });
 });

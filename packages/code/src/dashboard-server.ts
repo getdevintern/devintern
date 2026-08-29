@@ -17,11 +17,13 @@ import { join, normalize, resolve } from "path";
 import {
   DashboardData,
   handleLogs,
+  handleRetryRun,
   handleRuns,
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
 } from "./lib/dashboard-api";
+import type { RetryHandlerDeps } from "./lib/dashboard-api";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 
@@ -33,6 +35,14 @@ export interface DashboardServerOptions {
   workingDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
+  /**
+   * Retry execution mode (default `spawn`). The workspace worker passes
+   * `schedule` so dashboard retries are drained through the fleet pipeline;
+   * a standalone `devintern dashboard` keeps the detached-CLI spawn.
+   */
+  retryMode?: "spawn" | "schedule";
+  /** Collaborator overrides for the retry action (tests). */
+  retryDeps?: RetryHandlerDeps;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
 }
@@ -96,6 +106,7 @@ export function startDashboardServer(
     dbPath: options.dbPath,
     workingDir: options.workingDir,
     scheduleSnapshot: options.scheduleSnapshot,
+    retryMode: options.retryMode,
     logDirs: options.logDirs,
   });
   const uiDir = resolveUiDir();
@@ -108,15 +119,20 @@ export function startDashboardServer(
   }
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
 
   const server = Bun.serve({
     port,
     hostname: host,
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
+        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
+        if (retry) {
+          return json(await handleRetryRun(data, retry[1], options.retryDeps));
+        }
         if (request.method !== "GET") {
           return json({ status: 405, body: { error: "method not allowed" } });
         }
