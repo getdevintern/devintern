@@ -18,11 +18,14 @@ export class QwenCodeHarness implements AgentHarness {
   readonly promptFlag = "-p";
   /** No native plan/read-only enforcement documented for headless `qwen`. */
   readonly supportedModes = [] as const;
+  /** `--output-format json` buffers messages and emits them as a JSON array. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `qwen` CLI flags for headless (`-p`) execution.
    *
-   * @param options - Supports `skipPermissions` (`--yolo`) and `model`.
+   * @param options - Supports `skipPermissions` (`--yolo`), `model`, and
+   *   `structuredOutput`.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -35,6 +38,10 @@ export class QwenCodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Qwen Code does not currently support --max-turns.

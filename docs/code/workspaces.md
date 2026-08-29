@@ -3,7 +3,7 @@ title: "Workspaces (Multi-Repo Fleet)"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Server Automation"
 order: 1
-dateModified: 2026-08-26
+dateModified: 2026-08-28
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -18,7 +18,7 @@ Workspace mode runs under the same automation license as the rest of the worker:
 
 - The worker polls your tracker with one fleet-wide query (a detect-then-evaluate loop with one cursor).
 - Each ready task is matched against your routing rules. A task runs only when the rules agree on exactly one repository. The worker never guesses: tasks that match no rule, or rules for different repositories, are skipped and recorded, and are retried only after the task changes again. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
-- The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days`.
+- The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
 - Runs are serialized: one task at a time, with a per-repository lock. One systemd unit (or one terminal) drives the whole fleet.
 
@@ -29,6 +29,11 @@ Workspace mode runs under the same automation license as the rest of the worker:
 worktrees_ttl_days = 7
 dashboard = true
 # dashboard_port = 4400
+# Batch automatic conflict resolution off-peak instead of instant (default "auto"):
+# conflict_resolution = "scheduled"
+# conflict_resolution_cron = "0 3 * * *"      # worker host timezone
+# conflict_resolution_interval = "1d"         # exactly one of cron / interval
+# Or turn it off entirely: conflict_resolution = "disabled"
 
 [defaults]
 tracker = "jira"
@@ -36,11 +41,13 @@ task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
 poll_interval = 60
 default_branch = "main"
+# pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
 default_branch = "main"
+# pr_labels = ["backend"]
 # env_file = "env/backend.env"        # optional, relative to ~/.devintern
   [repos.env]                         # optional per-repo overrides
   GITHUB_REPO = "acme/backend"
@@ -74,9 +81,30 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 ```
 
 - `[defaults].tracker` picks the tracker for the fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, Markdown).
+- `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`, including built-in presets such as `docs-drift-guard` (see [Docs Drift Guard](./docs-drift-guard.md)). An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
+
+### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
+
+When a watched PR conflicts with its base branch, the worker normally resolves it right away (`conflict_resolution = "auto"`, the default — no behavior change on upgrade). Every resolution hands the conflicted files to the AI agent, which consumes tokens — even at 3am when nobody is reviewing the PR anyway.
+
+Set `conflict_resolution = "scheduled"` to batch those resolutions into an off-peak window. Polling still detects every conflict immediately and queues it (the PR stays conflicted until then, and the worker logs which mode is active at startup); the agent only runs inside the window:
+
+```toml
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d"
+```
+
+The schedule uses the same format as `[[automations]]`: a five-field cron expression (worker host timezone) or a positive `15m`/`6h`/`1d` interval — exactly one of the two. Exactly one window pass runs per occurrence; if the worker is down when the window arrives (a missed nightly run), the queued conflicts resolve on the first tick after restart. Inside a window the usual safety rules still apply: failed attempts wait out their retry backoff, PRs whose head is still moving wait out the quiet period, and anything not finished before the window closes (60 minutes by default, `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`) waits for the next one. PRs merged upstream before the window opens are skipped — the worker re-checks GitHub's mergeability before invoking the agent.
+
+Two things are never delayed by scheduled mode: review feedback on the agent's PRs is addressed immediately as usual, and you can always run `devintern resolve-conflicts <pr-url>` by hand to fix one PR without waiting for the window — once GitHub reports the PR conflict-free, the queued event never triggers an agent run.
+
+The setting is workspace-wide (per-repo overrides are not supported in v1) and, like the rest of `workspace.toml`, requires a worker restart to take effect. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
+
+Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
 
 ### How workspace automations differ from single-repo ones
 

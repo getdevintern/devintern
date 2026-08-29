@@ -26,6 +26,13 @@ export interface AutomationConfig {
   repo?: string;
 }
 
+/** A cron-or-interval schedule using the `[[automations]]` format. */
+export interface CronOrIntervalSchedule {
+  cron?: string;
+  interval?: string;
+  intervalMs?: number;
+}
+
 export const SINGLE_REPO_AUTOMATIONS_PATH = ".devintern-code/automations.toml";
 const AUTOMATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DURATION_PATTERN = /^(\d+)([mhd])$/;
@@ -44,6 +51,78 @@ export function parseAutomationInterval(value: string, nowMs = Date.now()): numb
     return null;
   }
   return intervalMs;
+}
+
+/**
+ * Validate a cron-or-interval schedule pair using the `[[automations]]`
+ * rules: exactly one of the two keys must be set, cron must be a five-field
+ * expression that parses, and interval must be a positive `15m`/`6h`/`1d`
+ * duration. Every problem found is collected in `errors`.
+ *
+ * @param table - Raw key/value table holding the schedule keys
+ * @param options - `label` for error messages; `cronKey` / `intervalKey`
+ *                    rename the keys (messages always use the actual key names)
+ * @returns The normalized schedule, or undefined when the pair is absent or
+ *          invalid.
+ */
+export function parseCronOrIntervalSchedule(
+  table: Record<string, unknown>,
+  options: { label: string; cronKey?: string; intervalKey?: string },
+  errors: string[],
+): CronOrIntervalSchedule | undefined {
+  const cronKey = options.cronKey ?? "cron";
+  const intervalKey = options.intervalKey ?? "interval";
+  const { label } = options;
+  const readScheduleString = (key: string): string | undefined => {
+    const item = table[key];
+    if (item === undefined || item === null) return undefined;
+    if (typeof item !== "string" || !item.trim()) {
+      errors.push(`${label}.${key} must be a non-empty string.`);
+      return undefined;
+    }
+    return item.trim();
+  };
+
+  const cron = readScheduleString(cronKey);
+  const interval = readScheduleString(intervalKey);
+  const pairInvalid = Boolean(cron) === Boolean(interval);
+  if (pairInvalid) {
+    errors.push(`${label} must set exactly one of ${cronKey} or ${intervalKey}.`);
+  }
+
+  let cronValid = true;
+  if (cron) {
+    if (cron.split(/\s+/).length !== 5) {
+      errors.push(`${label}.${cronKey} must be a five-field cron expression.`);
+      cronValid = false;
+    } else {
+      try {
+        CronExpressionParser.parse(cron);
+      } catch (error) {
+        errors.push(`${label}.${cronKey} is invalid: ${(error as Error).message}`);
+        cronValid = false;
+      }
+    }
+  }
+
+  const intervalMs = interval ? parseAutomationInterval(interval) : undefined;
+  let intervalValid = true;
+  if (interval && intervalMs === null) {
+    errors.push(`${label}.${intervalKey} must use a positive duration such as 15m, 6h, or 1d.`);
+    intervalValid = false;
+  }
+
+  if (pairInvalid || !cronValid || !intervalValid) return undefined;
+  return { cron, interval, intervalMs: intervalMs ?? undefined };
+}
+
+/** First occurrence of a schedule strictly after `afterMs` (cron uses host timezone). */
+export function nextScheduleOccurrence(schedule: CronOrIntervalSchedule, afterMs: number): number {
+  if (schedule.intervalMs) return afterMs + schedule.intervalMs;
+  if (!schedule.cron) throw new Error("Schedule has no cron expression");
+  return CronExpressionParser.parse(schedule.cron, { currentDate: new Date(afterMs) })
+    .next()
+    .getTime();
 }
 
 /**
@@ -139,26 +218,7 @@ export function parseAutomationEntries(
       }
     }
 
-    const cron = stringValue("cron");
-    const interval = stringValue("interval");
-    if (Boolean(cron) === Boolean(interval)) {
-      errors.push(`${label} must set exactly one of cron or interval.`);
-    }
-    if (cron) {
-      if (cron.split(/\s+/).length !== 5) {
-        errors.push(`${label}.cron must be a five-field cron expression.`);
-      } else {
-        try {
-          CronExpressionParser.parse(cron);
-        } catch (error) {
-          errors.push(`${label}.cron is invalid: ${(error as Error).message}`);
-        }
-      }
-    }
-    const intervalMs = interval ? parseAutomationInterval(interval) : undefined;
-    if (interval && intervalMs === null) {
-      errors.push(`${label}.interval must use a positive duration such as 15m, 6h, or 1d.`);
-    }
+    const schedule = parseCronOrIntervalSchedule(table, { label }, errors);
 
     const repo = stringValue("repo");
     if (repo && options.repoNames && !options.repoNames.has(repo)) {
@@ -168,8 +228,7 @@ export function parseAutomationEntries(
     const entryIsValid =
       id !== undefined &&
       typeof enabledValue === "boolean" &&
-      Boolean(cron) !== Boolean(interval) &&
-      (!interval || intervalMs !== null) &&
+      schedule !== undefined &&
       // Exactly one of prompt / preset, with the preset side fully valid.
       (presetName ? presetConfig !== null : prompt !== undefined);
 
@@ -185,9 +244,9 @@ export function parseAutomationEntries(
               baselineSha: presetConfig?.baselineSha,
             }
           : { prompt: prompt as string }),
-        cron,
-        interval,
-        intervalMs: intervalMs ?? undefined,
+        cron: schedule.cron,
+        interval: schedule.interval,
+        intervalMs: schedule.intervalMs,
         repo,
       });
     }

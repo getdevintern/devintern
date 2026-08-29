@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import {
   DashboardData,
+  handleLogs,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -134,6 +135,26 @@ describe("dashboard API", () => {
     expect(handleRunDetail(data, "abc").status).toBe(400);
   });
 
+  test("run detail includes the ticket description snapshot; the runs list strips it", () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-2",
+      tracker: "jira",
+      ticketUrl: "https://acme.atlassian.net/browse/PROJ-2",
+    });
+    store.setRunTicket(id, { description: "# Task\n\nBuild the thing." });
+    store.close();
+
+    const detail = handleRunDetail(data, String(id));
+    const detailBody = detail.body as { run: { taskDescription?: string } };
+    expect(detailBody.run.taskDescription).toBe("# Task\n\nBuild the thing.");
+
+    const listed = handleRuns(data, new URLSearchParams({ limit: "10" }));
+    const listBody = listed.body as { runs: { taskDescription?: string }[] };
+    expect(listBody.runs[0].taskDescription).toBeUndefined();
+  });
+
   test("handleStats computes rates over terminal runs only", () => {
     const store = new RunStore(dbPath);
     seedRun(store, { status: "succeeded", prUrl: "https://github.com/a/b/pull/1" });
@@ -255,6 +276,94 @@ describe("dashboard API", () => {
   });
 });
 
+describe("logs endpoint", () => {
+  let dir: string;
+  let logDir: string;
+  let dbPath: string;
+  let data: DashboardData;
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `dash-logs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    logDir = join(dir, "capture");
+    mkdirSync(logDir, { recursive: true });
+    dbPath = join(dir, "queue.db");
+    data = new DashboardData({ dbPath, workingDir: dir, logDirs: [logDir] });
+  });
+
+  afterEach(() => {
+    data.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("handleLogs rejects invalid params", () => {
+    expect(handleLogs(data, new URLSearchParams("limit=0")).status).toBe(400);
+    expect(handleLogs(data, new URLSearchParams("limit=9999")).status).toBe(400);
+    expect(handleLogs(data, new URLSearchParams("level=trace")).status).toBe(400);
+  });
+
+  test("returns an empty state when no capture files exist", () => {
+    const response = handleLogs(data, new URLSearchParams());
+    expect(response.status).toBe(200);
+    const body = response.body as { available: boolean; entries: unknown[]; truncated: boolean };
+    expect(body.available).toBe(false);
+    expect(body.entries).toEqual([]);
+    expect(body.truncated).toBe(false);
+  });
+
+  test("tails entries, redacts secrets, and links runs by task key", () => {
+    const store = new RunStore(dbPath);
+    const runId = store.createRun({ origin: "task", taskKey: "DEV-42", harness: "claude-code" });
+    store.finishRun(runId, "failed");
+    store.close();
+
+    writeFileSync(
+      join(logDir, "worker.stdout.log"),
+      "\x1b[31m❌ DEV-42 run failed\x1b[0m\nplain info line\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(logDir, "worker.stderr.log"),
+      "retry with WEBHOOK_SECRET=hunter2 super-secret ignored\n",
+      "utf8",
+    );
+
+    const response = handleLogs(data, new URLSearchParams());
+    expect(response.status).toBe(200);
+    const body = response.body as {
+      available: boolean;
+      entries: { message: string; level: string; taskKey?: string | null; runId?: number }[];
+      sources: { exists: boolean }[];
+    };
+    expect(body.available).toBe(true);
+    expect(body.entries.length).toBe(3);
+
+    const failed = body.entries.find((entry) => entry.message === "❌ DEV-42 run failed");
+    expect(failed?.level).toBe("error");
+    expect(failed?.taskKey).toBe("DEV-42");
+    expect(failed?.runId).toBe(runId);
+
+    const secretLine = body.entries.find((entry) => entry.message.includes("WEBHOOK_SECRET="));
+    expect(secretLine).toBeDefined();
+    expect(secretLine?.message.includes("hunter2")).toBe(false);
+
+    expect(body.sources.every((source) => source.exists)).toBe(true);
+  });
+
+  test("serves /api/logs end-to-end and degrades without files", async () => {
+    const server = startDashboardServer({ port: 0, dbPath, workingDir: dir, logDirs: [logDir] });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const logs = (await (await fetch(`${base}/api/logs`)).json()) as { available: boolean };
+      expect(logs.available).toBe(false);
+      const bad = await fetch(`${base}/api/logs?level=nope`);
+      expect(bad.status).toBe(400);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 describe("dashboard server", () => {
   let dir: string;
   let dbPath: string;
@@ -296,6 +405,92 @@ describe("dashboard server", () => {
 
       const post = await fetch(`${base}/api/runs`, { method: "POST" });
       expect(post.status).toBe(405);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("POST /api/runs/:id/retry triggers the CLI flow end-to-end", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-9" });
+    store.finishRun(id, "failed");
+    store.close();
+
+    const spawned: string[] = [];
+    const server = startDashboardServer({
+      port: 0,
+      dbPath,
+      workingDir: dir,
+      retryDeps: {
+        resolveActor: async () => ({ email: "sup@example.com" }),
+        spawn: (taskKey: string) => {
+          spawned.push(taskKey);
+          return { pid: 1234, command: `bun devintern ${taskKey} --force` };
+        },
+      },
+    });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+
+      // GET exposes retry metadata on the detail payload.
+      const detail = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { eligible: boolean; audit: unknown[] };
+      };
+      expect(detail.retry.eligible).toBe(true);
+      expect(detail.retry.audit).toEqual([]);
+
+      const response = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { status: string; taskKey?: string; pid?: number };
+      expect(body.status).toBe("triggered");
+      expect(body.taskKey).toBe("PROJ-9");
+      expect(body.pid).toBe(1234);
+      expect(spawned).toEqual(["PROJ-9"]);
+
+      // The audit entry is now visible on the detail payload.
+      const after = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { audit: { action: string }[] };
+      };
+      expect(after.retry.audit.map((entry) => entry.action)).toEqual(["triggered"]);
+
+      // A second POST immediately afterwards hits the in-flight guard.
+      const repeat = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(repeat.status).toBe(409);
+
+      // Unauthorized requests are refused before anything spawns.
+      const deniedId = (() => {
+        const s = new RunStore(dbPath);
+        const failed = s.createRun({ origin: "task", taskKey: "PROJ-10" });
+        s.finishRun(failed, "failed");
+        s.close();
+        return failed;
+      })();
+      const noAuth = startDashboardServer({
+        port: 0,
+        dbPath,
+        workingDir: dir,
+        retryDeps: { resolveActor: async () => null, spawn: () => ({ command: "" }) },
+      });
+      try {
+        const denied = await fetch(`http://127.0.0.1:${noAuth.port}/api/runs/${deniedId}/retry`, {
+          method: "POST",
+        });
+        expect(denied.status).toBe(403);
+      } finally {
+        noAuth.stop(true);
+      }
+
+      // GET is not allowed on the retry route.
+      const wrongMethod = await fetch(`${base}/api/runs/${id}/retry`);
+      expect(wrongMethod.status).toBe(404);
     } finally {
       server.stop(true);
     }
