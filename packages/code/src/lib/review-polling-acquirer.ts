@@ -25,10 +25,13 @@
 
 import { spawn } from "child_process";
 
+import { nextScheduleOccurrence } from "./automation-config";
+import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
+import type { ConflictResolutionMode } from "./workspace/config";
 import type { Acquirer } from "../worker";
 
 export interface PolledReview {
@@ -108,12 +111,48 @@ export interface ReviewPollingAcquirerOptions {
    */
   allowedRepos?: string[] | (() => string[]);
   verbose?: boolean;
+  /**
+   * Schedule gating automatic conflict resolution (workspace scheduled
+   * mode, `[workspace].conflict_resolution = "scheduled"`). When set,
+   * conflicting PRs are still detected and queued on every tick, but the
+   * agent is invoked only inside the scheduled window. Omit for `auto`
+   * mode: resolve as soon as a conflict is detected (default).
+   */
+  conflictSchedule?: CronOrIntervalSchedule;
+  /**
+   * Workspace conflict-resolution mode (`[workspace].conflict_resolution`),
+   * surfaced in the startup log. `"disabled"` means the caller omits
+   * `resolveConflicts`, so base-sync detection never runs and conflicts
+   * stay for manual resolution. Defaults to `"scheduled"` when
+   * `conflictSchedule` is set, else `"auto"`.
+   */
+  conflictResolution?: ConflictResolutionMode;
+  /**
+   * How long a scheduled window stays open for resolution attempts once it
+   * arrives (covers quiet-period waits, retry backoff, and a serial pass
+   * over several PRs). Defaults to `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`
+   * or 60 minutes.
+   */
+  conflictWindowGraceMs?: number;
 }
 
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
+/** Durable cursor source for the scheduled conflict-resolution window. */
+const CONFLICT_WINDOW_SOURCE = "worker:conflict-window";
 const prRunTails = new Map<string, Promise<void>>();
+
+/** Default minutes a scheduled conflict-resolution window stays open. */
+export const DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES = 60;
+
+/** Durable state for scheduled conflict resolution (persisted per worker). */
+interface ConflictWindowState {
+  /** Next scheduled occurrence (ms epoch). */
+  nextWindowAt: number;
+  /** Resolution attempts are allowed until this instant (0 = none opened yet). */
+  windowOpenUntil: number;
+}
 
 /**
  * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
@@ -377,9 +416,15 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
+  private conflictWindowState: ConflictWindowState | null | undefined;
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   /** Start polling: immediate first tick, then on the configured interval. */
@@ -399,6 +444,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       `🔎 Polling reviews on agent PRs every ${this.options.intervalSeconds}s ` +
         `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
     );
+    this.syncConflictWindow();
+    this.logConflictMode();
     await this.tick();
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
   }
@@ -435,6 +482,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
+      this.syncConflictWindow();
       const allowedRepos = this.resolveAllowedRepos();
       const watchedPrs = this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
@@ -606,6 +654,13 @@ export class ReviewPollingAcquirer implements Acquirer {
     const backoffMs = baseSyncRetryBackoffMs(event.attempts);
     if (backoffMs > 0 && now - event.updatedAt < backoffMs) return;
 
+    // Scheduled mode, outside the window: the conflict stays queued (the
+    // event above is durable) and the agent is not invoked. A manual
+    // `devintern resolve-conflicts <pr-url>` still runs on demand; once the
+    // PR is no longer conflicting, the mergeability check above keeps the
+    // queued event out of execution without spending tokens.
+    if (this.options.conflictSchedule && !this.conflictWindowOpen(now)) return;
+
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 
@@ -711,6 +766,113 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   private prKey(repo: string, prNumber: number): string {
     return `${repo.toLowerCase()}#${prNumber}`;
+  }
+
+  /**
+   * Advance the durable scheduled-window state for this tick. Auto mode
+   * (no schedule) is a no-op. The first tick after enabling scheduled mode
+   * only schedules the next occurrence — conflicts detected from now on
+   * queue for it instead of running. When an occurrence arrives, a grace
+   * window opens so pending conflicts resolve on the following ticks.
+   */
+  private syncConflictWindow(): void {
+    const schedule = this.options.conflictSchedule;
+    if (!schedule) return;
+    const now = this.now();
+    if (this.conflictWindowState === undefined) {
+      this.conflictWindowState = null;
+      const raw = this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as Partial<ConflictWindowState>;
+          if (
+            typeof parsed.nextWindowAt === "number" &&
+            typeof parsed.windowOpenUntil === "number"
+          ) {
+            this.conflictWindowState = {
+              nextWindowAt: parsed.nextWindowAt,
+              windowOpenUntil: parsed.windowOpenUntil,
+            };
+          }
+        } catch {
+          // Corrupt state re-initializes below.
+        }
+      }
+    }
+
+    let state = this.conflictWindowState;
+    if (!state) {
+      state = { nextWindowAt: nextScheduleOccurrence(schedule, now), windowOpenUntil: 0 };
+      this.saveConflictWindowState(state);
+      return;
+    }
+    if (now >= state.nextWindowAt) {
+      // Fresh window: each window gets its own defer budget, and anything
+      // still pending (including from a missed window while the worker was
+      // down) resolves now.
+      this.deferCounts.clear();
+      state = {
+        nextWindowAt: nextScheduleOccurrence(schedule, now),
+        windowOpenUntil: now + this.conflictWindowGraceMs(),
+      };
+      this.saveConflictWindowState(state);
+      console.log(
+        `⏰ [${this.name}] conflict-resolution window open until ${new Date(
+          state.windowOpenUntil,
+        ).toISOString()}; queued conflicts will resolve now`,
+      );
+    }
+  }
+
+  /** Scheduled mode only: are resolution attempts currently allowed? */
+  private conflictWindowOpen(now: number): boolean {
+    const state = this.conflictWindowState;
+    return state != null && now <= state.windowOpenUntil;
+  }
+
+  private saveConflictWindowState(state: ConflictWindowState): void {
+    this.conflictWindowState = state;
+    this.options.workerState.setCursor(CONFLICT_WINDOW_SOURCE, JSON.stringify(state));
+  }
+
+  private conflictWindowGraceMs(): number {
+    return (
+      this.options.conflictWindowGraceMs ??
+      parseEnvInteger(
+        "WORKER_RESOLVE_WINDOW_GRACE_MINUTES",
+        DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES,
+        { min: 0 },
+      ) * 60_000
+    );
+  }
+
+  private scheduleLabel(): string {
+    const schedule = this.options.conflictSchedule;
+    if (!schedule) return "auto";
+    return schedule.cron ? `cron "${schedule.cron}"` : `interval ${schedule.interval}`;
+  }
+
+  /** Surface the active conflict-resolution mode on worker startup. */
+  private logConflictMode(): void {
+    const mode =
+      this.options.conflictResolution ?? (this.options.conflictSchedule ? "scheduled" : "auto");
+    if (mode === "disabled") {
+      console.log(
+        `⏸️  [${this.name}] conflict resolution: disabled (conflicts stay for manual resolution)`,
+      );
+      return;
+    }
+    if (!this.options.conflictSchedule) {
+      console.log(
+        `🔀 [${this.name}] conflict resolution: auto (immediately when a conflict is detected)`,
+      );
+      return;
+    }
+    const nextWindowAt = this.conflictWindowState?.nextWindowAt;
+    console.log(
+      `⏰ [${this.name}] conflict resolution: scheduled (${this.scheduleLabel()})` +
+        (nextWindowAt ? `; next window ${new Date(nextWindowAt).toISOString()}` : ""),
+    );
   }
 
   private baseSyncExternalId(repo: string, prNumber: number, baseSha: string, headSha: string) {

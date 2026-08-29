@@ -4,11 +4,11 @@ import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
 import { join } from "path";
 
-import { CronExpressionParser } from "cron-parser";
 import { resolveConfigDir } from "@devintern/utils";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
+import { nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
@@ -66,11 +66,10 @@ interface ActiveAutomationRun {
 
 /** Calculate the first future occurrence after `afterMs` (cron uses host timezone). */
 export function nextAutomationDue(automation: AutomationConfig, afterMs: number): number {
-  if (automation.intervalMs) return afterMs + automation.intervalMs;
-  if (!automation.cron) throw new Error(`Automation "${automation.id}" has no schedule`);
-  return CronExpressionParser.parse(automation.cron, { currentDate: new Date(afterMs) })
-    .next()
-    .getTime();
+  if (!automation.intervalMs && !automation.cron) {
+    throw new Error(`Automation "${automation.id}" has no schedule`);
+  }
+  return nextScheduleOccurrence(automation, afterMs);
 }
 
 /** One-timer scheduler with durable UTC cursors and per-automation leases. */
