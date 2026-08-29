@@ -26,7 +26,7 @@ You can run `devintern` from any subdirectory of your project and it will find t
 
 ## Required Configuration
 
-The active task tracker is set with `TASK_TRACKER` (defaults to `jira`). Supported values: `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `markdown`.
+The active task tracker is set with `TASK_TRACKER` (defaults to `jira`). Supported values: `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `gitlab`, `markdown`.
 
 ### Jira (default)
 
@@ -231,7 +231,7 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
 - `todoStatus`: Status to reset to if implementation fails (e.g., "To Do", "Backlog")
 - `storyPointsField`: Custom field ID for story points (e.g., `"customfield_10016"` for Jira); auto-discovered if omitted
 
-**Supported trackers:** `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `markdown`.
+**Supported trackers:** `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `gitlab`, `markdown`.
 
 **Backward compatibility:** Existing Jira-only files using the legacy top-level `projects` key continue to work without any changes.
 

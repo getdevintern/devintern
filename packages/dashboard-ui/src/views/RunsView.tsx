@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, FilterGroup, StatusBadge } from "@/components/shared";
+import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -109,9 +110,14 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
                     <StatusBadge status={run.status} />
                   </TableCell>
                   <TableCell className="px-4 py-2.5 font-medium">
-                    {run.taskKey ??
-                      run.automationId ??
-                      (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)}
+                    <TicketKey
+                      label={
+                        run.taskKey ??
+                        run.automationId ??
+                        (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)
+                      }
+                      href={run.ticketUrl}
+                    />
                   </TableCell>
                   <TableCell className="px-4 py-2.5 text-muted-foreground">
                     {formatRunOrigin(run.origin)}

@@ -16,6 +16,7 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleLogs,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -30,6 +31,8 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Directories to search for worker capture files (primary first). */
+  logDirs?: string[];
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -87,7 +90,11 @@ export function startDashboardServer(
   const port =
     options.port ?? parseInt(process.env.DASHBOARD_PORT || String(DEFAULT_DASHBOARD_PORT), 10);
   const host = options.host ?? "127.0.0.1";
-  const data = new DashboardData({ dbPath: options.dbPath, workingDir: options.workingDir });
+  const data = new DashboardData({
+    dbPath: options.dbPath,
+    workingDir: options.workingDir,
+    logDirs: options.logDirs,
+  });
   const uiDir = resolveUiDir();
 
   if (host !== "127.0.0.1" && host !== "localhost") {
@@ -125,6 +132,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/logs") {
+          return json(handleLogs(data, url.searchParams));
         }
         return json({ status: 404, body: { error: "not found" } });
       }

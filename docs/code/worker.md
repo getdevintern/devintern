@@ -106,6 +106,8 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
 | Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
 | Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
+| A run failed and you need to know why | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)). |
+| The dashboard Logs tab is empty | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
 
 ## Scheduled story-point estimation
 
@@ -171,6 +173,21 @@ If a run completes but you want a different result, move the ticket back to your
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
+### Interrupted runs are recovered on startup
+
+A graceful stop (Ctrl-C, `SIGTERM`) comments on an in-flight ticket and moves it back to To Do. A hard crash — power cut, kernel panic, `kill -9`, a laptop that died — skips that cleanup, which used to leave the ticket stranded in "In Progress".
+
+The worker now bridges that gap on startup. Before any new tickets are acquired, it detects task runs left `in_progress` by the previous (dead) worker instance and gives each affected ticket the same treatment a graceful shutdown would have: the processing-failure comment is posted (explaining that the worker exited unexpectedly before a pull request could be created, and how to unlock a retry), and the ticket is moved back to your To Do status so it is no longer stranded. Each recovery is logged.
+
+Recovery respects the retry gate: the requeued ticket is not re-run on restart (no duplicate execution). It sits in To Do like any other ticket whose last attempt failed, and runs again when the ticket changes — an edited description, a new comment, or `--force`.
+
+Two guards keep the recovery from making noise or causing harm:
+
+- **Tickets that moved on are left alone.** If a ticket is no longer in your configured In Progress status (someone closed it, moved it to review, or otherwise handled it after the crash), the worker does not comment on or move it.
+- **Very old orphans are not announced.** Runs started more than 7 days ago are marked failed in the database but produce no comment or transition, on the assumption they were already handled manually. Set `WORKER_ORPHAN_MAX_AGE_HOURS` in the workspace `.env` to change the cutoff (`0` disables the feedback for every orphan).
+
+Runs from scheduled automations and PR reviews are not part of this: automations recover through their own claim machinery (the next occurrence picks up after a stale lease), and PR runs have their own comment flows.
+
 ### Ticket matches the query but is not picked up
 
 The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:jira]`):
@@ -215,7 +232,11 @@ The regular polling requests use ETags, and GitHub does not count `304 Not Modif
 
 When a watched PR falls behind its base branch, the worker catches the branch up automatically whether the base merges cleanly or conflicts. Eligibility comes from GitHub's own `mergeable_state` (`dirty` = conflicts, `behind` = mergeable but not up to date) — not from ancestry checks against the API-reported base SHA, a field GitHub can leave stale for days. The worker merges the base branch into the PR branch and, only when needed, asks the agent to resolve conflicted files (checking for semantic breakage, not just markers) before the merge is committed; every conflicting PR in the watch list is synced, not just one per tick. The result is pushed normally, never force-pushed: if a human moved the branch in the meantime, the push is rejected instead of being overwritten. A comment on the PR reports successful clean merges and conflict resolutions, and stacked PRs benefit the most, since merging one PR routinely advances the next PR's base.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`.
+Success is verified, not assumed: after a push the resolver re-fetches the PR (a bounded window of a few seconds) and only reports success once GitHub shows the merge commit and no longer reports conflicts. If GitHub still says `dirty` after that window — usually because the base advanced again mid-run — the run counts as failed so another sync opens, and if the push itself cannot be published, every failure path posts a comment on the PR explaining what is missing, so automation never dies silently while the local work looked done.
+
+Transient push problems recover on their own: a rejection caused by concurrent forward movement (someone pushed to the branch while the agent was resolving) triggers a bounded refresh-and-retry that rebuilds the merge on top of the new commits, keeping the eventual push a fast-forward. Rollbacks or history rewrites are left alone and deferred instead.
+
+This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
 
 ## Mention the bot on any PR
 
@@ -233,6 +254,7 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 ## How events are handled
 
 - Events are persisted to a local SQLite queue (`.devintern-code/queue.db`) before processing, so a crash or restart never loses accepted work.
+- Runs interrupted by a dead worker are recovered on startup: their tickets get the failure comment and move back to To Do before new work is picked up.
 - Duplicate webhook deliveries are detected by GitHub's delivery id and skipped.
 - Review feedback is processed before new task pickup: a human waiting on feedback beats a ticket that can wait a minute.
 - One task or scheduled automation runs at a time per repository.

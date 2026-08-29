@@ -32,6 +32,8 @@ export interface WorkspaceDefaults {
   workerTaskArgs?: string;
   /** Fallback default branch for repos that do not set one. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for repos that do not override them. */
+  prLabels?: string[];
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
 }
@@ -44,6 +46,8 @@ export interface RepoConfig {
   remote: string;
   /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
+  prLabels?: string[];
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
@@ -262,6 +266,10 @@ export function parseWorkspaceConfig(
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
+    prLabels:
+      defaultsTable.pr_labels === undefined
+        ? undefined
+        : readStringList(defaultsTable, "pr_labels", "[defaults]", errors),
     pollIntervalSeconds:
       readOptionalInteger(defaultsTable, "poll_interval", "[defaults]", errors, {
         min: 1,
@@ -299,6 +307,10 @@ export function parseWorkspaceConfig(
       name,
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      prLabels:
+        table.pr_labels === undefined
+          ? defaults.prLabels
+          : readStringList(table, "pr_labels", label, errors),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });

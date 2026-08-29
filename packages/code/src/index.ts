@@ -84,8 +84,16 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunPr,
+  recordRunStage,
+  recordRunTicket,
+} from "./lib/run-recorder";
 import type { RunStatus } from "./lib/run-recorder";
+import { buildTicketUrl } from "./lib/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
@@ -321,6 +329,9 @@ function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
   }
   if (trackerType === "github" && process.env.GITHUB_REPO) {
     return process.env.GITHUB_REPO;
+  }
+  if (trackerType === "gitlab" && process.env.GITLAB_PROJECT) {
+    return process.env.GITLAB_PROJECT;
   }
   if (trackerType === "azure-devops" && process.env.AZURE_DEVOPS_PROJECT) {
     return process.env.AZURE_DEVOPS_PROJECT;
@@ -972,6 +983,17 @@ if (process.argv[2] === "init") {
       }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
+      } else if (result.outcome === "failed") {
+        // A landed-but-unconfirmed failure means the merge commit IS on the
+        // PR branch even though verification failed; only the other failure
+        // kinds leave the PR untouched.
+        const untouchedHint =
+          result.failureKind === "landed-but-unconfirmed"
+            ? "The merge commit is on the branch; see the PR for details."
+            : "No changes landed on the PR; see the PR comment for details.";
+        console.error(`❌ Failed: ${result.message}. ${untouchedHint}`);
+      } else if (result.outcome === "deferred") {
+        console.log(`⏳ Deferred: ${result.message}`);
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
@@ -1123,7 +1145,7 @@ program
   .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
   .option(
     "--estimate",
-    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub posts comment-only estimates)",
+    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub and GitLab post comment-only estimates)",
   )
   .option(
     "--sandbox <provider>",
@@ -1149,6 +1171,11 @@ Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
 Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
   devintern 123 --create-pr
   devintern https://github.com/acme/webapp/issues/123 --create-pr
+  devintern --query "is:open label:bug" --create-pr
+
+Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
+  devintern 123 --create-pr
+  devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
 Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
@@ -1409,11 +1436,19 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Scheduled automations run through this same pipeline with their prompt
     // materialized as a markdown task; env markers attribute those runs.
     const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
+    const trackerName = process.env.TASK_TRACKER || "jira";
     beginRun({
       origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
-      tracker: process.env.TASK_TRACKER || "jira",
+      tracker: trackerName,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+      // Ticket link for remote trackers only: markdown-file inputs and
+      // materialized automation prompts have no tracker page, and deriving
+      // URLs from their synthetic keys would point nowhere.
+      ticketUrl:
+        markdownInput || scheduledAutomationId
+          ? undefined
+          : buildTicketUrl(trackerName, workflowKey),
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
@@ -1456,6 +1491,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.error("❌ Error formatting task details:", formatError);
       throw formatError;
     }
+
+    // Snapshot the ticket's description as markdown for the run record so the
+    // dashboard shows what was asked even if the ticket changes or is deleted.
+    recordRunTicket({
+      description: TaskFormatter.buildTaskDescriptionMarkdown(taskDetails),
+    });
 
     // Display summary
     console.log("\n📋 Task Summary:");

@@ -51,21 +51,28 @@ export interface RunMeta {
   repo?: string;
   prNumber?: number;
   automationId?: string;
+  /** Tracker-assigned key of the originating ticket (same as `taskKey`). */
+  ticketKey?: string;
+  /** Web URL of the originating ticket (derived from tracker config + key). */
+  ticketUrl?: string;
   /** Explicit attempt for non-task durable events. */
   attempt?: number;
 }
+
+/** Cap persisted ticket descriptions so a huge ticket cannot bloat the DB. */
+const MAX_DESCRIPTION_LENGTH = 20_000;
 
 export interface RunRecord extends RunMeta {
   id: number;
   /** 1-based attempt number for the task (null-ish for pr_mention runs). */
   attempt?: number;
   prUrl?: string;
-  ticketKey?: string;
-  ticketUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  /** Markdown snapshot of the ticket description captured at run start. */
+  taskDescription?: string;
 }
 
 export interface RunStageRecord {
@@ -189,7 +196,8 @@ export class RunStore {
         attempt INTEGER,
         automation_id TEXT,
         ticket_key TEXT,
-        ticket_url TEXT
+        ticket_url TEXT,
+        task_description TEXT
       )
     `);
 
@@ -206,6 +214,9 @@ export class RunStore {
     }
     if (!columns.some((c) => c.name === "ticket_url")) {
       this.db.run("ALTER TABLE runs ADD COLUMN ticket_url TEXT");
+    }
+    if (!columns.some((c) => c.name === "task_description")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN task_description TEXT");
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
@@ -240,8 +251,8 @@ export class RunStore {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
       `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number,
-       automation_id, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       automation_id, ticket_key, ticket_url, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -251,6 +262,8 @@ export class RunStore {
         meta.repo ?? null,
         meta.prNumber ?? null,
         meta.automationId ?? null,
+        meta.ticketKey ?? null,
+        meta.ticketUrl ?? null,
         Date.now(),
         attempt,
       ],
@@ -310,6 +323,32 @@ export class RunStore {
          pr_url = COALESCE(?, pr_url)
        WHERE id = ?`,
       [pr.repo ?? null, pr.prNumber ?? null, pr.url ?? null, runId],
+    );
+  }
+
+  /**
+   * Attach the originating tracker ticket to a run.
+   *
+   * Fields already set are never clobbered (`COALESCE`), so a late snapshot
+   * cannot erase metadata recorded at run start.
+   *
+   * @param runId - Run id
+   * @param ticket - Ticket key, web URL, and/or markdown description
+   */
+  setRunTicket(runId: number, ticket: { key?: string; url?: string; description?: string }): void {
+    const description = ticket.description?.trim() ? ticket.description : null;
+    this.db.run(
+      `UPDATE runs SET
+         ticket_key = COALESCE(?, ticket_key),
+         ticket_url = COALESCE(?, ticket_url),
+         task_description = COALESCE(?, task_description)
+       WHERE id = ?`,
+      [
+        ticket.key ?? null,
+        ticket.url ?? null,
+        description?.slice(0, MAX_DESCRIPTION_LENGTH) ?? null,
+        runId,
+      ],
     );
   }
 
@@ -399,6 +438,38 @@ export class RunStore {
       .query(`SELECT * FROM runs ${where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as Record<string, unknown>[];
     return rows.map((row) => this.rowToRun(row));
+  }
+
+  /**
+   * Latest run per task key, using the same ordering as {@link listRuns}
+   * (started_at DESC, id DESC). One query for all keys instead of one per key.
+   *
+   * @param taskKeys - Task keys to look up; duplicates are ignored
+   */
+  latestRunByTaskKey(taskKeys: string[]): Map<string, RunRecord> {
+    const map = new Map<string, RunRecord>();
+    const keys = [...new Set(taskKeys)];
+    if (keys.length === 0) {
+      return map;
+    }
+    const placeholders = keys.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT * FROM (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY task_key ORDER BY started_at DESC, id DESC
+           ) AS rn
+           FROM runs WHERE task_key IN (${placeholders})
+         ) WHERE rn = 1`,
+      )
+      .all(...keys) as Record<string, unknown>[];
+    for (const row of rows) {
+      const run = this.rowToRun(row);
+      if (run.taskKey) {
+        map.set(run.taskKey, run);
+      }
+    }
+    return map;
   }
 
   /**
@@ -552,6 +623,7 @@ export class RunStore {
       automationId: (row.automation_id as string | null) ?? undefined,
       ticketKey: (row.ticket_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
+      taskDescription: (row.task_description as string | null) ?? undefined,
     };
   }
 
@@ -626,6 +698,28 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Attach the originating tracker ticket to the current run (no-op when no run
+ * is active). Used to snapshot the ticket's description once task details are
+ * formatted, preserving what was asked even if the ticket changes later.
+ *
+ * @param ticket - Ticket key, web URL, and/or markdown description
+ */
+export function recordRunTicket(ticket: {
+  key?: string;
+  url?: string;
+  description?: string;
+}): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunTicket(currentRunId, ticket);
+  } catch (error) {
+    warnOnce("ticket", error);
   }
 }
 

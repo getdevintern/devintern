@@ -1066,9 +1066,12 @@ export class Utils {
 
       // Treat other push failures as potential hook/fixable errors
       // The full error context (stdout + stderr) will be passed to Agent
+      // A failing pre-push hook writes its diagnostics to stdout while git
+      // itself only emits one stderr line ("error: failed to push some refs
+      // to ..."); surfacing only stderr hides which hook command failed.
       return {
         success: false,
-        message: `Failed to push branch: ${pushResult.error}`,
+        message: `Failed to push branch: ${fullError || pushResult.error}`,
         hookError: fullError || pushResult.error,
       };
     } catch (error) {

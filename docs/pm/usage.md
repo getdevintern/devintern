@@ -74,7 +74,7 @@ devpm --prompt <text> [options]
 
 ### Additional Options
 
-- `--epic, -e <key>`: Link the created story to an epic (e.g., PROJ-100). Ignored for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, Markdown).
+- `--epic, -e <key>`: Link the created story to an epic (e.g., PROJ-100). Ignored for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, GitLab, Markdown).
 - `--type, -t <type>`: Issue type (default: "Task"). Common types: Task, Story, Bug, Epic. Only applied by backends that support issue types (Jira, Azure DevOps, GitHub, Markdown); ignored by Linear, Trello, and Asana.
 - `--custom, -c <text>`: Additional custom instructions for the requirements
 - `--attach <path>`: Attach a local file for agent context (and upload on create when the tracker supports it). Repeatable. Supported: images, text/docs, PDF (not Office binaries such as `.docx`). Max 10 files.

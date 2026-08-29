@@ -558,7 +558,7 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
           return true; // continue create-another loop
         }
         console.error("\n❌ Failed to parse story requirements from Agent output");
-        console.error("Error:", error.message);
+        console.error(error.message);
         console.error("Output:", error.detail);
         if (error.dumpFile) {
           console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
@@ -718,7 +718,7 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       }
       if (error instanceof EngineError && error.code === "parse-failed") {
         console.error("\n❌ Failed to parse subtasks from Agent output");
-        console.error("Error:", error.message);
+        console.error(error.message);
         console.error("Output:", error.detail);
         if (error.dumpFile) {
           console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);

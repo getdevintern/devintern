@@ -5,7 +5,8 @@ export type TrackerType =
   | "trello"
   | "azure-devops"
   | "asana"
-  | "github";
+  | "github"
+  | "gitlab";
 
 export interface TrackerConfig {
   backend: {
@@ -44,5 +45,10 @@ export interface TrackerConfig {
     owner: string;
     repo: string;
     repository: string;
+  };
+  gitlab?: {
+    token: string;
+    projectPath: string;
+    baseUrl: string;
   };
 }

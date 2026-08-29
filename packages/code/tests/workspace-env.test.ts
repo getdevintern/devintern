@@ -80,6 +80,20 @@ describe("buildRepoEnv", () => {
     expect(nonGitHub.GITHUB_REPO).toBe(process.env.GITHUB_REPO);
   });
 
+  test("injects PR_LABELS from repo pr_labels", () => {
+    const env = buildRepoEnv(repo({ prLabels: ["devintern", "auto-pr"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("devintern,auto-pr");
+  });
+
+  test("repo pr_labels overrides a PR_LABELS carried by env layers", () => {
+    writeFileSync(join(workspaceDir, ".env"), "PR_LABELS=from-env\n");
+    const env = buildRepoEnv(repo({ prLabels: ["from-config"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("from-config");
+
+    const unset = buildRepoEnv(repo(), workspaceDir);
+    expect(unset.PR_LABELS).toBe("from-env");
+  });
+
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {
     const path = join(workspaceDir, "sample.env");
     writeFileSync(path, "# comment\n\nA=1\nB='two'\nC=a=b\nBROKEN\n");

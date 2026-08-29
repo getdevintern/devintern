@@ -21,6 +21,7 @@ export interface RunRecord {
   automationId?: string;
   ticketKey?: string;
   ticketUrl?: string;
+  taskDescription?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;
@@ -90,6 +91,38 @@ export interface WorkerResponse {
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+}
+
+export type WorkerLogLevel = "info" | "warn" | "error";
+
+export type LogStream = "out" | "err";
+
+export interface LogEntry {
+  index: number;
+  timestamp: number | null;
+  level: WorkerLogLevel;
+  stream: LogStream;
+  message: string;
+  taskKey?: string | null;
+  runId?: number;
+  runStatus?: RunStatus;
+}
+
+export interface LogSourceInfo {
+  path: string;
+  stream: LogStream;
+  exists: boolean;
+  totalBytes: number;
+  readBytes: number;
+  truncated: boolean;
+  error: string;
+}
+
+export interface LogsResponse {
+  available: boolean;
+  entries: LogEntry[];
+  sources: LogSourceInfo[];
+  truncated: boolean;
 }
 
 export interface PollState<T> {

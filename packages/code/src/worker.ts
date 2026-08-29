@@ -11,6 +11,8 @@
  */
 
 import { LockManager } from "./lib/lock-manager";
+import { startWorkerCapture } from "./lib/worker-capture";
+import type { WorkerCaptureHandle } from "./lib/worker-capture";
 
 export interface WorkerOptions {
   /** Single-instance lock override (workspace mode locks the workspace home
@@ -18,6 +20,9 @@ export interface WorkerOptions {
   lock?: LockManager;
   /** What this worker serves, for the startup banner (defaults to cwd). */
   label?: string;
+  /** Directory for the dashboard's `worker.stdout.log` / `worker.stderr.log`
+   *  capture files (the workspace home). Omit to skip self-capture. */
+  logDir?: string;
   /** Called once after every configured event source starts successfully. */
   onStarted?: (acquirerNames: string[]) => Promise<void> | void;
 }
@@ -43,6 +48,17 @@ export async function startWorker(
   options: WorkerOptions,
   acquirers: Acquirer[] = [],
 ): Promise<void> {
+  // Self-capture first so the startup banner lands in the log files the
+  // dashboard tails; a capture failure never blocks the daemon.
+  let capture: WorkerCaptureHandle | null = null;
+  if (options.logDir) {
+    try {
+      capture = startWorkerCapture(options.logDir);
+    } catch {
+      capture = null;
+    }
+  }
+
   console.log("👷 Starting devintern worker");
   console.log(`   Workspace: ${options.label ?? process.cwd()}`);
   console.log(
@@ -95,6 +111,7 @@ export async function startWorker(
     // In-flight queue events stay marked in SQLite and are recovered on the
     // next start; shutdown never loses accepted work.
     lock.release();
+    capture?.stop();
     console.log("👋 Worker stopped");
     process.exit(0);
   };

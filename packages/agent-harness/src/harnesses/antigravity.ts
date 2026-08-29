@@ -34,13 +34,20 @@ export class AntigravityHarness implements AgentHarness {
   /** Executable on PATH after install (`curl -fsSL https://antigravity.google/cli/install.sh | bash`). */
   readonly defaultPath = "agy";
   readonly promptFlag = "-p";
+  /**
+   * `--output-format json` (print mode, v1.1.8+) emits one JSON envelope with
+   * status, response text, and usage metadata.
+   */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `agy` CLI flags for headless (`-p`) execution.
    *
-   * @param options - Supports `skipPermissions` (`--dangerously-skip-permissions`)
-   *   and `model` (`--model`, added upstream in v1.0.5; takes a model slug as
-   *   listed by `agy models`). Max-turns has no `--max-turns` equivalent.
+   * @param options - Supports `skipPermissions`
+   *   (`--dangerously-skip-permissions`), `model` (`--model`, added upstream
+   *   in v1.0.5; takes a model slug as listed by `agy models`),
+   *   `structuredOutput`, and `workingDir`. Max-turns has no `--max-turns`
+   *   equivalent.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -55,6 +62,10 @@ export class AntigravityHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Antigravity does not currently support --max-turns.

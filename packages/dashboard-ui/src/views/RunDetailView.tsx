@@ -4,8 +4,10 @@ import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
 import { StageDetailFields } from "@/components/StageDetailFields";
+import { TaskDescription } from "@/components/TaskDescription";
+import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Markdown } from "@/lib/markdown";
 import { usePoll } from "@/lib/api";
 import type { RunDetailResponse, RunStageRecord } from "@/lib/api";
@@ -119,9 +121,14 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
             <CardHeader>
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-semibold">
-                  {data.run.taskKey ??
-                    data.run.automationId ??
-                    (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)}
+                  <TicketKey
+                    label={
+                      data.run.taskKey ??
+                      data.run.automationId ??
+                      (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)
+                    }
+                    href={data.run.ticketUrl}
+                  />
                 </h2>
                 <StatusBadge status={data.run.status} />
               </div>
@@ -154,6 +161,19 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               />
             </CardContent>
           </Card>
+
+          {(data.run.taskKey || data.run.ticketUrl) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                  Task description
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <TaskDescription description={data.run.taskDescription} />
+              </CardContent>
+            </Card>
+          )}
 
           <div className="space-y-0">
             {data.stages.map((stage, index) => (

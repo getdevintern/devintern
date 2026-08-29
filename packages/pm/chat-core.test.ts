@@ -201,8 +201,14 @@ describe("messages", () => {
 
   test("renderError maps engine codes to friendly text without leaking detail", () => {
     const msg = renderError(new EngineError("parse-failed", "bad json", "RAW AGENT DUMP"));
-    expect(msg.text).toContain("couldn't parse");
+    expect(msg.text).toContain("malformed output");
+    expect(msg.text).toContain("switch harness/model");
     expect(msg.text).not.toContain("RAW AGENT DUMP");
+    expect(
+      renderError(
+        new EngineError("parse-failed", "bad json", "d", "/tmp/devpm-story-generation-parse-1.log"),
+      ).text,
+    ).toContain("/tmp/devpm-story-generation-parse-1.log");
     expect(renderError(new EngineError("agent-failed", "x")).text).toContain("devpm serve");
     expect(renderError(new Error("plain")).text).toContain("plain");
   });
