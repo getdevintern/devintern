@@ -96,6 +96,11 @@ export function upsertEnvVars(content: string, vars: Record<string, string>): st
 /**
  * Render a systemd service unit for the worker.
  *
+ * No stdout/stderr redirection here on purpose: the daemon tees its own
+ * console output into the dashboard's capture files (see `worker-capture.ts`),
+ * so custom units and shell wrappers need no redirect either — adding one
+ * would hide the output from the dashboard.
+ *
  * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
 export function renderSystemdUnit(options: {
@@ -134,7 +139,12 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-/** Render a per-user macOS launchd agent for the workspace worker. */
+/**
+ * Render a per-user macOS launchd agent for the workspace worker.
+ *
+ * Like the systemd unit, this does not redirect stdout/stderr: the worker
+ * self-captures into the dashboard's log files (see `worker-capture.ts`).
+ */
 export function renderLaunchdPlist(options: {
   execPath: string;
   workingDir: string;
@@ -161,10 +171,6 @@ export function renderLaunchdPlist(options: {
     <key>SuccessfulExit</key>
     <false/>
   </dict>
-  <key>StandardOutPath</key>
-  <string>${escapeXml(join(options.workingDir, "worker.stdout.log"))}</string>
-  <key>StandardErrorPath</key>
-  <string>${escapeXml(join(options.workingDir, "worker.stderr.log"))}</string>
 </dict>
 </plist>
 `;

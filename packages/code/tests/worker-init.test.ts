@@ -49,6 +49,15 @@ describe("renderSystemdUnit", () => {
     expect(unit).toContain("Restart=on-failure");
   });
 
+  test("does not redirect stdout/stderr — the worker self-captures", () => {
+    const unit = renderSystemdUnit({
+      execPath: "/usr/local/bin/devintern",
+      projectDir: "/srv/app",
+    });
+    expect(unit).not.toContain("StandardOutput=");
+    expect(unit).not.toContain("StandardError=");
+  });
+
   test("uses the canonical webhook command when webhook mode is chosen", () => {
     const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app", listen: true });
     expect(unit).toContain("ExecStart=devintern webhook serve");

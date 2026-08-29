@@ -1,10 +1,11 @@
 /**
  * Worker log tailing for the dashboard.
  *
- * The worker daemon logs to stdout/stderr. When it runs as a background
- * service those streams are captured into `worker.stdout.log` /
- * `worker.stderr.log` in the working directory (launchd config written by
- * `worker-init.ts`) or into the system journal (systemd). This module tails
+ * The worker daemon logs to stdout/stderr and tees its own console output
+ * into `worker.stdout.log` / `worker.stderr.log` in the workspace home (see
+ * `worker-capture.ts`), so the files exist no matter how the daemon is
+ * launched — systemd, launchd, cron, or a plain terminal. Legacy setups that
+ * redirect stdout/stderr to those same files keep working; this module tails
  * the capture files so the dashboard can surface recent worker log entries
  * without SSH access — the same local-data philosophy as the SQLite-backed
  * endpoints in `dashboard-api.ts`.

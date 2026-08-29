@@ -38,11 +38,19 @@ Success and escalation rates are computed over finished runs only. Run duration 
 
 ## Where the logs come from
 
-The worker daemon logs to stdout/stderr. When it runs as a background service, that output is captured: the macOS launchd agent written by `worker init` redirects it into `worker.stdout.log` and `worker.stderr.log` in the workspace directory (on Linux systemd, output goes to the journal instead). The Logs tab tails those capture files — whether or not the worker is currently running — and only reads a bounded tail (the most recent ~256 KiB per file, at most 500 lines), so huge logs never slow down or bloat the dashboard.
+The worker daemon tees its own console output into `worker.stdout.log` and `worker.stderr.log` in the workspace home (`~/.devintern`), so the Logs tab works no matter how the daemon is launched — a systemd unit, launchd agent, cron wrapper, or a plain terminal — without the service definition having to redirect stdout/stderr. Each file rotates to `<name>.1` past 8 MiB. The Logs tab tails those capture files — whether or not the worker is currently running — and only reads a bounded tail (the most recent ~256 KiB per file, at most 500 lines), so huge logs never slow down or bloat the dashboard.
+
+To follow the same output in a terminal:
+
+```bash
+tail -f ~/.devintern/worker.stdout.log ~/.devintern/worker.stderr.log
+```
+
+If `DEVINTERN_WORKSPACE_DIR` is set, the capture files live in that directory instead. When the files stay empty, your service definition still redirects output elsewhere — for example a `>> file` shell wrapper in the unit. Remove the redirect (or re-run `worker init` and reinstall the unit), or fall back to the journal: `journalctl --user -u devintern-worker -f`.
 
 A few behaviors worth knowing:
 
-- **No timestamps?** Capture files written by launchd have no timestamps; those entries show `–` for time and keep their relative order.
+- **No timestamps?** Capture files written by a service redirect instead of the worker's own capture have no timestamps; those entries show `–` for time and keep their relative order. The worker's own capture timestamps every line.
 - **Secrets**: log lines are scanned for credential-shaped content (`TOKEN=…` style assignments, common token formats) and masked before being served. Logs stay on this machine either way.
 - **ANSI codes**: terminal colors and control characters are stripped for clean rendering.
 - **If nothing shows up**: when no capture file exists (fresh install, or the worker has only ever run in the foreground), the tab explains where logs would be instead of showing an error.

@@ -6,6 +6,7 @@
 
 - **High-signal worker analytics**: a worker emits one anonymous `worker_started` event after its sources start (`polling`, `relay`, `hybrid`, or `scheduled`) and one `worker_task_run` event per terminal task outcome. Worker task subprocesses no longer duplicate the ordinary `cli_run` event; no polling heartbeats, task keys, repository names, prompts, or error text are sent
 - **Workspace worker probes push access at startup**: each configured GitHub HTTPS remote gets a side-effect-free `git push --dry-run` against its bare clone, so an under-scoped token (fine-grained PAT without `Contents: Read and write`, or a `$GITHUB_TOKEN` that silently overrides the keyring login via `gh auth git-credential`) is reported as a clear startup warning instead of burning task pickups on 403 pushes
+- **Worker logs just work**: the daemon tees its own console output into `worker.stdout.log` / `worker.stderr.log` in the workspace home (`~/.devintern`; one log set per workspace, not per repo, rotating at 8 MiB), so the dashboard Logs tab is populated under any launch method — systemd unit, launchd agent, cron wrapper, or terminal — with no service-definition redirection required
 
 ### Changed
 
