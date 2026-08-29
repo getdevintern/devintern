@@ -550,6 +550,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     {
       lock: createWorkspaceLock(workspaceDir),
       label: workspaceDir,
+      // Capture logs in the workspace home: one daemon serves many repos, and
+      // the dashboard's log tailer already searches this directory.
+      logDir: workspaceDir,
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",
