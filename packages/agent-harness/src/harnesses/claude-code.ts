@@ -33,11 +33,14 @@ export class ClaudeCodeHarness implements AgentHarness {
   readonly promptFlag = "-p";
   readonly supportedModes = ["plan", "readonly"] as const;
   readonly supportsMaxTurns = true;
+  /** Print mode accepts `--output-format json` (single JSON envelope, result in `result`). */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `claude` CLI flags for non-interactive (`-p`) execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`, and `maxTurns`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`, `maxTurns`,
+   *   and `structuredOutput`.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -61,6 +64,10 @@ export class ClaudeCodeHarness implements AgentHarness {
 
     if (options.maxTurns !== undefined) {
       args.push("--max-turns", String(options.maxTurns));
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     return args;

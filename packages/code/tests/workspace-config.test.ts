@@ -31,11 +31,13 @@ tracker = "jira"
 task_query = "labels = devintern"
 worker_task_args = "--create-pr"
 default_branch = "main"
+pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
 default_branch = "develop"
+pr_labels = ["backend"]
 env_file = "env/backend.env"
   [repos.env]
   GITHUB_REPO = "acme/backend"
@@ -65,16 +67,19 @@ describe("parseWorkspaceConfig", () => {
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
     expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
+    expect(config.defaults.prLabels).toEqual(["devintern", "auto-pr"]);
 
     const backend = findRepo(config, "backend");
     expect(backend?.remote).toBe("git@github.com:acme/backend.git");
     expect(backend?.defaultBranch).toBe("develop");
+    expect(backend?.prLabels).toEqual(["backend"]);
     expect(backend?.envFile).toBe("env/backend.env");
     expect(backend?.env).toEqual({ GITHUB_REPO: "acme/backend" });
 
     // frontend has no default_branch of its own: inherits [defaults].
     const frontend = findRepo(config, "frontend");
     expect(frontend?.defaultBranch).toBe("main");
+    expect(frontend?.prLabels).toEqual(["devintern", "auto-pr"]);
     expect(frontend?.env).toEqual({});
 
     expect(config.routing).toHaveLength(2);
@@ -94,6 +99,7 @@ tracker = "markdown"
     expect(config.workspace.worktreesTtlDays).toBe(DEFAULT_WORKTREES_TTL_DAYS);
     expect(config.workspace.dashboard).toBe(DEFAULT_DASHBOARD);
     expect(config.defaults.pollIntervalSeconds).toBe(DEFAULT_POLL_INTERVAL_SECONDS);
+    expect(config.defaults.prLabels).toBeUndefined();
     expect(config.repos).toEqual([]);
     expect(config.routing).toEqual([]);
   });
@@ -141,6 +147,161 @@ tracker = "markdown"
 poll_interval = 0
 `),
     ).toThrow(/poll_interval must be a positive integer/);
+  });
+
+  test("defaults conflict resolution to auto without a schedule", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("auto");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("parses scheduled conflict resolution with cron", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ cron: "0 3 * * *" });
+  });
+
+  test("parses scheduled conflict resolution with an interval", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ interval: "1d", intervalMs: 86_400_000 });
+  });
+
+  test("scheduled conflict resolution requires exactly one schedule key", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+  });
+
+  test("rejects invalid scheduled conflict resolution schedules", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "99 bad"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/five-field cron expression/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "30s"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/positive duration such as 15m, 6h, or 1d/);
+  });
+
+  test("rejects unknown conflict resolution modes", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "nightly"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must be "auto", "scheduled", or "disabled"/);
+  });
+
+  test("parses disabled conflict resolution", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("disabled");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("rejects schedule keys with disabled conflict resolution", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
+  test("rejects schedule keys without scheduled mode", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "auto"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
+  test("rejects invalid pr_labels values", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+pr_labels = "devintern"
+`),
+    ).toThrow(/\[defaults\]\.pr_labels must be an array of non-empty strings/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+pr_labels = [""]
+`),
+    ).toThrow(/\[\[repos\]\]\[0\]\.pr_labels must be an array of non-empty strings/);
   });
 
   test("rejects invalid TOML", () => {

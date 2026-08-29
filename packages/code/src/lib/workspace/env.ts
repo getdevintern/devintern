@@ -64,8 +64,9 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
- * (`WEBHOOK_QUEUE_DB`, stable analytics config directory, and `GITHUB_REPO`
- * for GitHub remotes unless the repo layers already set it).
+ * (`WEBHOOK_QUEUE_DB`, stable analytics config directory, `GITHUB_REPO`
+ * for GitHub remotes unless the repo layers already set it, and `PR_LABELS`
+ * from the repo's `pr_labels` config).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -95,6 +96,12 @@ export function buildRepoEnv(
     if (slug) {
       env.GITHUB_REPO = slug;
     }
+  }
+
+  // Config-driven PR labels win over a PR_LABELS the repo env layers carried;
+  // when the config sets none, an env-provided value survives untouched.
+  if (repo.prLabels && repo.prLabels.length > 0) {
+    env.PR_LABELS = repo.prLabels.join(",");
   }
 
   return env;

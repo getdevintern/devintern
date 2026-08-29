@@ -29,6 +29,15 @@ worktrees_ttl_days = 7
 # Local observability dashboard (http://localhost:4400). Set false to disable.
 dashboard = true
 # dashboard_port = 4400
+# When automatic merge-conflict resolution runs on the agent's PRs.
+# "auto" (default) resolves as soon as a conflict is detected; "scheduled"
+# queues conflicts during polling and resolves them in one off-peak window
+# to cut AI token spend. Requires exactly one schedule below, and a worker
+# restart to take effect. "disabled" turns it off entirely — conflicts
+# stay for manual resolution (devintern resolve-conflicts <pr-url>).
+# conflict_resolution = "scheduled"
+# conflict_resolution_cron = "0 3 * * *"      # worker host timezone
+# conflict_resolution_interval = "1d"
 
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, azure-devops,
@@ -38,6 +47,8 @@ tracker = "jira"
 # task_query = "sprint in openSprints() AND labels = devintern"
 # Extra CLI flags per task run.
 worker_task_args = "--create-pr"
+# Labels applied to created PRs (GitHub only). Override per repo.
+# pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
 default_branch = "main"

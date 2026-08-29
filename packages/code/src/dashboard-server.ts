@@ -16,11 +16,14 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleLogs,
+  handleRetryRun,
   handleRuns,
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
 } from "./lib/dashboard-api";
+import type { RetryHandlerDeps } from "./lib/dashboard-api";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 
@@ -30,6 +33,16 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Retry execution mode (default `spawn`). The workspace worker passes
+   * `schedule` so dashboard retries are drained through the fleet pipeline;
+   * a standalone `devintern dashboard` keeps the detached-CLI spawn.
+   */
+  retryMode?: "spawn" | "schedule";
+  /** Collaborator overrides for the retry action (tests). */
+  retryDeps?: RetryHandlerDeps;
+  /** Directories to search for worker capture files (primary first). */
+  logDirs?: string[];
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -87,7 +100,12 @@ export function startDashboardServer(
   const port =
     options.port ?? parseInt(process.env.DASHBOARD_PORT || String(DEFAULT_DASHBOARD_PORT), 10);
   const host = options.host ?? "127.0.0.1";
-  const data = new DashboardData({ dbPath: options.dbPath, workingDir: options.workingDir });
+  const data = new DashboardData({
+    dbPath: options.dbPath,
+    workingDir: options.workingDir,
+    retryMode: options.retryMode,
+    logDirs: options.logDirs,
+  });
   const uiDir = resolveUiDir();
 
   if (host !== "127.0.0.1" && host !== "localhost") {
@@ -98,15 +116,20 @@ export function startDashboardServer(
   }
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
 
   const server = Bun.serve({
     port,
     hostname: host,
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
+        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
+        if (retry) {
+          return json(await handleRetryRun(data, retry[1], options.retryDeps));
+        }
         if (request.method !== "GET") {
           return json({ status: 405, body: { error: "method not allowed" } });
         }
@@ -125,6 +148,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/logs") {
+          return json(handleLogs(data, url.searchParams));
         }
         return json({ status: 404, body: { error: "not found" } });
       }

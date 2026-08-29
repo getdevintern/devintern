@@ -1,9 +1,12 @@
 import { readFileSync } from "fs";
 
 import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
-import { parseAutomationEntries } from "../automation-config";
-import type { AutomationConfig } from "../automation-config";
+import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
+import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
 import { parseToml } from "./toml";
+
+/** When automatic conflict resolution on the agent's PRs runs. */
+export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
 
 /** Workspace-wide settings from the `[workspace]` table. */
 export interface WorkspaceSettings {
@@ -13,6 +16,20 @@ export interface WorkspaceSettings {
   dashboard: boolean;
   /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
   dashboardPort?: number;
+  /**
+   * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
+   * they are detected; `scheduled` queues them during polling and resolves
+   * them in the configured window (see {@link WorkspaceSettings.conflictSchedule});
+   * `disabled` turns automatic conflict resolution off entirely — conflicts
+   * stay for manual resolution (`devintern resolve-conflicts <pr-url>`).
+   */
+  conflictResolution: ConflictResolutionMode;
+  /**
+   * Cron-or-interval window for scheduled conflict resolution (same format
+   * as `[[automations]]` schedules). Set only when `conflictResolution` is
+   * `"scheduled"`.
+   */
+  conflictSchedule?: CronOrIntervalSchedule;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -25,6 +42,8 @@ export interface WorkspaceDefaults {
   workerTaskArgs?: string;
   /** Fallback default branch for repos that do not set one. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for repos that do not override them. */
+  prLabels?: string[];
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
 }
@@ -37,6 +56,8 @@ export interface RepoConfig {
   remote: string;
   /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
+  prLabels?: string[];
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
@@ -67,6 +88,7 @@ export interface WorkspaceConfig {
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
+export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -236,6 +258,38 @@ export function parseWorkspaceConfig(
     },
   );
 
+  const conflictResolutionRaw = readString(
+    workspaceTable,
+    "conflict_resolution",
+    "[workspace]",
+    errors,
+  );
+  let conflictResolution = DEFAULT_CONFLICT_RESOLUTION;
+  let conflictSchedule: CronOrIntervalSchedule | undefined;
+  if (conflictResolutionRaw === "scheduled") {
+    conflictResolution = "scheduled";
+    conflictSchedule = parseCronOrIntervalSchedule(
+      workspaceTable,
+      {
+        label: "[workspace]",
+        cronKey: "conflict_resolution_cron",
+        intervalKey: "conflict_resolution_interval",
+      },
+      errors,
+    );
+  } else if (conflictResolutionRaw === "disabled") {
+    conflictResolution = "disabled";
+  } else if (conflictResolutionRaw && conflictResolutionRaw !== "auto") {
+    errors.push(`[workspace].conflict_resolution must be "auto", "scheduled", or "disabled".`);
+  }
+  if (conflictResolutionRaw !== "scheduled") {
+    for (const key of ["conflict_resolution_cron", "conflict_resolution_interval"] as const) {
+      if (workspaceTable[key] !== undefined) {
+        errors.push(`[workspace].${key} is only used when conflict_resolution = "scheduled".`);
+      }
+    }
+  }
+
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
   if (tracker && !supportsPolling(tracker)) {
@@ -249,6 +303,10 @@ export function parseWorkspaceConfig(
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
+    prLabels:
+      defaultsTable.pr_labels === undefined
+        ? undefined
+        : readStringList(defaultsTable, "pr_labels", "[defaults]", errors),
     pollIntervalSeconds:
       readOptionalInteger(defaultsTable, "poll_interval", "[defaults]", errors, {
         min: 1,
@@ -286,6 +344,10 @@ export function parseWorkspaceConfig(
       name,
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      prLabels:
+        table.pr_labels === undefined
+          ? defaults.prLabels
+          : readStringList(table, "pr_labels", label, errors),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -330,7 +392,7 @@ export function parseWorkspaceConfig(
   }
 
   return {
-    workspace: { worktreesTtlDays, dashboard, dashboardPort },
+    workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
     defaults,
     repos,
     routing,

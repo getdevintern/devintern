@@ -19,11 +19,17 @@ export class KimiHarness implements AgentHarness {
   readonly promptFlag = "--prompt";
   /** No native plan/read-only enforcement documented for headless `kimi --print`. */
   readonly supportedModes = [] as const;
+  /**
+   * Print mode accepts `--output-format stream-json` (JSONL messages); its
+   * only structured format.
+   */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `kimi --print` flags for non-interactive execution.
    *
-   * @param options - Supports `skipPermissions` (`--yolo`) and `model`.
+   * @param options - Supports `skipPermissions` (`--yolo`), `model`, and
+   *   `structuredOutput`.
    * @returns Args including `--print`; prompt is supplied via {@link promptFlag}.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -36,6 +42,10 @@ export class KimiHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "stream-json");
     }
 
     // Kimi CLI does not currently support --max-turns.

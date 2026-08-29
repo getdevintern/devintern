@@ -18,11 +18,14 @@ export class ClineHarness implements AgentHarness {
   readonly defaultPath = "cline";
   /** No native plan/read-only enforcement documented for headless `cline task`. */
   readonly supportedModes = [] as const;
+  /** `--json` emits newline-delimited JSON message objects instead of styled text. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `cline task` subcommand flags for non-interactive execution.
    *
-   * @param options - Supports `skipPermissions` (`--yolo`) and `model`.
+   * @param options - Supports `skipPermissions` (`--yolo`), `model`, and
+   *   `structuredOutput` (`--json`).
    * @returns Args starting with `task`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -35,6 +38,10 @@ export class ClineHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--json");
     }
 
     // Cline does not currently support --max-turns.
