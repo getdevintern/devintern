@@ -135,6 +135,26 @@ describe("dashboard API", () => {
     expect(handleRunDetail(data, "abc").status).toBe(400);
   });
 
+  test("run detail includes the ticket description snapshot; the runs list strips it", () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-2",
+      tracker: "jira",
+      ticketUrl: "https://acme.atlassian.net/browse/PROJ-2",
+    });
+    store.setRunTicket(id, { description: "# Task\n\nBuild the thing." });
+    store.close();
+
+    const detail = handleRunDetail(data, String(id));
+    const detailBody = detail.body as { run: { taskDescription?: string } };
+    expect(detailBody.run.taskDescription).toBe("# Task\n\nBuild the thing.");
+
+    const listed = handleRuns(data, new URLSearchParams({ limit: "10" }));
+    const listBody = listed.body as { runs: { taskDescription?: string }[] };
+    expect(listBody.runs[0].taskDescription).toBeUndefined();
+  });
+
   test("handleStats computes rates over terminal runs only", () => {
     const store = new RunStore(dbPath);
     seedRun(store, { status: "succeeded", prUrl: "https://github.com/a/b/pull/1" });
