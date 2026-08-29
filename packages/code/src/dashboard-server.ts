@@ -16,6 +16,7 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleLogs,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -32,6 +33,8 @@ export interface DashboardServerOptions {
   workingDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
+  /** Directories to search for worker capture files (primary first). */
+  logDirs?: string[];
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -93,6 +96,7 @@ export function startDashboardServer(
     dbPath: options.dbPath,
     workingDir: options.workingDir,
     scheduleSnapshot: options.scheduleSnapshot,
+    logDirs: options.logDirs,
   });
   const uiDir = resolveUiDir();
 
@@ -131,6 +135,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/logs") {
+          return json(handleLogs(data, url.searchParams));
         }
         return json({ status: 404, body: { error: "not found" } });
       }
