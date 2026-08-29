@@ -21,6 +21,7 @@ export interface RunRecord {
   automationId?: string;
   ticketKey?: string;
   ticketUrl?: string;
+  taskDescription?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;

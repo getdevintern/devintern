@@ -28,13 +28,15 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. Filter by status or origin (`origin=scheduled` isolates automation runs).
-- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs).
+- **Run detail**: the task key header (linked to its tracker ticket when possible) plus a snapshot of the original task description — captured when the run started and rendered as markdown — followed by a stage-by-stage timeline: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Logs**: the most recent worker log lines (timestamp, severity, message), filterable by level (`everything` / `warnings` / `errors`) with a search box over the loaded window. Lines that mention a task key link straight to that task's latest run in the Runs view.
 - **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
 
 Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
+
+The ticket link and description snapshot work for remote trackers whose web URLs can be derived from base configuration plus the task key (Jira, GitHub Issues, GitLab, Azure DevOps, Asana, Trello). Linear issue links need the organization slug, so those keys stay plain text there; markdown-file runs (including scheduled automations) have no tracker page at all. Descriptions are persisted when the run begins, so history keeps showing what was asked even if the ticket is later edited or deleted.
 
 ## Retrying a run
 

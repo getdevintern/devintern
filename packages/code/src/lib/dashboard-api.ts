@@ -174,6 +174,12 @@ export class DashboardData {
     return this.ensureStores() === null;
   }
 
+  /**
+   * List runs for `/api/runs`.
+   *
+   * Task descriptions are stripped here: they are polled every few seconds
+   * and would multiply the payload dozens of times; run detail serves them.
+   */
   listRuns(filter: {
     taskKey?: string;
     status?: RunStatus;
@@ -182,7 +188,7 @@ export class DashboardData {
     offset: number;
   }): { runs: RunRecord[]; total: number } {
     return this.read({ runs: [], total: 0 }, (stores) => ({
-      runs: stores.runs.listRuns(filter),
+      runs: stores.runs.listRuns(filter).map((run) => ({ ...run, taskDescription: undefined })),
       total: stores.runs.countFilteredRuns(filter),
     }));
   }
