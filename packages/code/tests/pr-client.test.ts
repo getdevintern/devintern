@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { GitHubPRClient, isTransientPrFailure } from "../src/lib/pr-client";
+import { GitHubPRClient, isTransientPrFailure, parsePrLabels } from "../src/lib/pr-client";
 import type { PRInfo } from "../src/lib/pr-client";
 
 const originalFetch = globalThis.fetch;
@@ -48,6 +48,105 @@ describe("isTransientPrFailure", () => {
         "GitHub client not configured. Please set GITHUB_TOKEN or configure GitHub App.",
       ),
     ).toBe(false);
+  });
+});
+
+describe("parsePrLabels", () => {
+  test("splits a comma-separated value and drops empties", () => {
+    expect(parsePrLabels("devintern, auto-pr,, backend ")).toEqual([
+      "devintern",
+      "auto-pr",
+      "backend",
+    ]);
+    expect(parsePrLabels(undefined)).toEqual([]);
+    expect(parsePrLabels("")).toEqual([]);
+    expect(parsePrLabels(" , ")).toEqual([]);
+  });
+});
+
+describe("GitHubPRClient label application", () => {
+  test("labels the PR after a successful create", async () => {
+    const labelBodies: unknown[] = [];
+    let labelRequested = "";
+    globalThis.fetch = mockFetch(async (url, init) => {
+      if (String(url).endsWith("/pulls") && init?.method === "POST") {
+        return jsonResponse(201, {
+          html_url: "https://github.com/owner/repo/pull/7",
+          number: 7,
+        });
+      }
+      labelRequested = String(url);
+      labelBodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(200, []);
+    });
+
+    const client = new GitHubPRClient("test-token");
+    const result = await client.createPullRequest(basePrInfo({ labels: ["devintern", "auto-pr"] }));
+
+    expect(result.success).toBe(true);
+    expect(labelRequested).toBe("https://api.github.com/repos/owner/repo/issues/7/labels");
+    expect(labelBodies).toEqual([{ labels: ["devintern", "auto-pr"] }]);
+  });
+
+  test("does not label when no labels are configured", async () => {
+    let labelCalled = false;
+    globalThis.fetch = mockFetch(async (url, init) => {
+      if (String(url).endsWith("/pulls") && init?.method === "POST") {
+        return jsonResponse(201, {
+          html_url: "https://github.com/owner/repo/pull/7",
+          number: 7,
+        });
+      }
+      labelCalled = true;
+      return jsonResponse(200, []);
+    });
+
+    const client = new GitHubPRClient("test-token");
+    const result = await client.createPullRequest(basePrInfo());
+
+    expect(result.success).toBe(true);
+    expect(labelCalled).toBe(false);
+  });
+
+  test("labels an already-existing PR found via the 422 lookup", async () => {
+    let labelRequested = "";
+    globalThis.fetch = mockFetch(async (url, init) => {
+      if (init?.method === "POST" && String(url).endsWith("/pulls")) {
+        return jsonResponse(422, {
+          message: "Validation Failed",
+          errors: ["A pull request already exists for owner:feature/dev-1."],
+        });
+      }
+      if (String(url).includes("/pulls?head=")) {
+        return jsonResponse(200, [{ html_url: "https://github.com/owner/repo/pull/3" }]);
+      }
+      labelRequested = String(url);
+      return jsonResponse(200, []);
+    });
+
+    const client = new GitHubPRClient("test-token");
+    const result = await client.createPullRequest(basePrInfo({ labels: ["devintern"] }));
+
+    expect(result.success).toBe(true);
+    expect(labelRequested).toBe("https://api.github.com/repos/owner/repo/issues/3/labels");
+  });
+
+  test("label failure does not fail PR creation", async () => {
+    globalThis.fetch = mockFetch(async (url, init) => {
+      if (String(url).endsWith("/pulls") && init?.method === "POST") {
+        return jsonResponse(201, {
+          html_url: "https://github.com/owner/repo/pull/7",
+          number: 7,
+        });
+      }
+      return jsonResponse(403, { message: "Resource not accessible by integration" });
+    });
+
+    const client = new GitHubPRClient("test-token");
+    const result = await client.createPullRequest(basePrInfo({ labels: ["devintern"] }));
+
+    expect(result.success).toBe(true);
+    expect(result.url).toBe("https://github.com/owner/repo/pull/7");
   });
 });
 

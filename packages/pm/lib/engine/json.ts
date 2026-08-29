@@ -9,7 +9,10 @@ import { EngineError } from "./types.js";
  * Extract and validate a JSON payload from raw agent output.
  *
  * Delegates to {@link parseAgentJson}, which tolerates fenced ```json blocks,
- * bare JSON, and prose-prefixed JSON (some agents narrate before the object).
+ * bare JSON, prose-prefixed JSON, and common object-literal drift (comments,
+ * trailing commas, unquoted keys, stray inner quotes). Failures surface as a
+ * friendly {@link EngineError} — the low-level parser diagnostics stay in
+ * `detail`, never as the user-facing headline.
  *
  * @param raw - Raw agent stdout.
  * @param validate - Type guard for the expected payload shape.
@@ -26,9 +29,10 @@ export function extractJsonPayload<T>(
   try {
     parsed = parseAgentJson<unknown>(raw);
   } catch (error) {
+    const technical = error instanceof Error ? error.message : String(error);
     throw new EngineError(
       "parse-failed",
-      error instanceof Error ? error.message : String(error),
+      `The agent returned malformed output that could not be repaired automatically (${technical}). Retry the generation, or try another harness/model.`,
       raw,
     );
   }
