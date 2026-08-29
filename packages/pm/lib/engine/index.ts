@@ -20,6 +20,11 @@ import type { CreatedTask, LabelListResult, TaskBackend } from "../backends/inde
 import type { Config } from "../config.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
+import {
+  createReadableStdoutTap,
+  structuredOutputEnvEnabled,
+  structuredPayloadFromResult,
+} from "./structured.js";
 import { EngineError } from "./types.js";
 import type {
   EngineCallEvents,
@@ -176,6 +181,13 @@ export interface CreateEngineOptions {
    * Defaults to cwd; desktop hosts pass the project directory.
    */
   baseDir?: string;
+  /**
+   * Explicit structured (JSON) output override. When omitted, engine runs
+   * request JSON mode from harnesses that support it unless the project opts
+   * out via `AGENT_STRUCTURED_OUTPUT` in the environment. Set `false` to
+   * force the legacy plain-text extraction path.
+   */
+  structuredOutput?: boolean;
 }
 
 function isStoryPayload(value: unknown): value is StoryDraft {
@@ -210,6 +222,14 @@ export async function createEngine(
   const runAgent = deps.runAgent ?? defaultRunAgent;
   const promptsDir = options.promptsDir ?? defaultPromptsDir();
   const model = options.model;
+  /**
+   * Structured (JSON) mode is capability-gated: only harnesses whose CLI
+   * documents a JSON output flag are asked for machine-readable output.
+   * Harnesses without the capability keep the plain-text path unchanged.
+   */
+  const structuredMode =
+    config.agent.harness.supportsStructuredOutput === true &&
+    (options.structuredOutput ?? structuredOutputEnvEnabled());
 
   const defaultProjectKey =
     config.jira?.defaultProjectKey ||
@@ -253,16 +273,26 @@ export async function createEngine(
       | { ok: false; stage: "parse"; error: EngineError; rawResult: AgentRunResult };
 
     async function attemptParse(currentPrompt: string): Promise<AttemptOutcome> {
+      // With JSON mode on, raw stdout chunks are machine events; live output
+      // views still get readable assistant text via the tap. The raw streams
+      // themselves (transcript detectors, debug dumps) stay untouched, and
+      // plain-text runs forward chunks exactly as before.
+      const rawStdoutForward = onAgentChunk
+        ? (chunk: string) => onAgentChunk(chunk, "stdout")
+        : undefined;
+      const stdoutTap = structuredMode ? createReadableStdoutTap(rawStdoutForward) : undefined;
       const result = await runAgent(config.agent.harness, config.agent.path, currentPrompt, {
         maxTurns: 100,
         skipPermissions: true,
         model,
         silent: true,
+        structuredOutput: structuredMode,
         attachmentPaths: agentFiles?.attachmentPaths,
         imagePaths: agentFiles?.imagePaths,
-        onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
+        onStdout: stdoutTap ? (chunk) => stdoutTap.forward(chunk) : rawStdoutForward,
         onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
       });
+      stdoutTap?.flush();
 
       if (result.exitCode !== 0) {
         const dumpFile = await dumpAgentOutput(label, result, dumpContext);
@@ -278,6 +308,18 @@ export async function createEngine(
         };
       }
 
+      // Structured (JSON) mode: the runner already parsed the machine-readable
+      // payload from the CLI's output — unwrap harness envelopes (Claude Code
+      // result envelopes, NDJSON event streams, ...) and validate directly
+      // instead of scraping raw transcript text.
+      const fromStructured = structuredPayloadFromResult(result, validate, invalidMessage);
+      if (fromStructured.ok) {
+        return { ok: true, payload: fromStructured.payload };
+      }
+
+      // Structured parsing failed (or the harness has no JSON mode): fall
+      // back to the tolerant repair heuristics over raw stdout before giving
+      // up with `parse-failed`.
       try {
         return { ok: true, payload: extractJsonPayload(result.stdout, validate, invalidMessage) };
       } catch (error) {

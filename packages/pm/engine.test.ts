@@ -3,10 +3,11 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getModuleDir } from "./lib/runtime/path.js";
 import { createEngine, DEFAULT_ISSUE_TYPES, EngineError, extractJsonPayload } from "./lib/engine";
+import { STRUCTURED_OUTPUT_ENV_VAR } from "./lib/engine/structured.js";
 import type { StoryDraft } from "./lib/engine";
 import type { Config } from "./lib/config";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./lib/backends";
-import type { AgentRunResult } from "@devintern/agent-harness";
+import type { AgentHarness, AgentRunOptions, AgentRunResult } from "@devintern/agent-harness";
 
 const PROMPTS_DIR = join(getModuleDir(import.meta.url), "prompts");
 
@@ -148,7 +149,7 @@ describe("extractJsonPayload", () => {
 });
 
 /** Minimal config stub; engine only reads tracker default keys and agent config. */
-function stubConfig(): Config {
+function stubConfig(harnessOverrides: Partial<AgentHarness> = {}): Config {
   return {
     backend: { type: "markdown" },
     verbose: false,
@@ -165,6 +166,7 @@ function stubConfig(): Config {
         displayName: "Stub Agent",
         defaultPath: "stub",
         buildArgs: () => [],
+        ...harnessOverrides,
       },
       path: "stub",
     },
@@ -889,6 +891,403 @@ describe("createEngine", () => {
       { backend: stubBackend({ getProjects: undefined }) },
     );
     expect(await engine.listProjects()).toBeUndefined();
+  });
+});
+
+describe("engine structured output (JSON mode)", () => {
+  const STORY = { summary: "S", description: "D" };
+
+  function generateInput() {
+    return { source: { type: "prompt" as const, content: "x" }, promptStyle: "pm" as const };
+  }
+
+  test("requests structured output and reads the payload from result.structured", async () => {
+    const seenOptions: AgentRunOptions[] = [];
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          seenOptions.push(options);
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: true, value: STORY },
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+    expect(seenOptions[0]?.structuredOutput).toBe(true);
+  });
+
+  test("unwraps a Claude Code result envelope before validating", async () => {
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout:
+            '{"type":"result","is_error":false,"result":"{\\"summary\\": \\"S\\", \\"description\\": \\"D\\"}"}',
+          structured: {
+            ok: true,
+            value: {
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              result: '{"summary": "S", "description": "D"}',
+            },
+          },
+        }),
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+  });
+
+  test("unwraps the last assistant message from an NDJSON event stream", async () => {
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout:
+            '{"type":"thread.started"}\n{"type":"item.completed","item":{"type":"agent_message","text":"payload"}}\n{"type":"turn.completed"}',
+          structured: {
+            ok: true,
+            value: [
+              { type: "thread.started", thread_id: "t1" },
+              {
+                type: "item.completed",
+                item: { type: "agent_message", text: '{"summary": "S", "description": "D"}' },
+              },
+              { type: "turn.completed", usage: {} },
+            ],
+          },
+        }),
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+  });
+
+  test("unwraps decomposition payloads from a buffered message array", async () => {
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout: "",
+          structured: {
+            ok: true,
+            value: [
+              { type: "system", content: "session context" },
+              {
+                role: "assistant",
+                content: '{"subtasks": [{"summary": "A"}, {"summary": "B", "description": "b"}]}',
+              },
+            ],
+          },
+        }),
+      },
+    );
+
+    const subtasks = await engine.decomposeStory({
+      story: STORY,
+      sourceType: "prompt",
+      promptStyle: "pm",
+    });
+    expect(subtasks).toEqual([{ summary: "A" }, { summary: "B", description: "b" }]);
+  });
+
+  test("repairs narration-prefixed JSON inside the envelope reply text", async () => {
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout: '{"type":"result","result":"narration + payload"}',
+          structured: {
+            ok: true,
+            value: {
+              type: "result",
+              result:
+                'I\'ll write the story now.\n```json\n{"summary": "S", "description": "D"}\n```',
+            },
+          },
+        }),
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+  });
+
+  test("falls back to raw stdout repair when structured parsing fails", async () => {
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async () => {
+          calls += 1;
+          return {
+            stdout: '```json\n{"summary": "S", "description": "D"}\n```',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: false, error: "no JSON found in agent stdout" },
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+    expect(calls).toBe(1);
+  });
+
+  test("falls back to raw stdout when the structured payload does not validate", async () => {
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async () => {
+          calls += 1;
+          return {
+            stdout: '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: true, value: { summary: "only" } },
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+    expect(calls).toBe(1);
+  });
+
+  test("keeps the corrective re-run when structured parsing fails repeatedly", async () => {
+    const prompts: string[] = [];
+    let calls = 0;
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, prompt) => {
+          prompts.push(prompt);
+          calls += 1;
+          return {
+            stdout: `garbage attempt ${calls}`,
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: false, error: "no JSON found in agent stdout" },
+          };
+        },
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await engine.generateStory(generateInput());
+    } catch (error) {
+      caught = error;
+    }
+    expect(calls).toBe(2);
+    expect(prompts[1]).toContain("could not be parsed as JSON");
+    expect(caught).toBeInstanceOf(EngineError);
+    expect((caught as EngineError).code).toBe("parse-failed");
+    expect((caught as EngineError).dumpFile).toContain("devpm-story-generation-parse-");
+  });
+
+  test("does not request structured output from a harness without the capability", async () => {
+    const seenOptions: AgentRunOptions[] = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          seenOptions.push(options);
+          return {
+            stdout: '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+    expect(seenOptions[0]?.structuredOutput).toBe(false);
+  });
+
+  test("honors the structuredOutput opt-out option", async () => {
+    const seenOptions: AgentRunOptions[] = [];
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR, structuredOutput: false },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          seenOptions.push(options);
+          return {
+            stdout: '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput());
+    expect(draft).toEqual(STORY);
+    expect(seenOptions[0]?.structuredOutput).toBe(false);
+  });
+
+  test("honors the AGENT_STRUCTURED_OUTPUT opt-out env var", async () => {
+    const previous = process.env[STRUCTURED_OUTPUT_ENV_VAR];
+    process.env[STRUCTURED_OUTPUT_ENV_VAR] = "0";
+    try {
+      const seenOptions: AgentRunOptions[] = [];
+      const engine = await createEngine(
+        stubConfig({ supportsStructuredOutput: true }),
+        { promptsDir: PROMPTS_DIR },
+        {
+          backend: stubBackend(),
+          runAgent: async (_harness, _path, _prompt, options) => {
+            seenOptions.push(options);
+            return {
+              stdout: '{"summary": "S", "description": "D"}',
+              stderr: "",
+              exitCode: 0,
+              maxTurnsReached: false,
+            };
+          },
+        },
+      );
+
+      const draft = await engine.generateStory(generateInput());
+      expect(draft).toEqual(STORY);
+      expect(seenOptions[0]?.structuredOutput).toBe(false);
+    } finally {
+      if (previous === undefined) {
+        delete process.env[STRUCTURED_OUTPUT_ENV_VAR];
+      } else {
+        process.env[STRUCTURED_OUTPUT_ENV_VAR] = previous;
+      }
+    }
+  });
+});
+
+describe("readable stdout tap (structured streaming)", () => {
+  function generateInput() {
+    return { source: { type: "prompt" as const, content: "x" }, promptStyle: "pm" as const };
+  }
+
+  function engineEmittingStdout(emit: (onStdout: (chunk: string) => void) => void) {
+    return createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          emit(options.onStdout ?? (() => {}));
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: true, value: { summary: "S", description: "D" } },
+          };
+        },
+      },
+    );
+  }
+
+  test("streams readable assistant text instead of raw JSON events", async () => {
+    const chunks: Array<[string, string]> = [];
+    const engine = await engineEmittingStdout((onStdout) => {
+      onStdout("boot log\n");
+      onStdout(
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Working on it"}}\n',
+      );
+      // Envelope without a trailing newline: extracted on flush.
+      onStdout('{"type":"result","result":"All done"}');
+    });
+
+    await engine.generateStory(generateInput(), {
+      onAgentChunk: (chunk, stream) => chunks.push([stream, chunk]),
+    });
+    expect(chunks).toEqual([
+      ["stdout", "boot log\n"],
+      ["stdout", "Working on it\n"],
+      ["stdout", "All done"],
+    ]);
+  });
+
+  test("passes non-text JSON and non-JSON lines through unchanged", async () => {
+    const chunks: Array<[string, string]> = [];
+    const engine = await engineEmittingStdout((onStdout) => {
+      onStdout('{"type":"turn.completed","usage":{"input_tokens":10}}\n');
+      onStdout('  "summary": "partial",\n');
+    });
+
+    await engine.generateStory(generateInput(), {
+      onAgentChunk: (chunk, stream) => chunks.push([stream, chunk]),
+    });
+    expect(chunks).toEqual([
+      ["stdout", '{"type":"turn.completed","usage":{"input_tokens":10}}\n'],
+      ["stdout", '  "summary": "partial",\n'],
+    ]);
+  });
+
+  test("stderr chunks pass through untouched in structured mode", async () => {
+    const chunks: Array<[string, string]> = [];
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          options.onStderr?.("raw stderr");
+          return {
+            stdout: "",
+            stderr: "raw stderr",
+            exitCode: 0,
+            maxTurnsReached: false,
+            structured: { ok: true, value: { summary: "S", description: "D" } },
+          };
+        },
+      },
+    );
+
+    await engine.generateStory(generateInput(), {
+      onAgentChunk: (chunk, stream) => chunks.push([stream, chunk]),
+    });
+    expect(chunks).toEqual([["stderr", "raw stderr"]]);
   });
 });
 
