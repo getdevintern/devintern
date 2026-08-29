@@ -394,6 +394,55 @@ export function createFleetTaskExecutor(
   };
 }
 
+/** Interval between periodic stale-worktree sweeps (1 hour). */
+export const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Sweep every configured repo's stale worktrees once.
+ *
+ * Shared by the startup sweep and the periodic sweeper.
+ *
+ * @returns Total worktrees removed across all repos.
+ */
+export async function sweepAllWorktrees(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+): Promise<number> {
+  let removedTotal = 0;
+  for (const repo of repos) {
+    const removed = await repoManager.sweepStaleWorktrees(repo.name, ttlDays);
+    removedTotal += removed.length;
+    if (removed.length > 0) {
+      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
+    }
+  }
+  return removedTotal;
+}
+
+/**
+ * Start periodic stale-worktree sweeps.
+ *
+ * The startup sweep alone misses worktrees that age past the TTL while the
+ * worker keeps running, so a long-lived worker would accumulate failed-run
+ * worktrees until the next restart. The returned timer is unref'd so it
+ * never keeps the process alive on its own.
+ */
+export function startWorktreeSweeper(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+  intervalMs: number = WORKTREE_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweepAllWorktrees(repos, repoManager, ttlDays).catch((error) =>
+      console.warn(`⚠️  [fleet] periodic worktree sweep failed: ${(error as Error).message}`),
+    );
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
 export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
@@ -454,15 +503,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     dbPath: state.dbPath,
   });
 
-  for (const repo of config.repos) {
-    const removed = await repoManager.sweepStaleWorktrees(
-      repo.name,
-      config.workspace.worktreesTtlDays,
-    );
-    if (removed.length > 0) {
-      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
-    }
-  }
+  await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
+  // Keep sweeping while the worker runs, not only at startup: a long-lived
+  // worker would otherwise accumulate worktrees that age past the TTL until
+  // the next restart.
+  startWorktreeSweeper(config.repos, repoManager, config.workspace.worktreesTtlDays);
 
   await warnOnPushAuthIssues(config, repoManager);
 
