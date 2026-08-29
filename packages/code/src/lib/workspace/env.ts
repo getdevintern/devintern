@@ -14,6 +14,7 @@ import { isAbsolute, join } from "path";
 
 import type { RepoConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
+import { ANALYTICS_CONFIG_DIR_ENV } from "../analytics";
 
 /**
  * Parse a dotenv-style file into a record (same semantics as the tracker
@@ -63,8 +64,9 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
- * (`WEBHOOK_QUEUE_DB`, and `GITHUB_REPO` for GitHub remotes unless the repo
- * layers already set it).
+ * (`WEBHOOK_QUEUE_DB`, stable analytics config directory, `GITHUB_REPO`
+ * for GitHub remotes unless the repo layers already set it, and `PR_LABELS`
+ * from the repo's `pr_labels` config).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -87,12 +89,19 @@ export function buildRepoEnv(
   };
 
   env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {
     const slug = gitHubSlugFromRemote(repo.remote);
     if (slug) {
       env.GITHUB_REPO = slug;
     }
+  }
+
+  // Config-driven PR labels win over a PR_LABELS the repo env layers carried;
+  // when the config sets none, an env-provided value survives untouched.
+  if (repo.prLabels && repo.prLabels.length > 0) {
+    env.PR_LABELS = repo.prLabels.join(",");
   }
 
   return env;

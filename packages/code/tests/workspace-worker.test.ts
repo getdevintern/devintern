@@ -148,6 +148,7 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(ran[0].cwd).toContain(join("worktrees", "backend"));
     expect(ran[0].env.GITHUB_REPO).toBe("acme/backend");
     expect(ran[0].env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(ran[0].env.DEVINTERN_RUN_ORIGIN).toBe("worker");
 
     // Successful run: worktree removed.
     expect(existsSync(ran[0].cwd)).toBe(false);

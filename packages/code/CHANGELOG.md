@@ -1,10 +1,16 @@
 # @devintern/code Changelog
 
-## [Unreleased]
+## [2.6.0] - 2026-08-28
+
+Worker resilience release: interrupted runs are recovered on startup, failure feedback no longer causes retry loops, conflict resolution reliably lands on the PR, and usage-limit detection covers every harness.
 
 ### Added
 
+- **Interrupted runs are recovered on startup**: before acquiring new tickets, the worker detects task runs left `in_progress` by a previous (dead) worker instance and gives each affected ticket the same treatment a graceful shutdown would have — the failure comment is posted and the ticket moves back to To Do. Tickets that already moved on are left alone; orphans older than 7 days (configurable via `WORKER_ORPHAN_MAX_AGE_HOURS`, `0` disables) are marked failed silently. Recovery respects the retry gate, so recovered tickets are not re-run until the ticket changes
+- **GitHub App setup in the worker init wizard**: `devintern worker init` walks through creating and wiring a GitHub App (needed for `@mention` matching and `slug[bot]` commits) as part of unattended setup
+- **High-signal worker analytics**: a worker emits one anonymous `worker_started` event after its sources start (`polling`, `relay`, `hybrid`, or `scheduled`) and one `worker_task_run` event per terminal task outcome. Worker task subprocesses no longer duplicate the ordinary `cli_run` event; no polling heartbeats, task keys, repository names, prompts, or error text are sent
 - **Workspace worker probes push access at startup**: each configured GitHub HTTPS remote gets a side-effect-free `git push --dry-run` against its bare clone, so an under-scoped token (fine-grained PAT without `Contents: Read and write`, or a `$GITHUB_TOKEN` that silently overrides the keyring login via `gh auth git-credential`) is reported as a clear startup warning instead of burning task pickups on 403 pushes
+- **Worker logs just work**: the daemon tees its own console output into `worker.stdout.log` / `worker.stderr.log` in the workspace home (`~/.devintern`; one log set per workspace, not per repo, rotating at 8 MiB), so the dashboard Logs tab is populated under any launch method — systemd unit, launchd agent, cron wrapper, or terminal — with no service-definition redirection required
 
 ### Changed
 
@@ -15,6 +21,11 @@
 
 ### Fixed
 
+- **Failure feedback no longer causes an immediate retry loop**: posting the failure comment and moving the ticket back to To Do bumps the tracker's update stamp, which the retry gate previously counted as a change. The gate now ignores the harness's own comments and records the attempt, so a failed ticket sits still until a human edits the description, posts their own comment, or deletes the failure comment — for every failure kind (incomplete implementation, crash, interrupt, usage limit)
+- **`devintern resolve-conflicts` reliably lands its fix on the PR**: the resolver pushes its merged fix and verifies it actually reaches the pull request, so conflicted branches become mergeable instead of resolving locally while the PR stays dirty
+- **Tasks deferred by a busy repo are retried**: a task deferred because its target repository was mid-run is re-enqueued for the next poll instead of being dropped
+- **Usage-limit detection covers every harness**: credit/quota exhaustion in Codex and Claude, account/subscription limits in TUI harnesses, and quota-limit messages in Antigravity and Kilo are now recognized and stop the run with the shared usage-limit error, matching the OpenCode fix below
+- **Push failure messages include hook stdout**: a failing pre-push hook writes its diagnostics to stdout while git only adds one stderr line, so surfacing only stderr hid which hook failed. Local logs, agents, and sanitized PR comments now embed the full stdout+stderr context
 - **OpenCode usage limits stop runs immediately instead of hanging**: headless OpenCode invocations mirror ERROR-level provider logs to stderr, recognize timestamped `AI_APICallError` five-hour-limit diagnostics, terminate the otherwise-stuck CLI process as soon as the limit arrives, and propagate the shared usage-limit error through implementation, analysis, review, auto-review, and hook-fix paths
 - **1-repo workspaces route without `[[routing.rules]]`**: a workspace with a single `[[repos]]` entry sends every ready task to that repo, matching automations and `worker init`'s first import. Multi-repo workspaces still require explicit rules and never guess
 - **Workspace relay no longer depends on GitHub polling credentials**: tracker envelopes start from workspace-scoped pairing even when `GITHUB_TOKEN` / GitHub App credentials are absent

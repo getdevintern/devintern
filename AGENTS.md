@@ -7,7 +7,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | Package                        | Role                                                                                                                  | Published       |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- | --------------- |
 | `@getdevintern/code`           | CLI for task automation (`devintern`): Jira + multi-PM support, configurable AI agent                                 | yes             |
-| `@getdevintern/pm`             | CLI for PM task/story creation (`devpm`): supports Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, Markdown | yes             |
+| `@getdevintern/pm`             | CLI for PM task/story creation (`devpm`): supports Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, GitLab, Markdown | yes             |
 | `@devintern/pm-desktop`        | Electron desktop app for `@getdevintern/pm`: multi-ticket AI task creation for your tracker                           | no, application |
 | `@devintern/agent-harness`     | Shared agent harness abstraction                                                                                      | no, source-only |
 | `@devintern/dashboard-ui`      | Local observability dashboard UI (Vite + React), bundled into `@getdevintern/code` at build time                      | no, source-only |

@@ -151,6 +151,21 @@ describe("RunStore", () => {
     expect(runs.map((r) => r.id).sort()).toEqual([first, second].sort());
   });
 
+  test("latestRunByTaskKey returns the newest run per key in one query", () => {
+    const firstProj = store.createRun({ origin: "task", taskKey: "PROJ-10" });
+    store.finishRun(firstProj, "failed");
+    const secondProj = store.createRun({ origin: "task", taskKey: "PROJ-10" });
+    const otherRun = store.createRun({ origin: "task", taskKey: "OTHER-3" });
+    store.createRun({ origin: "pr_mention", repo: "acme/widgets" });
+
+    const latest = store.latestRunByTaskKey(["PROJ-10", "OTHER-3", "PROJ-10", "UNKNOWN-1"]);
+    expect(latest.size).toBe(2);
+    expect(latest.get("PROJ-10")?.id).toBe(secondProj);
+    expect(latest.get("PROJ-10")?.status).toBe("in_progress");
+    expect(latest.get("OTHER-3")?.id).toBe(otherRun);
+    expect(latest.has("UNKNOWN-1")).toBe(false);
+  });
+
   test("run records survive a restart", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-8" });
     store.finishRun(id, "succeeded");

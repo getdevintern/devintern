@@ -11,9 +11,10 @@ import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
+import { RUN_ORIGIN_ENV } from "./analytics";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
-export const AUTOMATION_ORIGIN_ENV = "DEVINTERN_RUN_ORIGIN";
+export const AUTOMATION_ORIGIN_ENV = RUN_ORIGIN_ENV;
 export const AUTOMATION_ID_ENV = "DEVINTERN_AUTOMATION_ID";
 
 const LEASE_MS = 2 * 60_000;

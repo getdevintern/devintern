@@ -17,6 +17,7 @@ export type {
   AgentRunOptions,
   AgentRunResult,
   ResolvedHarness,
+  StructuredOutputResult,
 } from "./types.js";
 
 // Run modes (plan / readonly) and capability checks
@@ -136,3 +137,10 @@ export {
 
 // Open-question detection (agent blocked on user input)
 export { detectOpenQuestions, type OpenQuestionsResult } from "./detect-open-questions.js";
+
+// Structured (JSON) output
+export {
+  UnsupportedStructuredOutputError,
+  assertStructuredOutputSupported,
+  parseStructuredOutput,
+} from "./structured-output.js";

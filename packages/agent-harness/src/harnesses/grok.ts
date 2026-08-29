@@ -35,12 +35,14 @@ export class GrokHarness implements AgentHarness {
   readonly defaultPath = "grok";
   readonly promptFlag = "-p";
   readonly supportedModes = ["plan", "readonly"] as const;
+  /** `--output-format json` emits one JSON object (text, stopReason, session, usage). */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `grok` CLI flags for headless (`-p`) execution.
    *
-   * @param options - Supports `mode`, `skipPermissions` (`--always-approve`), `model` (`-m`),
-   *   and `workingDir` (`--cwd`).
+   * @param options - Supports `mode`, `skipPermissions` (`--always-approve`),
+   *   `model` (`-m`), `structuredOutput`, and `workingDir` (`--cwd`).
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -60,6 +62,10 @@ export class GrokHarness implements AgentHarness {
 
     if (options.workingDir) {
       args.push("--cwd", options.workingDir);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Grok Build does not currently support --max-turns.

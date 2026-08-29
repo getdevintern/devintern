@@ -23,7 +23,7 @@ import {
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
-  isIncompleteImplementationCommentText,
+  isAutomationFailureCommentText,
 } from "../shared/markdown-comment-formatter";
 import type { ClarityAssessmentLike } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
@@ -230,7 +230,7 @@ export class TrelloTaskTrackerClient implements TaskTrackerClient {
   async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
       const actions = await this.trelloClient.getCardComments(taskKey);
-      return actions.some((a) => isIncompleteImplementationCommentText(a.data?.text || ""));
+      return actions.some((a) => isAutomationFailureCommentText(a.data?.text || ""));
     } catch (error) {
       console.warn(`Failed to check for duplicate comments: ${error}`);
       return false;

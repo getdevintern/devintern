@@ -23,7 +23,17 @@ const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 export type AnalyticsPropValue = string | boolean | number;
 
 /** Curated event names — keep in sync with privacy copy. */
-export type AnalyticsEvent = "cli_run" | "analytics_opt_out";
+export type AnalyticsEvent = "cli_run" | "worker_started" | "worker_task_run" | "analytics_opt_out";
+
+export type WorkerTaskOutcome = "succeeded" | "failed" | "deferred" | "escalated" | "abandoned";
+
+export type WorkerTaskTrigger = "task" | "scheduled";
+export type WorkerMode = "polling" | "relay" | "hybrid" | "scheduled";
+
+/** Internal marker inherited only by task subprocesses launched by the worker. */
+export const RUN_ORIGIN_ENV = "DEVINTERN_RUN_ORIGIN";
+/** Keeps worker subprocesses on the workspace's stable anonymous identity. */
+export const ANALYTICS_CONFIG_DIR_ENV = "DEVINTERN_ANALYTICS_CONFIG_DIR";
 
 const ALLOWED_PROP_KEYS = new Set([
   "cli_version",
@@ -37,6 +47,9 @@ const ALLOWED_PROP_KEYS = new Set([
   "auto_review",
   "estimate",
   "sandbox",
+  "outcome",
+  "worker_trigger",
+  "worker_mode",
 ]);
 
 /** Minimal send surface so tests can inject a mock without network access. */
@@ -90,14 +103,21 @@ interface TelemetrySettingsShape {
   analytics?: { enabled?: boolean };
 }
 
+function analyticsConfigDir(configDir?: string): string {
+  return (
+    configDir ??
+    process.env[ANALYTICS_CONFIG_DIR_ENV] ??
+    resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME })
+  );
+}
+
 /**
  * Reads `analytics.enabled` from .devintern-code/settings.json. Returns
  * `undefined` when unset or unreadable so env/config absence means opt-in.
  */
 export function readAnalyticsEnabledFromSettings(configDir?: string): boolean | undefined {
   try {
-    const dir =
-      configDir ?? resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME });
+    const dir = analyticsConfigDir(configDir);
     const settingsPath = join(dir, "settings.json");
     if (!existsSync(settingsPath)) return undefined;
     const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as TelemetrySettingsShape;
@@ -129,8 +149,7 @@ export function scrubProps(
 }
 
 function getOrCreateAnonymousId(configDir?: string): string {
-  const dir =
-    configDir ?? resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME });
+  const dir = analyticsConfigDir(configDir);
   const telemetryFile = join(dir, "telemetry.json");
   try {
     if (existsSync(telemetryFile)) {
@@ -175,8 +194,7 @@ function getSender(): AnalyticsSender | null {
 /** True when this is the first run that created telemetry.json (for disclosure). */
 export function isAnonymousIdNewlyCreated(configDir?: string): boolean {
   try {
-    const dir =
-      configDir ?? resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME });
+    const dir = analyticsConfigDir(configDir);
     return !existsSync(join(dir, "telemetry.json"));
   } catch {
     return false;
@@ -207,6 +225,62 @@ export async function track(
   } catch {
     // Swallow — product use must not fail because of analytics.
   }
+}
+
+/**
+ * Emit one high-signal event when a worker task reaches a terminal outcome.
+ * Manual CLI runs are ignored, and the payload contains no task/repo identity.
+ *
+ * @returns True when this process was launched for a worker task.
+ */
+export function trackWorkerTaskRun(
+  outcome: WorkerTaskOutcome,
+  props: {
+    cliVersion: string;
+    tracker: string;
+  },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const runOrigin = env[RUN_ORIGIN_ENV];
+  const workerTrigger: WorkerTaskTrigger | undefined =
+    runOrigin === "worker" ? "task" : runOrigin === "scheduled" ? "scheduled" : undefined;
+  if (!workerTrigger) return false;
+
+  void track("worker_task_run", {
+    cli_version: props.cliVersion,
+    tracker: props.tracker,
+    outcome,
+    worker_trigger: workerTrigger,
+  });
+  return true;
+}
+
+/** Collapse configured acquirers into a stable, low-cardinality worker mode. */
+export function resolveWorkerMode(acquirerNames: readonly string[]): WorkerMode {
+  const hasRelay = acquirerNames.includes("relay");
+  const hasPolling = acquirerNames.some((name) => name.startsWith("poll:"));
+  if (hasRelay && hasPolling) return "hybrid";
+  if (hasRelay) return "relay";
+  if (hasPolling) return "polling";
+  return "scheduled";
+}
+
+/** Emit once after a worker has successfully started all configured sources. */
+export function trackWorkerStarted(props: {
+  cliVersion: string;
+  tracker: string;
+  acquirerNames: readonly string[];
+  configDir?: string;
+}): void {
+  void track(
+    "worker_started",
+    {
+      cli_version: props.cliVersion,
+      tracker: props.tracker,
+      worker_mode: resolveWorkerMode(props.acquirerNames),
+    },
+    { configDir: props.configDir },
+  );
 }
 
 /**

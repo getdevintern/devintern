@@ -4,8 +4,10 @@ export {
   loadEnvFromConfigDir,
   loadTrackerConfig,
   parseGitHubRepo,
+  parseGitLabProject,
   parseTrackerConfigFromEnv,
   sanitizeDomain,
+  sanitizeGitlabBaseUrl,
 } from "./config/load-tracker-config.ts";
 export type { ConfiguredTracker, TrackerId, TrackerMeta } from "./config/tracker-meta.ts";
 export {

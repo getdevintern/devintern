@@ -34,11 +34,14 @@ export class OpencodeHarness implements AgentHarness {
   readonly displayName = "Opencode";
   readonly defaultPath = "opencode";
   readonly supportedModes = ["plan", "readonly"] as const;
+  /** `--format json` streams raw JSON events (one object per line) to stdout. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `opencode run` flags for non-interactive execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`, and `workingDir`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`,
+   *   `structuredOutput`, and `workingDir`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -62,6 +65,10 @@ export class OpencodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--format", "json");
     }
 
     // Opencode does not currently support --max-turns.

@@ -402,6 +402,38 @@ export class RunStore {
   }
 
   /**
+   * Latest run per task key, using the same ordering as {@link listRuns}
+   * (started_at DESC, id DESC). One query for all keys instead of one per key.
+   *
+   * @param taskKeys - Task keys to look up; duplicates are ignored
+   */
+  latestRunByTaskKey(taskKeys: string[]): Map<string, RunRecord> {
+    const map = new Map<string, RunRecord>();
+    const keys = [...new Set(taskKeys)];
+    if (keys.length === 0) {
+      return map;
+    }
+    const placeholders = keys.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT * FROM (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY task_key ORDER BY started_at DESC, id DESC
+           ) AS rn
+           FROM runs WHERE task_key IN (${placeholders})
+         ) WHERE rn = 1`,
+      )
+      .all(...keys) as Record<string, unknown>[];
+    for (const row of rows) {
+      const run = this.rowToRun(row);
+      if (run.taskKey) {
+        map.set(run.taskKey, run);
+      }
+    }
+    return map;
+  }
+
+  /**
    * Count runs matching a filter (pagination totals).
    *
    * @param filter - Optional task-key/status/origin filter

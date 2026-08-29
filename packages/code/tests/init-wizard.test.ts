@@ -68,6 +68,10 @@ describe("buildEnvExample", () => {
     expect(template).toContain("https://linear.app/settings/account/security");
     expect(template).toContain("https://app.asana.com/0/my-apps");
     expect(template).toContain("# MARKDOWN_TASKS_DIR=");
+    // GitLab section: instance URL defaults to cloud, project path allows subgroups
+    expect(template).toContain("# GITLAB_TOKEN=");
+    expect(template).toContain("# GITLAB_PROJECT=group/sub/repo");
+    expect(template).toContain("# GITLAB_BASE_URL=https://gitlab.example.com");
     // Agent + PR integration tail is preserved
     expect(template).toContain("AGENT_HARNESS=claude-code");
     expect(template).toContain("BITBUCKET_TOKEN");
@@ -86,6 +90,18 @@ describe("renderEnvFile", () => {
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("# JIRA_DEFAULT_PROJECT_KEY=");
     expect(env).toContain("AGENT_HARNESS=claude-code");
+  });
+
+  test("renders GitLab env with base URL default written out", () => {
+    const env = renderEnvFile("gitlab", {
+      GITLAB_TOKEN: "glpat-secret",
+      GITLAB_PROJECT: "acme/team/webapp",
+    });
+    expect(env).toContain("TASK_TRACKER=gitlab");
+    expect(env).toContain("GITLAB_TOKEN=glpat-secret");
+    expect(env).toContain("GITLAB_PROJECT=acme/team/webapp");
+    // Skipped optional is commented so users can find it later
+    expect(env).toContain("# GITLAB_BASE_URL=https://gitlab.example.com");
   });
 
   test("writes extra values (PR token) under a dedicated section", () => {

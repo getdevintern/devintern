@@ -59,7 +59,7 @@ describe("isInteractive", () => {
 describe("PM_TRACKER_SETUP", () => {
   test("covers every tracker in the backends registry", () => {
     expect(Object.keys(PM_TRACKER_SETUP).sort()).toEqual(
-      ["asana", "azure-devops", "github", "jira", "linear", "markdown", "trello"].sort(),
+      ["asana", "azure-devops", "github", "gitlab", "jira", "linear", "markdown", "trello"].sort(),
     );
   });
 
