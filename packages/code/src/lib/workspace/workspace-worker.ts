@@ -25,6 +25,7 @@ import {
 } from "../orphan-recovery";
 import { RunStore } from "../run-recorder";
 import { RetryStateStore } from "../retry-state";
+import { ScheduledRetryStore } from "../run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
@@ -48,6 +49,7 @@ import { EstimationAcquirer } from "../estimation-acquirer";
 import { RunCoordinator } from "../run-coordinator";
 import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
 function orphanMaxAgeMs(): number {
@@ -57,7 +59,8 @@ function orphanMaxAgeMs(): number {
 /**
  * Recover task runs left in progress by a previous (dead) worker before any
  * acquirer picks up new tickets: reap them and give their tickets the
- * graceful-shutdown feedback (failure comment + move back to To Do).
+ * graceful-shutdown feedback (failure comment + move back to To Do). Also
+ * settles dashboard-scheduled retry rows left `running` by the crash.
  *
  * Replaces the old reap-only startup sweep, which also only ran when GitHub
  * credentials were configured; recovery here covers every workspace.
@@ -113,6 +116,24 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         retryStore?.recordIncompleteAttempt(taskKey, type, description),
       maxAgeMs: orphanMaxAgeMs(),
     });
+
+    // Dashboard-scheduled retries claimed by the previous worker: settle the
+    // rows so the dashboard's per-task guard unblocks (the operator can
+    // re-schedule) instead of reporting "already scheduled or running"
+    // forever. The orphaned run itself was reaped above.
+    const retryQueue = new ScheduledRetryStore(dbPath);
+    try {
+      const orphans = retryQueue.failRunning(
+        "worker restarted while this retry was running; schedule it again",
+      );
+      for (const orphan of orphans) {
+        console.warn(
+          `⚠️  [fleet] scheduled retry of ${orphan.taskKey} was interrupted by a worker restart`,
+        );
+      }
+    } finally {
+      retryQueue.close();
+    }
   } finally {
     retryStore?.close();
     runStore.close();
@@ -345,20 +366,26 @@ export type FleetExecutorDeps = Pick<
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
- * disposable worktree. Shared by the polling acquirer and the relay's task
- * evaluation, which acquire tasks differently but execute identically.
+ * disposable worktree. Shared by the polling acquirer, the relay's task
+ * evaluation, and the dashboard retry queue, which acquire tasks differently
+ * but execute identically.
  *
  * Ambiguous/unrouted tasks are recorded as routing skips and count as
  * handled: dedupe keeps them out of the loop until the task changes again,
  * the same policy as failing tasks.
+ *
+ * @param deps - Routing, locking, and runner collaborators
+ * @param options - `extraArgs` overrides the per-task CLI args (the retry
+ *                  queue prepends `--force` to bypass the retry gate)
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
+  options: { extraArgs?: string[] } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
-  const extraArgs = fleetTaskArgs(config);
+  const extraArgs = options.extraArgs ?? fleetTaskArgs(config);
 
   return async (taskKey, routable) => {
     const decision = routeTask(routable, config);
@@ -429,6 +456,55 @@ export function createFleetTaskExecutor(
   };
 }
 
+/** Interval between periodic stale-worktree sweeps (1 hour). */
+export const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Sweep every configured repo's stale worktrees once.
+ *
+ * Shared by the startup sweep and the periodic sweeper.
+ *
+ * @returns Total worktrees removed across all repos.
+ */
+export async function sweepAllWorktrees(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+): Promise<number> {
+  let removedTotal = 0;
+  for (const repo of repos) {
+    const removed = await repoManager.sweepStaleWorktrees(repo.name, ttlDays);
+    removedTotal += removed.length;
+    if (removed.length > 0) {
+      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
+    }
+  }
+  return removedTotal;
+}
+
+/**
+ * Start periodic stale-worktree sweeps.
+ *
+ * The startup sweep alone misses worktrees that age past the TTL while the
+ * worker keeps running, so a long-lived worker would accumulate failed-run
+ * worktrees until the next restart. The returned timer is unref'd so it
+ * never keeps the process alive on its own.
+ */
+export function startWorktreeSweeper(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+  intervalMs: number = WORKTREE_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweepAllWorktrees(repos, repoManager, ttlDays).catch((error) =>
+      console.warn(`⚠️  [fleet] periodic worktree sweep failed: ${(error as Error).message}`),
+    );
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
 export interface RunWorkspaceWorkerOptions {
   /** Explicit workspace.toml path (defaults to the workspace home). */
   workspacePath?: string;
@@ -472,11 +548,22 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const query = config.defaults.taskQuery;
   const intervalSeconds = config.defaults.pollIntervalSeconds;
+
+  // Dashboard retries ride the shared workspace DB: the dashboard inserts a
+  // pending row, this worker drains it through the fleet executor below.
+  const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
+
   if (!query && config.automations.length === 0 && config.estimations.length === 0) {
-    console.error(
-      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
-    );
-    process.exit(1);
+    if (retryQueue.hasPending()) {
+      console.warn(
+        "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+      );
+    } else {
+      console.error(
+        "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+      );
+      process.exit(1);
+    }
   }
 
   const state = openWorkspaceState(workspaceDir);
@@ -496,19 +583,31 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     dbPath: state.dbPath,
   });
 
-  for (const repo of config.repos) {
-    const removed = await repoManager.sweepStaleWorktrees(
-      repo.name,
-      config.workspace.worktreesTtlDays,
-    );
-    if (removed.length > 0) {
-      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
-    }
-  }
+  await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
+  // Keep sweeping while the worker runs, not only at startup: a long-lived
+  // worker would otherwise accumulate worktrees that age past the TTL until
+  // the next restart.
+  startWorktreeSweeper(config.repos, repoManager, config.workspace.worktreesTtlDays);
 
   await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
+
+  // First in the list and on a short interval: a dashboard-scheduled retry
+  // gets picked up ahead of the slower pollers.
+  acquirers.push(
+    new RetryQueueAcquirer({
+      store: retryQueue,
+      execute: createFleetTaskExecutor(
+        { config, workspaceDir, skips: state.skips, repoManager },
+        // `--force` bypasses the incomplete-attempt retry gate, exactly like
+        // the manual `devintern <TASK> --force` the dashboard action mirrors.
+        { extraArgs: ["--force", ...fleetTaskArgs(config)] },
+      ),
+      intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
+      verbose: options.verbose,
+    }),
+  );
 
   if (config.automations.length > 0) {
     const semanticErrors: string[] = [];
@@ -603,7 +702,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      startDashboardServer({ port: config.workspace.dashboardPort });
+      // `schedule`: retries are drained by this worker's retry-queue acquirer
+      // through the normal pipeline (never spawned from the workspace home).
+      startDashboardServer({ port: config.workspace.dashboardPort, retryMode: "schedule" });
     } catch (error) {
       console.warn(
         `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,
@@ -728,7 +829,10 @@ export async function buildFleetEventAcquirers(options: {
           },
         },
         addressPr: fleetAddressPr,
-        resolveConflicts,
+        resolveConflicts:
+          config.workspace.conflictResolution === "disabled" ? undefined : resolveConflicts,
+        conflictSchedule: config.workspace.conflictSchedule,
+        conflictResolution: config.workspace.conflictResolution,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore,
         allowedRepos: slugs,
