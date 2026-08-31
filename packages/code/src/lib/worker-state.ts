@@ -12,6 +12,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { buildTicketUrl } from "./ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export interface Cursor {
@@ -28,6 +29,13 @@ export interface AgentPr {
   prNumber: number;
   branch?: string;
   taskKey?: string;
+  /**
+   * Tracker ticket link, derived from the tracker configured when the PR was
+   * created and frozen here. The dashboard replays it verbatim, so switching
+   * `TASK_TRACKER` later (or running the dashboard without tracker env) never
+   * breaks links for already-created PRs.
+   */
+  ticketUrl?: string;
   state: AgentPrState;
   createdAt: number;
   updatedAt: number;
@@ -93,12 +101,23 @@ export class WorkerState {
         pr_number INTEGER NOT NULL,
         branch TEXT,
         task_key TEXT,
+        ticket_url TEXT,
         state TEXT NOT NULL DEFAULT 'open',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (repo, pr_number)
       )
     `);
+
+    // Additive migration for databases created before the ticket_url column
+    // (the readonly dashboard cannot migrate, so reads must tolerate its
+    // absence — see `listOpenAgentPrs`).
+    const prColumns = this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{
+      name: string;
+    }>;
+    if (!prColumns.some((c) => c.name === "ticket_url")) {
+      this.db.run("ALTER TABLE agent_prs ADD COLUMN ticket_url TEXT");
+    }
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_agent_prs_state
@@ -180,18 +199,27 @@ export class WorkerState {
    * Register a PR created by the pipeline (upsert; reopening resets state).
    *
    * @param pr - Repo slug, PR number, and optional branch/task metadata
+   *             including the ticket URL derived from the tracker active at
+   *             creation time
    */
-  recordAgentPr(pr: { repo: string; prNumber: number; branch?: string; taskKey?: string }): void {
+  recordAgentPr(pr: {
+    repo: string;
+    prNumber: number;
+    branch?: string;
+    taskKey?: string;
+    ticketUrl?: string;
+  }): void {
     const now = Date.now();
     this.db.run(
-      `INSERT INTO agent_prs (repo, pr_number, branch, task_key, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'open', ?, ?)
+      `INSERT INTO agent_prs (repo, pr_number, branch, task_key, ticket_url, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'open', ?, ?)
        ON CONFLICT(repo, pr_number) DO UPDATE SET
          branch = excluded.branch,
          task_key = excluded.task_key,
+         ticket_url = excluded.ticket_url,
          state = 'open',
          updated_at = excluded.updated_at`,
-      [pr.repo, pr.prNumber, pr.branch ?? null, pr.taskKey ?? null, now, now],
+      [pr.repo, pr.prNumber, pr.branch ?? null, pr.taskKey ?? null, pr.ticketUrl ?? null, now, now],
     );
   }
 
@@ -201,19 +229,17 @@ export class WorkerState {
    * @param repo - Optional repo slug filter
    */
   listOpenAgentPrs(repo?: string): AgentPr[] {
+    // `SELECT *` (like the run store's reads) so a readonly dashboard can
+    // still list PRs from a database that predates the ticket_url column.
     const rows = (
       repo
         ? this.db
             .query(
-              `SELECT repo, pr_number, branch, task_key, state, created_at, updated_at
-               FROM agent_prs WHERE state = 'open' AND repo = ? ORDER BY created_at ASC`,
+              `SELECT * FROM agent_prs WHERE state = 'open' AND repo = ? ORDER BY created_at ASC`,
             )
             .all(repo)
         : this.db
-            .query(
-              `SELECT repo, pr_number, branch, task_key, state, created_at, updated_at
-               FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`,
-            )
+            .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
             .all()
     ) as Record<string, unknown>[];
 
@@ -222,6 +248,7 @@ export class WorkerState {
       prNumber: row.pr_number as number,
       branch: (row.branch as string | null) ?? undefined,
       taskKey: (row.task_key as string | null) ?? undefined,
+      ticketUrl: (row.ticket_url as string | null) ?? undefined,
       state: row.state as AgentPrState,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
@@ -283,6 +310,11 @@ export class WorkerState {
  * Never throws — a bookkeeping failure must not fail the run that just
  * successfully created a PR.
  *
+ * The ticket URL is derived here, in the worker/CLI process that has the
+ * project's tracker configuration loaded, and frozen in the registry so the
+ * dashboard never has to re-derive it from its own (possibly unrelated)
+ * environment.
+ *
  * @param prUrl - PR URL returned by the PR client
  * @param branch - Source branch of the PR
  * @param taskKey - Task tracker key the PR implements
@@ -293,9 +325,10 @@ export function recordAgentPrFromUrl(prUrl: string, branch?: string, taskKey?: s
     if (!parsed) {
       return; // non-GitHub host; review polling is GitHub-first
     }
+    const ticketUrl = buildTicketUrl(process.env.TASK_TRACKER, taskKey);
     const state = new WorkerState();
     try {
-      state.recordAgentPr({ ...parsed, branch, taskKey });
+      state.recordAgentPr({ ...parsed, branch, taskKey, ticketUrl });
     } finally {
       state.close();
     }

@@ -14,7 +14,6 @@
 import { LockManager } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
-import { buildTicketUrl } from "./ticket-url";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
@@ -211,8 +210,10 @@ export class DashboardData {
 
   /**
    * Open agent-created PRs with their GitHub URLs (`GET /api/agent-prs`).
-   * Ticket links derive from the configured tracker and are dropped when no
-   * URL can be built (the UI falls back to plain text).
+   * Ticket links are frozen in the registry by the worker at PR-creation
+   * time (from the tracker configured then), so they survive tracker
+   * switches and stay correct even when this dashboard process runs
+   * without tracker configuration.
    */
   getOpenAgentPrs(): OpenAgentPrView[] {
     return this.read([], (stores) =>
@@ -222,9 +223,7 @@ export class DashboardData {
         prUrl: `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
         branch: pr.branch,
         taskKey: pr.taskKey,
-        ticketUrl: pr.taskKey
-          ? buildTicketUrl(process.env.TASK_TRACKER || "jira", pr.taskKey)
-          : undefined,
+        ticketUrl: pr.ticketUrl,
         createdAt: pr.createdAt,
         updatedAt: pr.updatedAt,
       })),

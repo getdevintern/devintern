@@ -288,43 +288,42 @@ describe("dashboard API", () => {
   });
 
   test("handleAgentPrs lists open PRs with links and drops closed ones", () => {
-    process.env.JIRA_BASE_URL = "https://acme.atlassian.net";
-    try {
-      const state = new WorkerState(dbPath);
-      state.recordAgentPr({
-        repo: "acme/webapp",
-        prNumber: 7,
-        branch: "feature/dev-1",
-        taskKey: "DEV-1",
-      });
-      state.recordAgentPr({ repo: "acme/webapp", prNumber: 8, taskKey: "DEV-2" });
-      state.markAgentPrClosed("acme/webapp", 8);
-      state.close();
+    const state = new WorkerState(dbPath);
+    // The worker freezes the ticket link at PR-creation time from the tracker
+    // configured then; the dashboard only replays it, so no tracker env is
+    // needed here (and switching trackers cannot break existing links).
+    state.recordAgentPr({
+      repo: "acme/webapp",
+      prNumber: 7,
+      branch: "feature/dev-1",
+      taskKey: "DEV-1",
+      ticketUrl: "https://acme.atlassian.net/browse/DEV-1",
+    });
+    state.recordAgentPr({ repo: "acme/webapp", prNumber: 8, taskKey: "DEV-2" });
+    state.markAgentPrClosed("acme/webapp", 8);
+    state.close();
 
-      const response = handleAgentPrs(data);
-      expect(response.status).toBe(200);
-      const body = response.body as {
-        prs: {
-          repo: string;
-          prNumber: number;
-          prUrl: string;
-          branch?: string;
-          taskKey?: string;
-          ticketUrl?: string;
-        }[];
-      };
-      expect(body.prs).toHaveLength(1);
-      expect(body.prs[0]).toMatchObject({
-        repo: "acme/webapp",
-        prNumber: 7,
-        prUrl: "https://github.com/acme/webapp/pull/7",
-        branch: "feature/dev-1",
-        taskKey: "DEV-1",
-        ticketUrl: "https://acme.atlassian.net/browse/DEV-1",
-      });
-    } finally {
-      delete process.env.JIRA_BASE_URL;
-    }
+    const response = handleAgentPrs(data);
+    expect(response.status).toBe(200);
+    const body = response.body as {
+      prs: {
+        repo: string;
+        prNumber: number;
+        prUrl: string;
+        branch?: string;
+        taskKey?: string;
+        ticketUrl?: string;
+      }[];
+    };
+    expect(body.prs).toHaveLength(1);
+    expect(body.prs[0]).toMatchObject({
+      repo: "acme/webapp",
+      prNumber: 7,
+      prUrl: "https://github.com/acme/webapp/pull/7",
+      branch: "feature/dev-1",
+      taskKey: "DEV-1",
+      ticketUrl: "https://acme.atlassian.net/browse/DEV-1",
+    });
   });
 
   test("handleAgentPrs degrades to an empty list without a database", () => {
