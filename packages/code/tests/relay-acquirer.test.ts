@@ -95,6 +95,7 @@ describe("RelayAcquirer", () => {
       handlers: {
         addressPr: async (repo, pr) => {
           log.addressed.push([repo, pr]);
+          return true;
         },
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
@@ -234,7 +235,7 @@ describe("RelayAcquirer", () => {
       fetchImpl,
       isAgentPr: () => false,
       handlers: {
-        addressPr: async () => {},
+        addressPr: async () => false,
         handlePrComment: async () => {},
         evaluateTask: async (taskKey) => {
           if (taskKey === "BOOM-1") {

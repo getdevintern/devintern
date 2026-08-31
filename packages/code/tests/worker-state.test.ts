@@ -126,6 +126,44 @@ describe("WorkerState", () => {
     });
   });
 
+  describe("addressed_comments", () => {
+    test("unmarked comments are not addressed", () => {
+      expect(state.isCommentAddressed("acme/widgets", "review", 101)).toBe(false);
+      expect(state.isCommentAddressed("acme/widgets", "conversation", 202)).toBe(false);
+    });
+
+    test("markCommentAddressed records and dedupes per repo/type/id", () => {
+      state.markCommentAddressed("acme/widgets", "review", 101);
+      expect(state.isCommentAddressed("acme/widgets", "review", 101)).toBe(true);
+      // Same id in another repo or type stays untouched.
+      expect(state.isCommentAddressed("acme/other", "review", 101)).toBe(false);
+      expect(state.isCommentAddressed("acme/widgets", "conversation", 101)).toBe(false);
+      // Idempotent.
+      state.markCommentAddressed("acme/widgets", "review", 101);
+      expect(state.isCommentAddressed("acme/widgets", "review", 101)).toBe(true);
+    });
+
+    test("markCommentsAddressed records batches idempotently", () => {
+      state.markCommentsAddressed("acme/widgets", "conversation", [1, 2, 3]);
+      state.markCommentsAddressed("acme/widgets", "conversation", [2, 4]);
+      for (const id of [1, 2, 3, 4]) {
+        expect(state.isCommentAddressed("acme/widgets", "conversation", id)).toBe(true);
+      }
+      // Batch helpers accept an empty list.
+      expect(() => state.markCommentsAddressed("acme/widgets", "review", [])).not.toThrow();
+    });
+
+    test("marked comments persist across connections", () => {
+      state.markCommentAddressed("acme/widgets", "review", 77);
+      const second = new WorkerState(dbPath);
+      try {
+        expect(second.isCommentAddressed("acme/widgets", "review", 77)).toBe(true);
+      } finally {
+        second.close();
+      }
+    });
+  });
+
   test("shares a database file with the webhook queue", () => {
     const queue = new WebhookQueue({ dbPath });
     queue.markProcessed("github", "delivery-1");

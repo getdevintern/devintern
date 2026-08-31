@@ -85,6 +85,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
+- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 
 ### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
 
@@ -149,7 +150,7 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The fleet query comes from `[defaults].task_query`. A workspace with automations can omit the query and run as an automation-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Schedule state and leases for automations live in the central workspace database.
+The fleet query comes from `[defaults].task_query`. A workspace with automations or estimations can omit the query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Schedule state and leases for automations and estimations live in the central workspace database.
 
 ### Editing workspace.toml while running
 
@@ -158,7 +159,7 @@ The worker watches `workspace.toml` and reloads it automatically a moment after 
 - **Routing rules, repos, `[[automations]]`, `worker_task_args`, and `poll_interval` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
 - **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
-- **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once at startup), plus `[workspace].dashboard` / `dashboard_port`.
+- **Startup-only settings** still require a restart: `[[estimations]]` entries and their schedules, tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once at startup), plus `[workspace].dashboard` / `dashboard_port`.
 
 `devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 

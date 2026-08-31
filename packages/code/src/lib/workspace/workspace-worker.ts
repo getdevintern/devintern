@@ -46,6 +46,9 @@ import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { EstimationAcquirer } from "../estimation-acquirer";
+import { RunCoordinator } from "../run-coordinator";
+import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
@@ -176,11 +179,41 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<boolean>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
 }
 
 interface RepoRunLockLike {
   acquire(): { success: boolean; message: string; pid?: number };
   release(): void;
+}
+
+/**
+ * Hold a process-level agent slot for a scheduled run's lifetime.
+ *
+ * Without a coordinator (no [[estimations]] configured) the context passes
+ * through untouched, so long-lived gates are never introduced silently.
+ * With one, acquisition happens after any repo lock is held, and release
+ * always runs — even when the caller's own release throws.
+ */
+async function withCoordinatorSlot(
+  context: AutomationRunContext | null | Promise<AutomationRunContext | null>,
+  coordinator?: RunCoordinator,
+): Promise<AutomationRunContext | null> {
+  const resolved = await context;
+  if (!coordinator || !resolved) return resolved;
+  const releaseRun = await coordinator.acquire();
+  const releaseContext = resolved.release;
+  return {
+    ...resolved,
+    release: async () => {
+      try {
+        await releaseContext();
+      } finally {
+        releaseRun();
+      }
+    },
+  };
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -365,7 +398,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
   "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
->;
+> & { coordinator?: RunCoordinator };
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
@@ -435,13 +468,15 @@ export function createFleetTaskExecutor(
       const worktree = await repoManager.createTaskWorktree(repo, taskKey);
       console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
 
-      const ok = await runTask(taskKey, extraArgs, {
-        cwd: worktree,
-        env: {
-          ...buildRepoEnv(repo, workspaceDir),
-          [RUN_ORIGIN_ENV]: "worker",
-        },
-      });
+      const invoke = () =>
+        runTask(taskKey, extraArgs, {
+          cwd: worktree,
+          env: {
+            ...buildRepoEnv(repo, workspaceDir),
+            [RUN_ORIGIN_ENV]: "worker",
+          },
+        });
+      const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
 
       if (ok) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
@@ -561,7 +596,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (!query && config.automations.length === 0) {
+  if (!query && config.automations.length === 0 && config.estimations.length === 0) {
     if (retryQueue.hasPending()) {
       console.warn(
         "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
@@ -576,6 +611,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
+  // Preserve the worker's existing concurrency when scheduled estimation is
+  // absent or fully disabled. The account-global gate is needed only once an
+  // enabled schedule joins the process and must serialize with every other
+  // agent run.
+  const coordinator = config.estimations.some((item) => item.enabled)
+    ? new RunCoordinator()
+    : undefined;
 
   // Recover what the previous worker left behind before acquiring new work.
   await recoverOrphanedWorkspaceRuns({
@@ -618,8 +660,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     automations: initialFleetAutomations.automations,
     dbPath: state.dbPath,
     extraArgs: () => fleetTaskArgs(config),
-    resolveContext: (automation) =>
-      resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+    resolveContext: async (automation) =>
+      withCoordinatorSlot(
+        await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+        coordinator,
+      ),
   });
   acquirers.push(fleetAutomationAcquirer);
 
@@ -628,6 +673,26 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
   const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
+
+  if (config.estimations.length > 0) {
+    // Scheduled story-point sweeps: the automation scheduler (durable cursors
+    // and leases), a one-shot search of each entry's query, and the regular
+    // `--estimate` engine. No repo, no worktree, no branch, no PR.
+    console.log(
+      `📊 Scheduling ${config.estimations.filter((item) => item.enabled).length} enabled estimation schedule(s)`,
+    );
+    acquirers.push(
+      new EstimationAcquirer({
+        estimations: config.estimations,
+        dbPath: state.dbPath,
+        resolveContext: () =>
+          withCoordinatorSlot(
+            Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+            coordinator,
+          ),
+      }),
+    );
+  }
 
   if (query) {
     const { TaskTrackerManager } = await import("../task-tracker-manager");
@@ -653,6 +718,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       query,
       intervalSeconds,
       verbose: options.verbose,
+      coordinator,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);
@@ -668,6 +734,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         verbose: options.verbose,
         intervalUpdaters,
         reloadHooksOut: eventReloadHooks,
+        coordinator,
       })),
     );
   }
@@ -765,6 +832,8 @@ export async function buildFleetEventAcquirers(options: {
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
   reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
     options;
@@ -803,6 +872,7 @@ export async function buildFleetEventAcquirers(options: {
       userHasPushAccess: (owner: string, repo: string, user: string) =>
         gh.userHasPushAccess(owner, repo, user),
       verbose,
+      coordinator: options.coordinator,
     };
     const fleetAddressPr = createFleetAddressPr(eventDeps);
     addressPr = fleetAddressPr;
@@ -965,7 +1035,7 @@ export async function buildFleetEventAcquirers(options: {
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.
-  const { loadRelayState } = await import("../relay-connect");
+  const { loadRelayState, RELAY_BOT_LOGIN } = await import("../relay-connect");
   const relayState = loadRelayState(workspaceDir);
   if (relayState || process.env.WORKER_RELAY_URL) {
     const relayToken = relayState?.relayToken;
@@ -976,13 +1046,30 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      // Relay-managed PRs are associated with the DevIntern AI App identity,
+      // whose private key never leaves DevIntern infrastructure. Register its
+      // login as a mention alias so the local mention gates (including the
+      // address-review subprocess, which inherits this env) match
+      // `@devintern-ai` without needing the key.
+      const aliasNames = new Set(
+        (process.env.GITHUB_BOT_ALIASES ?? "")
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean),
+      );
+      if (!aliasNames.has(RELAY_BOT_LOGIN)) {
+        aliasNames.add(RELAY_BOT_LOGIN);
+        process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
+      }
+
       const { RelayAcquirer } = await import("../relay-acquirer");
-      const { mentionsBot } = await import("../mention-sweep-acquirer");
+      const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
       const execute = createFleetTaskExecutor({
         config,
         workspaceDir,
         skips: state.skips,
         repoManager,
+        coordinator: options.coordinator,
       });
       const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
 
@@ -996,10 +1083,24 @@ export async function buildFleetEventAcquirers(options: {
             state.workerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
           handlers: {
             addressPr: async (repo, prNumber) => {
-              if (addressPr) await addressPr(repo, prNumber);
+              if (addressPr) return addressPr(repo, prNumber);
+              // No GitHub credentials → review envelopes cannot be acted on.
+              console.warn(
+                `⚠️  [relay] review feedback on ${repo}#${prNumber} cannot be addressed: ` +
+                  "GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace.",
+              );
+              return false;
             },
             handlePrComment: async (repo, prNumber, commentId) => {
-              if (!github || !handleMention) return;
+              if (!github || !handleMention) {
+                if (verbose) {
+                  console.log(
+                    `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
+                      "(GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace).",
+                  );
+                }
+                return;
+              }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
               const { data: comment } = await github.conditionalGet<{
                 id: number;
@@ -1010,7 +1111,8 @@ export async function buildFleetEventAcquirers(options: {
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
               if (!comment) return;
               const botName = await github.getBotUsername(repoOwner, repoName);
-              if (!botName || !mentionsBot(comment.body, botName)) return;
+              const botNames = botMentionCandidates(botName);
+              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,

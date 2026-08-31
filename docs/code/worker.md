@@ -109,6 +109,39 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | A run failed and you need to know why | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)). |
 | The dashboard Logs tab is empty | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
 
+## Scheduled story-point estimation
+
+`[[estimations]]` in `workspace.toml` runs unattended `--estimate` sweeps on a schedule. Entries use the same schedule grammar as `[[automations]]`, but the body is a **query**, not a prompt — there is no implementation, no branch, no worktree, no PR, and no `repo` key even in multi-repo workspaces:
+
+```toml
+[[estimations]]
+id = "weekday-groom"
+enabled = true
+cron = "0 9 * * 1-5"
+query = "status = 'To Do' AND labels IN (NeedsEstimate)"
+
+[[estimations]]
+id = "sprint-gaps"
+enabled = true
+cron = "0 10 * * 3"
+query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
+```
+
+Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana, GitHub comment-only); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+
+When an entry comes due the worker runs one-shot `devintern --estimate --query "<query>"` from the workspace home. That path keeps all of the interactive behavior: tickets younger than 24 hours are skipped, already-estimated tickets are skipped unless the ticket changed since the estimate, changed tickets are re-estimated with the estimate comment updated in place, points are written to the tracker field, and usage-limit aborts exit cleanly so the next occurrence retries. Each sweep is recorded with its own `estimate` origin (plus the schedule id) in the [dashboard](./dashboard.md) — it never shows up as a scheduled implement run.
+
+### Serialization
+
+Agent usage limits are account-global. While scheduled estimation is configured, every agent run in the worker process — implement tasks, automation occurrences, PR reviews, conflict resolutions, and estimation sweeps — takes turns through one process-level gate, so at most one agent subprocess burns quota at a time.
+
+Estimation shares the [automation scheduler](#schedule-semantics): durable cursors, leases, missed-occurrence coalescing, and overlap skipping live under `estimation:<id>` keys in `queue.db`.
+
+```bash
+# The CLI one-shot stays available for ad-hoc estimates:
+devintern --estimate --query "project = PROJ AND status = 'To Do'"
+```
+
 ## Polling mode
 
 With `[defaults].task_query` in `workspace.toml`, the worker polls your tracker on an interval (`[defaults].poll_interval`, default 60 seconds) and runs every task that matches the query. The query uses the same language as batch `--query` runs for your tracker, so "ready" means whatever your query says, for example a status or label.

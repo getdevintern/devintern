@@ -55,11 +55,11 @@ default_branch = "main"
 
 # Add repos with \`devintern workspace import\` (run inside each repo), or by
 # hand:
-#
+# 
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
-#
+# 
 # [[routing.rules]]
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
@@ -69,7 +69,7 @@ default_branch = "main"
 # restart. Each occurrence runs the prompt through the normal task pipeline as
 # a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
-#
+# 
 # [[automations]]
 # id = "weekday-maintenance"
 # enabled = true
