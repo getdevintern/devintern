@@ -15,6 +15,7 @@ import {
 } from "../src/lib/workspace/fleet-events";
 import { createFleetTaskExecutor } from "../src/lib/workspace/workspace-worker";
 import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import type { AddressReviewResult } from "../src/lib/address-review";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 
@@ -177,6 +178,52 @@ describe("fleet event handlers", () => {
     const addressPr = createFleetAddressPr(deps());
     expect(await addressPr("acme/unknown", 7)).toBe(false);
     expect(reviews).toHaveLength(0);
+  });
+
+  test("addressPr forwards the CLI result to the relay reaction request", async () => {
+    const relayRequests: Array<{ repo: string; result: unknown }> = [];
+    const addressPr = createFleetAddressPr({
+      ...deps(),
+      requestRelayReactions: async (repo, result) => {
+        relayRequests.push({ repo, result });
+      },
+      runReview: async (
+        slug: string,
+        prNumber: number,
+        opts: { cwd: string; onResult?: (result: AddressReviewResult) => void },
+      ) => {
+        opts.onResult?.({
+          aliasMentioned: true,
+          unmarkedComments: [{ id: 3892157438, target: "review" }],
+        });
+        return true;
+      },
+    });
+
+    const ok = await addressPr("acme/backend", 42);
+    expect(ok).toBe(true);
+    expect(relayRequests).toEqual([
+      {
+        repo: "acme/backend",
+        result: {
+          aliasMentioned: true,
+          unmarkedComments: [{ id: 3892157438, target: "review" }],
+        },
+      },
+    ]);
+  });
+
+  test("addressPr does not request relay reactions without a CLI result", async () => {
+    let requested = 0;
+    const addressPr = createFleetAddressPr({
+      ...deps(),
+      requestRelayReactions: async () => {
+        requested++;
+      },
+    });
+
+    await addressPr("acme/backend", 42);
+    expect(requested).toBe(0);
   });
 
   test("base sync uses the fleet repo worktree and forwards expected SHAs", async () => {
