@@ -286,6 +286,15 @@ async function markCommentsAddressed(
 
   let successCount = 0;
 
+  /** Explain the classic App-permission 403 so the fix is obvious in the log. */
+  const reactionFailureHint = (message: string): string =>
+    message.includes("not accessible by integration")
+      ? `${message}\n` +
+        "      The GitHub App installation lacks the Reactions permission — grant it " +
+        '"Reactions: Read & write" (App settings → Permissions), or react with 🎉 manually ' +
+        "to mark the comment addressed. Until marked, the comment is re-processed on later runs."
+      : message;
+
   // Add 🎉 (hooray) reaction to each review comment
   if (comments.length > 0) {
     console.log(`   Marking ${comments.length} review comment(s) as addressed...`);
@@ -301,7 +310,7 @@ async function markCommentsAddressed(
         successCount++;
       } catch (error) {
         console.warn(
-          `   ⚠️  Failed to add reaction to review comment ${comment.id}: ${(error as Error).message}`,
+          `   ⚠️  Failed to add reaction to review comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }
@@ -319,7 +328,7 @@ async function markCommentsAddressed(
         successCount++;
       } catch (error) {
         console.warn(
-          `   ⚠️  Failed to add reaction to conversation comment ${comment.id}: ${(error as Error).message}`,
+          `   ⚠️  Failed to add reaction to conversation comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }

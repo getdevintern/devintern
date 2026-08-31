@@ -165,10 +165,11 @@ Both the ID and a private key are required.
 2. Set repository permissions:
    - **Contents:** Read and write
    - **Pull requests:** Read and write
+   - **Reactions:** Read and write
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation and PR creation. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation and PR creation. **Reactions** is required for the 🎉 reaction that marks review comments as addressed — without it, addressing still runs but fails to mark comments (a 403 `Resource not accessible by integration` in the worker log), and already-addressed feedback is re-processed on later runs. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
