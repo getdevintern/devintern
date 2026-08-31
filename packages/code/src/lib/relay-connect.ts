@@ -17,6 +17,15 @@ import { dirname, join, resolve } from "path";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
+/**
+ * Login of the DevIntern AI App bot that acts on relay-managed PRs. Its
+ * private key stays on DevIntern infrastructure, so a local worker can never
+ * resolve this identity via App auth — instead the worker injects it as a
+ * mention alias (GITHUB_BOT_ALIASES, see `botMentionAliases`) so that
+ * `@devintern-ai` mentions on relay PRs trigger review addressing.
+ */
+export const RELAY_BOT_LOGIN = "devintern-ai";
+
 export interface RelayRegistration {
   kind: "repo" | "source";
   key: string;

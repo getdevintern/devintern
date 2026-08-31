@@ -78,7 +78,7 @@ Tracker-specific sections are supported. The tool resolves configuration based o
 
 Legacy top-level `projects` is still honored as a Jira fallback for backward compatibility.
 
-Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
+Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state, addressed PR feedback) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
 
 ## Key Implementation Details
 
@@ -94,7 +94,7 @@ Everything under the output directory is a write-only debug artifact. Durable st
 
 ## Testing: state database isolation
 
-Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state). Three layers enforce this:
+Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state, addressed PR feedback). Three layers enforce this:
 
 1. `tests/run-tests.ts` (the `bun run test` entry) sets `WEBHOOK_QUEUE_DB` to a temp path before launching `bun test`, so even subprocesses spawned without an explicit env option inherit a safe value.
 2. `tests/setup/guard-queue-db.ts` (bunfig preload) re-pins `WEBHOOK_QUEUE_DB` to a unique mkdtemp db per test-file process, covering every default-resolution code path (`new RunStore()`, `new WorkerState()`, `resolveQueueDbPath()`), and removes it at exit. Bun children that thread `{ ...process.env }` inherit the pin; children without an explicit env option get the start environment, which layer 1 pinned.

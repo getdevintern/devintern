@@ -171,6 +171,11 @@ export function parseAutomationEntries(
 
     const enabledValue = table.enabled;
     if (typeof enabledValue !== "boolean") errors.push(`${label}.enabled must be a boolean.`);
+    if (table.kind !== undefined) {
+      errors.push(
+        `${label}.kind is not supported; scheduled estimation belongs in [[estimations]].`,
+      );
+    }
 
     const presetName = stringValue("preset");
     const prompt = stringValue("prompt");
