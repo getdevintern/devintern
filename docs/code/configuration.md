@@ -106,6 +106,16 @@ Set both when you run mention-driven automation and also use GitHub Issues as a 
 
 Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
 
+### Bot mention aliases
+
+Mention matching resolves the bot login from your configured GitHub App. When a relay-managed worker should also react to the DevIntern AI App's identity — whose private key stays on DevIntern infrastructure and is never available locally — add its login as an alias:
+
+```bash
+GITHUB_BOT_ALIASES=devintern-ai
+```
+
+The value is a comma-separated list of logins (with or without the `[bot]` suffix). Aliases count everywhere mentions are matched: commented reviews, inline comment scopes, and the `@mention` sweep. A worker connected to the relay (`devintern worker connect`) injects `devintern-ai` automatically; set the variable explicitly when running a custom App alongside it or without the relay.
+
 ### GitHub Personal Access Token
 
 For personal / interactive CLI use, and for `TASK_TRACKER=github`:

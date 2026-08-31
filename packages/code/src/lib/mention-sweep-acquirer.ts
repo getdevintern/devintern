@@ -93,6 +93,38 @@ export function mentionsBot(body: string | null, botName: string): boolean {
 }
 
 /**
+ * Extra bot logins that should count as @mentions beyond the resolved GitHub
+ * identity, from `GITHUB_BOT_ALIASES` (comma-separated, with or without the
+ * `[bot]` suffix). The main use case is the relay: relay-managed PRs are
+ * associated with the DevIntern AI App identity, whose private key never
+ * leaves DevIntern infrastructure — so the local worker cannot resolve it via
+ * App auth and must be told the login instead.
+ */
+export function botMentionAliases(): string[] {
+  return (process.env.GITHUB_BOT_ALIASES ?? "")
+    .split(",")
+    .map((alias) => alias.trim())
+    .filter(Boolean);
+}
+
+/**
+ * All bot logins a mention gate should match: the resolved identity (App auth
+ * or a Bot-type token) plus configured aliases, deduped order-stable.
+ */
+export function botMentionCandidates(resolvedBotName: string | null): string[] {
+  return [
+    ...new Set([resolvedBotName, ...botMentionAliases()].filter((n): n is string => Boolean(n))),
+  ];
+}
+
+/**
+ * Whether a comment body mentions any of the candidate bot logins.
+ */
+export function mentionsAnyBot(body: string | null, botNames: string[]): boolean {
+  return botNames.some((name) => mentionsBot(body, name));
+}
+
+/**
  * Sweeps the repo for bot mentions on any PR.
  */
 export class MentionSweepAcquirer implements Acquirer {
@@ -132,20 +164,20 @@ export class MentionSweepAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      const botName = await this.resolveBotName();
-      if (!botName) {
+      const botNames = botMentionCandidates(await this.resolveBotName());
+      if (botNames.length === 0) {
         return;
       }
 
       await this.sweepFeed(
         `github:mention:issuecomments:${this.options.repo}`,
         (since) => this.options.github.fetchIssueCommentsSince(since),
-        botName,
+        botNames,
       );
       await this.sweepFeed(
         `github:mention:prcomments:${this.options.repo}`,
         (since) => this.options.github.fetchReviewCommentsSince(since),
-        botName,
+        botNames,
       );
     } catch (error) {
       console.warn(`⚠️  [${this.name}] sweep failed: ${(error as Error).message}`);
@@ -154,15 +186,15 @@ export class MentionSweepAcquirer implements Acquirer {
     }
   }
 
-  /** Resolve and cache the bot login; warn once when unavailable. */
+  /** Resolve and cache the bot login; warn once when no identity is usable. */
   private async resolveBotName(): Promise<string | null> {
     if (this.botName === undefined) {
       this.botName = await this.options.github.getBotUsername();
-      if (!this.botName && !this.warnedNoBot) {
+      if (!this.botName && botMentionAliases().length === 0 && !this.warnedNoBot) {
         this.warnedNoBot = true;
         console.warn(
-          `⚠️  [${this.name}] could not resolve a bot username (GitHub App auth required); ` +
-            `mention sweeping is disabled`,
+          `⚠️  [${this.name}] could not resolve a bot username (GitHub App auth required, ` +
+            `or set GITHUB_BOT_ALIASES); mention sweeping is disabled`,
         );
       }
     }
@@ -173,7 +205,7 @@ export class MentionSweepAcquirer implements Acquirer {
   private async sweepFeed(
     cursorSource: string,
     fetchSince: (sinceIso: string) => Promise<SweptComment[]>,
-    botName: string,
+    botNames: string[],
   ): Promise<void> {
     const { workerState, queue, github, handleMention, verbose } = this.options;
 
@@ -191,7 +223,11 @@ export class MentionSweepAcquirer implements Acquirer {
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
       }
-      if (comment.user.type === "Bot" || !mentionsBot(comment.body, botName)) {
+      if (comment.user.type === "Bot") {
+        continue;
+      }
+      const matchedBot = botNames.find((name) => mentionsBot(comment.body, name));
+      if (!matchedBot) {
         continue;
       }
 
@@ -236,7 +272,7 @@ export class MentionSweepAcquirer implements Acquirer {
         }
 
         console.log(
-          `\n📌 [${this.name}] @${botName} mentioned on PR #${prNumber} by @${comment.user.login}`,
+          `\n📌 [${this.name}] @${matchedBot} mentioned on PR #${prNumber} by @${comment.user.login}`,
         );
         await handleMention(comment, prNumber);
       } catch (error) {

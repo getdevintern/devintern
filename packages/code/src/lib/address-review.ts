@@ -21,7 +21,7 @@ import { beginRun, endRun, recordRunStage } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
-import { mentionsBot } from "./mention-sweep-acquirer";
+import { botMentionCandidates, mentionsAnyBot } from "./mention-sweep-acquirer";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,
@@ -402,7 +402,10 @@ export async function addressReview(
 
   // Resolve the bot identity once: it decides whether a commented review run
   // triggers at all and whether a stray inline comment is an explicit ask.
+  // Aliases (GITHUB_BOT_ALIASES) extend the resolvable identity — e.g. the
+  // relay App's login, whose private key is not available locally.
   const botName = await githubClient.getBotUsername(owner, repo);
+  const botNames = botMentionCandidates(botName);
 
   // Check which comments already have a "hooray" reaction (marked as addressed)
   const addressedCommentIds = new Set<number>();
@@ -448,7 +451,7 @@ export async function addressReview(
       if (rootId !== undefined && reviewThreadRootIds.has(rootId)) {
         return true;
       }
-      return botName !== null && mentionsBot(c.body, botName);
+      return mentionsAnyBot(c.body, botNames);
     })
     .map((c) => ({
       id: c.id,
@@ -523,25 +526,29 @@ export async function addressReview(
   }
   console.log(`   ${processedConversationComments.length} remaining to address`);
 
-  // A commented review is informational by nature: only act on it when the
-  // bot is explicitly mentioned — in the review body itself or in one of the
-  // comments beneath it. changes_requested reviews are always addressed.
-  // Fails closed when no bot identity is resolvable.
+  // A commented review is informational by nature: only act on it when a bot
+  // identity is explicitly mentioned — in the review body itself or in one of
+  // the comments beneath it. changes_requested reviews are always addressed.
+  // Fails closed when no bot identity is configured at all.
   if (review.state === "COMMENTED") {
     const mentionSources = [
       review.body,
       ...processedComments.map((c) => c.body),
       ...processedConversationComments.map((c) => c.body),
     ];
-    const mentioned = botName !== null && mentionSources.some((body) => mentionsBot(body, botName));
+    const mentioned = mentionSources.some((body) => mentionsAnyBot(body, botNames));
     if (!mentioned) {
-      if (botName === null) {
+      if (botNames.length === 0) {
         console.log(
-          "\n⏭️  Latest review is commented, but no bot identity is resolvable under the current credentials to verify @mentions — skipping.",
+          "\n⏭️  Latest review is commented, but no bot identity is configured to verify @mentions — skipping.",
+        );
+        console.log(
+          "   Configure a GitHub App or set GITHUB_BOT_ALIASES (e.g. the relay App's login).",
         );
       } else {
+        const names = botNames.map((name) => `@${name}`).join(" or ");
         console.log(
-          `\n⏭️  Latest review is commented and nothing in it mentions @${botName} — skipping.`,
+          `\n⏭️  Latest review is commented and nothing in it mentions ${names} — skipping.`,
         );
       }
       console.log(
@@ -550,8 +557,10 @@ export async function addressReview(
       console.log(`   View PR: ${prUrl}`);
       return;
     }
-    if (verbose && botName !== null) {
-      console.log(`   💬 Commented review mentions @${botName}; addressing.`);
+    if (verbose && botNames.length > 0) {
+      console.log(
+        `   💬 Bot mention detected (${botNames.map((name) => `@${name}`).join(", ")}); addressing.`,
+      );
     }
   }
 

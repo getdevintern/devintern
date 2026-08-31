@@ -847,7 +847,7 @@ export async function buildFleetEventAcquirers(options: {
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.
-  const { loadRelayState } = await import("../relay-connect");
+  const { loadRelayState, RELAY_BOT_LOGIN } = await import("../relay-connect");
   const relayState = loadRelayState(workspaceDir);
   if (relayState || process.env.WORKER_RELAY_URL) {
     const relayToken = relayState?.relayToken;
@@ -858,8 +858,24 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      // Relay-managed PRs are associated with the DevIntern AI App identity,
+      // whose private key never leaves DevIntern infrastructure. Register its
+      // login as a mention alias so the local mention gates (including the
+      // address-review subprocess, which inherits this env) match
+      // `@devintern-ai` without needing the key.
+      const aliasNames = new Set(
+        (process.env.GITHUB_BOT_ALIASES ?? "")
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean),
+      );
+      if (!aliasNames.has(RELAY_BOT_LOGIN)) {
+        aliasNames.add(RELAY_BOT_LOGIN);
+        process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
+      }
+
       const { RelayAcquirer } = await import("../relay-acquirer");
-      const { mentionsBot } = await import("../mention-sweep-acquirer");
+      const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
       const execute = createFleetTaskExecutor({
         config,
         workspaceDir,
@@ -906,7 +922,8 @@ export async function buildFleetEventAcquirers(options: {
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
               if (!comment) return;
               const botName = await github.getBotUsername(repoOwner, repoName);
-              if (!botName || !mentionsBot(comment.body, botName)) return;
+              const botNames = botMentionCandidates(botName);
+              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,
