@@ -249,12 +249,15 @@ async function serializePrRun<T>(
  * @param prNumber - Pull request number
  * @param opts - Working directory and environment for the subprocess;
  *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both
+ *               per-repo env; direct callers inherit both.
  */
 export function runAddressReviewViaCli(
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+  } = {},
 ): Promise<boolean> {
   return serializePrRun(repo, prNumber, () =>
     runSubcommandViaCli("address-review", repo, prNumber, opts),
@@ -387,12 +390,15 @@ function runSubcommandViaCli(
   subcommand: string,
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+  } = {},
 ): Promise<boolean> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit"],
       cwd: opts.cwd,
       env: opts.env ?? process.env,
     });

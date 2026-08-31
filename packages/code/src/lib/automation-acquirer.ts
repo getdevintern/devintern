@@ -54,6 +54,12 @@ export interface AutomationAcquirerOptions {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   setInterval?: (callback: () => void, ms: number) => ReturnType<typeof setInterval>;
   clearInterval?: (timer: ReturnType<typeof setInterval>) => void;
+  /** Namespace durable schedule state when another job type reuses this scheduler. */
+  stateId?: (automation: AutomationConfig) => string;
+  /** User-facing job kind used in log lines; defaults to "automation". */
+  jobKind?: string;
+  /** Acquirer name override (worker banner / analytics worker mode). */
+  name?: string;
 }
 
 interface ActiveAutomationRun {
@@ -71,7 +77,7 @@ export function nextAutomationDue(automation: AutomationConfig, afterMs: number)
 
 /** One-timer scheduler with durable UTC cursors and per-automation leases. */
 export class AutomationAcquirer implements Acquirer {
-  readonly name = "scheduled-automations";
+  readonly name: string;
   private options: AutomationAcquirerOptions;
   private store: AutomationStateStore;
   private owner = `${process.pid}:${randomUUID()}`;
@@ -82,6 +88,7 @@ export class AutomationAcquirer implements Acquirer {
 
   constructor(options: AutomationAcquirerOptions) {
     this.options = options;
+    this.name = options.name ?? "scheduled-automations";
     this.store = new AutomationStateStore(options.dbPath);
   }
 
@@ -89,10 +96,10 @@ export class AutomationAcquirer implements Acquirer {
     this.stopped = false;
     const now = this.now();
     for (const automation of this.options.automations.filter((item) => item.enabled)) {
-      this.store.register(automation, nextAutomationDue(automation, now));
+      this.store.register(automation, nextAutomationDue(automation, now), this.stateId(automation));
     }
     console.log(
-      `⏰ Scheduling ${this.options.automations.filter((item) => item.enabled).length} enabled automation(s)`,
+      `⏰ Scheduling ${this.options.automations.filter((item) => item.enabled).length} enabled ${this.jobKind()}(s)`,
     );
     await this.tick();
   }
@@ -122,18 +129,20 @@ export class AutomationAcquirer implements Acquirer {
 
   private async runTick(): Promise<void> {
     const leaseMs = this.options.leaseMs ?? LEASE_MS;
+    const kind = this.jobKind();
     for (const automation of this.options.automations.filter((item) => item.enabled)) {
-      let state = this.store.get(automation.id);
+      const stateId = this.stateId(automation);
+      let state = this.store.get(stateId);
       if (!state) continue;
 
       if (this.active.has(automation.id)) {
         const active = this.active.get(automation.id) as ActiveAutomationRun;
-        if (!this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs)) {
-          console.warn(`⏭️  [automation:${automation.id}] terminating: lease was lost`);
+        if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
+          console.warn(`⏭️  [${kind}:${automation.id}] terminating: lease was lost`);
           active.run.terminate();
           await active.lifecycle;
         }
-        state = this.store.get(automation.id);
+        state = this.store.get(stateId);
         if (!state) continue;
       }
       if (state.nextDueAt > this.now()) continue;
@@ -142,16 +151,14 @@ export class AutomationAcquirer implements Acquirer {
       if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > overlapNow) {
         const skipNow = this.now();
         const nextDue = nextAutomationDue(automation, skipNow);
-        if (this.store.skipOverlap(automation.id, skipNow, nextDue)) {
-          console.warn(
-            `⏭️  [automation:${automation.id}] occurrence skipped: previous run is active`,
-          );
+        if (this.store.skipOverlap(stateId, skipNow, nextDue)) {
+          console.warn(`⏭️  [${kind}:${automation.id}] occurrence skipped: previous run is active`);
         }
         continue;
       }
       const claimNow = this.now();
       const nextDue = nextAutomationDue(automation, claimNow);
-      if (!this.store.claim(automation.id, this.owner, claimNow, nextDue, leaseMs)) continue;
+      if (!this.store.claim(stateId, this.owner, claimNow, nextDue, leaseMs)) continue;
 
       let context: AutomationRunContext | null = null;
       try {
@@ -161,7 +168,7 @@ export class AutomationAcquirer implements Acquirer {
         const clearHeartbeatInterval = this.options.clearInterval ?? clearInterval;
         const preparationHeartbeat = setHeartbeatInterval(
           () => {
-            if (!this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs)) {
+            if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
               ownsClaim = false;
             }
           },
@@ -174,22 +181,24 @@ export class AutomationAcquirer implements Acquirer {
           clearHeartbeatInterval(preparationHeartbeat);
         }
         if (!context) {
-          console.warn(`⏭️  [automation:${automation.id}] occurrence skipped: repository is busy`);
-          this.store.release(automation.id, this.owner);
+          console.warn(
+            `⏭️  [${kind}:${automation.id}] occurrence skipped: ${this.busySkipReason()}`,
+          );
+          this.store.release(stateId, this.owner);
           continue;
         }
         if (this.stopped) {
-          this.store.release(automation.id, this.owner);
+          this.store.release(stateId, this.owner);
           await context.release();
           continue;
         }
-        ownsClaim &&= this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs);
+        ownsClaim &&= this.store.heartbeat(stateId, this.owner, this.now(), leaseMs);
         if (!ownsClaim) {
-          console.warn(`⏭️  [automation:${automation.id}] occurrence skipped: lease was lost`);
+          console.warn(`⏭️  [${kind}:${automation.id}] occurrence skipped: lease was lost`);
           await context.release();
           continue;
         }
-        console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
+        console.log(`\n⏰ [${kind}:${automation.id}] starting scheduled run`);
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
           : defaultSpawnRun(
@@ -206,16 +215,16 @@ export class AutomationAcquirer implements Acquirer {
           .then((ok) =>
             console.log(
               ok
-                ? `✅ [automation:${automation.id}] completed`
-                : `⚠️  [automation:${automation.id}] did not complete cleanly`,
+                ? `✅ [${kind}:${automation.id}] completed`
+                : `⚠️  [${kind}:${automation.id}] did not complete cleanly`,
             ),
           )
           .catch((error) =>
-            console.error(`❌ [automation:${automation.id}] ${(error as Error).message}`),
+            console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`),
           )
           .finally(async () => {
             try {
-              this.store.release(automation.id, this.owner);
+              this.store.release(stateId, this.owner);
               await context?.release();
             } finally {
               if (this.active.get(automation.id) === active) this.active.delete(automation.id);
@@ -224,9 +233,9 @@ export class AutomationAcquirer implements Acquirer {
           });
         this.active.set(automation.id, active);
       } catch (error) {
-        this.store.release(automation.id, this.owner);
+        this.store.release(stateId, this.owner);
         await context?.release();
-        console.error(`❌ [automation:${automation.id}] ${(error as Error).message}`);
+        console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`);
       }
     }
     this.scheduleNext();
@@ -236,13 +245,26 @@ export class AutomationAcquirer implements Acquirer {
     return (this.options.now ?? Date.now)();
   }
 
+  private jobKind(): string {
+    return this.options.jobKind ?? "automation";
+  }
+
+  /** Reason logged when `resolveContext` declines a due occurrence. */
+  private busySkipReason(): string {
+    return this.options.jobKind === undefined ? "repository is busy" : "worker is busy";
+  }
+
+  private stateId(automation: AutomationConfig): string {
+    return this.options.stateId?.(automation) ?? automation.id;
+  }
+
   private scheduleNext(): void {
     if (this.stopped) return;
     if (this.timer) (this.options.clearTimer ?? clearTimeout)(this.timer);
     const now = this.now();
     const dueTimes = this.options.automations
       .filter((item) => item.enabled)
-      .map((item) => this.store.get(item.id)?.nextDueAt)
+      .map((item) => this.store.get(this.stateId(item))?.nextDueAt)
       .filter((value): value is number => value !== undefined);
     const heartbeatAt =
       this.active.size > 0 ? now + (this.options.heartbeatMs ?? HEARTBEAT_MS) : Infinity;

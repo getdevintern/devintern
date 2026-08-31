@@ -9,6 +9,9 @@
  *   from "now", so a reboot cannot drop events.
  * - `agent_prs` — PRs created by the pipeline. Review polling watches these
  *   automatically (the agent's own PRs need no @mention to trigger).
+ * - `addressed_comments` — PR feedback comments this worker has already
+ *   addressed. The dedupe gate for review runs is local: GitHub reactions are
+ *   visual feedback for humans only.
  */
 
 import { Database } from "bun:sqlite";
@@ -25,6 +28,8 @@ export type AgentPrState = "open" | "closed";
 
 /** `worker_meta` key holding the epoch ms of the last executed task drain. */
 export const TASK_POLL_LAST_DRAIN_KEY = "task-poll:last-drain-at";
+
+export type AddressedCommentType = "review" | "conversation";
 
 export interface AgentPr {
   repo: string; // owner/repo
@@ -113,6 +118,16 @@ export class WorkerState {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS addressed_comments (
+        repo TEXT NOT NULL,
+        comment_type TEXT NOT NULL,
+        comment_id INTEGER NOT NULL,
+        addressed_at INTEGER NOT NULL,
+        PRIMARY KEY (repo, comment_type, comment_id)
       )
     `);
   }
@@ -301,6 +316,65 @@ export class WorkerState {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       [key, value, Date.now()],
     );
+  }
+
+  /**
+   * Whether a PR feedback comment was already addressed by this worker.
+   * This is the dedupe gate for review runs — GitHub reactions carry no
+   * gating meaning.
+   *
+   * @param repo - Repo slug (`owner/repo`)
+   * @param commentType - `review` (inline) or `conversation` (issue comment)
+   * @param commentId - GitHub comment id
+   */
+  isCommentAddressed(repo: string, commentType: AddressedCommentType, commentId: number): boolean {
+    return (
+      this.db
+        .query(
+          `SELECT 1 FROM addressed_comments WHERE repo = ? AND comment_type = ? AND comment_id = ?`,
+        )
+        .get(repo, commentType, commentId) !== null
+    );
+  }
+
+  /**
+   * Record a single PR feedback comment as addressed (idempotent).
+   *
+   * @param repo - Repo slug (`owner/repo`)
+   * @param commentType - `review` (inline) or `conversation` (issue comment)
+   * @param commentId - GitHub comment id
+   */
+  markCommentAddressed(repo: string, commentType: AddressedCommentType, commentId: number): void {
+    this.db.run(
+      `INSERT OR IGNORE INTO addressed_comments (repo, comment_type, comment_id, addressed_at)
+       VALUES (?, ?, ?, ?)`,
+      [repo, commentType, commentId, Date.now()],
+    );
+  }
+
+  /**
+   * Record PR feedback comments as addressed (idempotent, single transaction).
+   *
+   * @param repo - Repo slug (`owner/repo`)
+   * @param commentType - `review` (inline) or `conversation` (issue comment)
+   * @param commentIds - GitHub comment ids
+   */
+  markCommentsAddressed(
+    repo: string,
+    commentType: AddressedCommentType,
+    commentIds: number[],
+  ): void {
+    if (commentIds.length === 0) return;
+    const now = Date.now();
+    this.db.transaction(() => {
+      for (const commentId of commentIds) {
+        this.db.run(
+          `INSERT OR IGNORE INTO addressed_comments (repo, comment_type, comment_id, addressed_at)
+           VALUES (?, ?, ?, ?)`,
+          [repo, commentType, commentId, now],
+        );
+      }
+    })();
   }
 
   /** Close the underlying SQLite connection. */

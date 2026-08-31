@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Turn tracker tickets into pull requests with any coding agent — on your keys, self-hosted.</strong>
+  <strong>A worker for the coding agents you already have. Ready tickets become reviewed pull requests — on your machines.</strong>
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 <p align="center">
   <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
 </p>
-<p align="center"><em>Markdown task → coding agent → pull request</em></p>
+<p align="center"><em>Try it on one task. The product is the worker that keeps going.</em></p>
 
 <!-- Fallback GIF if video is awkward on some clients
 <p align="center">
@@ -28,12 +28,12 @@
 </p>
 -->
 
-DevIntern connects the tracker your team already uses to the coding agent and model you choose. Tickets get implemented and self-reviewed in the background; you step in when a clean diff is ready. Swap any piece at any time.
+DevIntern is a self-hosted worker: it picks up ready tickets from the tracker you already use, runs Claude Code, Codex, Cursor, or OpenCode with your keys, and opens a self-reviewed pull request. You review diffs, not agent sessions. Interactive runs are free; the daemon is the paid product.
 
 - **Your tracker:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · plain markdown files
 - **Your agent:** Claude Code · Codex · Cursor · OpenCode (one config line to switch)
-- **Your keys:** BYOK — billed on your existing provider contract
-- **Interactive use is free forever** — no signup, no time limit
+- **Your keys, your machines** — billed on the contract you already have; code never hits our servers
+- **Try it free** — run `devintern PROJ-123` from your terminal, no signup
 
 <!-- Visual echo of the tracker + agent bullets above.
      Near-black brand marks use color/dark_mode_color so they stay visible
@@ -83,42 +83,29 @@ DevIntern connects the tracker your team already uses to the coding agent and mo
 curl -fsSL https://bun.sh/install | bash
 bun install -g @getdevintern/code
 
-# Zero tracker credentials: pass a local markdown task
-devintern ./tasks/my-task.md --create-pr
+# 1. Try one task in this repo (free, no signup)
+devintern init
+devintern ./tasks/my-task.md --create-pr   # or: devintern PROJ-123 --create-pr
+
+# 2. Leave it running (automation license)
+devintern worker init
+devintern worker
 ```
 
-That is the full loop: **markdown task → agent run → pull request**. No Jira or Linear account required for the markdown path.
+One local run proves the loop. The worker is the intern: it keeps picking up ready tickets and turns review comments on its pull requests into commits.
 
-With a real tracker (after `devintern init`):
+## Why teams use it
 
-```bash
-devintern init                 # interactive setup for your tracker + agent
-devintern PROJ-123 --create-pr
-```
+|                     |                                                                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| **Worker**          | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                         |
+| **Your stack**      | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent.        |
+| **Quality gates**   | Vague tickets get questions on the tracker instead of a wrong PR. The agent reviews its own diff before a human sees it.          |
+| **Self-hosted**     | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.                  |
 
-Product guides are available locally for [Code](docs/code/quick-start.md) and [PM](docs/pm/quick-start.md). The same guides are rendered at [devintern.com/docs](https://devintern.com/docs/code/quick-start/).
+## The worker
 
-## Interactive commands
-
-One CLI covers the whole loop — point it at a ticket and get a reviewed diff back. Interactive use is free forever: no signup, no time limit.
-
-| Command                                            | What you get                                                                                      |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `devintern PROJ-123 --create-pr`                   | Ticket → feature branch → implemented diff → PR, with a summary posted back to the tracker        |
-| `devintern ./tasks/my-task.md --create-pr`         | The same loop from a local markdown file — zero tracker credentials                               |
-| `devintern --query 'status = "To Do"' --create-pr` | Batch mode: every ticket matching your JQL / Linear filter / GitHub search, run one after another |
-| `devintern PROJ-123 --create-pr --auto-review`     | The agent critiques its own PR diff and commits fixes before any human has to look                |
-| `devintern address-review <pr-url>`                | Review comments on a pull request become addressed commits on its branch                          |
-| `devintern resolve-conflicts <pr-url>`             | The base branch is merged in and the agent resolves the conflicted files sensibly                 |
-| `devintern doctor`                                 | Pre-flight check for runtime, git, agent CLIs, tracker credentials — with a fix hint per problem  |
-
-And when a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR.
-
-Full flag reference: [Usage](docs/code/usage.md).
-
-## Put your backlog on autopilot (worker mode)
-
-Everything above was you driving one task at a time. `devintern worker` flips it around: a single long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy — while your team writes specs, reviews code, or sleeps. Your code, credentials, and agent execution never leave your machine.
+`devintern worker` is a long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy while your team writes specs, reviews code, or sleeps. Your code, credentials, and agent execution never leave your machine.
 
 Once it's running, the worker:
 
@@ -163,23 +150,32 @@ Unattended automation uses the paid automation tier (one-time Supporter license 
 </p>
 -->
 
-## Write the ticket first
+## Try one task
 
-Worker mode is only as good as the work you feed it. Write the ticket first with **[DevIntern PM](https://devintern.com/pm-desktop/)** (desktop, free, no signup) or **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) in the terminal — turn a prompt, error log, or Figma frame into a well-specified ticket — then run it with `devintern`.
+Point the CLI at a ticket and get a reviewed diff back. Interactive use is free forever: no signup, no time limit.
 
-<p align="center">
-  <a href="https://devintern.com/pm-desktop/">
-    <img src=".github/readme/pm-desktop.jpg" width="100%" alt="DevIntern PM: a prompt becomes a ready-to-create ticket">
-  </a>
-</p>
-<p align="center"><em>Prompt → drafted ticket → Create Task</em></p>
+| Command                                            | What you get                                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `devintern PROJ-123 --create-pr`                   | Ticket → feature branch → implemented diff → PR, with a summary posted back to the tracker        |
+| `devintern ./tasks/my-task.md --create-pr`         | The same loop from a local markdown file — zero tracker credentials                               |
+| `devintern --query 'status = "To Do"' --create-pr` | Batch mode: every ticket matching your JQL / Linear filter / GitHub search, run one after another |
+| `devintern PROJ-123 --create-pr --auto-review`     | The agent critiques its own PR diff and commits fixes before any human has to look                |
+| `devintern address-review <pr-url>`                | Review comments on a pull request become addressed commits on its branch                          |
+| `devintern resolve-conflicts <pr-url>`             | The base branch is merged in and the agent resolves the conflicted files sensibly                 |
+| `devintern doctor`                                 | Pre-flight check for runtime, git, agent CLIs, tracker credentials — with a fix hint per problem  |
+
+When a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR. See the [quick-start guide](docs/code/quick-start.md) and [full usage reference](docs/code/usage.md).
+
+## Need a ticket first?
+
+[DevIntern PM](https://devintern.com/pm-desktop/) (desktop, free) and [`devpm`](https://www.npmjs.com/package/@getdevintern/pm) turn a prompt, error log, or Figma frame into a well-specified tracker ticket. They are optional intake for the worker.
 
 ## License and pricing
 
 Source is under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
 - **Interactive use** → free forever
-- **Unattended automation** (scheduled pickup, webhook-driven review handling) → Supporter License (one-time) or Team/Business subscription
+- **Worker (unattended)** → Supporter ($99 once for one person's own repos) or a Team/Business subscription
 
 Details: [devintern.com/pricing](https://devintern.com/pricing/)
 
