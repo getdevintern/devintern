@@ -21,6 +21,8 @@ import { beginRun, endRun, recordRunStage } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
+import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "./mention-sweep-acquirer";
+import { RELAY_BOT_LOGIN } from "./relay-connect";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,
@@ -31,6 +33,18 @@ export interface AddressReviewOptions {
   noPush?: boolean;
   noReply?: boolean;
   verbose?: boolean;
+}
+
+/** Outcome of one address-review invocation, consumed by the worker. */
+export interface AddressReviewResult {
+  /**
+   * The run was triggered by a mention of the relay App identity
+   * (`devintern-ai`) rather than a locally-resolved bot login — the worker
+   * can then ask the relay to mark unmarked comments as that identity.
+   */
+  aliasMentioned: boolean;
+  /** Comments that were in scope but not marked addressed locally. */
+  unmarkedComments: Array<{ id: number; target: "review" | "conversation" }>;
 }
 
 interface ParsedPRUrl {
@@ -67,43 +81,69 @@ function parsePRUrl(url: string): ParsedPRUrl {
 }
 
 /**
- * Get the latest review with `changes_requested` state.
+ * Metadata of the review a run will act on.
+ */
+interface FeedbackReview {
+  reviewId: number;
+  reviewer: string;
+  body: string | null;
+  submittedAt: string;
+  /** GitHub REST review state (`CHANGES_REQUESTED` or `COMMENTED`). */
+  state: string;
+}
+
+/**
+ * Get the review a run should act on: the latest `changes_requested` review,
+ * or — when no `changes_requested` reviews exist — the latest `commented`
+ * review. A `commented` pick is only acted on when the bot is mentioned
+ * (the gate runs in {@link addressReview} once the comments are fetched);
+ * `changes_requested` reviews are always addressed.
  *
  * @param client - GitHub reviews API client
  * @param owner - Repository owner
  * @param repo - Repository name
  * @param prNumber - Pull request number
- * @returns Latest changes-requested review metadata, or `null` if none exist
+ * @returns Review metadata, or `null` if none exist
  */
-async function getLatestChangesRequestedReview(
+async function getLatestFeedbackReview(
   client: GitHubReviewsClient,
   owner: string,
   repo: string,
   prNumber: number,
-): Promise<{
-  reviewId: number;
-  reviewer: string;
-  body: string | null;
-  submittedAt: string;
-} | null> {
+): Promise<FeedbackReview | null> {
   // Fetch all reviews for the PR using the client
   const reviews = await client.getReviews(owner, repo, prNumber);
 
-  // Find the latest "changes_requested" review
+  const byNewest = (a: { submitted_at: string }, b: { submitted_at: string }) =>
+    new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime();
+
   const changesRequestedReviews = reviews
     .filter((r) => r.state === "CHANGES_REQUESTED")
-    .sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
+    .sort(byNewest);
 
-  if (changesRequestedReviews.length === 0) {
+  if (changesRequestedReviews.length > 0) {
+    const latest = changesRequestedReviews[0];
+    return {
+      reviewId: latest.id,
+      reviewer: latest.user.login,
+      body: latest.body,
+      submittedAt: latest.submitted_at,
+      state: latest.state,
+    };
+  }
+
+  const commentedReviews = reviews.filter((r) => r.state === "COMMENTED").sort(byNewest);
+  if (commentedReviews.length === 0) {
     return null;
   }
 
-  const latest = changesRequestedReviews[0];
+  const latest = commentedReviews[0];
   return {
     reviewId: latest.id,
     reviewer: latest.user.login,
     body: latest.body,
     submittedAt: latest.submitted_at,
+    state: latest.state,
   };
 }
 
@@ -244,6 +284,8 @@ export async function runAgent(
  * @param prNumber - Pull request number (unused; kept for API symmetry)
  * @param comments - Top-level and reply review comments to mark
  * @param conversationComments - Issue/conversation tab comments to mark
+ * @returns The in-scope comments that are NOT marked (skipped replies,
+ *          failed reactions) — relay-reaction candidates for the worker
  */
 async function markCommentsAddressed(
   client: GitHubReviewsClient,
@@ -252,20 +294,32 @@ async function markCommentsAddressed(
   prNumber: number,
   comments: ProcessedReviewComment[],
   conversationComments: ProcessedConversationComment[],
-): Promise<void> {
+): Promise<AddressReviewResult["unmarkedComments"]> {
   if (comments.length === 0 && conversationComments.length === 0) {
-    return;
+    return [];
   }
 
   let successCount = 0;
+  const unmarked: AddressReviewResult["unmarkedComments"] = [];
+
+  /** Explain the classic App-permission 403 so the fix is obvious in the log. */
+  const reactionFailureHint = (message: string): string =>
+    message.includes("not accessible by integration")
+      ? `${message}\n` +
+        "      The GitHub App installation lacks the Reactions permission — grant it " +
+        '"Reactions: Read & write" (App settings → Permissions), or react with 🎉 manually ' +
+        "to mark the comment addressed. Until marked, the comment is re-processed on later runs."
+      : message;
 
   // Add 🎉 (hooray) reaction to each review comment
   if (comments.length > 0) {
     console.log(`   Marking ${comments.length} review comment(s) as addressed...`);
 
     for (const comment of comments) {
-      // Skip reply comments (only mark top-level comments)
+      // Skip reply comments (only mark top-level comments); they still count
+      // as unmarked for the relay so the dedupe marker covers them too.
       if (comment.isReply) {
+        unmarked.push({ id: comment.id, target: "review" });
         continue;
       }
 
@@ -273,8 +327,9 @@ async function markCommentsAddressed(
         await client.addReactionToComment(owner, repo, comment.id, "hooray");
         successCount++;
       } catch (error) {
+        unmarked.push({ id: comment.id, target: "review" });
         console.warn(
-          `   ⚠️  Failed to add reaction to review comment ${comment.id}: ${(error as Error).message}`,
+          `   ⚠️  Failed to add reaction to review comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }
@@ -291,8 +346,9 @@ async function markCommentsAddressed(
         await client.addReactionToIssueComment(owner, repo, comment.id, "hooray");
         successCount++;
       } catch (error) {
+        unmarked.push({ id: comment.id, target: "conversation" });
         console.warn(
-          `   ⚠️  Failed to add reaction to conversation comment ${comment.id}: ${(error as Error).message}`,
+          `   ⚠️  Failed to add reaction to conversation comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }
@@ -301,6 +357,7 @@ async function markCommentsAddressed(
   if (successCount > 0) {
     console.log(`✅ Marked ${successCount} comment(s) as addressed with 🎉 reaction`);
   }
+  return unmarked;
 }
 
 /**
@@ -313,8 +370,9 @@ async function markCommentsAddressed(
 export async function addressReview(
   prUrl: string,
   options: AddressReviewOptions = {},
-): Promise<void> {
+): Promise<AddressReviewResult> {
   const { noPush = false, noReply = false, verbose = false } = options;
+  const result: AddressReviewResult = { aliasMentioned: false, unmarkedComments: [] };
 
   console.log("🔍 Parsing PR URL...");
   const { owner, repo, prNumber } = parsePRUrl(prUrl);
@@ -340,8 +398,10 @@ export async function addressReview(
     }
   }
 
-  // Initialize GitHub client
-  const githubClient = new GitHubReviewsClient();
+  // Initialize GitHub client. App auth takes precedence when configured so
+  // the bot identity resolves (`slug[bot]`) for @mention matching — a human
+  // GITHUB_TOKEN alone can never satisfy the commented-review mention gate.
+  const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
 
   // Get PR details
   console.log("\n📋 Fetching PR details...");
@@ -354,20 +414,29 @@ export async function addressReview(
     throw new Error(`PR is ${pr.state}, not open. Cannot address review.`);
   }
 
-  // Get latest changes_requested review
-  console.log("\n🔎 Looking for changes_requested review...");
-  const review = await getLatestChangesRequestedReview(githubClient, owner, repo, prNumber);
+  // Get latest actionable review (changes_requested, or commented when no
+  // changes_requested reviews exist — the commented pick is mention-gated
+  // after the comments below are fetched).
+  console.log("\n🔎 Looking for actionable review feedback...");
+  const review = await getLatestFeedbackReview(githubClient, owner, repo, prNumber);
 
   if (!review) {
-    console.log("✅ No pending changes_requested reviews found.");
-    return;
+    console.log("✅ No pending changes_requested or commented reviews found.");
+    return result;
   }
 
-  console.log(`   Found review from @${review.reviewer}`);
+  console.log(`   Found ${review.state.toLowerCase()} review from @${review.reviewer}`);
 
   // Fetch ALL review comments for the PR (not just from this review)
   console.log("\n📥 Fetching review comments...");
   const rawComments = await githubClient.getPullRequestReviewComments(owner, repo, prNumber);
+
+  // Resolve the bot identity once: it decides whether a commented review run
+  // triggers at all and whether a stray inline comment is an explicit ask.
+  // Aliases (GITHUB_BOT_ALIASES) extend the resolvable identity — e.g. the
+  // relay App's login, whose private key is not available locally.
+  const botName = await githubClient.getBotUsername(owner, repo);
+  const botNames = botMentionCandidates(botName);
 
   // Check which comments already have a "hooray" reaction (marked as addressed)
   const addressedCommentIds = new Set<number>();
@@ -389,8 +458,32 @@ export async function addressReview(
     }
   }
 
-  const processedComments: ProcessedReviewComment[] = rawComments
-    .filter((c) => !addressedCommentIds.has(c.id)) // Filter out already addressed
+  // Scope comments to this run: the chosen review's own threads plus explicit
+  // @mentions of the bot. Feedback that was never asked for (a stray comment
+  // from another review) stays unactioned until its author mentions the bot
+  // or submits their own actionable review.
+  const reviewThreadRootIds = new Set(
+    rawComments.filter((c) => c.pull_request_review_id === review.reviewId).map((c) => c.id),
+  );
+  const rootIdOf = (comment: (typeof rawComments)[number]): number | undefined => {
+    let current: (typeof rawComments)[number] | undefined = comment;
+    const visited = new Set<number>();
+    while (current?.in_reply_to_id !== undefined && !visited.has(current.id)) {
+      visited.add(current.id);
+      current = rawComments.find((c) => c.id === current?.in_reply_to_id);
+    }
+    return current?.id;
+  };
+
+  const unaddressedComments = rawComments.filter((c) => !addressedCommentIds.has(c.id));
+  const processedComments: ProcessedReviewComment[] = unaddressedComments
+    .filter((c) => {
+      const rootId = rootIdOf(c);
+      if (rootId !== undefined && reviewThreadRootIds.has(rootId)) {
+        return true;
+      }
+      return mentionsAnyBot(c.body, botNames);
+    })
     .map((c) => ({
       id: c.id,
       path: c.path,
@@ -403,11 +496,18 @@ export async function addressReview(
     }));
 
   const totalComments = rawComments.length;
-  const alreadyAddressed = totalComments - processedComments.length;
+  const alreadyAddressed = totalComments - unaddressedComments.length;
+  const outOfScope = unaddressedComments.length - processedComments.length;
 
   console.log(`   Found ${totalComments} comment(s)`);
   if (alreadyAddressed > 0) {
     console.log(`   ${alreadyAddressed} already addressed (skipping)`);
+  }
+  if (outOfScope > 0) {
+    console.log(
+      `   ${outOfScope} unaddressed but out of scope for this run ` +
+        "(different review thread and no bot @mention — not actioned)",
+    );
   }
   console.log(`   ${processedComments.length} remaining to address`);
 
@@ -457,11 +557,57 @@ export async function addressReview(
   }
   console.log(`   ${processedConversationComments.length} remaining to address`);
 
+  // A commented review is informational by nature: only act on it when a bot
+  // identity is explicitly mentioned — in the review body itself or in one of
+  // the comments beneath it. changes_requested reviews are always addressed.
+  // Fails closed when no bot identity is configured at all.
+  if (review.state === "COMMENTED") {
+    const mentionSources = [
+      review.body,
+      ...processedComments.map((c) => c.body),
+      ...processedConversationComments.map((c) => c.body),
+    ];
+    const matchedBot = botNames.find((name) =>
+      mentionSources.some((body) => mentionsBot(body, name)),
+    );
+    // A mention of the relay identity (not resolvable locally) lets the
+    // worker ask the relay to mark comments as that identity afterwards.
+    result.aliasMentioned =
+      matchedBot !== undefined &&
+      matchedBot !== botName &&
+      matchedBot.replace(/\[bot\]$/i, "") === RELAY_BOT_LOGIN;
+    if (!matchedBot) {
+      if (botNames.length === 0) {
+        console.log(
+          "\n⏭️  Latest review is commented, but no bot identity is configured to verify @mentions — skipping.",
+        );
+        console.log(
+          "   Configure a GitHub App or set GITHUB_BOT_ALIASES (e.g. the relay App's login).",
+        );
+      } else {
+        const names = botNames.map((name) => `@${name}`).join(" or ");
+        console.log(
+          `\n⏭️  Latest review is commented and nothing in it mentions ${names} — skipping.`,
+        );
+      }
+      console.log(
+        "   Commented reviews are addressed only when they mention the bot; changes_requested reviews are always addressed.",
+      );
+      console.log(`   View PR: ${prUrl}`);
+      return result;
+    }
+    if (verbose && botNames.length > 0) {
+      console.log(
+        `   💬 Bot mention detected (${botNames.map((name) => `@${name}`).join(", ")}); addressing.`,
+      );
+    }
+  }
+
   // If no comments remaining (neither review nor conversation), we're done
   if (processedComments.length === 0 && processedConversationComments.length === 0) {
     console.log("\n✅ All review and conversation comments have been addressed already.");
     console.log(`   View PR: ${prUrl}`);
-    return;
+    return result;
   }
 
   // Build feedback object
@@ -471,7 +617,7 @@ export async function addressReview(
     repository: `${owner}/${repo}`,
     branch: pr.head.ref,
     reviewer: review.reviewer,
-    reviewState: "changes_requested",
+    reviewState: review.state.toLowerCase() as ProcessedReviewFeedback["reviewState"],
     reviewBody: review.body,
     comments: processedComments,
     conversationComments:
@@ -589,7 +735,7 @@ export async function addressReview(
     if (!hasUncommitted && !hasUnpushed) {
       console.log("\n⚠️  No changes were made by @devintern/code");
       console.log(`   View PR: ${prUrl}`);
-      return;
+      return result;
     }
 
     // Get hook retries configuration
@@ -766,7 +912,7 @@ export async function addressReview(
     if (!noReply && !noPush) {
       console.log("\n💬 Marking comments as addressed...");
 
-      await markCommentsAddressed(
+      result.unmarkedComments = await markCommentsAddressed(
         githubClient,
         owner,
         repo,
@@ -781,6 +927,7 @@ export async function addressReview(
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
     console.log(`   View PR: ${prUrl}`);
     endRun("succeeded");
+    return result;
   } catch (error) {
     endRun("failed", (error as Error).message);
     throw error;

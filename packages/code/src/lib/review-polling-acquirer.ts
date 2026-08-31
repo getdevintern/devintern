@@ -27,6 +27,7 @@ import { spawn } from "child_process";
 
 import { nextScheduleOccurrence } from "./automation-config";
 import type { CronOrIntervalSchedule } from "./automation-config";
+import type { AddressReviewResult } from "./address-review";
 import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
@@ -249,12 +250,18 @@ async function serializePrRun<T>(
  * @param prNumber - Pull request number
  * @param opts - Working directory and environment for the subprocess;
  *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both
+ *               per-repo env; direct callers inherit both. `onResult`
+ *               receives the subprocess's structured outcome
+ *               ({@link AddressReviewResult}) via the result fd.
  */
 export function runAddressReviewViaCli(
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    onResult?: (result: AddressReviewResult) => void;
+  } = {},
 ): Promise<boolean> {
   return serializePrRun(repo, prNumber, () =>
     runSubcommandViaCli("address-review", repo, prNumber, opts),
@@ -387,15 +394,34 @@ function runSubcommandViaCli(
   subcommand: string,
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    onResult?: (result: AddressReviewResult) => void;
+  } = {},
 ): Promise<boolean> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit", opts.onResult ? "pipe" : "inherit"],
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env: opts.onResult
+        ? { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" }
+        : (opts.env ?? process.env),
     });
+    if (opts.onResult && child.stdio[3]) {
+      let output = "";
+      child.stdio[3].on("data", (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      child.on("close", () => {
+        try {
+          opts.onResult?.(JSON.parse(output) as AddressReviewResult);
+        } catch {
+          // Subprocess emitted no structured result (e.g. older build).
+        }
+      });
+    }
     child.on("close", (code) => resolve(code === 0));
     child.on("error", (error) => {
       console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
