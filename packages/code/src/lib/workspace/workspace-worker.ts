@@ -878,10 +878,24 @@ export async function buildFleetEventAcquirers(options: {
             state.workerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
           handlers: {
             addressPr: async (repo, prNumber) => {
-              if (addressPr) await addressPr(repo, prNumber);
+              if (addressPr) return addressPr(repo, prNumber);
+              // No GitHub credentials → review envelopes cannot be acted on.
+              console.warn(
+                `⚠️  [relay] review feedback on ${repo}#${prNumber} cannot be addressed: ` +
+                  "GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace.",
+              );
+              return false;
             },
             handlePrComment: async (repo, prNumber, commentId) => {
-              if (!github || !handleMention) return;
+              if (!github || !handleMention) {
+                if (verbose) {
+                  console.log(
+                    `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
+                      "(GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace).",
+                  );
+                }
+                return;
+              }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
               const { data: comment } = await github.conditionalGet<{
                 id: number;
