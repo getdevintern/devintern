@@ -321,6 +321,136 @@ tracker = "fossil"
     ).toThrow(/does not support polling/);
   });
 
+  describe("[[estimations]]", () => {
+    function configWithEstimations(table: string): string {
+      return `
+[defaults]
+tracker = "jira"
+task_query = "labels = devintern"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+${table}
+`;
+    }
+
+    test("parses scheduled estimation sweeps", () => {
+      const config = parseWorkspaceConfig(
+        configWithEstimations(`
+[[estimations]]
+id = "weekday-groom"
+enabled = true
+cron = "0 9 * * 1-5"
+query = "status = 'To Do' AND labels IN (NeedsEstimate)"
+
+[[estimations]]
+id = "sprint-gaps"
+enabled = true
+cron = "0 10 * * 3"
+query = "sprint in openSprints() AND \\"Story Points\\" is EMPTY"
+`),
+      );
+
+      expect(config.estimations).toHaveLength(2);
+      expect(config.estimations[0]).toMatchObject({
+        id: "weekday-groom",
+        enabled: true,
+        cron: "0 9 * * 1-5",
+        query: "status = 'To Do' AND labels IN (NeedsEstimate)",
+      });
+      expect(config.estimations[1]?.query).toContain("is EMPTY");
+    });
+
+    test("an omitted table leaves estimation off", () => {
+      expect(parseWorkspaceConfig(VALID_CONFIG).estimations).toEqual([]);
+    });
+
+    test("requires no repo or routing even with several repos", () => {
+      const config = parseWorkspaceConfig(
+        configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "labels IN (NeedsEstimate)"
+`),
+      );
+      // Estimation entries carry only schedule + query fields.
+      expect(config.estimations[0]).toEqual({
+        id: "groom",
+        enabled: true,
+        interval: "1d",
+        intervalMs: 86_400_000,
+        query: "labels IN (NeedsEstimate)",
+      });
+    });
+
+    test("rejects prompt and repo keys", () => {
+      expect(() =>
+        parseWorkspaceConfig(
+          configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "q"
+prompt = "implement it"
+repo = "backend"
+`),
+        ),
+      ).toThrow(/prompt is not supported[\s\S]*repo is not supported/s);
+    });
+
+    test("rejects the kind selector", () => {
+      expect(() =>
+        parseWorkspaceConfig(
+          configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "q"
+kind = "estimate"
+`),
+        ),
+      ).toThrow(/kind is not supported/);
+    });
+
+    test("rejects [defaults].estimate_query", () => {
+      expect(() =>
+        parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+estimate_query = "labels = NeedsEstimate"
+`),
+      ).toThrow(/\[defaults\]\.estimate_query is not supported/);
+    });
+
+    test.each(["trello", "markdown"])(
+      "fails startup on trackers that cannot estimate (%s)",
+      (tracker) => {
+        expect(() =>
+          parseWorkspaceConfig(`
+[defaults]
+tracker = "${tracker}"
+
+[[repos]]
+name = "board"
+remote = "git@github.com:acme/board.git"
+
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "list:'To Do'"
+`),
+        ).toThrow(/requires a tracker that supports --estimate/);
+      },
+    );
+  });
+
   test("rejects duplicate repo names", () => {
     expect(() =>
       parseWorkspaceConfig(`

@@ -90,6 +90,24 @@ repo = "web"
 `),
     ).toThrow(/does not match any \[\[repos\]\] name/);
   });
+
+  test("rejects the kind selector — scheduled estimation lives in [[estimations]]", () => {
+    let message = "";
+    try {
+      parseAutomationConfig(`
+[[automations]]
+id = "groom"
+enabled = true
+interval = "1d"
+kind = "estimate"
+prompt = "estimate stories"
+`);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("kind is not supported");
+    expect(message).toContain("[[estimations]]");
+  });
 });
 
 describe("parseCronOrIntervalSchedule", () => {

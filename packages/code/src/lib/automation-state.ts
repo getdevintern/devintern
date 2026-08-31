@@ -35,22 +35,22 @@ export class AutomationStateStore {
   }
 
   /** Create schedule state once; restarts retain the prior interval anchor. */
-  register(automation: AutomationConfig, nextDueAt: number): void {
+  register(automation: AutomationConfig, nextDueAt: number, stateId = automation.id): void {
     const spec = automation.cron ? `cron:${automation.cron}` : `interval:${automation.interval}`;
     const existing = this.db
       .query("SELECT schedule_spec FROM automation_schedules WHERE automation_id = ?")
-      .get(automation.id) as { schedule_spec: string } | null;
+      .get(stateId) as { schedule_spec: string } | null;
     if (!existing) {
       this.db.run(
         `INSERT INTO automation_schedules (automation_id, schedule_spec, next_due_at)
          VALUES (?, ?, ?)`,
-        [automation.id, spec, nextDueAt],
+        [stateId, spec, nextDueAt],
       );
     } else if (existing.schedule_spec !== spec) {
       this.db.run(
         `UPDATE automation_schedules SET schedule_spec = ?, next_due_at = ?,
          last_scheduled_at = NULL WHERE automation_id = ?`,
-        [spec, nextDueAt, automation.id],
+        [spec, nextDueAt, stateId],
       );
     }
   }

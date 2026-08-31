@@ -16,7 +16,13 @@ import { formatRunOrigin } from "@/lib/run-origin";
 import { formatDuration, formatRate } from "@/lib/utils";
 
 const WINDOWS = ["7d", "30d", "90d", "all"] as const;
-const RUN_ORIGINS: RunOrigin[] = ["task", "pr_mention", "conflict_resolution", "scheduled"];
+const RUN_ORIGINS: RunOrigin[] = [
+  "task",
+  "pr_mention",
+  "conflict_resolution",
+  "scheduled",
+  "estimate",
+];
 
 /** Hand-rolled SVG bar chart of runs per week (keeps dependencies minimal). */
 function WeeklyBars({ weeks }: { weeks: { weekStart: string; count: number }[] }) {

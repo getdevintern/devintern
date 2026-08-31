@@ -28,7 +28,7 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, or scheduled), agent harness, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs).
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, scheduled, or estimate), agent harness, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs; `origin=estimate` isolates story-point sweeps).
 - **Run detail**: the task key header (linked to its tracker ticket when possible) plus a snapshot of the original task description — captured when the run started and rendered as markdown — followed by a stage-by-stage timeline: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Logs**: the most recent worker log lines (timestamp, severity, message), filterable by level (`everything` / `warnings` / `errors`) with a search box over the loaded window. Lines that mention a task key link straight to that task's latest run in the Runs view.
@@ -104,7 +104,7 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 
 | Endpoint                    | Returns                                                               |
 | --------------------------- | --------------------------------------------------------------------- |
-| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` is supported |
+| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` and `origin=estimate` are supported |
 | `GET /api/runs/:id`         | One run with its stage timeline and retry metadata                     |
 | `POST /api/runs/:id/retry`  | Schedule a re-run of the task behind a failed/escalated/abandoned run (requires sign-in) |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |

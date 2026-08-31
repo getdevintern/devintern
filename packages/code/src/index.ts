@@ -158,7 +158,7 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 function isWorkerTaskProcess(): boolean {
   const origin = process.env[RUN_ORIGIN_ENV];
-  return origin === "worker" || origin === "scheduled";
+  return origin === "worker" || origin === "scheduled" || origin === "estimate";
 }
 
 /** Finish the local run record and emit exactly one outcome event for worker tasks. */
@@ -2168,6 +2168,17 @@ async function main(): Promise<void> {
 
           estimationResults.total++;
 
+          // Structured run record for this attempt (skips above are not
+          // attempts). Estimation is its own dashboard origin — never an
+          // implement run — and scheduled sweeps carry the schedule id.
+          const estimationScheduleId = process.env.DEVINTERN_AUTOMATION_ID;
+          beginRun({
+            origin: "estimate",
+            taskKey,
+            tracker: activeTrackerType,
+            ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
+          });
+
           // Fetch comments and linked resources
           const comments = await tracker.getComments(taskKey);
           const linkedResources = tracker.extractLinkedResources(task);
@@ -2224,10 +2235,15 @@ async function main(): Promise<void> {
               error: "Failed to parse estimation response",
             });
           }
+          await finishTaskRun(
+            result ? "succeeded" : "failed",
+            result ? undefined : "Failed to parse estimation response",
+          );
         } catch (error) {
           // Usage limit is account-global — abort the rest of the estimation
           // batch and exit 0 so the scheduler retries next window.
           if (error instanceof UsageLimitError) {
+            await finishTaskRun("deferred", error.message);
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
@@ -2241,6 +2257,7 @@ async function main(): Promise<void> {
             error: (error as Error).message,
           });
           console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
+          await finishTaskRun("failed", (error as Error).message);
         }
       }
 
