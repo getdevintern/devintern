@@ -909,13 +909,7 @@ if (process.argv[2] === "init") {
     // Import and run address-review
     const { addressReview } = await import("./lib/address-review");
     try {
-      const result = await addressReview(prUrl, { noPush, noReply, verbose });
-      // Workers read this to follow up (e.g. relay-initiated reactions).
-      const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
-      if (Number.isInteger(resultFd) && resultFd >= 3) {
-        const { writeSync } = await import("fs");
-        writeSync(resultFd, `${JSON.stringify(result)}\n`);
-      }
+      await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).

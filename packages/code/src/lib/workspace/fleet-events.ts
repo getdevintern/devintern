@@ -12,10 +12,8 @@
 
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
 import type { AutomaticResolveResult } from "../review-polling-acquirer";
-import type { AddressReviewResult } from "../address-review";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
-import { RELAY_BOT_LOGIN } from "../relay-connect";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
 
@@ -32,13 +30,10 @@ export interface FleetEventDeps {
     opts: {
       cwd: string;
       env: Record<string, string | undefined>;
-      onResult?: (result: AddressReviewResult) => void;
     },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
-  /** Relay reaction request (injected for tests; defaults to the HTTP call). */
-  requestRelayReactions?: (repo: string, result: AddressReviewResult) => Promise<void>;
   verbose?: boolean;
 }
 
@@ -65,50 +60,6 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
 }
 
 /**
- * Ask the relay to mark comments as addressed under the relay App identity
- * (devintern-ai) when the run was triggered by a mention of that identity but
- * the local credentials could not (or should not) react. Failures are logged
- * and non-fatal: the local hooray remains the primary marker.
- */
-async function requestRelayReactionsViaHttp(
-  workspaceDir: string,
-  repo: string,
-  result: AddressReviewResult,
-): Promise<void> {
-  if (!result.aliasMentioned || result.unmarkedComments.length === 0) {
-    return;
-  }
-  const { loadRelayState } = await import("../relay-connect");
-  const relayState = loadRelayState(workspaceDir);
-  if (!relayState?.relayToken || !relayState.relayUrl) {
-    return;
-  }
-  try {
-    const response = await fetch(`${relayState.relayUrl.replace(/\/+$/, "")}/v1/reactions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${relayState.relayToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ repo, comments: result.unmarkedComments }),
-    });
-    if (!response.ok) {
-      console.warn(
-        `⚠️  [relay] could not mark ${result.unmarkedComments.length} comment(s) as @${RELAY_BOT_LOGIN}: HTTP ${response.status}`,
-      );
-      return;
-    }
-    const body = (await response.json()) as { results?: Array<{ id: number; marked: boolean }> };
-    const marked = body.results?.filter((r) => r.marked).length ?? 0;
-    if (marked > 0) {
-      console.log(`🎉 [relay] @${RELAY_BOT_LOGIN} marked ${marked} comment(s) as addressed`);
-    }
-  } catch (error) {
-    console.warn(`⚠️  [relay] reaction request failed: ${(error as Error).message}`);
-  }
-}
-
-/**
  * Build the fleet review runner: address a PR's feedback from the repo's
  * base worktree. Used for the agent's own PRs (no gate needed) and as the
  * execution half of gated mention handling.
@@ -120,10 +71,6 @@ export function createFleetAddressPr(
 ): (slug: string, prNumber: number) => Promise<boolean> {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
-  const requestRelayReactions =
-    deps.requestRelayReactions ??
-    ((repo: string, result: AddressReviewResult) =>
-      requestRelayReactionsViaHttp(workspaceDir, repo, result));
 
   return async (slug, prNumber) => {
     const repo = repoBySlug(config, slug);
@@ -136,18 +83,10 @@ export function createFleetAddressPr(
     await repoManager.ensureBareClone(repo);
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
-    let cliResult: AddressReviewResult | undefined;
-    const ok = await runReview(slug, prNumber, {
+    return runReview(slug, prNumber, {
       cwd: base,
       env: buildRepoEnv(repo, workspaceDir),
-      onResult: (result: AddressReviewResult) => {
-        cliResult = result;
-      },
     });
-    if (cliResult) {
-      await requestRelayReactions(slug, cliResult);
-    }
-    return ok;
   };
 }
 

@@ -116,7 +116,9 @@ GITHUB_BOT_ALIASES=devintern-ai
 
 The value is a comma-separated list of logins (with or without the `[bot]` suffix). Aliases count everywhere mentions are matched: commented reviews, inline comment scopes, and the `@mention` sweep. A worker connected to the relay (`devintern worker connect`) injects `devintern-ai` automatically; set the variable explicitly when running a custom App alongside it or without the relay.
 
-When a run is triggered by a `devintern-ai` mention, a relay-connected worker also has the relay mark any comments it could not react to locally with a 🎉 under the DevIntern AI identity, so the addressed-marker exists even when the local credentials cannot react. Failures here are logged and non-fatal; the local reaction remains the primary marker.
+### Which feedback gets re-processed
+
+Addressed feedback is tracked locally in the worker's state database, so a comment is never processed twice on the same machine. A 🎉 reaction is also left on each addressed comment as visual feedback for humans — it carries no gating meaning, so reaction-permission problems can never cause feedback to be re-processed.
 
 ### GitHub Personal Access Token
 
@@ -171,7 +173,7 @@ Both the ID and a private key are required.
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation, PR creation, and the 🎉 reaction that marks review feedback as addressed. If reactions start failing with a permissions error after a settings change, re-approve the installation — already-issued credentials keep working for up to an hour, and unmarked feedback is re-processed on later runs. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
