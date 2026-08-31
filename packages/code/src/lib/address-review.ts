@@ -22,7 +22,7 @@ import { formatReviewPrompt } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "./mention-sweep-acquirer";
-import { RELAY_BOT_LOGIN } from "./relay-connect";
+import { WorkerState } from "./worker-state";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,
@@ -33,18 +33,6 @@ export interface AddressReviewOptions {
   noPush?: boolean;
   noReply?: boolean;
   verbose?: boolean;
-}
-
-/** Outcome of one address-review invocation, consumed by the worker. */
-export interface AddressReviewResult {
-  /**
-   * The run was triggered by a mention of the relay App identity
-   * (`devintern-ai`) rather than a locally-resolved bot login — the worker
-   * can then ask the relay to mark unmarked comments as that identity.
-   */
-  aliasMentioned: boolean;
-  /** Comments that were in scope but not marked addressed locally. */
-  unmarkedComments: Array<{ id: number; target: "review" | "conversation" }>;
 }
 
 interface ParsedPRUrl {
@@ -276,88 +264,93 @@ export async function runAgent(
 }
 
 /**
- * Mark review and conversation comments as addressed by adding a hooray reaction.
+ * Record in-scope comments as addressed (local dedupe) and leave 🎉 reactions
+ * as visual feedback for humans. Reaction failures are logged and ignored:
+ * they carry no gating meaning.
  *
  * @param client - GitHub reviews API client
  * @param owner - Repository owner
  * @param repo - Repository name
- * @param prNumber - Pull request number (unused; kept for API symmetry)
  * @param comments - Top-level and reply review comments to mark
  * @param conversationComments - Issue/conversation tab comments to mark
- * @returns The in-scope comments that are NOT marked (skipped replies,
- *          failed reactions) — relay-reaction candidates for the worker
  */
 async function markCommentsAddressed(
   client: GitHubReviewsClient,
   owner: string,
   repo: string,
-  prNumber: number,
   comments: ProcessedReviewComment[],
   conversationComments: ProcessedConversationComment[],
-): Promise<AddressReviewResult["unmarkedComments"]> {
+): Promise<void> {
   if (comments.length === 0 && conversationComments.length === 0) {
-    return [];
+    return;
   }
 
-  let successCount = 0;
-  const unmarked: AddressReviewResult["unmarkedComments"] = [];
+  const repoSlug = `${owner}/${repo}`;
+  const workerState = new WorkerState();
+  try {
+    // Replies included: the local marker is per-comment, so reply threads
+    // dedupe too (reactions skip them — GitHub threads under the root).
+    workerState.markCommentsAddressed(
+      repoSlug,
+      "review",
+      comments.map((comment) => comment.id),
+    );
+    workerState.markCommentsAddressed(
+      repoSlug,
+      "conversation",
+      conversationComments.map((comment) => comment.id),
+    );
+  } finally {
+    workerState.close();
+  }
 
-  /** Explain the classic App-permission 403 so the fix is obvious in the log. */
   const reactionFailureHint = (message: string): string =>
     message.includes("not accessible by integration")
-      ? `${message}\n` +
-        "      The GitHub App installation lacks the Reactions permission — grant it " +
-        '"Reactions: Read & write" (App settings → Permissions), or react with 🎉 manually ' +
-        "to mark the comment addressed. Until marked, the comment is re-processed on later runs."
+      ? `${message} (the App installation lacks reaction permissions; dedupe is local, so this is cosmetic only)`
       : message;
 
-  // Add 🎉 (hooray) reaction to each review comment
+  // 🎉 reactions: visual feedback only. Skipped for replies so the thread
+  // root carries the single human-readable marker.
   if (comments.length > 0) {
     console.log(`   Marking ${comments.length} review comment(s) as addressed...`);
 
+    let successCount = 0;
     for (const comment of comments) {
-      // Skip reply comments (only mark top-level comments); they still count
-      // as unmarked for the relay so the dedupe marker covers them too.
-      if (comment.isReply) {
-        unmarked.push({ id: comment.id, target: "review" });
-        continue;
-      }
-
+      if (comment.isReply) continue;
       try {
         await client.addReactionToComment(owner, repo, comment.id, "hooray");
         successCount++;
       } catch (error) {
-        unmarked.push({ id: comment.id, target: "review" });
         console.warn(
-          `   ⚠️  Failed to add reaction to review comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
+          `   ⚠️  Could not add 🎉 to review comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }
+    if (successCount > 0) {
+      console.log(`   🎉 Reacted to ${successCount} review comment(s) (visual feedback)`);
+    }
   }
 
-  // Add 🎉 (hooray) reaction to each conversation comment
   if (conversationComments.length > 0) {
     console.log(
       `   Marking ${conversationComments.length} conversation comment(s) as addressed...`,
     );
 
+    let successCount = 0;
     for (const comment of conversationComments) {
       try {
         await client.addReactionToIssueComment(owner, repo, comment.id, "hooray");
         successCount++;
       } catch (error) {
-        unmarked.push({ id: comment.id, target: "conversation" });
         console.warn(
-          `   ⚠️  Failed to add reaction to conversation comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
+          `   ⚠️  Could not add 🎉 to conversation comment ${comment.id}: ${reactionFailureHint((error as Error).message)}`,
         );
       }
     }
+    if (successCount > 0) {
+      console.log(`   🎉 Reacted to ${successCount} conversation comment(s) (visual feedback)`);
+    }
   }
-
-  if (successCount > 0) {
-    console.log(`✅ Marked ${successCount} comment(s) as addressed with 🎉 reaction`);
-  }
-  return unmarked;
 }
 
 /**
@@ -370,12 +363,12 @@ async function markCommentsAddressed(
 export async function addressReview(
   prUrl: string,
   options: AddressReviewOptions = {},
-): Promise<AddressReviewResult> {
+): Promise<void> {
   const { noPush = false, noReply = false, verbose = false } = options;
-  const result: AddressReviewResult = { aliasMentioned: false, unmarkedComments: [] };
 
   console.log("🔍 Parsing PR URL...");
   const { owner, repo, prNumber } = parsePRUrl(prUrl);
+  const repoSlug = `${owner}/${repo}`;
   console.log(`   Repository: ${owner}/${repo}`);
   console.log(`   PR #${prNumber}`);
 
@@ -422,7 +415,7 @@ export async function addressReview(
 
   if (!review) {
     console.log("✅ No pending changes_requested or commented reviews found.");
-    return result;
+    return;
   }
 
   console.log(`   Found ${review.state.toLowerCase()} review from @${review.reviewer}`);
@@ -438,25 +431,15 @@ export async function addressReview(
   const botName = await githubClient.getBotUsername(owner, repo);
   const botNames = botMentionCandidates(botName);
 
-  // Check which comments already have a "hooray" reaction (marked as addressed)
-  const addressedCommentIds = new Set<number>();
+  // Local dedupe: which comments this worker already addressed. GitHub
+  // reactions are visual feedback only and carry no gating meaning.
+  const workerState = new WorkerState();
 
-  for (const comment of rawComments) {
-    try {
-      const reactions = await githubClient.getCommentReactions(owner, repo, comment.id);
-
-      // Check if there's a "hooray" (🎉) reaction
-      const hasHoorayReaction = reactions.some((r) => r.content === "hooray");
-      if (hasHoorayReaction) {
-        addressedCommentIds.add(comment.id);
-      }
-    } catch (error) {
-      // Ignore errors fetching reactions, treat as not addressed
-      if (verbose) {
-        console.warn(`   ⚠️  Failed to fetch reactions for comment ${comment.id}`);
-      }
-    }
-  }
+  const addressedCommentIds = new Set(
+    rawComments
+      .filter((comment) => workerState.isCommentAddressed(repoSlug, "review", comment.id))
+      .map((comment) => comment.id),
+  );
 
   // Scope comments to this run: the chosen review's own threads plus explicit
   // @mentions of the bot. Feedback that was never asked for (a stray comment
@@ -521,23 +504,13 @@ export async function addressReview(
     (c) => c.user.login === review.reviewer && new Date(c.created_at) >= reviewSubmittedAt,
   );
 
-  // Check which issue comments already have a "hooray" reaction
-  const addressedIssueCommentIds = new Set<number>();
-
-  for (const comment of reviewerIssueComments) {
-    try {
-      const reactions = await githubClient.getIssueCommentReactions(owner, repo, comment.id);
-
-      const hasHoorayReaction = reactions.some((r) => r.content === "hooray");
-      if (hasHoorayReaction) {
-        addressedIssueCommentIds.add(comment.id);
-      }
-    } catch (error) {
-      if (verbose) {
-        console.warn(`   ⚠️  Failed to fetch reactions for issue comment ${comment.id}`);
-      }
-    }
-  }
+  // Check which issue comments were already addressed (local dedupe)
+  const addressedIssueCommentIds = new Set(
+    reviewerIssueComments
+      .filter((comment) => workerState.isCommentAddressed(repoSlug, "conversation", comment.id))
+      .map((comment) => comment.id),
+  );
+  workerState.close();
 
   const processedConversationComments: ProcessedConversationComment[] = reviewerIssueComments
     .filter((c) => !addressedIssueCommentIds.has(c.id))
@@ -570,12 +543,6 @@ export async function addressReview(
     const matchedBot = botNames.find((name) =>
       mentionSources.some((body) => mentionsBot(body, name)),
     );
-    // A mention of the relay identity (not resolvable locally) lets the
-    // worker ask the relay to mark comments as that identity afterwards.
-    result.aliasMentioned =
-      matchedBot !== undefined &&
-      matchedBot !== botName &&
-      matchedBot.replace(/\[bot\]$/i, "") === RELAY_BOT_LOGIN;
     if (!matchedBot) {
       if (botNames.length === 0) {
         console.log(
@@ -594,7 +561,7 @@ export async function addressReview(
         "   Commented reviews are addressed only when they mention the bot; changes_requested reviews are always addressed.",
       );
       console.log(`   View PR: ${prUrl}`);
-      return result;
+      return;
     }
     if (verbose && botNames.length > 0) {
       console.log(
@@ -607,7 +574,7 @@ export async function addressReview(
   if (processedComments.length === 0 && processedConversationComments.length === 0) {
     console.log("\n✅ All review and conversation comments have been addressed already.");
     console.log(`   View PR: ${prUrl}`);
-    return result;
+    return;
   }
 
   // Build feedback object
@@ -735,7 +702,7 @@ export async function addressReview(
     if (!hasUncommitted && !hasUnpushed) {
       console.log("\n⚠️  No changes were made by @devintern/code");
       console.log(`   View PR: ${prUrl}`);
-      return result;
+      return;
     }
 
     // Get hook retries configuration
@@ -912,11 +879,10 @@ export async function addressReview(
     if (!noReply && !noPush) {
       console.log("\n💬 Marking comments as addressed...");
 
-      result.unmarkedComments = await markCommentsAddressed(
+      await markCommentsAddressed(
         githubClient,
         owner,
         repo,
-        prNumber,
         processedComments,
         processedConversationComments,
       );
@@ -927,7 +893,7 @@ export async function addressReview(
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
     console.log(`   View PR: ${prUrl}`);
     endRun("succeeded");
-    return result;
+    return;
   } catch (error) {
     endRun("failed", (error as Error).message);
     throw error;
