@@ -367,8 +367,10 @@ export async function addressReview(
     }
   }
 
-  // Initialize GitHub client
-  const githubClient = new GitHubReviewsClient();
+  // Initialize GitHub client. App auth takes precedence when configured so
+  // the bot identity resolves (`slug[bot]`) for @mention matching — a human
+  // GITHUB_TOKEN alone can never satisfy the commented-review mention gate.
+  const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
 
   // Get PR details
   console.log("\n📋 Fetching PR details...");
