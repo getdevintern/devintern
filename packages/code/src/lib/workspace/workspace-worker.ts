@@ -25,6 +25,7 @@ import {
 } from "../orphan-recovery";
 import { RunStore } from "../run-recorder";
 import { RetryStateStore } from "../retry-state";
+import { ScheduledRetryStore } from "../run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
@@ -44,7 +45,11 @@ import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { EstimationAcquirer } from "../estimation-acquirer";
+import { RunCoordinator } from "../run-coordinator";
+import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
 function orphanMaxAgeMs(): number {
@@ -54,7 +59,8 @@ function orphanMaxAgeMs(): number {
 /**
  * Recover task runs left in progress by a previous (dead) worker before any
  * acquirer picks up new tickets: reap them and give their tickets the
- * graceful-shutdown feedback (failure comment + move back to To Do).
+ * graceful-shutdown feedback (failure comment + move back to To Do). Also
+ * settles dashboard-scheduled retry rows left `running` by the crash.
  *
  * Replaces the old reap-only startup sweep, which also only ran when GitHub
  * credentials were configured; recovery here covers every workspace.
@@ -110,6 +116,24 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         retryStore?.recordIncompleteAttempt(taskKey, type, description),
       maxAgeMs: orphanMaxAgeMs(),
     });
+
+    // Dashboard-scheduled retries claimed by the previous worker: settle the
+    // rows so the dashboard's per-task guard unblocks (the operator can
+    // re-schedule) instead of reporting "already scheduled or running"
+    // forever. The orphaned run itself was reaped above.
+    const retryQueue = new ScheduledRetryStore(dbPath);
+    try {
+      const orphans = retryQueue.failRunning(
+        "worker restarted while this retry was running; schedule it again",
+      );
+      for (const orphan of orphans) {
+        console.warn(
+          `⚠️  [fleet] scheduled retry of ${orphan.taskKey} was interrupted by a worker restart`,
+        );
+      }
+    } finally {
+      retryQueue.close();
+    }
   } finally {
     retryStore?.close();
     runStore.close();
@@ -154,11 +178,41 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<boolean>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
 }
 
 interface RepoRunLockLike {
   acquire(): { success: boolean; message: string; pid?: number };
   release(): void;
+}
+
+/**
+ * Hold a process-level agent slot for a scheduled run's lifetime.
+ *
+ * Without a coordinator (no [[estimations]] configured) the context passes
+ * through untouched, so long-lived gates are never introduced silently.
+ * With one, acquisition happens after any repo lock is held, and release
+ * always runs — even when the caller's own release throws.
+ */
+async function withCoordinatorSlot(
+  context: AutomationRunContext | null | Promise<AutomationRunContext | null>,
+  coordinator?: RunCoordinator,
+): Promise<AutomationRunContext | null> {
+  const resolved = await context;
+  if (!coordinator || !resolved) return resolved;
+  const releaseRun = await coordinator.acquire();
+  const releaseContext = resolved.release;
+  return {
+    ...resolved,
+    release: async () => {
+      try {
+        await releaseContext();
+      } finally {
+        releaseRun();
+      }
+    },
+  };
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -308,24 +362,30 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
   "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
->;
+> & { coordinator?: RunCoordinator };
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
- * disposable worktree. Shared by the polling acquirer and the relay's task
- * evaluation, which acquire tasks differently but execute identically.
+ * disposable worktree. Shared by the polling acquirer, the relay's task
+ * evaluation, and the dashboard retry queue, which acquire tasks differently
+ * but execute identically.
  *
  * Ambiguous/unrouted tasks are recorded as routing skips and count as
  * handled: dedupe keeps them out of the loop until the task changes again,
  * the same policy as failing tasks.
+ *
+ * @param deps - Routing, locking, and runner collaborators
+ * @param options - `extraArgs` overrides the per-task CLI args (the retry
+ *                  queue prepends `--force` to bypass the retry gate)
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
+  options: { extraArgs?: string[] } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
-  const extraArgs = fleetTaskArgs(config);
+  const extraArgs = options.extraArgs ?? fleetTaskArgs(config);
 
   return async (taskKey, routable) => {
     const decision = routeTask(routable, config);
@@ -369,13 +429,15 @@ export function createFleetTaskExecutor(
       const worktree = await repoManager.createTaskWorktree(repo, taskKey);
       console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
 
-      const ok = await runTask(taskKey, extraArgs, {
-        cwd: worktree,
-        env: {
-          ...buildRepoEnv(repo, workspaceDir),
-          [RUN_ORIGIN_ENV]: "worker",
-        },
-      });
+      const invoke = () =>
+        runTask(taskKey, extraArgs, {
+          cwd: worktree,
+          env: {
+            ...buildRepoEnv(repo, workspaceDir),
+            [RUN_ORIGIN_ENV]: "worker",
+          },
+        });
+      const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
 
       if (ok) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
@@ -392,6 +454,55 @@ export function createFleetTaskExecutor(
       lock.release();
     }
   };
+}
+
+/** Interval between periodic stale-worktree sweeps (1 hour). */
+export const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Sweep every configured repo's stale worktrees once.
+ *
+ * Shared by the startup sweep and the periodic sweeper.
+ *
+ * @returns Total worktrees removed across all repos.
+ */
+export async function sweepAllWorktrees(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+): Promise<number> {
+  let removedTotal = 0;
+  for (const repo of repos) {
+    const removed = await repoManager.sweepStaleWorktrees(repo.name, ttlDays);
+    removedTotal += removed.length;
+    if (removed.length > 0) {
+      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
+    }
+  }
+  return removedTotal;
+}
+
+/**
+ * Start periodic stale-worktree sweeps.
+ *
+ * The startup sweep alone misses worktrees that age past the TTL while the
+ * worker keeps running, so a long-lived worker would accumulate failed-run
+ * worktrees until the next restart. The returned timer is unref'd so it
+ * never keeps the process alive on its own.
+ */
+export function startWorktreeSweeper(
+  repos: RepoConfig[],
+  repoManager: RepoManagerLike,
+  ttlDays: number,
+  intervalMs: number = WORKTREE_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweepAllWorktrees(repos, repoManager, ttlDays).catch((error) =>
+      console.warn(`⚠️  [fleet] periodic worktree sweep failed: ${(error as Error).message}`),
+    );
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
 }
 
 export interface RunWorkspaceWorkerOptions {
@@ -437,15 +548,33 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const query = config.defaults.taskQuery;
   const intervalSeconds = config.defaults.pollIntervalSeconds;
-  if (!query && config.automations.length === 0) {
-    console.error(
-      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
-    );
-    process.exit(1);
+
+  // Dashboard retries ride the shared workspace DB: the dashboard inserts a
+  // pending row, this worker drains it through the fleet executor below.
+  const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
+
+  if (!query && config.automations.length === 0 && config.estimations.length === 0) {
+    if (retryQueue.hasPending()) {
+      console.warn(
+        "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+      );
+    } else {
+      console.error(
+        "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+      );
+      process.exit(1);
+    }
   }
 
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
+  // Preserve the worker's existing concurrency when scheduled estimation is
+  // absent or fully disabled. The account-global gate is needed only once an
+  // enabled schedule joins the process and must serialize with every other
+  // agent run.
+  const coordinator = config.estimations.some((item) => item.enabled)
+    ? new RunCoordinator()
+    : undefined;
 
   // Recover what the previous worker left behind before acquiring new work.
   await recoverOrphanedWorkspaceRuns({
@@ -454,19 +583,31 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     dbPath: state.dbPath,
   });
 
-  for (const repo of config.repos) {
-    const removed = await repoManager.sweepStaleWorktrees(
-      repo.name,
-      config.workspace.worktreesTtlDays,
-    );
-    if (removed.length > 0) {
-      console.log(`🧹 [fleet] swept ${removed.length} stale worktree(s) for ${repo.name}`);
-    }
-  }
+  await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
+  // Keep sweeping while the worker runs, not only at startup: a long-lived
+  // worker would otherwise accumulate worktrees that age past the TTL until
+  // the next restart.
+  startWorktreeSweeper(config.repos, repoManager, config.workspace.worktreesTtlDays);
 
   await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
+
+  // First in the list and on a short interval: a dashboard-scheduled retry
+  // gets picked up ahead of the slower pollers.
+  acquirers.push(
+    new RetryQueueAcquirer({
+      store: retryQueue,
+      execute: createFleetTaskExecutor(
+        { config, workspaceDir, skips: state.skips, repoManager },
+        // `--force` bypasses the incomplete-attempt retry gate, exactly like
+        // the manual `devintern <TASK> --force` the dashboard action mirrors.
+        { extraArgs: ["--force", ...fleetTaskArgs(config)] },
+      ),
+      intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
+      verbose: options.verbose,
+    }),
+  );
 
   if (config.automations.length > 0) {
     const semanticErrors: string[] = [];
@@ -486,8 +627,31 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         automations: config.automations,
         dbPath: state.dbPath,
         extraArgs: fleetTaskArgs(config),
-        resolveContext: (automation) =>
-          resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+        resolveContext: async (automation) =>
+          withCoordinatorSlot(
+            await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+            coordinator,
+          ),
+      }),
+    );
+  }
+
+  if (config.estimations.length > 0) {
+    // Scheduled story-point sweeps: the automation scheduler (durable cursors
+    // and leases), a one-shot search of each entry's query, and the regular
+    // `--estimate` engine. No repo, no worktree, no branch, no PR.
+    console.log(
+      `📊 Scheduling ${config.estimations.filter((item) => item.enabled).length} enabled estimation schedule(s)`,
+    );
+    acquirers.push(
+      new EstimationAcquirer({
+        estimations: config.estimations,
+        dbPath: state.dbPath,
+        resolveContext: () =>
+          withCoordinatorSlot(
+            Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+            coordinator,
+          ),
       }),
     );
   }
@@ -517,6 +681,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordinator,
       }),
     );
     acquirers.push(
@@ -529,6 +694,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordinator,
       })),
     );
   }
@@ -536,7 +702,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      startDashboardServer({ port: config.workspace.dashboardPort });
+      // `schedule`: retries are drained by this worker's retry-queue acquirer
+      // through the normal pipeline (never spawned from the workspace home).
+      startDashboardServer({ port: config.workspace.dashboardPort, retryMode: "schedule" });
     } catch (error) {
       console.warn(
         `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,
@@ -586,6 +754,7 @@ export async function buildFleetEventAcquirers(options: {
   query: string;
   intervalSeconds: number;
   verbose?: boolean;
+  coordinator?: RunCoordinator;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
     options;
@@ -621,6 +790,7 @@ export async function buildFleetEventAcquirers(options: {
       userHasPushAccess: (owner: string, repo: string, user: string) =>
         gh.userHasPushAccess(owner, repo, user),
       verbose,
+      coordinator: options.coordinator,
     };
     const fleetAddressPr = createFleetAddressPr(eventDeps);
     addressPr = fleetAddressPr;
@@ -676,7 +846,10 @@ export async function buildFleetEventAcquirers(options: {
           },
         },
         addressPr: fleetAddressPr,
-        resolveConflicts,
+        resolveConflicts:
+          config.workspace.conflictResolution === "disabled" ? undefined : resolveConflicts,
+        conflictSchedule: config.workspace.conflictSchedule,
+        conflictResolution: config.workspace.conflictResolution,
         quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
         runStore,
         allowedRepos: slugs,
@@ -760,7 +933,7 @@ export async function buildFleetEventAcquirers(options: {
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.
-  const { loadRelayState } = await import("../relay-connect");
+  const { loadRelayState, RELAY_BOT_LOGIN } = await import("../relay-connect");
   const relayState = loadRelayState(workspaceDir);
   if (relayState || process.env.WORKER_RELAY_URL) {
     const relayToken = relayState?.relayToken;
@@ -771,13 +944,30 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      // Relay-managed PRs are associated with the DevIntern AI App identity,
+      // whose private key never leaves DevIntern infrastructure. Register its
+      // login as a mention alias so the local mention gates (including the
+      // address-review subprocess, which inherits this env) match
+      // `@devintern-ai` without needing the key.
+      const aliasNames = new Set(
+        (process.env.GITHUB_BOT_ALIASES ?? "")
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean),
+      );
+      if (!aliasNames.has(RELAY_BOT_LOGIN)) {
+        aliasNames.add(RELAY_BOT_LOGIN);
+        process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
+      }
+
       const { RelayAcquirer } = await import("../relay-acquirer");
-      const { mentionsBot } = await import("../mention-sweep-acquirer");
+      const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
       const execute = createFleetTaskExecutor({
         config,
         workspaceDir,
         skips: state.skips,
         repoManager,
+        coordinator: options.coordinator,
       });
       const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
 
@@ -791,10 +981,24 @@ export async function buildFleetEventAcquirers(options: {
             state.workerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
           handlers: {
             addressPr: async (repo, prNumber) => {
-              if (addressPr) await addressPr(repo, prNumber);
+              if (addressPr) return addressPr(repo, prNumber);
+              // No GitHub credentials → review envelopes cannot be acted on.
+              console.warn(
+                `⚠️  [relay] review feedback on ${repo}#${prNumber} cannot be addressed: ` +
+                  "GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace.",
+              );
+              return false;
             },
             handlePrComment: async (repo, prNumber, commentId) => {
-              if (!github || !handleMention) return;
+              if (!github || !handleMention) {
+                if (verbose) {
+                  console.log(
+                    `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
+                      "(GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace).",
+                  );
+                }
+                return;
+              }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
               const { data: comment } = await github.conditionalGet<{
                 id: number;
@@ -805,7 +1009,8 @@ export async function buildFleetEventAcquirers(options: {
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
               if (!comment) return;
               const botName = await github.getBotUsername(repoOwner, repoName);
-              if (!botName || !mentionsBot(comment.body, botName)) return;
+              const botNames = botMentionCandidates(botName);
+              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,

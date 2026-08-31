@@ -15,7 +15,7 @@
 import { Database } from "bun:sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled";
+export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled" | "estimate";
 
 export type RunStatus =
   | "in_progress"
@@ -540,6 +540,7 @@ export class RunStore {
       pr_mention: 0,
       conflict_resolution: 0,
       scheduled: 0,
+      estimate: 0,
     };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<

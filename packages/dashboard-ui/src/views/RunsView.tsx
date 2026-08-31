@@ -36,6 +36,7 @@ const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "pr_mention",
   "conflict_resolution",
   "scheduled",
+  "estimate",
 ];
 
 /** Paginated, filterable list of worker runs. */

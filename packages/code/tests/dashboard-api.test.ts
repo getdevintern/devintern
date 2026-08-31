@@ -103,6 +103,9 @@ describe("dashboard API", () => {
     const scheduled = handleRuns(data, new URLSearchParams("origin=scheduled"));
     expect((scheduled.body as { total: number }).total).toBe(1);
 
+    const estimate = handleRuns(data, new URLSearchParams("origin=estimate"));
+    expect((estimate.body as { total: number }).total).toBe(0);
+
     const byKey = handleRuns(data, new URLSearchParams("taskKey=PROJ-1"));
     expect((byKey.body as { total: number }).total).toBe(1);
   });
@@ -508,6 +511,92 @@ describe("dashboard server", () => {
 
       const post = await fetch(`${base}/api/runs`, { method: "POST" });
       expect(post.status).toBe(405);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("POST /api/runs/:id/retry triggers the CLI flow end-to-end", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-9" });
+    store.finishRun(id, "failed");
+    store.close();
+
+    const spawned: string[] = [];
+    const server = startDashboardServer({
+      port: 0,
+      dbPath,
+      workingDir: dir,
+      retryDeps: {
+        resolveActor: async () => ({ email: "sup@example.com" }),
+        spawn: (taskKey: string) => {
+          spawned.push(taskKey);
+          return { pid: 1234, command: `bun devintern ${taskKey} --force` };
+        },
+      },
+    });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+
+      // GET exposes retry metadata on the detail payload.
+      const detail = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { eligible: boolean; audit: unknown[] };
+      };
+      expect(detail.retry.eligible).toBe(true);
+      expect(detail.retry.audit).toEqual([]);
+
+      const response = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { status: string; taskKey?: string; pid?: number };
+      expect(body.status).toBe("triggered");
+      expect(body.taskKey).toBe("PROJ-9");
+      expect(body.pid).toBe(1234);
+      expect(spawned).toEqual(["PROJ-9"]);
+
+      // The audit entry is now visible on the detail payload.
+      const after = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        retry: { audit: { action: string }[] };
+      };
+      expect(after.retry.audit.map((entry) => entry.action)).toEqual(["triggered"]);
+
+      // A second POST immediately afterwards hits the in-flight guard.
+      const repeat = await fetch(`${base}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(repeat.status).toBe(409);
+
+      // Unauthorized requests are refused before anything spawns.
+      const deniedId = (() => {
+        const s = new RunStore(dbPath);
+        const failed = s.createRun({ origin: "task", taskKey: "PROJ-10" });
+        s.finishRun(failed, "failed");
+        s.close();
+        return failed;
+      })();
+      const noAuth = startDashboardServer({
+        port: 0,
+        dbPath,
+        workingDir: dir,
+        retryDeps: { resolveActor: async () => null, spawn: () => ({ command: "" }) },
+      });
+      try {
+        const denied = await fetch(`http://127.0.0.1:${noAuth.port}/api/runs/${deniedId}/retry`, {
+          method: "POST",
+        });
+        expect(denied.status).toBe(403);
+      } finally {
+        noAuth.stop(true);
+      }
+
+      // GET is not allowed on the retry route.
+      const wrongMethod = await fetch(`${base}/api/runs/${id}/retry`);
+      expect(wrongMethod.status).toBe(404);
     } finally {
       server.stop(true);
     }

@@ -77,6 +77,23 @@ describe("workspace init/import", () => {
     expect(runWorkspaceInit()).toBe(1); // second run refuses
   });
 
+  test("scaffold has no bare # comment lines (Bun.TOML redefinition bug)", () => {
+    // Bun 1.3.2's TOML parser mis-attributes keys to the previous table when
+    // a "#"-only comment line precedes an [[array.of.tables]] header, failing
+    // with "Cannot redefine key". Keep whitespace after every "#" in templates.
+    expect(runWorkspaceInit()).toBe(0);
+    const text = readFileSync(workspaceConfigPath(), "utf8");
+    expect(text).not.toMatch(/^#$/m);
+
+    // Reproduce the parser bug's trigger: an uncommented table header after
+    // the scaffold's comment block.
+    const withAutomation =
+      text +
+      '\n[[automations]]\nid = "weekday-maintenance"\nenabled = true\n' +
+      'cron = "0 9 * * 1-5"\nprompt = "p"\nrepo = "backend"\n';
+    Bun.TOML.parse(withAutomation);
+  });
+
   test("import adds the repo, merges env, and seeds a routing rule", async () => {
     runWorkspaceInit();
     expect(await runWorkspaceImport(repoDir)).toBe(0);

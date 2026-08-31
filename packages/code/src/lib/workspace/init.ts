@@ -29,6 +29,15 @@ worktrees_ttl_days = 7
 # Local observability dashboard (http://localhost:4400). Set false to disable.
 dashboard = true
 # dashboard_port = 4400
+# When automatic merge-conflict resolution runs on the agent's PRs.
+# "auto" (default) resolves as soon as a conflict is detected; "scheduled"
+# queues conflicts during polling and resolves them in one off-peak window
+# to cut AI token spend. Requires exactly one schedule below, and a worker
+# restart to take effect. "disabled" turns it off entirely — conflicts
+# stay for manual resolution (devintern resolve-conflicts <pr-url>).
+# conflict_resolution = "scheduled"
+# conflict_resolution_cron = "0 3 * * *"      # worker host timezone
+# conflict_resolution_interval = "1d"
 
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, azure-devops,
@@ -46,11 +55,11 @@ default_branch = "main"
 
 # Add repos with \`devintern workspace import\` (run inside each repo), or by
 # hand:
-#
+# 
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
-#
+# 
 # [[routing.rules]]
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
@@ -59,7 +68,7 @@ default_branch = "main"
 # Recurring work is loaded once when the worker starts. Each occurrence runs
 # the prompt through the normal task pipeline as a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
-#
+# 
 # [[automations]]
 # id = "weekday-maintenance"
 # enabled = true
