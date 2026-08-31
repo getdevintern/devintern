@@ -16,6 +16,7 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
+import type { RunCoordinator } from "../run-coordinator";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -35,6 +36,8 @@ export interface FleetEventDeps {
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
 }
 
 /**
@@ -83,10 +86,12 @@ export function createFleetAddressPr(
     await repoManager.ensureBareClone(repo);
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
-    return runReview(slug, prNumber, {
-      cwd: base,
-      env: buildRepoEnv(repo, workspaceDir),
-    });
+    const invoke = () =>
+      runReview(slug, prNumber, {
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir),
+      });
+    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
   };
 }
 
@@ -108,12 +113,14 @@ export function createFleetResolveConflicts(
     await repoManager.ensureBareClone(repo);
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
-    return runResolve(slug, prNumber, {
-      cwd: base,
-      env: buildRepoEnv(repo, workspaceDir),
-      expectedHeadSha: expected.headSha,
-      expectedBaseSha: expected.baseSha,
-    });
+    const invoke = () =>
+      runResolve(slug, prNumber, {
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir),
+        expectedHeadSha: expected.headSha,
+        expectedBaseSha: expected.baseSha,
+      });
+    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
   };
 }
 

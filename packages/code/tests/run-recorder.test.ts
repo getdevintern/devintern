@@ -91,6 +91,20 @@ describe("RunStore", () => {
     expect(store.getStats(null).byOrigin.scheduled).toBe(1);
   });
 
+  test("estimate runs are a distinct origin carrying the schedule id", () => {
+    const id = store.createRun({
+      origin: "estimate",
+      taskKey: "PROJ-9",
+      automationId: "weekday-groom",
+    });
+    store.finishRun(id, "succeeded");
+
+    expect(store.getRun(id)).toMatchObject({ origin: "estimate", automationId: "weekday-groom" });
+    const stats = store.getStats(null).byOrigin;
+    expect(stats.estimate).toBe(1);
+    expect(stats.scheduled).toBe(0);
+  });
+
   test("stages accumulate in order with structured detail", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-2" });
     store.addStage(id, "feasibility", "succeeded", "clear enough", '{"clarityScore":8}');

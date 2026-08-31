@@ -7,6 +7,7 @@ import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
   buildFleetEventAcquirers,
+  createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
   fleetTaskArgs,
   resolveWorkspaceAutomationContext,
@@ -17,6 +18,8 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
+import { RunCoordinator } from "../src/lib/run-coordinator";
+import { toRoutableTask } from "../src/lib/workspace/router";
 import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
@@ -246,11 +249,76 @@ describe("createWorkspaceTaskAcquirer", () => {
   });
 });
 
+describe("createFleetTaskExecutor serialization", () => {
+  let workspaceDir: string;
+  let state: WorkspaceState;
+  let repoManager: FakeRepoManager;
+
+  beforeEach(() => {
+    workspaceDir = join(tmpdir(), `ws-coord-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+    repoManager = new FakeRepoManager(workspaceDir);
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("with a coordinator, task runs wait for held agent slots (account-global limits)", async () => {
+    const coordinator = new RunCoordinator();
+    let agentStarted = false;
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => {
+        agentStarted = true;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return true;
+      },
+      repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      coordinator,
+    });
+
+    // A scheduled estimation sweep holds the process-level slot first.
+    const releaseEstimation = await coordinator.acquire();
+    const routable = toRoutableTask({ key: "T-C1", labels: ["backend"], components: [] });
+    const running = executor("T-C1", routable);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Repo preparation may proceed, but no agent process starts while the
+    // estimation sweep holds the account-global slot.
+    expect(agentStarted).toBe(false);
+    expect(repoManager.calls).toContain("worktree:backend:T-C1");
+
+    releaseEstimation();
+    await running;
+    expect(agentStarted).toBe(true);
+  });
+
+  test("without a coordinator, runs start immediately (unchanged legacy behavior)", async () => {
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => true,
+      repoLock: (name) => createRepoRunLock(name, workspaceDir),
+    });
+    const routable = toRoutableTask({ key: "T-C2", labels: ["backend"], components: [] });
+    const result = await executor("T-C2", routable);
+    expect(result).toBe(true);
+    expect(repoManager.calls).toContain("worktree:backend:T-C2");
+  });
+});
+
 describe("fleetTaskArgs", () => {
   test("uses worker_task_args from the workspace config", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
   });
-
   test("defaults to --create-pr when worker_task_args is omitted", () => {
     const config = parseWorkspaceConfig(`
 [defaults]

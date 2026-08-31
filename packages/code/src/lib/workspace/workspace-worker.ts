@@ -45,6 +45,9 @@ import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { EstimationAcquirer } from "../estimation-acquirer";
+import { RunCoordinator } from "../run-coordinator";
+import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
@@ -175,11 +178,41 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<boolean>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
 }
 
 interface RepoRunLockLike {
   acquire(): { success: boolean; message: string; pid?: number };
   release(): void;
+}
+
+/**
+ * Hold a process-level agent slot for a scheduled run's lifetime.
+ *
+ * Without a coordinator (no [[estimations]] configured) the context passes
+ * through untouched, so long-lived gates are never introduced silently.
+ * With one, acquisition happens after any repo lock is held, and release
+ * always runs — even when the caller's own release throws.
+ */
+async function withCoordinatorSlot(
+  context: AutomationRunContext | null | Promise<AutomationRunContext | null>,
+  coordinator?: RunCoordinator,
+): Promise<AutomationRunContext | null> {
+  const resolved = await context;
+  if (!coordinator || !resolved) return resolved;
+  const releaseRun = await coordinator.acquire();
+  const releaseContext = resolved.release;
+  return {
+    ...resolved,
+    release: async () => {
+      try {
+        await releaseContext();
+      } finally {
+        releaseRun();
+      }
+    },
+  };
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -329,7 +362,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
   "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
->;
+> & { coordinator?: RunCoordinator };
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
@@ -396,13 +429,15 @@ export function createFleetTaskExecutor(
       const worktree = await repoManager.createTaskWorktree(repo, taskKey);
       console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
 
-      const ok = await runTask(taskKey, extraArgs, {
-        cwd: worktree,
-        env: {
-          ...buildRepoEnv(repo, workspaceDir),
-          [RUN_ORIGIN_ENV]: "worker",
-        },
-      });
+      const invoke = () =>
+        runTask(taskKey, extraArgs, {
+          cwd: worktree,
+          env: {
+            ...buildRepoEnv(repo, workspaceDir),
+            [RUN_ORIGIN_ENV]: "worker",
+          },
+        });
+      const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
 
       if (ok) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
@@ -518,7 +553,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (!query && config.automations.length === 0) {
+  if (!query && config.automations.length === 0 && config.estimations.length === 0) {
     if (retryQueue.hasPending()) {
       console.warn(
         "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
@@ -533,6 +568,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const state = openWorkspaceState(workspaceDir);
   const repoManager = new RepoManager(workspaceDir);
+  // Preserve the worker's existing concurrency when scheduled estimation is
+  // absent or fully disabled. The account-global gate is needed only once an
+  // enabled schedule joins the process and must serialize with every other
+  // agent run.
+  const coordinator = config.estimations.some((item) => item.enabled)
+    ? new RunCoordinator()
+    : undefined;
 
   // Recover what the previous worker left behind before acquiring new work.
   await recoverOrphanedWorkspaceRuns({
@@ -585,8 +627,31 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         automations: config.automations,
         dbPath: state.dbPath,
         extraArgs: fleetTaskArgs(config),
-        resolveContext: (automation) =>
-          resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+        resolveContext: async (automation) =>
+          withCoordinatorSlot(
+            await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+            coordinator,
+          ),
+      }),
+    );
+  }
+
+  if (config.estimations.length > 0) {
+    // Scheduled story-point sweeps: the automation scheduler (durable cursors
+    // and leases), a one-shot search of each entry's query, and the regular
+    // `--estimate` engine. No repo, no worktree, no branch, no PR.
+    console.log(
+      `📊 Scheduling ${config.estimations.filter((item) => item.enabled).length} enabled estimation schedule(s)`,
+    );
+    acquirers.push(
+      new EstimationAcquirer({
+        estimations: config.estimations,
+        dbPath: state.dbPath,
+        resolveContext: () =>
+          withCoordinatorSlot(
+            Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+            coordinator,
+          ),
       }),
     );
   }
@@ -616,6 +681,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordinator,
       }),
     );
     acquirers.push(
@@ -628,6 +694,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query,
         intervalSeconds,
         verbose: options.verbose,
+        coordinator,
       })),
     );
   }
@@ -687,6 +754,7 @@ export async function buildFleetEventAcquirers(options: {
   query: string;
   intervalSeconds: number;
   verbose?: boolean;
+  coordinator?: RunCoordinator;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
     options;
@@ -722,6 +790,7 @@ export async function buildFleetEventAcquirers(options: {
       userHasPushAccess: (owner: string, repo: string, user: string) =>
         gh.userHasPushAccess(owner, repo, user),
       verbose,
+      coordinator: options.coordinator,
     };
     const fleetAddressPr = createFleetAddressPr(eventDeps);
     addressPr = fleetAddressPr;
@@ -881,6 +950,7 @@ export async function buildFleetEventAcquirers(options: {
         workspaceDir,
         skips: state.skips,
         repoManager,
+        coordinator: options.coordinator,
       });
       const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
 
