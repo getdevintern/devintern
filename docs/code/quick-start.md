@@ -1,7 +1,7 @@
 ---
 title: "@devintern/code Quick Start"
 sidebarLabel: "Quick Start"
-description: "Install @devintern/code and turn your first tracker ticket into a pull request."
+description: "Install @devintern/code and turn a markdown task or tracker ticket into working code."
 section: "Automation"
 order: 0
 dateModified: 2026-09-01
@@ -10,14 +10,14 @@ tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 
 # @devintern/code Quick Start
 
-**@devintern/code** is your AI intern for automatically implementing tasks from your task tracker. It fetches task details, creates feature branches, runs your AI agent, commits changes, and optionally creates pull requests, all from a single command.
+**@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
 Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, and **local markdown files** (no PM account required).
 
 ## Prerequisites
 
 - **[Bun](https://bun.sh) runtime** (required to run @devintern/code)
-- Task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues), or local markdown files with no account at all
+- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues)
 - AI agent CLI installed (e.g., Claude Code, OpenCode, Codex, Cursor)
 - Git repository for your project
 
@@ -53,6 +53,8 @@ In a terminal, this starts an interactive setup wizard that:
 - Finishes with a readiness checklist so your first run cannot fail on something setup could have caught
 - Writes your answers to `.devintern-code/.env`, creates `settings.json` for per-project configuration, and adds a whitelist block to your `.gitignore` (`.devintern-code/*` plus `!settings.json` and `!.env.example` exceptions) so credentials and local run state never get committed, while `settings.json` and the `.env.example` template stay trackable
 
+Not ready to connect a real task tracker yet? Choose **Markdown files** in the wizard. It configures a local task directory (`./tasks` by default), requires no tracker account or API credentials, and lets you switch to Jira, Linear, or another tracker later. See [Markdown File Tasks](./markdown-tasks.md) for the supported file format and workflow.
+
 For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write a commented configuration template instead:
 
 ```bash
@@ -83,11 +85,17 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 
 Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
 
-## First Run
+## Run Your First Task
 
 Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
 
-Run `devintern` with a task reference from your configured tracker:
+If you chose Markdown during setup, add `TASK-1.md` to your configured task directory and pass its filename without the extension:
+
+```bash
+devintern TASK-1
+```
+
+For a connected tracker, pass its task reference instead:
 
 **Jira**
 
@@ -100,16 +108,6 @@ devintern PROJ-123 --create-pr
 ```bash
 devintern AbCdEf12 --create-pr
 ```
-
-Every run:
-
-1. **Fetches** task details (description, comments, attachments where supported)
-2. **Transitions** the task (Jira status or Trello list, when configured in `settings.json`)
-3. **Creates** a feature branch (`feature/proj-123`)
-4. **Runs** a clarity check (skippable with `--skip-clarity-check`)
-5. **Executes** your AI agent with formatted task context
-6. **Commits** changes automatically after successful implementation
-7. **Posts** a summary back to your task tracker
 
 ## What's Next?
 
