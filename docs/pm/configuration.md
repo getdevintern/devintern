@@ -2,7 +2,7 @@
 title: "@devintern/pm Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
-section: "PM"
+section: "Create Tasks"
 order: 2
 dateModified: 2026-08-08
 ---

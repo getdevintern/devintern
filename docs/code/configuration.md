@@ -2,8 +2,8 @@
 title: "@devintern/code Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
-section: "Code"
-order: 2
+section: "Automation"
+order: 4
 dateModified: 2026-09-01
 ---
 
@@ -89,14 +89,14 @@ Set `GITHUB_TOKEN` for interactive runs and workspace automation. When the works
 
 Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
 
-| What you want | Need |
-| --- | --- |
-| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
-| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
-| Worker review polling and replies | `GITHUB_TOKEN` |
-| `@devintern-ai` on any PR (standard workspace) | `GITHUB_TOKEN` + relay + central DevIntern AI App installation |
-| Air-gapped mentions or `devintern webhook serve` | Customer-owned GitHub App (advanced) |
-| Custom `slug[bot]` attribution | Customer-owned GitHub App (advanced) |
+| What you want                                                 | Need                                                           |
+| ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Implement tickets and open PRs from the CLI (personal)        | `GITHUB_TOKEN`                                                 |
+| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute)                     |
+| Worker review polling and replies                             | `GITHUB_TOKEN`                                                 |
+| `@devintern-ai` on any PR (standard workspace)                | `GITHUB_TOKEN` + relay + central DevIntern AI App installation |
+| Air-gapped mentions or `devintern webhook serve`              | Customer-owned GitHub App (advanced)                           |
+| Custom `slug[bot]` attribution                                | Customer-owned GitHub App (advanced)                           |
 
 See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Integration](./github-integration.md) guide.
 
@@ -135,7 +135,7 @@ GITHUB_TOKEN=your-github-token
 - **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
-> **`Contents` must be *Read and write*, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
+> **`Contents` must be _Read and write_, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
 
 #### How git picks push credentials
 

@@ -3,6 +3,7 @@ title: "GitHub Integration"
 description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern webhook serve`)"
 section: "Server Automation"
 order: 4
+sidebarHidden: true
 dateModified: 2026-09-01
 ---
 

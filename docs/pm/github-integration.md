@@ -4,6 +4,7 @@ sidebarLabel: "GitHub Issues Integration"
 description: "File well-specified GitHub issues from AI drafts in your repository."
 section: "PM"
 order: 6
+sidebarHidden: true
 ---
 
 # Create GitHub Issues with @devintern/pm

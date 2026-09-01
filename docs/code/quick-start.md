@@ -2,9 +2,9 @@
 title: "@devintern/code Quick Start"
 sidebarLabel: "Quick Start"
 description: "Install @devintern/code and turn your first tracker ticket into a pull request."
-section: "Code"
-order: 1
-dateModified: 2026-08-26
+section: "Automation"
+order: 0
+dateModified: 2026-09-01
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
@@ -113,5 +113,13 @@ Every run:
 
 ## What's Next?
 
-- [Usage](./usage.md): CLI flags, query-based batch runs, git, and pull requests
-- [Automated task processing](./automated-task-processing.md): drain the backlog with the worker daemon
+Turn the successful one-off run into a worker that watches for ready tasks and opens pull requests without you starting each run:
+
+```bash
+devintern worker init
+devintern worker
+```
+
+- [Set up the worker](./worker.md): automate task pickup, pull request feedback, and recurring work
+- [CLI reference](./usage.md): run individual tasks and queries on demand
+- [Tracker setup guides](#connect-your-task-tracker): open the guide for the tracker you selected during setup

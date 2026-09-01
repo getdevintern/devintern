@@ -4,6 +4,7 @@ sidebarLabel: "Azure DevOps Integration"
 description: "File well-specified Azure DevOps work items from AI drafts in your project."
 section: "PM"
 order: 9
+sidebarHidden: true
 ---
 
 # Create Azure DevOps Work Items with @devintern/pm

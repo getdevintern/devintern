@@ -4,6 +4,7 @@ sidebarLabel: "GitHub Issues Integration"
 description: "Fetch GitHub issues, track status labels, implement with your coding agent, and open the PR in the same repository."
 section: "Code"
 order: 5
+sidebarHidden: true
 dateModified: 2026-09-01
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---

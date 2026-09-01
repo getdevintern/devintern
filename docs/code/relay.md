@@ -3,6 +3,7 @@ title: "Relay (Instant Events)"
 description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
 section: "Server Automation"
 order: 3
+sidebarHidden: true
 dateModified: 2026-09-01
 ---
 
@@ -91,16 +92,16 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.
 
 ## Commands
 
-| Command                                             | Description                                                                |
-| --------------------------------------------------- | -------------------------------------------------------------------------- |
-| `devintern worker connect`                          | Verify and pair this repository through the GitHub App (auto-detected)     |
-| `devintern worker connect github --repo owner/name` | Verify and pair a specific repository through the GitHub App               |
-| `devintern worker connect linear`                   | Self-register a Linear webhook for Issue events                            |
-| `devintern worker connect asana`                    | Self-register an Asana webhook for task events                             |
-| `devintern worker connect trello`                   | Self-register a Trello webhook for card events                             |
-| `devintern worker connect azure-devops`             | Self-register work item service hooks                                      |
-| `devintern worker connect jira`                     | Print the one-time Jira admin webhook setup with your private ingest URL   |
-| `devintern worker connect status`                   | Show registrations, buffered events, and per-source freshness              |
+| Command                                             | Description                                                              |
+| --------------------------------------------------- | ------------------------------------------------------------------------ |
+| `devintern worker connect`                          | Verify and pair this repository through the GitHub App (auto-detected)   |
+| `devintern worker connect github --repo owner/name` | Verify and pair a specific repository through the GitHub App             |
+| `devintern worker connect linear`                   | Self-register a Linear webhook for Issue events                          |
+| `devintern worker connect asana`                    | Self-register an Asana webhook for task events                           |
+| `devintern worker connect trello`                   | Self-register a Trello webhook for card events                           |
+| `devintern worker connect azure-devops`             | Self-register work item service hooks                                    |
+| `devintern worker connect jira`                     | Print the one-time Jira admin webhook setup with your private ingest URL |
+| `devintern worker connect status`                   | Show registrations, buffered events, and per-source freshness            |
 
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
 

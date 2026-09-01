@@ -1,14 +1,15 @@
 ---
-title: "Automated Task Processing"
-description: "Drain your backlog continuously with the worker daemon"
-section: "Server Automation"
+title: "Running the Worker Unattended"
+description: "Choose when the worker picks up tasks and keep unattended runs healthy"
+section: "Automation"
 order: 5
+sidebarHidden: true
 dateModified: 2026-09-01
 ---
 
-# Automated Task Processing
+# Running the Worker Unattended
 
-Run @devintern/code without sitting at the keyboard. The unattended path is the [worker daemon](./worker.md): one long-running process that polls your tracker, runs ready tasks, watches the agent's PRs, and can receive events in seconds through the [relay](./relay.md). [Working windows (quiet hours)](#working-windows-quiet-hours) keep that process resident while limiting when it spends tokens.
+The [worker](./worker.md) is the unattended path for @devintern/code. It stays running, picks up ready tasks, watches the agent's pull requests, and receives instant events through the [relay](./relay.md). You do not need a separate scheduler around the CLI.
 
 ```bash
 devintern worker init
@@ -17,7 +18,7 @@ devintern worker
 
 `worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers verified relay pairing through the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access). GitHub pairing is enabled only after the relay verifies the App installation and requested repository; skipped pairing is reminded in the summary. The wizard can also generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked. Air-gapped/no-relay installations use the separate customer-owned App workflow.
 
-Do not schedule `devintern --query` every few minutes. That is what the worker already does.
+Keep the worker running and use [working windows](#working-windows-quiet-hours) when you want to control when it may pick up new tasks.
 
 ## Requires an automation license
 
@@ -53,7 +54,7 @@ How it behaves:
 
 ### Timezones and DST
 
-Windows are defined in **wall-clock time**. With no `timezone` set (the default), they follow the worker machine's local time, so "nights" mean *its* nights. Set any IANA name (for example `timezone = "Europe/Berlin"`) to pin the schedule independent of where the daemon runs; the resolved zone is printed in the startup banner and shown on the dashboard.
+Windows are defined in **wall-clock time**. With no `timezone` set (the default), they follow the worker machine's local time, so "nights" mean _its_ nights. Set any IANA name (for example `timezone = "Europe/Berlin"`) to pin the schedule independent of where the daemon runs; the resolved zone is printed in the startup banner and shown on the dashboard.
 
 Daylight-saving transitions shift real window duration by up to an hour because windows track the clock, not absolute time:
 
