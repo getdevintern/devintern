@@ -16,6 +16,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { saveGitHubAppRecord } from "./github-app-setup";
+import { loadWorkspaceConfig } from "./workspace/config";
+import { gitHubSlugFromRemote } from "./workspace/env";
+import { hasWorkspace, resolveWorkspaceDir, workspaceConfigPath } from "./workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -104,6 +107,24 @@ export function hasGitHubRelayRegistration(
     : repositories.length > 0;
 }
 
+/**
+ * Whether relay state can route central-App events for a repository.
+ *
+ * Verified immutable repository ids remain the source of truth for setup UI,
+ * but older workers may already have a live repo registration without those
+ * newer local fields. Runtime handling accepts that legacy registration so a
+ * CLI upgrade does not disable an already-delivering relay.
+ */
+export function hasGitHubRelayRouting(state: RelayConnectState | null, repo?: string): boolean {
+  if (!state?.relayToken) return false;
+  if (hasGitHubRelayRegistration(state, repo)) return true;
+  return state.registrations.some(
+    (registration) =>
+      registration.kind === "repo" &&
+      (!repo || registration.key.toLowerCase() === repo.toLowerCase()),
+  );
+}
+
 /** Resolve the relay URL: env override, else the hosted default. */
 export function resolveRelayUrl(): string {
   return (process.env.WORKER_RELAY_URL || DEFAULT_RELAY_URL).replace(/\/+$/, "");
@@ -164,16 +185,51 @@ export interface RelayConnectDeps {
   onGitHubInstallUrl?: (url: string) => void;
 }
 
+/**
+ * Resolve where a repo's relay state belongs.
+ *
+ * `worker connect github` is intentionally run from a source checkout. When
+ * that repository is managed by the default fleet workspace, persist into
+ * the workspace the daemon reads instead of leaving a second repo-local
+ * relay.json behind.
+ */
+export function resolveRelayConnectWorkingDir(
+  repo: string,
+  currentDir: string = process.cwd(),
+  workspaceDir: string = resolveWorkspaceDir(),
+): string {
+  if (!hasWorkspace(workspaceDir)) return currentDir;
+  try {
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    const normalizedRepo = repo.toLowerCase();
+    const isManaged = config.repos.some(
+      (configuredRepo) =>
+        gitHubSlugFromRemote(configuredRepo.remote)?.toLowerCase() === normalizedRepo,
+    );
+    return isManaged ? workspaceDir : currentDir;
+  } catch {
+    return currentDir;
+  }
+}
+
 async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> {
   if (deps.getAccessToken) {
     return deps.getAccessToken();
   }
-  const workingDir = deps.workingDir ?? process.cwd();
-  const user = await requireAuthenticatedUser(
-    createDefaultSupabaseAuthConfig(authSessionPath(workingDir)),
-    "devintern login",
-  );
-  return user.accessToken;
+  const workingDirs = [...new Set([deps.workingDir ?? process.cwd(), process.cwd()])];
+  let lastError: unknown;
+  for (const workingDir of workingDirs) {
+    try {
+      const user = await requireAuthenticatedUser(
+        createDefaultSupabaseAuthConfig(authSessionPath(workingDir)),
+        "devintern login",
+      );
+      return user.accessToken;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 async function connectRequest(
@@ -475,9 +531,19 @@ export async function runWorkerConnect(
     }
   }
 
+  const repo = target === "github" ? (repoFlag ?? (await detectRepo())) : undefined;
+  const workingDir =
+    deps.workingDir ??
+    (repo
+      ? resolveRelayConnectWorkingDir(repo)
+      : target === "status" && hasWorkspace()
+        ? resolveWorkspaceDir()
+        : process.cwd());
+  const resolvedDeps: RelayConnectDeps = { ...deps, workingDir };
+
   let accessToken: string;
   try {
-    accessToken = await resolveAccessToken(deps);
+    accessToken = await resolveAccessToken(resolvedDeps);
   } catch (error) {
     console.error(`❌ ${(error as Error).message}`);
     return 1;
@@ -485,15 +551,15 @@ export async function runWorkerConnect(
 
   const connectOpts = {
     accessToken,
-    workingDir: deps.workingDir,
+    workingDir,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
   };
 
   if (target === "status") {
     try {
-      const { relayToken } = await ensureRelayToken(accessToken, deps);
-      const status = await fetchRelayStatus({ relayToken, ...deps });
+      const { relayToken } = await ensureRelayToken(accessToken, resolvedDeps);
+      const status = await fetchRelayStatus({ relayToken, ...resolvedDeps });
       console.log(`📡 Relay: ${resolveRelayUrl()}`);
       console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
       console.log(`   Buffered envelopes: ${status.buffered}`);
@@ -646,7 +712,6 @@ export async function runWorkerConnect(
     return 1;
   }
 
-  const repo = repoFlag ?? (await detectRepo());
   if (!repo) {
     console.error(
       "❌ Could not detect a GitHub repository. Pass one explicitly:\n" +
@@ -680,7 +745,7 @@ export async function runWorkerConnect(
         installationId: state.github?.installationId,
         repositoryId: state.github?.repositoryId,
       },
-      deps.workingDir,
+      workingDir,
     );
     console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
     console.log("   Run the worker as usual: devintern worker [--query ...]");

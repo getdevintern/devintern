@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -8,8 +8,10 @@ import {
   ensureRelayToken,
   fetchRelayStatus,
   hasGitHubRelayRegistration,
+  hasGitHubRelayRouting,
   loadRelayState,
   registerRelaySource,
+  resolveRelayConnectWorkingDir,
   runWorkerConnect,
   saveRelayState,
 } from "../src/lib/relay-connect";
@@ -61,6 +63,42 @@ describe("relay-connect auth", () => {
     expect(hasGitHubRelayRegistration(state)).toBe(true);
     expect(hasGitHubRelayRegistration(state, "ACME/WIDGETS")).toBe(true);
     expect(hasGitHubRelayRegistration(state, "acme/other")).toBe(false);
+  });
+
+  test("runtime relay routing preserves a live legacy repo registration", () => {
+    const state: RelayConnectState = {
+      relayUrl: RELAY_URL,
+      customerId: "user_1",
+      connectedAt: new Date(0).toISOString(),
+      relayToken: "drt_test",
+      registrations: [{ kind: "repo", key: "acme/widgets", createdAt: 0, lastEventAt: Date.now() }],
+    };
+
+    expect(hasGitHubRelayRegistration(state)).toBe(false);
+    expect(hasGitHubRelayRouting(state)).toBe(true);
+    expect(hasGitHubRelayRouting(state, "ACME/WIDGETS")).toBe(true);
+    expect(hasGitHubRelayRouting(state, "acme/other")).toBe(false);
+  });
+
+  test("repo connect state follows a matching fleet workspace", () => {
+    const workspaceDir = join(dir, "workspace");
+    const repoDir = join(dir, "checkout");
+    mkdirSync(workspaceDir, { recursive: true });
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "widgets"
+remote = "https://github.com/acme/widgets.git"
+`,
+    );
+
+    expect(resolveRelayConnectWorkingDir("ACME/WIDGETS", repoDir, workspaceDir)).toBe(workspaceDir);
+    expect(resolveRelayConnectWorkingDir("acme/other", repoDir, workspaceDir)).toBe(repoDir);
   });
 
   test("ensureRelayToken mints with the Supabase session and stores drt_ token", async () => {

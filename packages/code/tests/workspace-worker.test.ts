@@ -348,7 +348,7 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
-  test("relay mode requires GITHUB_TOKEN and ignores custom App credentials", async () => {
+  test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
     const workspaceDir = join(
       tmpdir(),
       `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -373,7 +373,6 @@ describe("buildFleetEventAcquirers", () => {
           { kind: "repo", key: "acme/backend", createdAt: Date.now(), lastEventAt: null },
         ],
         relayToken: "drt_test",
-        github: { repo: "acme/backend", installationId: 7001, repositoryId: 9001 },
       },
       workspaceDir,
     );
@@ -389,6 +388,8 @@ describe("buildFleetEventAcquirers", () => {
         intervalSeconds: 60,
       });
       expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["relay"]);
+      expect(process.env.DEVINTERN_GITHUB_AUTH_MODE).toBe("token-only");
+      expect(process.env.GITHUB_BOT_ALIASES?.split(",")).toContain("devintern-ai");
     } finally {
       if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = savedToken;
