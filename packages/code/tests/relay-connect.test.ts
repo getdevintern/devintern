@@ -11,6 +11,7 @@ import {
   loadRelayState,
   registerRelaySource,
   runWorkerConnect,
+  saveRelayState,
 } from "../src/lib/relay-connect";
 import type { RelayConnectState } from "../src/lib/relay-connect";
 
@@ -40,7 +41,7 @@ describe("relay-connect auth", () => {
     }) as typeof fetch;
   }
 
-  test("central App mode requires a repo registration, not only a relay token", () => {
+  test("central App mode requires verified immutable ids, not a legacy repo registration", () => {
     const state: RelayConnectState = {
       relayUrl: RELAY_URL,
       customerId: "user_1",
@@ -55,7 +56,11 @@ describe("relay-connect auth", () => {
       createdAt: 0,
       lastEventAt: null,
     });
+    expect(hasGitHubRelayRegistration(state)).toBe(false);
+    state.github = { repo: "acme/widgets", installationId: 7001, repositoryId: 9001 };
     expect(hasGitHubRelayRegistration(state)).toBe(true);
+    expect(hasGitHubRelayRegistration(state, "ACME/WIDGETS")).toBe(true);
+    expect(hasGitHubRelayRegistration(state, "acme/other")).toBe(false);
   });
 
   test("ensureRelayToken mints with the Supabase session and stores drt_ token", async () => {
@@ -91,6 +96,45 @@ describe("relay-connect auth", () => {
     });
     expect(again.relayToken).toBe("drt_minted_abc");
     expect(calls.length).toBe(0);
+  });
+
+  test("token rotation for another customer drops the previous GitHub associations", async () => {
+    saveRelayState(
+      {
+        relayUrl: RELAY_URL,
+        customerId: "user_1",
+        connectedAt: new Date(0).toISOString(),
+        relayToken: "drt_old",
+        registrations: [{ kind: "repo", key: "acme/api", createdAt: 1, lastEventAt: null }],
+        github: { repo: "acme/api", installationId: 7001, repositoryId: 9001 },
+        githubRepositories: [{ repo: "acme/api", installationId: 7001, repositoryId: 9001 }],
+      },
+      dir,
+    );
+    const fetchImpl = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            customerId: "user_2",
+            licenseSource: "solo-automation",
+            relayToken: "drt_new",
+          }),
+          { status: 200 },
+        ),
+    );
+
+    const { state } = await ensureRelayToken("other-supa-access", {
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+      force: true,
+    });
+
+    expect(state.customerId).toBe("user_2");
+    expect(state.registrations).toEqual([]);
+    expect(state.github).toBeUndefined();
+    expect(state.githubRepositories).toBeUndefined();
+    expect(hasGitHubRelayRegistration(state)).toBe(false);
   });
 
   test("connectGitHubRepo waits for verified GitHub App pairing", async () => {
@@ -144,11 +188,85 @@ describe("relay-connect auth", () => {
     expect(state.relayToken).toBe("drt_repo_1");
     expect(state.registrations[0]?.key).toBe("acme/webapp");
     expect(state.github?.repositoryId).toBe(9001);
+    expect(state.githubRepositories).toEqual([
+      { repo: "acme/webapp", installationId: 7001, repositoryId: 9001 },
+    ]);
     expect(calls.filter((c) => c.body).map((c) => (c.body as { action: string }).action)).toEqual([
       "issue-token",
       "begin-github-pairing",
     ]);
     expect(calls.every((c) => c.auth === "Bearer supa-access")).toBe(true);
+  });
+
+  test("connectGitHubRepo preserves verified associations for multiple repositories", async () => {
+    let pairingRepo = "";
+    const verified = new Map([
+      ["acme/api", { installationId: 7001, repositoryId: 9001 }],
+      ["acme/web", { installationId: 7001, repositoryId: 9002 }],
+    ]);
+    const fetchImpl = mockFetch((url, body) => {
+      if (url.includes("/v1/github/pairings/")) {
+        const ids = verified.get(pairingRepo)!;
+        return new Response(
+          JSON.stringify({
+            status: "complete",
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            repo: pairingRepo,
+            ...ids,
+            registrations: [...verified.keys()].map((key) => ({
+              kind: "repo",
+              key,
+              createdAt: 1,
+              lastEventAt: null,
+            })),
+          }),
+          { status: 200 },
+        );
+      }
+      const request = body as { action: string; repo?: string };
+      if (request.action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_multi",
+          }),
+          { status: 200 },
+        );
+      }
+      pairingRepo = request.repo!.toLowerCase();
+      return new Response(
+        JSON.stringify({
+          installUrl: `https://github.com/apps/devintern-ai/installations/new?state=${pairingRepo}`,
+          pairingStatusUrl: `${RELAY_URL}/v1/github/pairings/${pairingRepo}`,
+          expiresAt: Date.now() + 60_000,
+        }),
+        { status: 200 },
+      );
+    });
+
+    await connectGitHubRepo({
+      repo: "acme/api",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+    const state = await connectGitHubRepo({
+      repo: "acme/web",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+
+    expect(state.githubRepositories).toEqual([
+      { repo: "acme/api", installationId: 7001, repositoryId: 9001 },
+      { repo: "acme/web", installationId: 7001, repositoryId: 9002 },
+    ]);
+    expect(hasGitHubRelayRegistration(state, "acme/api")).toBe(true);
+    expect(hasGitHubRelayRegistration(state, "acme/web")).toBe(true);
   });
 
   test("registerRelaySource returns an ingest URL and keeps the relay token", async () => {
@@ -288,8 +406,8 @@ describe("relay-connect auth", () => {
     expect(saved.relayToken).toBe("drt_cli_1");
     const appRecord = JSON.parse(
       readFileSync(join(dir, ".devintern-code", "github-app.json"), "utf8"),
-    ) as { installationId: number; repositoryId: number };
-    expect(appRecord.installationId).toBe(7001);
-    expect(appRecord.repositoryId).toBe(9001);
+    ) as { repositories: Array<{ installationId: number; repositoryId: number }> };
+    expect(appRecord.repositories[0]?.installationId).toBe(7001);
+    expect(appRecord.repositories[0]?.repositoryId).toBe(9001);
   });
 });

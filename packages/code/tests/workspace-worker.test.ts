@@ -373,6 +373,7 @@ describe("buildFleetEventAcquirers", () => {
           { kind: "repo", key: "acme/backend", createdAt: Date.now(), lastEventAt: null },
         ],
         relayToken: "drt_test",
+        github: { repo: "acme/backend", installationId: 7001, repositoryId: 9001 },
       },
       workspaceDir,
     );

@@ -6,6 +6,15 @@
 
 - **Relay-backed workspaces use the central DevIntern AI App**: `worker init` registers every GitHub repository already present in `workspace.toml`, `worker connect github` verifies the hosted App installation and repository with the relay before enabling event routing, and `GITHUB_TOKEN` remains the only local GitHub API credential. Customer-owned `GITHUB_APP_ID` + private-key authentication remains available as the advanced no-relay/air-gapped path and for `devintern webhook serve`
 
+## [2.7.1] - 2026-09-01
+
+Patch release: verified relay GitHub pairing (requires the deployed relay) and resolve-conflicts push reliability through PR pre-push hooks.
+
+### Fixed
+
+- **Relay GitHub pairing is verified through the GitHub App**: `devintern worker connect` prints a short-lived App installation URL and waits while the relay verifies that the signed-in GitHub user can access the requested repository through that installation — routing now uses GitHub's immutable installation and repository IDs instead of the user-supplied `owner/name` slug, and an installation already associated with another DevIntern account cannot be claimed. Connections created before verified pairing must run `devintern worker connect github --repo owner/name` once again; normal polling continues while GitHub instant events are unpaired
+- **resolve-conflicts lands its pushes through PR pre-push hooks**: review-worktree dependency installs (e.g. lefthook postinstall) rewrote the shared `.git/hooks` with scripts hardcoding the ephemeral worktree's `node_modules` path, so pushes failed once the worktree was removed — conflicts were resolved locally but never landed. The resolver now isolates worktree hooks via per-worktree `core.hooksPath` (seeded with copies of the shared hooks), hands pre-push hook failures to the agent and retries the push with a bound attempt count, folding leftover changes into the merge commit; branch races still defer without burning agent runs
+
 ## [2.7.0] - 2026-09-01
 
 Worker control release: quiet hours, scheduled story-point estimation, config hot reload, dashboard retries and logs, configurable conflict resolution, PR labels — plus review-trigger and dashboard robustness fixes.

@@ -567,7 +567,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
       log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
       log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
-      const existing = loadGitHubAppRecord(workspaceDir);
+      const existing = loadGitHubAppRecord(workspaceDir, githubRepo);
       if (
         existing?.enabled &&
         existing.repo === githubRepo.toLowerCase() &&
