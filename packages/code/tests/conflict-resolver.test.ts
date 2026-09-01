@@ -6,9 +6,11 @@ import { join } from "path";
 
 import {
   buildConflictPrompt,
+  buildHookFixPrompt,
   resolveConflictsOnPr,
   sanitizeErrorForPublicComment,
 } from "../src/lib/conflict-resolver";
+import { Utils } from "../src/lib/utils";
 import type { PullRequestInfo } from "../src/lib/github-reviews";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
@@ -499,7 +501,11 @@ describe("resolveConflictsOnPr", () => {
         comments.push(body);
       },
       fetchPr: async () => prInfo(),
-      agentRunner: async (_prompt, workDir) => {
+      agentRunner: async (prompt, workDir) => {
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // The hook is permanently broken here; the agent cannot fix it.
+          return { success: true, output: "cannot fix" };
+        }
         writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
         git(workDir, "add -A");
         git(workDir, "commit --no-edit");
@@ -540,7 +546,11 @@ exit 1
         comments.push(body);
       },
       fetchPr: async () => prInfo(),
-      agentRunner: async (_prompt, workDir) => {
+      agentRunner: async (prompt, workDir) => {
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // The hook always leaks and always fails; nothing to fix.
+          return { success: true, output: "cannot fix" };
+        }
         writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
         git(workDir, "add -A");
         git(workDir, "commit --no-edit");
@@ -948,6 +958,84 @@ exit 1
     rmSync(shipped, { recursive: true, force: true });
   });
 
+  test("hands a failed pre-push hook to the agent and pushes once fixed", async () => {
+    const untouchedHead = git(seedDir, "rev-parse origin/feature/change").trim();
+    const marker = join(testDir, "hook-fixed");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nif [ ! -f "${marker}" ]; then echo 'typecheck failed' >&2; exit 1; fi\n`,
+      { mode: 0o755 },
+    );
+
+    const prompts: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (prompt, workDir) => {
+        prompts.push(prompt);
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // Simulate the agent fixing the underlying hook failure.
+          writeFileSync(marker, "ok\n");
+          return { success: true, output: "fixed" };
+        }
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(prompts.length).toBe(2);
+    expect(prompts[1]).toContain("Fix Pre-Push Hook Failures");
+    expect(prompts[1]).toContain("typecheck failed");
+    expect(prompts[1]).toContain("--amend");
+
+    // The merge landed on origin's feature branch once the hook passed.
+    expect(
+      git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim(),
+    ).not.toBe(untouchedHead);
+  });
+
+  test("folds hook-fix changes into the merge commit before retrying the push", async () => {
+    // The hook fails exactly once, so the retry (after the amend) can land.
+    const marker = join(testDir, "hook-failed-once");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nif [ ! -f "${marker}" ]; then touch "${marker}"; echo 'formatting drifted' >&2; exit 1; fi\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (prompt, workDir) => {
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // The agent fixed the code but forgot to amend; the resolver must
+          // fold the change into the merge commit itself.
+          writeFileSync(join(workDir, "hook-fix.txt"), "formatted\n");
+          return { success: true, output: "fixed" };
+        }
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+
+    // The amend happened: the pushed merge commit carries the hook fix.
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-amend-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(existsSync(join(shipped, "clone", "hook-fix.txt"))).toBe(true);
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
   test("an already-up-to-date branch stays quiet and posts nothing", async () => {
     // Make the branch genuinely contain main: a real (resolved) merge commit.
     const fix = join(testDir, "uptodate");
@@ -983,5 +1071,109 @@ exit 1
     expect(result.outcome).toBe("skipped");
     expect(agentCalled).toBe(false);
     expect(comments).toEqual([]);
+  });
+});
+
+describe("isolateWorktreeHooks", () => {
+  let testDir: string;
+  let repoDir: string;
+  let sharedHookPath: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "devintern-hooks-"));
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    execSync(
+      [
+        "set -e",
+        "git init -q bare-origin",
+        "git clone -q bare-origin repo",
+        "cd repo",
+        "git config user.email t@t.co",
+        "git config user.name T",
+        "printf 'x\\n' > f.txt",
+        "git add .",
+        "git commit -qm init",
+        "git push -qu origin HEAD:main",
+      ].join("\n"),
+      { cwd: testDir, encoding: "utf8", stdio: "ignore" },
+    );
+    repoDir = join(testDir, "repo");
+    sharedHookPath = join(repoDir, ".git", "hooks", "pre-push");
+  });
+
+  afterEach(() => {
+    if (process.env.GIT_CONFIG_GLOBAL === "/dev/null") delete process.env.GIT_CONFIG_GLOBAL;
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  test("redirects core.hooksPath into the worktree admin dir and copies shared hooks", async () => {
+    writeFileSync(sharedHookPath, "#!/bin/sh\necho shared-hook\n", { mode: 0o755 });
+    const worktreePath = join(testDir, "hooks-worktree");
+    execSync(`git worktree add -q -b hooks-branch ${worktreePath} origin/main`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    await Utils.isolateWorktreeHooks(worktreePath);
+
+    // `core.hooksPath` resolves (per-worktree) into the worktree's own git
+    // admin area, not the shared `.git/hooks`.
+    const hooksPath = git(worktreePath, "config core.hooksPath").trim();
+    expect(hooksPath).toContain(join(".git", "worktrees"));
+    expect(hooksPath).not.toBe(join(repoDir, ".git", "hooks"));
+    // The main checkout's config is untouched (`git config` exits 1 and prints
+    // nothing when the key is unset in the shared config).
+    expect(
+      execSync("git config core.hooksPath || true", { cwd: repoDir, encoding: "utf8" }).trim(),
+    ).toBe("");
+
+    // Shared hooks were copied into the isolated directory.
+    expect(readFileSync(join(hooksPath, "pre-push"), "utf8")).toContain("shared-hook");
+  });
+
+  test("shields the shared hooks from postinstall-style rewrites", async () => {
+    writeFileSync(sharedHookPath, "#!/bin/sh\necho shared-hook\n", { mode: 0o755 });
+    const worktreePath = join(testDir, "hooks-worktree");
+    execSync(`git worktree add -q -b hooks-branch ${worktreePath} origin/main`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    await Utils.isolateWorktreeHooks(worktreePath);
+
+    // Simulate what lefthook's postinstall does: rewrite the hooks it finds
+    // via `git config core.hooksPath` (which now points inside the worktree).
+    const hooksPath = git(worktreePath, "config core.hooksPath").trim();
+    writeFileSync(join(hooksPath, "pre-push"), "#!/bin/sh\necho rewritten\n", { mode: 0o755 });
+
+    expect(readFileSync(sharedHookPath, "utf8")).toContain("shared-hook");
+    expect(readFileSync(join(hooksPath, "pre-push"), "utf8")).toContain("rewritten");
+  });
+
+  test("runs the isolated hook (not the shared one) on push from the worktree", async () => {
+    const isolatedStamp = join(testDir, "isolated-hook-ran");
+    const sharedStamp = join(testDir, "shared-hook-ran");
+    writeFileSync(sharedHookPath, `#!/bin/sh\necho ran > "${sharedStamp}"\n`, { mode: 0o755 });
+    const worktreePath = join(testDir, "hooks-worktree");
+    execSync(`git worktree add -q -b hooks-branch ${worktreePath} origin/main`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    await Utils.isolateWorktreeHooks(worktreePath);
+
+    // After isolation, the hook copied into the isolated dir writes elsewhere.
+    const hooksPath = git(worktreePath, "config core.hooksPath").trim();
+    writeFileSync(join(hooksPath, "pre-push"), `#!/bin/sh\necho ran > "${isolatedStamp}"\n`, {
+      mode: 0o755,
+    });
+
+    writeFileSync(join(worktreePath, "new.txt"), "new\n");
+    git(worktreePath, "add -A");
+    git(worktreePath, "commit -qm new");
+    git(worktreePath, "push -q origin hooks-branch");
+
+    expect(existsSync(isolatedStamp)).toBe(true);
+    expect(existsSync(sharedStamp)).toBe(false);
   });
 });
