@@ -3265,7 +3265,7 @@ async function runAgentHarness(
         model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
-      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
+      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
       console.log(`   Timeout: ${timeoutMinutes} minutes`);
       console.log(

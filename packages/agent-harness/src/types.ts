@@ -181,6 +181,15 @@ export interface AgentHarness {
    */
   readonly promptFlag?: string;
   /**
+   * End-of-options marker (e.g. `--`) that this CLI honors before positional
+   * arguments. When set and a positional prompt starts with `-`,
+   * {@link buildPromptArgs} emits the marker before the prompt so flag-like
+   * prompt text (markdown frontmatter, bullet lists) is not parsed as CLI
+   * flags. Only set this when the CLI reliably treats everything after the
+   * marker as positional.
+   */
+  readonly endOfOptionsMarker?: string;
+  /**
    * How image attachments from {@link AgentRunOptions.imagePaths} are delivered.
    *
    * - `"path"` (default) — list paths in the prompt only.
