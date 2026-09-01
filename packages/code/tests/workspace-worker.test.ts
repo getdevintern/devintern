@@ -333,7 +333,7 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
-  test("starts tracker relay without GitHub polling credentials", async () => {
+  test("relay mode requires GITHUB_TOKEN and ignores custom App credentials", async () => {
     const workspaceDir = join(
       tmpdir(),
       `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -343,14 +343,20 @@ describe("buildFleetEventAcquirers", () => {
     const repoManager = new FakeRepoManager(workspaceDir);
     const savedToken = process.env.GITHUB_TOKEN;
     const savedAppId = process.env.GITHUB_APP_ID;
+    const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+    const savedAuthMode = process.env.DEVINTERN_GITHUB_AUTH_MODE;
+    const savedAliases = process.env.GITHUB_BOT_ALIASES;
     delete process.env.GITHUB_TOKEN;
-    delete process.env.GITHUB_APP_ID;
+    process.env.GITHUB_APP_ID = "123456";
+    process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/custom-app.pem";
     saveRelayState(
       {
         relayUrl: "https://relay.test",
         customerId: "customer-1",
         connectedAt: new Date(0).toISOString(),
-        registrations: [],
+        registrations: [
+          { kind: "repo", key: "acme/backend", createdAt: Date.now(), lastEventAt: null },
+        ],
         relayToken: "drt_test",
       },
       workspaceDir,
@@ -372,6 +378,12 @@ describe("buildFleetEventAcquirers", () => {
       else process.env.GITHUB_TOKEN = savedToken;
       if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
       else process.env.GITHUB_APP_ID = savedAppId;
+      if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
+      if (savedAuthMode === undefined) delete process.env.DEVINTERN_GITHUB_AUTH_MODE;
+      else process.env.DEVINTERN_GITHUB_AUTH_MODE = savedAuthMode;
+      if (savedAliases === undefined) delete process.env.GITHUB_BOT_ALIASES;
+      else process.env.GITHUB_BOT_ALIASES = savedAliases;
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }

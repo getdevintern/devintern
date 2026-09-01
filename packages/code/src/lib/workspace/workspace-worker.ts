@@ -768,7 +768,39 @@ export async function buildFleetEventAcquirers(options: {
     fleetGitHubSlugs,
   } = await import("./fleet-events");
 
-  const hasGitHubCreds = Boolean(process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID);
+  const { hasGitHubRelayRegistration, loadRelayState, RELAY_BOT_LOGIN } =
+    await import("../relay-connect");
+  const relayState = loadRelayState(workspaceDir);
+  const relayToken = relayState?.relayToken;
+  const relayUrl =
+    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRegistration(relayState));
+
+  // Hosted workspaces use the central App only for event delivery. All
+  // follow-up GitHub reads/writes stay local and authenticate with the user's
+  // GITHUB_TOKEN. Without a relay, preserve the customer-owned App-first path
+  // for air-gapped/direct installations (with PAT fallback).
+  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../github-reviews");
+  process.env[GITHUB_AUTH_MODE_ENV] = usesHostedApp ? "token-only" : "app-first";
+
+  if (usesHostedApp) {
+    const aliasNames = new Set(
+      (process.env.GITHUB_BOT_ALIASES ?? "")
+        .split(",")
+        .map((alias) => alias.trim())
+        .filter(Boolean),
+    );
+    aliasNames.add(RELAY_BOT_LOGIN);
+    process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
+  }
+
+  const hasCustomAppCredentials = Boolean(
+    process.env.GITHUB_APP_ID &&
+    (process.env.GITHUB_APP_PRIVATE_KEY_PATH || process.env.GITHUB_APP_PRIVATE_KEY_BASE64),
+  );
+  const hasGitHubCreds = usesHostedApp
+    ? Boolean(process.env.GITHUB_TOKEN)
+    : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
   let github: import("../github-reviews").GitHubReviewsClient | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<boolean>) | undefined;
@@ -777,8 +809,7 @@ export async function buildFleetEventAcquirers(options: {
     | undefined;
 
   if (hasGitHubCreds && slugs.length > 0) {
-    const { GitHubReviewsClient } = await import("../github-reviews");
-    github = new GitHubReviewsClient({ preferAppAuth: true });
+    github = new GitHubReviewsClient({ authMode: usesHostedApp ? "token-only" : "app-first" });
     const gh = github;
     const ownerOf = (slug: string) => slug.split("/")[0] as string;
     const nameOf = (slug: string) => slug.split("/")[1] as string;
@@ -909,40 +940,21 @@ export async function buildFleetEventAcquirers(options: {
     console.log(
       hasGitHubCreds
         ? "   [fleet] no GitHub repos in the workspace; review/mention acquirers disabled."
-        : "   [fleet] GITHUB_TOKEN/GITHUB_APP_ID not set; review/mention acquirers disabled.",
+        : usesHostedApp
+          ? "   [fleet] GITHUB_TOKEN not set; central-App events can arrive, but GitHub review/mention handling is disabled."
+          : "   [fleet] GITHUB_TOKEN or complete custom GitHub App credentials not set; review/mention acquirers disabled.",
     );
   }
 
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.
-  const { loadRelayState, RELAY_BOT_LOGIN } = await import("../relay-connect");
-  const relayState = loadRelayState(workspaceDir);
   if (relayState || process.env.WORKER_RELAY_URL) {
-    const relayToken = relayState?.relayToken;
-    const relayUrl =
-      process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
     if (!relayToken) {
       console.warn(
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
-      // Relay-managed PRs are associated with the DevIntern AI App identity,
-      // whose private key never leaves DevIntern infrastructure. Register its
-      // login as a mention alias so the local mention gates (including the
-      // address-review subprocess, which inherits this env) match
-      // `@devintern-ai` without needing the key.
-      const aliasNames = new Set(
-        (process.env.GITHUB_BOT_ALIASES ?? "")
-          .split(",")
-          .map((alias) => alias.trim())
-          .filter(Boolean),
-      );
-      if (!aliasNames.has(RELAY_BOT_LOGIN)) {
-        aliasNames.add(RELAY_BOT_LOGIN);
-        process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
-      }
-
       const { RelayAcquirer } = await import("../relay-acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
       const execute = createFleetTaskExecutor({
@@ -968,7 +980,7 @@ export async function buildFleetEventAcquirers(options: {
               // No GitHub credentials → review envelopes cannot be acted on.
               console.warn(
                 `⚠️  [relay] review feedback on ${repo}#${prNumber} cannot be addressed: ` +
-                  "GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace.",
+                  "GITHUB_TOKEN is not set in this relay-backed workspace.",
               );
               return false;
             },
@@ -977,7 +989,7 @@ export async function buildFleetEventAcquirers(options: {
                 if (verbose) {
                   console.log(
                     `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
-                      "(GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace).",
+                      "(GITHUB_TOKEN is not set in this relay-backed workspace).",
                   );
                 }
                 return;

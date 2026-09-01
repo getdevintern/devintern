@@ -8,16 +8,17 @@
  * enabled for the detected repository, so re-running the wizard can detect an
  * existing connection and setup summaries can remind about a skipped one.
  *
- * This is bookkeeping only: the worker itself still authenticates with
- * `GITHUB_APP_ID` + private key from the environment; nothing secret is
- * stored in this file.
+ * This is bookkeeping only. In the normal relay-backed workspace path, the
+ * central App's private key stays on DevIntern infrastructure and the worker
+ * uses `GITHUB_TOKEN` for GitHub API calls. Customer-owned App credentials are
+ * reserved for the advanced no-relay path and are not stored here.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 /** Hosted DevIntern AI GitHub App (same install target as `worker connect`). */
-export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai";
+export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai/installations/new";
 
 export interface GitHubAppRecord {
   /** `owner/name` slug of the repository the step ran for. */

@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+### Changed
+
+- **Relay-backed workspaces use the central DevIntern AI App**: `worker init` registers every GitHub repository already present in `workspace.toml`, directs users to the hosted App installation, and keeps `GITHUB_TOKEN` as the only local GitHub API credential. Customer-owned `GITHUB_APP_ID` + private-key authentication remains available as the advanced no-relay/air-gapped path and for `devintern webhook serve`
+
 ## [2.6.0] - 2026-08-28
 
 Worker resilience release: interrupted runs are recovered on startup, failure feedback no longer causes retry loops, conflict resolution reliably lands on the PR, and usage-limit detection covers every harness.

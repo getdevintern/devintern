@@ -45,6 +45,13 @@ export interface RelayConnectState {
   relayToken?: string;
 }
 
+/** Whether this pairing can receive central GitHub App events. */
+export function hasGitHubRelayRegistration(state: RelayConnectState | null): boolean {
+  return Boolean(
+    state?.relayToken && state.registrations.some((registration) => registration.kind === "repo"),
+  );
+}
+
 /** Resolve the relay URL: env override, else the hosted default. */
 export function resolveRelayUrl(): string {
   return (process.env.WORKER_RELAY_URL || DEFAULT_RELAY_URL).replace(/\/+$/, "");
@@ -293,7 +300,7 @@ LICENSE_KEY is still required for the local unattended license gate when you
 run \`devintern worker\`.
 
 Targets:
-  github (default)   Register this repo for GitHub App webhook delivery
+  github (default)   Register this repo for central DevIntern App delivery
   linear             Self-register a Linear webhook (uses LINEAR_API_KEY)
   asana              Self-register an Asana webhook (uses ASANA_API_TOKEN and
                      ASANA_DEFAULT_PROJECT_GID)
@@ -541,7 +548,8 @@ export async function runWorkerConnect(
     console.log("");
     console.log("Next steps:");
     console.log("   1. Install the DevIntern AI GitHub App on this repository:");
-    console.log("      https://github.com/apps/devintern-ai");
+    console.log("      https://github.com/apps/devintern-ai/installations/new");
+    console.log("      Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
     console.log("   2. Run the worker as usual: devintern worker [--query ...]");
     console.log("      It now receives PR events through the relay within seconds.");
     return 0;

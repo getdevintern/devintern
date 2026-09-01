@@ -3,7 +3,7 @@ title: "Relay (Instant Events)"
 description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
 section: "Server Automation"
 order: 3
-dateModified: 2026-08-04
+dateModified: 2026-09-01
 ---
 
 # Relay (Instant Events)
@@ -32,6 +32,8 @@ If the relay is unreachable, nothing breaks: the worker's regular polling keeps 
 ## How authentication works
 
 Connect is an interactive step. The default `devintern worker init` flow offers sign-in, registers GitHub plus the active tracker, and stores the workspace's durable pairing under `~/.devintern/`. The relay verifies the session and your automation entitlement, then mints a durable **relay token** (`drt_…`). The worker uses that token for `/v1/status` and `/v1/events` long-polls, so polling survives session rotation, logouts, and password changes.
+
+For GitHub, the central DevIntern AI App sends webhooks to the relay. Its private key never reaches the worker. The worker uses its local `GITHUB_TOKEN` to fetch referenced PRs/comments and perform GitHub writes; customer-owned `GITHUB_APP_ID` credentials are ignored in this relay-backed mode.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
 
@@ -69,10 +71,10 @@ devintern login
 # Automation license for the worker daemon
 # Set LICENSE_KEY in .devintern-code/.env (from https://devintern.com/account)
 
-# Pair this repo for GitHub App delivery
+# Pair the workspace repositories for central App delivery
 devintern worker connect
 
-# Then install the DevIntern AI GitHub App on the repository when prompted,
+# Then install the DevIntern AI GitHub App on the repositories when prompted,
 # and run the worker as usual:
 devintern worker
 ```

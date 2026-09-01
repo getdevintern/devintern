@@ -3,12 +3,12 @@ title: "GitHub Integration"
 description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern webhook serve`)"
 section: "Server Automation"
 order: 4
-dateModified: 2026-08-26
+dateModified: 2026-09-01
 ---
 
 # GitHub Integration Guide
 
-Prefer the [worker](./worker.md) plus the [relay](./relay.md) for PR review feedback: polling is always on, and relay delivers events in seconds with no open ports. This page is the advanced path — `devintern webhook serve` — for airgapped or self-hosted installs that already operate a public GitHub webhook.
+Prefer the [worker](./worker.md) plus the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally. This page is the advanced path—`devintern webhook serve` with a customer-owned GitHub App—for air-gapped or self-hosted installs that operate their own public GitHub webhook.
 
 This guide covers secure deployment of that listener.
 
@@ -71,7 +71,7 @@ Inline review comments are processed _as a batch_ with their parent review — t
 
 ## Prerequisites
 
-1. **GitHub App** (`GITHUB_APP_ID` + private key) configured with webhook permissions — the team / unattended-automation credential, required for `@mention` matching and `slug[bot]` commit attribution. A personal `GITHUB_TOKEN` still lets the server call the API, but mention-gated triggers will not fire. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
+1. **Customer-owned GitHub App** (`GITHUB_APP_ID` + private key) configured with webhook permissions. This is required only for this advanced no-relay path: it supplies the bot identity used by the mention gate and custom `slug[bot]` attribution. A personal `GITHUB_TOKEN` can call the API, but by itself it cannot identify the App bot for direct-webhook mentions. See [Configuration](./configuration.md#advanced-customer-owned-github-app).
 2. **Webhook Secret** - a random string for request verification
 3. **Agent Harness CLI** installed and configured
 4. **Git credentials** with push access to target repositories

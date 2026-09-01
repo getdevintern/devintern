@@ -7,10 +7,12 @@ import {
   connectGitHubRepo,
   ensureRelayToken,
   fetchRelayStatus,
+  hasGitHubRelayRegistration,
   loadRelayState,
   registerRelaySource,
   runWorkerConnect,
 } from "../src/lib/relay-connect";
+import type { RelayConnectState } from "../src/lib/relay-connect";
 
 const RELAY_URL = "http://relay.test";
 
@@ -37,6 +39,24 @@ describe("relay-connect auth", () => {
       return handler(url, body);
     }) as typeof fetch;
   }
+
+  test("central App mode requires a repo registration, not only a relay token", () => {
+    const state: RelayConnectState = {
+      relayUrl: RELAY_URL,
+      customerId: "user_1",
+      connectedAt: new Date(0).toISOString(),
+      relayToken: "drt_test",
+      registrations: [],
+    };
+    expect(hasGitHubRelayRegistration(state)).toBe(false);
+    state.registrations.push({
+      kind: "repo",
+      key: "acme/widgets",
+      createdAt: 0,
+      lastEventAt: null,
+    });
+    expect(hasGitHubRelayRegistration(state)).toBe(true);
+  });
 
   test("ensureRelayToken mints with the Supabase session and stores drt_ token", async () => {
     const fetchImpl = mockFetch((_url, body) => {
