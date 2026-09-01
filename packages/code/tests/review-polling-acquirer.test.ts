@@ -874,6 +874,20 @@ describe("ReviewPollingAcquirer", () => {
     expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
   });
 
+  test("live reload can disable and re-enable conflict resolution", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(conflictGh());
+
+    made.acquirer.updateConflictResolution("disabled");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+
+    made.acquirer.updateConflictResolution("auto");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+  });
+
   test("start() surfaces the active conflict-resolution mode", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const logs: string[] = [];
@@ -944,6 +958,66 @@ describe("ReviewPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(addressed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("a PR deleted on GitHub (404 → gone) is unwatched within one tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        // The workspace adapter maps 404 responses to `gone`.
+        async fetchPr() {
+          return { data: null, notModified: false, gone: true };
+        },
+        async fetchReviews() {
+          throw new Error("must not be called for a gone PR");
+        },
+        async fetchReviewCommentsSince() {
+          throw new Error("must not be called for a gone PR");
+        },
+      },
+      addressPr: async () => {
+        throw new Error("must not be addressed");
+      },
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    expect(workerState.countAgentPrs().closed).toBe(1);
+  });
+
+  test("reconciliation shares one PR fetch with the poll loop", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let prFetches = 0;
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          prFetches += 1;
+          return {
+            data: { state: "open", mergeable_state: "clean" },
+            etag: 'W/"pr-1"',
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return { data: [], notModified: false };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+      },
+      addressPr: async () => true,
+    });
+
+    await acquirer.tick();
+    // One reconciliation fetch feeds the poll loop; a second would double
+    // the API cost of every tick.
+    expect(prFetches).toBe(1);
   });
 });
 

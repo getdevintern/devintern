@@ -88,6 +88,7 @@ import {
   RunStore,
   beginRun,
   endRun,
+  recordRunBranch,
   recordRunPr,
   recordRunStage,
   recordRunTicket,
@@ -1441,6 +1442,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: scheduledAutomationId ? "scheduled" : "task",
       taskKey: workflowKey,
       tracker: trackerName,
+      // The harness that will implement this run (resolved at startup).
+      harness: resolvedAgent.harness.name,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
       // Ticket link for remote trackers only: markdown-file inputs and
       // materialized automation prompts have no tracker page, and deriving
@@ -1682,6 +1685,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
       if (branchResult.success) {
         console.log(`✅ ${branchResult.message}`);
+        // Record the actual branch (it can gain an attempt suffix) so the
+        // dashboard shows which branch a run worked on.
+        recordRunBranch(branchResult.branchName);
       } else {
         // Branch creation failed - this is critical for safety
         console.error(`\n❌ Failed to create feature branch: ${branchResult.message}`);
@@ -3265,7 +3271,7 @@ async function runAgentHarness(
         model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
-      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
+      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
       console.log(`   Timeout: ${timeoutMinutes} minutes`);
       console.log(

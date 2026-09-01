@@ -2,8 +2,9 @@
  * Review polling acquirer (worker Mode 1, Tier 1): watch the agent's own PRs.
  *
  * Each tick, for every open PR in the `agent_prs` registry:
- * 1. Conditional GET on the PR itself — closed/merged PRs leave the watch
- *    list; 304s (rate-limit-free) reuse cached metadata for base-sync checks.
+ * 1. The reconciler conditionally GETs the PR itself — closed/merged/gone
+ *    PRs leave the watch list (and the dashboard's open count); 304s
+ *    (rate-limit-free) reuse cached metadata for base-sync checks.
  * 2. Conditional GET on the review list — a new `changes_requested` review
  *    by a human is implicitly addressed to the agent (its own PR), no
  *    @mention required.
@@ -25,6 +26,13 @@
 
 import { spawn } from "child_process";
 
+import {
+  agentPrKey,
+  agentPrStateCursorSource,
+  applyAgentPrFetch,
+  reconcileOpenAgentPrs,
+} from "./agent-pr-reconciler";
+import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
 import { nextScheduleOccurrence } from "./automation-config";
 import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";
@@ -33,6 +41,10 @@ import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { ConflictResolutionMode } from "./workspace/config";
 import type { Acquirer } from "../worker";
+
+// The PR-state protocol types live with the reconciler, which shares them;
+// re-exported so poller consumers keep their existing import paths.
+export type { ConditionalResult, PolledPr };
 
 export interface PolledReview {
   id: number;
@@ -44,20 +56,6 @@ export interface PolledComment {
   id: number;
   user: { login: string; type: string };
   created_at: string;
-}
-
-export interface ConditionalResult<T> {
-  data: T | null;
-  etag?: string;
-  notModified: boolean;
-}
-
-export interface PolledPr {
-  state: string;
-  /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
-  mergeable_state?: string;
-  head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
-  base?: { sha: string; ref?: string };
 }
 
 export interface AutomaticResolveResult {
@@ -475,6 +473,19 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
   }
 
+  /** Apply conflict-resolution mode and schedule changes from workspace reloads. */
+  updateConflictResolution(
+    conflictResolution: ConflictResolutionMode,
+    conflictSchedule?: CronOrIntervalSchedule,
+  ): void {
+    this.options.conflictResolution = conflictResolution;
+    this.options.conflictSchedule = conflictSchedule;
+    this.conflictWindowState = null;
+    this.deferCounts.clear();
+    this.syncConflictWindow();
+    this.logConflictMode();
+  }
+
   private resolveAllowedRepos(): string[] | undefined {
     const raw = this.options.allowedRepos;
     return typeof raw === "function" ? raw() : raw;
@@ -489,9 +500,34 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     try {
       this.syncConflictWindow();
+      const { workerState } = this.options;
       const allowedRepos = this.resolveAllowedRepos();
-      const watchedPrs = this.options.workerState.listOpenAgentPrs();
-      const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
+
+      // Reconcile the registry with GitHub first: one conditional GET per
+      // watched PR whose result is shared with the poll loop below, so PRs
+      // closed or deleted outside the worker leave the watch list (and the
+      // dashboard's open count) within this tick even if per-PR polling
+      // later errors out.
+      const fresh = new Map<string, ConditionalResult<PolledPr>>();
+      const reconciliation = await reconcileOpenAgentPrs({
+        workerState,
+        github: this.options.github,
+        watched: workerState.listOpenAgentPrs(),
+        allowedRepos,
+        etagFor: (repo, prNumber) =>
+          this.prCache.has(agentPrKey(repo, prNumber))
+            ? workerState.getCursor(agentPrStateCursorSource(repo, prNumber))?.etag
+            : undefined,
+        fresh,
+      });
+      for (const closure of reconciliation.closed) {
+        console.log(
+          `🧹 [${this.name}] ${closure.repo}#${closure.prNumber} is ${closure.reason}; unwatching`,
+        );
+      }
+
+      const watchedPrs = workerState.listOpenAgentPrs();
+      const watchedKeys = new Set(watchedPrs.map((pr) => agentPrKey(pr.repo, pr.prNumber)));
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
@@ -502,7 +538,12 @@ export class ReviewPollingAcquirer implements Acquirer {
           continue;
         }
         try {
-          await this.pollPr(pr.repo, pr.prNumber, pr.createdAt);
+          await this.pollPr(
+            pr.repo,
+            pr.prNumber,
+            pr.createdAt,
+            fresh.get(agentPrKey(pr.repo, pr.prNumber)),
+          );
         } catch (error) {
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
@@ -515,31 +556,36 @@ export class ReviewPollingAcquirer implements Acquirer {
   }
 
   /** Poll a single PR; triggers at most one address-review run. */
-  private async pollPr(repo: string, prNumber: number, watchedSinceMs: number): Promise<void> {
+  private async pollPr(
+    repo: string,
+    prNumber: number,
+    watchedSinceMs: number,
+    prefetched?: ConditionalResult<PolledPr>,
+  ): Promise<void> {
     const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
 
-    // 1. PR state (ETag-cached): unwatch closed/merged PRs.
-    const prSource = `github:pr:${repo}#${prNumber}`;
-    const prCursor = workerState.getCursor(prSource);
-    const prKey = this.prKey(repo, prNumber);
-    // Hydrate once per process even when an ETag survived a restart, then use
-    // conditional requests on normal polling ticks.
-    const prResult = await github.fetchPr(
-      repo,
-      prNumber,
-      this.prCache.has(prKey) ? prCursor?.etag : undefined,
-    );
-    if (!prResult.notModified) {
-      if (prResult.etag) {
-        workerState.setCursor(prSource, "state", prResult.etag);
-      }
-      if (prResult.data && prResult.data.state !== "open") {
-        console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${prResult.data.state}; unwatching`);
-        workerState.markAgentPrClosed(repo, prNumber);
+    // 1. PR state (ETag-cached): unwatch closed/merged/gone PRs. When the
+    //    reconciliation pass already fetched this PR, its result is reused
+    //    (and already applied), so no second request is spent here.
+    const prSource = agentPrStateCursorSource(repo, prNumber);
+    const prKey = agentPrKey(repo, prNumber);
+    const prResult =
+      prefetched ??
+      (await github.fetchPr(
+        repo,
+        prNumber,
+        this.prCache.has(prKey) ? workerState.getCursor(prSource)?.etag : undefined,
+      ));
+    if (!prefetched) {
+      const closure = applyAgentPrFetch(workerState, { repo, prNumber }, prResult);
+      if (closure) {
+        console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${closure.reason}; unwatching`);
         this.clearPrCache(prKey);
         return;
       }
+    }
 
+    if (!prResult.notModified) {
       if (prResult.data) this.prCache.set(prKey, prResult.data);
 
       if (resolveConflicts && prResult.data) {
@@ -612,7 +658,7 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
     const { github, queue, resolveConflicts, runStore } = this.options;
-    if (!resolveConflicts) return;
+    if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
 
     // The event key includes the head SHA so that new commits on the branch
@@ -770,10 +816,6 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  private prKey(repo: string, prNumber: number): string {
-    return `${repo.toLowerCase()}#${prNumber}`;
-  }
-
   /**
    * Advance the durable scheduled-window state for this tick. Auto mode
    * (no schedule) is a no-op. The first tick after enabling scheduled mode
@@ -782,6 +824,7 @@ export class ReviewPollingAcquirer implements Acquirer {
    * window opens so pending conflicts resolve on the following ticks.
    */
   private syncConflictWindow(): void {
+    if (this.options.conflictResolution === "disabled") return;
     const schedule = this.options.conflictSchedule;
     if (!schedule) return;
     const now = this.now();

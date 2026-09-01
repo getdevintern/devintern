@@ -108,6 +108,44 @@ describe("WorkspaceConfigReloader", () => {
     expect(current.automations.map((automation) => automation.id)).toEqual(["sweep"]);
   });
 
+  test("copies scheduled estimations into the shared config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(V2);
+    next.estimations = [
+      {
+        id: "groom",
+        enabled: true,
+        query: "status=todo",
+        interval: "1h",
+        intervalMs: 3_600_000,
+      },
+    ];
+
+    applyWorkspaceConfig(current, next);
+
+    expect(current.estimations.map((item) => item.id)).toEqual(["groom"]);
+  });
+
+  test("rejects runtime-incompatible changes before mutating active config", () => {
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V2);
+    const current = parseWorkspaceConfig(V1);
+    const errors: string[] = [];
+    const reloader = new WorkspaceConfigReloader({
+      configPath: path,
+      current,
+      validate: () => {
+        throw new Error("tracker is startup-only");
+      },
+      onError: (message) => errors.push(message),
+    });
+
+    expect(reloader.reload("test").applied).toBe(false);
+    expect(current.defaults.pollIntervalSeconds).toBe(60);
+    expect(errors[0]).toContain("tracker is startup-only");
+  });
+
   test("keeps the last good config when a reload produces invalid TOML", () => {
     const dir = freshDir();
     const path = join(dir, "workspace.toml");

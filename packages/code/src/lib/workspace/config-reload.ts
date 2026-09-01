@@ -39,6 +39,7 @@ export function applyWorkspaceConfig(target: WorkspaceConfig, next: WorkspaceCon
   target.repos = next.repos;
   target.routing = next.routing;
   target.automations = next.automations;
+  target.estimations = next.estimations;
 }
 
 /** Deterministic serialization used to skip no-op saves/touches. */
@@ -67,6 +68,8 @@ export interface WorkspaceConfigReloaderOptions {
   debounceMs?: number;
   /** Called after a changed config was applied (reconcile acquirers here). */
   onApplied?: (config: WorkspaceConfig) => void;
+  /** Final runtime validation before the shared config is mutated. */
+  validate?: (next: WorkspaceConfig, current: WorkspaceConfig) => void;
   /** Error sink (injected for tests). Defaults to console.error. */
   onError?: (message: string) => void;
 }
@@ -156,11 +159,21 @@ export class WorkspaceConfigReloader {
       return { applied: false, unchanged: true };
     }
 
+    try {
+      this.options.validate?.(next, this.options.current);
+    } catch (error) {
+      this.reportError(
+        `Failed to reload workspace config (${reason}): ${(error as Error).message}\n` +
+          "   Continuing with the previously loaded configuration.",
+      );
+      return { applied: false };
+    }
+
     applyWorkspaceConfig(this.options.current, next);
     console.log(
       `🔄 [config] Reloaded ${this.options.configPath} ` +
         `(${next.repos.length} repo(s), ${next.routing.length} routing rule(s), ` +
-        `${next.automations.length} automation(s))`,
+        `${next.automations.length} automation(s), ${next.estimations.length} estimation(s))`,
     );
     this.options.onApplied?.(this.options.current);
     return { applied: true };

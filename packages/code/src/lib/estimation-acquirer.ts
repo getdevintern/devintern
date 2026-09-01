@@ -84,23 +84,16 @@ export function spawnEstimationSweep(
  */
 export class EstimationAcquirer extends AutomationAcquirer {
   constructor(options: EstimationAcquirerOptions) {
-    const byId = new Map(options.estimations.map((item) => [item.id, item]));
-    // The scheduler's config shape requires a prompt; scheduled estimates
-    // always use the sweep runner below, so it stays empty and unread.
-    const schedules: AutomationConfig[] = options.estimations.map((item) => ({
-      ...item,
-      prompt: "",
-    }));
+    const schedules = estimationSchedules(options.estimations);
     super({
       automations: schedules,
       dbPath: options.dbPath,
       name: "scheduled-estimations",
       jobKind: "estimation",
       stateId: (schedule) => `${STATE_PREFIX}${schedule.id}`,
-      resolveContext: (schedule) =>
-        options.resolveContext(byId.get(schedule.id) as EstimationConfig),
+      resolveContext: (schedule) => options.resolveContext(schedule as ScheduledEstimation),
       spawnRun: (schedule, context) => {
-        const estimation = byId.get(schedule.id) as EstimationConfig;
+        const estimation = schedule as ScheduledEstimation;
         return options.spawnRun
           ? options.spawnRun(estimation, context)
           : spawnEstimationSweep(estimation, context);
@@ -115,4 +108,16 @@ export class EstimationAcquirer extends AutomationAcquirer {
       clearInterval: options.clearInterval,
     });
   }
+
+  /** Reconcile scheduled estimation entries after a live workspace reload. */
+  applyEstimations(estimations: EstimationConfig[]): void {
+    this.applyAutomations(estimationSchedules(estimations));
+  }
+}
+
+type ScheduledEstimation = AutomationConfig & EstimationConfig;
+
+/** Adapt estimation bodies to the shared durable scheduler's config shape. */
+function estimationSchedules(estimations: EstimationConfig[]): ScheduledEstimation[] {
+  return estimations.map((item) => ({ ...item, prompt: "" }));
 }

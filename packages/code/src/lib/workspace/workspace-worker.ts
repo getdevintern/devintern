@@ -168,7 +168,7 @@ export interface WorkspaceTaskAcquirerDeps {
   repoManager: RepoManagerLike;
   detector: ChangeDetector;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  query: string;
+  query: string | (() => string | undefined);
   intervalSeconds: number;
   verbose?: boolean;
   /** Task runner (injected for tests; defaults to the CLI subprocess). */
@@ -340,6 +340,8 @@ export function resolveFleetAutomations(config: WorkspaceConfig): {
 export interface FleetEventReloadHooks {
   /** Re-run mention-sweep reconciliation against the live config's repos. */
   reconcileMentionSweeps(): void;
+  /** Apply live conflict-resolution mode and schedule settings. */
+  reconcileConflictResolution(): void;
   /** Slugs currently served by a mention sweep (sorted). */
   mentionSweepRepos(): string[];
 }
@@ -416,17 +418,21 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-  options: { extraArgs?: string[] } = {},
+  options: { extraArgs?: string[] | (() => string[]) } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
 
   return async (taskKey, routable) => {
-    // Read per run: live config reloads must apply to subsequent work. An
-    // explicit `options.extraArgs` override (the retry queue's `--force`)
-    // wins and is fixed at construction.
-    const extraArgs = options.extraArgs ?? fleetTaskArgs(config);
+    // Read per run: live config reloads must apply to subsequent work.
+    // Explicit overrides can also be factories (dashboard retries prepend
+    // `--force` while still following live worker_task_args).
+    const configuredArgs = options.extraArgs;
+    const extraArgs =
+      typeof configuredArgs === "function"
+        ? configuredArgs()
+        : (configuredArgs ?? fleetTaskArgs(config));
     const decision = routeTask(routable, config);
 
     if (decision.kind !== "routed") {
@@ -530,13 +536,15 @@ export async function sweepAllWorktrees(
  * never keeps the process alive on its own.
  */
 export function startWorktreeSweeper(
-  repos: RepoConfig[],
+  repos: RepoConfig[] | (() => RepoConfig[]),
   repoManager: RepoManagerLike,
-  ttlDays: number,
+  ttlDays: number | (() => number),
   intervalMs: number = WORKTREE_SWEEP_INTERVAL_MS,
 ): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
-    sweepAllWorktrees(repos, repoManager, ttlDays).catch((error) =>
+    const activeRepos = typeof repos === "function" ? repos() : repos;
+    const activeTtlDays = typeof ttlDays === "function" ? ttlDays() : ttlDays;
+    sweepAllWorktrees(activeRepos, repoManager, activeTtlDays).catch((error) =>
       console.warn(`⚠️  [fleet] periodic worktree sweep failed: ${(error as Error).message}`),
     );
   }, intervalMs);
@@ -585,7 +593,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // In-process consumers (dashboard, run records) follow the fleet DB.
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
 
-  const query = config.defaults.taskQuery;
+  const initialQuery = config.defaults.taskQuery;
   const intervalSeconds = config.defaults.pollIntervalSeconds;
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
@@ -596,7 +604,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (!query && config.automations.length === 0 && config.estimations.length === 0) {
+  if (!initialQuery && config.automations.length === 0 && config.estimations.length === 0) {
     if (retryQueue.hasPending()) {
       console.warn(
         "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
@@ -615,9 +623,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // absent or fully disabled. The account-global gate is needed only once an
   // enabled schedule joins the process and must serialize with every other
   // agent run.
-  const coordinator = config.estimations.some((item) => item.enabled)
-    ? new RunCoordinator()
-    : undefined;
+  const coordinator = new RunCoordinator(false);
+  if (config.estimations.some((item) => item.enabled)) coordinator.enable();
 
   // Recover what the previous worker left behind before acquiring new work.
   await recoverOrphanedWorkspaceRuns({
@@ -630,7 +637,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Keep sweeping while the worker runs, not only at startup: a long-lived
   // worker would otherwise accumulate worktrees that age past the TTL until
   // the next restart.
-  startWorktreeSweeper(config.repos, repoManager, config.workspace.worktreesTtlDays);
+  startWorktreeSweeper(
+    () => config.repos,
+    repoManager,
+    () => config.workspace.worktreesTtlDays,
+  );
 
   await warnOnPushAuthIssues(config, repoManager);
 
@@ -645,7 +656,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         { config, workspaceDir, skips: state.skips, repoManager },
         // `--force` bypasses the incomplete-attempt retry gate, exactly like
         // the manual `devintern <TASK> --force` the dashboard action mirrors.
-        { extraArgs: ["--force", ...fleetTaskArgs(config)] },
+        { extraArgs: () => ["--force", ...fleetTaskArgs(config)] },
       ),
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
@@ -674,38 +685,36 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
-  if (config.estimations.length > 0) {
-    // Scheduled story-point sweeps: the automation scheduler (durable cursors
-    // and leases), a one-shot search of each entry's query, and the regular
-    // `--estimate` engine. No repo, no worktree, no branch, no PR.
-    console.log(
-      `📊 Scheduling ${config.estimations.filter((item) => item.enabled).length} enabled estimation schedule(s)`,
-    );
-    acquirers.push(
-      new EstimationAcquirer({
-        estimations: config.estimations,
-        dbPath: state.dbPath,
-        resolveContext: () =>
-          withCoordinatorSlot(
-            Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
-            coordinator,
-          ),
-      }),
-    );
-  }
+  // Always assemble the estimation scheduler so entries can be added to an
+  // already-running schedules-only worker.
+  const estimationAcquirer = new EstimationAcquirer({
+    estimations: config.estimations,
+    dbPath: state.dbPath,
+    resolveContext: () =>
+      withCoordinatorSlot(
+        Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+        coordinator,
+      ),
+  });
+  acquirers.push(estimationAcquirer);
 
-  if (query) {
-    const { TaskTrackerManager } = await import("../task-tracker-manager");
-    const { createChangeDetector } = await import("../change-detector");
-    const tracker = new TaskTrackerManager().getClient();
-    const detector = createChangeDetector(config.defaults.tracker, (q) => tracker.searchTasks(q));
-    if (!detector) {
-      console.error(
-        `❌ Could not initialize the ${config.defaults.tracker} change detector. ` +
-          "Check the tracker's required variables in the workspace .env.",
-      );
-      process.exit(1);
-    }
+  // The tracker type is startup-only, but task_query itself is live. Keep a
+  // dormant poller when the detector prerequisites are available so adding
+  // a query needs no restart. The tracker client itself remains lazy, which
+  // preserves automation-only workspaces without tracker credentials.
+  const { TaskTrackerManager } = await import("../task-tracker-manager");
+  const { createChangeDetector } = await import("../change-detector");
+  const trackerManager = new TaskTrackerManager();
+  const searchTasks = (q: string) => trackerManager.getClient().searchTasks(q);
+  const detector = createChangeDetector(config.defaults.tracker, searchTasks);
+  if (initialQuery && !detector) {
+    console.error(
+      `❌ Could not initialize the ${config.defaults.tracker} change detector. ` +
+        "Check the tracker's required variables in the workspace .env.",
+    );
+    process.exit(1);
+  }
+  if (detector) {
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -714,8 +723,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       skips: state.skips,
       repoManager,
       detector,
-      searchTasks: (q) => tracker.searchTasks(q),
-      query,
+      searchTasks,
+      query: () => config.defaults.taskQuery,
       intervalSeconds,
       verbose: options.verbose,
       coordinator,
@@ -728,8 +737,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         workspaceDir,
         state,
         repoManager,
-        searchTasks: (q) => tracker.searchTasks(q),
-        query,
+        searchTasks,
+        query: () => config.defaults.taskQuery,
         intervalSeconds,
         verbose: options.verbose,
         intervalUpdaters,
@@ -746,10 +755,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
    */
   const applyReloadedConfig = (updated: WorkspaceConfig): void => {
     const fleet = resolveFleetAutomations(updated);
-    for (const problem of fleet.problems) {
-      console.error(`❌ [config] ${problem}`);
-    }
     fleetAutomationAcquirer.applyAutomations(fleet.automations);
+    if (updated.estimations.some((item) => item.enabled)) coordinator.enable();
+    else coordinator.disableWhenIdle();
+    estimationAcquirer.applyEstimations(updated.estimations);
 
     if (updated.defaults.pollIntervalSeconds !== pollIntervalSeconds) {
       pollIntervalSeconds = updated.defaults.pollIntervalSeconds;
@@ -757,6 +766,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       for (const update of intervalUpdaters) update(pollIntervalSeconds);
     }
     eventReloadHooks.hooks?.reconcileMentionSweeps();
+    eventReloadHooks.hooks?.reconcileConflictResolution();
   };
 
   // Live reload: watch workspace.toml and apply validated edits in place.
@@ -766,6 +776,27 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
+    validate: (next, current) => {
+      const fleet = resolveFleetAutomations(next);
+      if (fleet.problems.length > 0) throw new Error(fleet.problems.join("\n- "));
+      if (next.defaults.tracker !== current.defaults.tracker) {
+        throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
+      }
+      if (next.defaults.taskQuery && !detector) {
+        throw new Error(
+          `task_query cannot be enabled live because the ${current.defaults.tracker} change detector ` +
+            "could not be initialized; fix its required workspace .env settings and restart the worker.",
+        );
+      }
+      if (
+        next.workspace.dashboard !== current.workspace.dashboard ||
+        next.workspace.dashboardPort !== current.workspace.dashboardPort
+      ) {
+        throw new Error(
+          "[workspace].dashboard and dashboard_port are startup-only; restart the worker to change them.",
+        );
+      }
+    },
     onApplied: applyReloadedConfig,
   });
   reloader.start();
@@ -825,7 +856,7 @@ export async function buildFleetEventAcquirers(options: {
   state: ReturnType<typeof openWorkspaceState>;
   repoManager: RepoManagerLike;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  query: string;
+  query: string | (() => string | undefined);
   intervalSeconds: number;
   verbose?: boolean;
   /** Collectors of cadence changes, applied on live config reloads. */
@@ -883,46 +914,61 @@ export async function buildFleetEventAcquirers(options: {
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
+    const { isGitHubNotFound } = await import("../github-reviews");
     const runStore = new RunStore(state.dbPath);
-    acquirers.push(
-      new ReviewPollingAcquirer({
-        intervalSeconds,
-        workerState: state.workerState,
-        queue: state.queue,
-        github: {
-          fetchPr: (repo, n, etag) =>
-            gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
-          fetchReviews: (repo, n, etag) =>
-            gh.conditionalGet(
-              `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
+    const reviewAcquirer = new ReviewPollingAcquirer({
+      intervalSeconds,
+      workerState: state.workerState,
+      queue: state.queue,
+      github: {
+        fetchPr: async (repo, n, etag) => {
+          try {
+            return await gh.conditionalGet(
+              `/repos/${repo}/pulls/${n}`,
               ownerOf(repo),
               nameOf(repo),
               etag,
-            ),
-          fetchReviewCommentsSince: async (repo, n, sinceIso) => {
-            const result = await gh.conditionalGet<
-              Array<{ id: number; user: { login: string; type: string }; created_at: string }>
-            >(
-              `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
-              ownerOf(repo),
-              nameOf(repo),
             );
-            return result.data ?? [];
-          },
+          } catch (error) {
+            if (isGitHubNotFound(error)) {
+              // Renamed/transferred/deleted repo or PR (or lost App
+              // access): report gone so the reconciler unregisters the
+              // row instead of erroring on every tick.
+              return { data: null, notModified: false, gone: true };
+            }
+            throw error;
+          }
         },
-        addressPr: fleetAddressPr,
-        resolveConflicts:
-          config.workspace.conflictResolution === "disabled" ? undefined : resolveConflicts,
-        conflictSchedule: config.workspace.conflictSchedule,
-        conflictResolution: config.workspace.conflictResolution,
-        quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
-        runStore,
-        // Factory form: repos added at runtime become watchable without a
-        // restart (a static list would pin the startup slug set).
-        allowedRepos: () => fleetGitHubSlugs(config),
-        verbose,
-      }),
-    );
+        fetchReviews: (repo, n, etag) =>
+          gh.conditionalGet(
+            `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
+            ownerOf(repo),
+            nameOf(repo),
+            etag,
+          ),
+        fetchReviewCommentsSince: async (repo, n, sinceIso) => {
+          const result = await gh.conditionalGet<
+            Array<{ id: number; user: { login: string; type: string }; created_at: string }>
+          >(
+            `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
+            ownerOf(repo),
+            nameOf(repo),
+          );
+          return result.data ?? [];
+        },
+      },
+      addressPr: fleetAddressPr,
+      resolveConflicts,
+      conflictSchedule: config.workspace.conflictSchedule,
+      conflictResolution: config.workspace.conflictResolution,
+      quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+      runStore,
+      // Factory form: repos added at runtime become watchable without a
+      // restart (a static list would pin the startup slug set).
+      allowedRepos: () => fleetGitHubSlugs(config),
+      verbose,
+    });
+    acquirers.push(reviewAcquirer);
 
     // Tier 2: one mention sweep per GitHub repo (cursor sources are already
     // namespaced by slug). The permission gate runs in the fleet handler.
@@ -1021,6 +1067,11 @@ export async function buildFleetEventAcquirers(options: {
             }
           }
         },
+        reconcileConflictResolution: () =>
+          reviewAcquirer.updateConflictResolution(
+            config.workspace.conflictResolution,
+            config.workspace.conflictSchedule,
+          ),
         mentionSweepRepos: () => [...mentionSweeps.keys()].sort(),
       };
     }

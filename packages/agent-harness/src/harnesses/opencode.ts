@@ -36,6 +36,12 @@ export class OpencodeHarness implements AgentHarness {
   readonly supportedModes = ["plan", "readonly"] as const;
   /** `--format json` streams raw JSON events (one object per line) to stdout. */
   readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by yargs; without this marker a
+   * prompt starting with `-` (e.g. markdown frontmatter) fails with a usage
+   * error. Verified `opencode run -- "<prompt>"` executes normally.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build `opencode run` flags for non-interactive execution.

@@ -33,7 +33,7 @@ dashboard = true
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window
 # to cut AI token spend. Requires exactly one schedule below, and a worker
-# restart to take effect. "disabled" turns it off entirely — conflicts
+# changes apply to the running worker. "disabled" turns it off entirely — conflicts
 # stay for manual resolution (devintern resolve-conflicts <pr-url>).
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone

@@ -154,6 +154,38 @@ describe("EstimationAcquirer", () => {
     store.close();
   });
 
+  test("reconciles entries and updated queries after a live reload", async () => {
+    const dbPath = newDb();
+    let now = 0;
+    const queries: string[] = [];
+    const acquirer = new EstimationAcquirer({
+      estimations: [],
+      dbPath,
+      now: () => now,
+      ...noopTimers(),
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: (estimation) => {
+        queries.push(estimation.query);
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+    });
+
+    await acquirer.start();
+    acquirer.applyEstimations([
+      intervalEntry("groom", { query: "labels = Fresh", interval: "1m", intervalMs: 60_000 }),
+    ]);
+    now = 60_000;
+    await acquirer.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queries).toEqual(["labels = Fresh"]);
+
+    acquirer.applyEstimations([]);
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("estimation:groom")).toBeNull();
+    store.close();
+    await acquirer.stop();
+  });
+
   test("caps long timer delays at the runtime maximum", async () => {
     const dbPath = newDb();
     const delays: number[] = [];

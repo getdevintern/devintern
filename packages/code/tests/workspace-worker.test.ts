@@ -568,4 +568,26 @@ describe("worktree sweeping", () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(swept.length).toBe(countAfterClear);
   });
+
+  test("startWorktreeSweeper reads live repos and TTL on every pass", async () => {
+    const { swept, repoManager } = fakeSweeper({});
+    let repos = [REPOS[0]!];
+    let ttlDays = 7;
+    const timer = startWorktreeSweeper(
+      () => repos,
+      repoManager,
+      () => ttlDays,
+      10,
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      repos = [REPOS[1]!];
+      ttlDays = 3;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(swept).toContainEqual({ repo: "backend", ttlDays: 7 });
+      expect(swept).toContainEqual({ repo: "frontend", ttlDays: 3 });
+    } finally {
+      clearInterval(timer);
+    }
+  });
 });
