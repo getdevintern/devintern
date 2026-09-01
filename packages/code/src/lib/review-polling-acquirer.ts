@@ -755,6 +755,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           origin: "conflict_resolution",
           repo,
           prNumber,
+          prUrl: `https://github.com/${repo}/pull/${prNumber}`,
           branch: fresh.head.ref,
           harness: this.options.harness ?? process.env.AGENT_HARNESS ?? "claude-code",
           attempt,

@@ -2220,6 +2220,8 @@ async function main(): Promise<void> {
             origin: "estimate",
             taskKey,
             tracker: activeTrackerType,
+            // Every origin records the harness that executed it.
+            harness: resolvedAgent.harness.name,
             ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
           });
 

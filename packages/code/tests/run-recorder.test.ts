@@ -134,6 +134,16 @@ describe("RunStore", () => {
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
   });
 
+  test("createRun persists the PR URL of PR-affected origins", () => {
+    const id = store.createRun({
+      origin: "conflict_resolution",
+      repo: "acme/widgets",
+      prNumber: 42,
+      prUrl: "https://github.com/acme/widgets/pull/42",
+    });
+    expect(store.getRun(id)?.prUrl).toBe("https://github.com/acme/widgets/pull/42");
+  });
+
   test("createRun persists the derived ticket URL and setRunTicket snapshots the description", () => {
     const id = store.createRun({
       origin: "task",

@@ -599,6 +599,7 @@ export async function addressReview(
     origin: "pr_mention",
     repo: `${owner}/${repo}`,
     prNumber,
+    prUrl,
     branch: pr.head.ref,
     harness: resolveHarness({ warnDeprecated: false }).harness.name,
   });

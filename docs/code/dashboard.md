@@ -25,6 +25,16 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 
 The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
 
+## Read the run list
+
+Each row in the run list shows what the run worked on, where it came from, which agent harness executed it, how it went, and when:
+
+- **Work** names the run's subject and links where useful — the tracker task for plain task runs, the automation id for scheduled and manually triggered automations, and the pull request itself for PR mentions and conflict resolutions. Runs whose pull request does not exist yet show no PR text at all; the link appears only once the PR has actually been created.
+- **Result** links the outcome to its pull request when there is one — the created PR for task runs, or the affected PR for PR mentions and conflict resolutions.
+- **Harness** records the agent CLI that executed every run, whatever its origin; a dash means the run predates harness recording.
+
+Older automation runs recorded before automation ids existed fall back to their occurrence identifier.
+
 ## Retry a failed run
 
 Open the failed run and choose **Retry**. The worker queues a fresh attempt using the same task and workspace routing rules.
