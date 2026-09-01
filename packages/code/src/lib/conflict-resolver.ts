@@ -111,6 +111,61 @@ Instructions:
 When you are done, every conflict must be resolved and the merge commit created.`;
 }
 
+/** How many times a failed pre-push hook may be handed to the agent for fixing. */
+const MAX_HOOK_FIX_ATTEMPTS = 2;
+
+/** Characters of raw hook error output included in the agent's fix prompt. */
+const HOOK_ERROR_PROMPT_LENGTH = 1500;
+
+/** Build the agent prompt for fixing a failed pre-push hook on the merge commit. */
+export function buildHookFixPrompt(options: { branch: string; hookError: string }): string {
+  const rawError = options.hookError.trim();
+  const excerpt =
+    rawError.length > HOOK_ERROR_PROMPT_LENGTH
+      ? `…${rawError.slice(-HOOK_ERROR_PROMPT_LENGTH)}`
+      : rawError;
+  return `# Fix Pre-Push Hook Failures
+
+A \`git push\` of \`${options.branch}\` was rejected by a pre-push hook. The branch
+carries a merge commit that has NOT been published yet.
+
+Hook error output (may be truncated):
+\`\`\`
+${excerpt || "(no output captured — run the project's check scripts to reproduce)"}
+\`\`\`
+
+Instructions:
+1. Reproduce the failing checks with the project's own scripts (lint, format,
+   typecheck, tests) and fix the underlying issues. Change as little as possible.
+2. Stage everything with \`git add -A\`.
+3. Fold the fixes into the existing commit with \`git commit --amend --no-edit\`
+   (only if there is anything to fold in — the commit is a merge commit and must
+   keep both parents).
+4. Do NOT push. Do NOT rebase, reset, or create new commits beyond the amend.
+5. Do NOT abort or undo the merge.
+
+When you are done, the failing checks must pass locally and the working tree
+must be clean.`;
+}
+
+/**
+ * Fold leftover working-tree changes from a hook-fix agent run into the merge
+ * commit (amend keeps both parents). A no-op when the tree is already clean.
+ *
+ * @returns `true` when changes were found and successfully amended in.
+ */
+async function amendHookFixIntoMergeCommit(workDir: string): Promise<boolean> {
+  const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
+  if (!status.success || status.output.trim() === "") {
+    return false;
+  }
+  await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
+  const amend = await Utils.executeGitCommand(["commit", "--amend", "--no-edit"], {
+    cwd: workDir,
+  });
+  return amend.success;
+}
+
 /**
  * How many times the merge+push cycle may restart when a push is rejected
  * because the branch moved underneath us (or was rejected transiently).
@@ -520,12 +575,59 @@ export async function resolveConflictsOnPr(
 
       // The exact lease makes the head check above atomic with the push. The
       // push helper also verifies that HEAD descends from the leased commit.
-      const push = await Utils.pushCurrentBranch({
-        cwd: workDir,
-        expectedBranch: branch,
-        expectedRemoteSha: leaseSha ?? remoteTip,
-        verbose,
-      });
+      const pushOnce = () =>
+        Utils.pushCurrentBranch({
+          cwd: workDir,
+          expectedBranch: branch,
+          expectedRemoteSha: leaseSha ?? remoteTip,
+          verbose,
+        });
+      let push = await pushOnce();
+
+      // The PR repo's pre-push hooks run inside this ephemeral worktree and
+      // can fail for fixable reasons (lint, formatting, types). Hand the
+      // failure to the agent and retry, mirroring the review flow's hook
+      // fixer; without this the resolved merge never lands on the PR. A
+      // branch race is not fixable by the agent, so the lease is re-checked
+      // first to keep the existing defer/retry handling authoritative.
+      let hookFixAttempt = 0;
+      while (!push.success && push.hookError && hookFixAttempt < MAX_HOOK_FIX_ATTEMPTS) {
+        if (leaseSha) {
+          const refreshed = await Utils.executeGitCommand(
+            ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+            { cwd: workDir, verbose },
+          );
+          const moved = refreshed.success
+            ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
+            : null;
+          const newTip = moved?.success ? moved.output.trim() : null;
+          if (newTip && newTip !== leaseSha) {
+            break; // the post-push handling below defers or retries on races
+          }
+        }
+        hookFixAttempt++;
+        console.log(
+          `⚠️  Pre-push hook failed (attempt ${hookFixAttempt}/${MAX_HOOK_FIX_ATTEMPTS}); handing to the agent`,
+        );
+        let fixResult: { success: boolean; output: string };
+        try {
+          fixResult = await agentRunner(
+            buildHookFixPrompt({ branch, hookError: push.hookError }),
+            workDir,
+            verbose,
+          );
+        } catch (error) {
+          fixResult = { success: false, output: (error as Error).message };
+        }
+        // Trust the tree, not the agent's word: fold any leftover changes into
+        // the merge commit so the retry pushes a complete tree.
+        const amended = await amendHookFixIntoMergeCommit(workDir);
+        if (!fixResult.success && !amended) {
+          console.warn("⚠️  Hook-fix agent run failed; retrying the push anyway");
+        }
+        push = await pushOnce();
+      }
+
       if (!push.success) {
         if (leaseSha) {
           const refreshed = await Utils.executeGitCommand(
