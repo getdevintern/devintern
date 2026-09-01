@@ -15,7 +15,13 @@
 import { Database } from "bun:sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled" | "estimate";
+export type RunOrigin =
+  | "task"
+  | "pr_mention"
+  | "conflict_resolution"
+  | "scheduled"
+  | "estimate"
+  | "manual";
 
 export type RunStatus =
   | "in_progress"
@@ -92,6 +98,7 @@ export interface RunFilter {
   taskKey?: string;
   status?: RunStatus;
   origin?: RunOrigin;
+  automationId?: string;
 }
 
 export interface RunStatsWeek {
@@ -437,6 +444,10 @@ export class RunStore {
       clauses.push("origin = ?");
       params.push(filter.origin);
     }
+    if (filter.automationId) {
+      clauses.push("automation_id = ?");
+      params.push(filter.automationId);
+    }
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 
@@ -541,6 +552,7 @@ export class RunStore {
       conflict_resolution: 0,
       scheduled: 0,
       estimate: 0,
+      manual: 0,
     };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<

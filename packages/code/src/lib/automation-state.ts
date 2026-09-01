@@ -110,6 +110,20 @@ export class AutomationStateStore {
     return result.changes === 1;
   }
 
+  /**
+   * Take the overlap lease for a manual ("Run now") run without touching the
+   * schedule cursor: while held, `claim` and `skipOverlap` see the lease and
+   * treat the manual run exactly like an active scheduled run.
+   */
+  acquireManual(automationId: string, owner: string, now: number, leaseMs: number): boolean {
+    const result = this.db.run(
+      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?
+       WHERE automation_id = ? AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
+      [owner, now + leaseMs, now, automationId, now],
+    );
+    return result.changes === 1;
+  }
+
   heartbeat(automationId: string, owner: string, now: number, leaseMs: number): boolean {
     const result = this.db.run(
       `UPDATE automation_schedules SET heartbeat_at = ?, lease_expires_at = ?

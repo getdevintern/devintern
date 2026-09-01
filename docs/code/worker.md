@@ -78,6 +78,8 @@ Because the occurrence is just a markdown task, you can reproduce or rerun any o
 devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
+You usually don't have to: the [dashboard](./dashboard.md#running-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
+
 ### Writing good prompts
 
 The prompt replaces the ticket description the agent would normally read, so treat it like you would write a task for a new teammate:
@@ -93,21 +95,21 @@ Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_
 
 ### Schedule semantics
 
-Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
+Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed. A dashboard-triggered manual run holds the same lease while it is active, so a scheduled occurrence coming due mid-validation is skipped rather than run concurrently.
 
 On shutdown the scheduler stops its timer, terminates active automation subprocess groups, waits for them to exit, and leaves their claims recoverable in SQLite.
 
 ### Troubleshooting
 
-| Symptom | Likely cause |
-| ---------------------------- | ------------------------------------------------------------ |
-| No occurrences fire after editing the TOML | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately). |
-| `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
-| `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
-| Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
-| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
-| A run failed and you need to know why | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)). |
-| The dashboard Logs tab is empty | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
+| Symptom                                              | Likely cause                                                                                                                                                                                                                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately).                                                   |
+| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                                                                                 |
+| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                                                                       |
+| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                                                                        |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                                                                          |
+| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                                                                      |
+| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
 
 ## Scheduled story-point estimation
 
@@ -231,10 +233,10 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 ```
 
-| Option              | Description                                                         |
-| ------------------- | ------------------------------------------------------------------- |
+| Option               | Description                                                       |
+| -------------------- | ----------------------------------------------------------------- |
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`) |
-| `-v, --verbose`     | Verbose logging                                                     |
+| `-v, --verbose`      | Verbose logging                                                   |
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 
@@ -299,7 +301,7 @@ Polling reacts within one interval (about a minute). On its default path, `worke
 
 ## Seeing what the worker did
 
-Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) at `http://localhost:4400` by default; set `[workspace].dashboard = false` to disable it, or `[workspace].dashboard_port` to change the port. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
+Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) on the loopback-only address `http://localhost:4400` by default; set `[workspace].dashboard = false` to disable it, or `[workspace].dashboard_port` to change the port. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
 
 ## Running as a service
 

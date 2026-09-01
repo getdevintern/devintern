@@ -742,6 +742,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         coordinator,
       ),
   });
+  const automationActions = {
+    list: () => fleetAutomationAcquirer.listSchedules(),
+    trigger: (automationId: string) => fleetAutomationAcquirer.triggerManual(automationId),
+  };
   acquirers.push(fleetAutomationAcquirer);
 
   // Cadence reconciliation: applied on successful reloads of poll_interval.
@@ -874,10 +878,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
       // `schedule`: retries are drained by this worker's retry-queue acquirer
-      // through the normal pipeline (never spawned from the workspace home).
+      // through the normal pipeline (never spawned from the workspace home);
+      // automation "Run now" triggers go through the in-process scheduler.
       startDashboardServer({
         port: config.workspace.dashboardPort,
         retryMode: "schedule",
+        automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
       });
     } catch (error) {

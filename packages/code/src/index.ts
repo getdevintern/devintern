@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { execSync } from "child_process";
 import { Option, program } from "commander";
 import { config } from "dotenv";
 import {
@@ -19,7 +18,6 @@ import {
   getAuthenticatedUser,
   login,
   logout,
-  requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
 import { checkLicense, requireLicense } from "@devintern/license-check";
@@ -159,7 +157,9 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 function isWorkerTaskProcess(): boolean {
   const origin = process.env[RUN_ORIGIN_ENV];
-  return origin === "worker" || origin === "scheduled" || origin === "estimate";
+  return (
+    origin === "worker" || origin === "scheduled" || origin === "estimate" || origin === "manual"
+  );
 }
 
 /** Finish the local run record and emit exactly one outcome event for worker tasks. */
@@ -846,8 +846,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Options:");
         console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --host <host>  Host to bind to (default: 127.0.0.1; no authentication,");
-        console.log("                 so binding beyond localhost is not recommended)");
+        console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
+        console.log("                 accepted: 127.0.0.1, localhost, ::1)");
         console.log("  -h, --help     Display this help message");
         process.exit(0);
       }
@@ -1471,10 +1471,14 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Structured run record for this attempt (skips above are not attempts).
     // Scheduled automations run through this same pipeline with their prompt
     // materialized as a markdown task; env markers attribute those runs.
+    // Dashboard "Run now" triggers use the same markers with a `manual`
+    // origin so run history distinguishes them from scheduled runs.
     const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
     const trackerName = process.env.TASK_TRACKER || "jira";
+    const isManualAutomationRun =
+      scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
     beginRun({
-      origin: scheduledAutomationId ? "scheduled" : "task",
+      origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
       taskKey: workflowKey,
       tracker: trackerName,
       // The harness that will implement this run (resolved at startup).

@@ -6,6 +6,7 @@ export const RUN_ORIGIN_LABELS = {
   conflict_resolution: "Conflict resolution",
   scheduled: "Scheduled automation",
   estimate: "Estimate run",
+  manual: "Manual run",
 } satisfies Record<RunOrigin, string>;
 
 export function formatRunOrigin(origin: RunOrigin): string {
