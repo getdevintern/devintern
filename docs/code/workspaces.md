@@ -1,8 +1,9 @@
 ---
 title: "Workspaces (Multi-Repo Fleet)"
+sidebarLabel: "Multiple Repositories"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
-section: "Server Automation"
-order: 1
+section: "Automation"
+order: 2
 dateModified: 2026-09-01
 ---
 
@@ -90,7 +91,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
-- `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Automated Task Processing → Working windows](./automated-task-processing.md#working-windows-quiet-hours).
+- `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 

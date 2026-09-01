@@ -4,6 +4,7 @@ sidebarLabel: "GitLab Integration"
 description: "File well-specified GitLab issues from AI drafts on gitlab.com or a self-hosted instance."
 section: "PM"
 order: 7
+sidebarHidden: true
 ---
 
 # Create GitLab Issues with @devintern/pm
@@ -21,9 +22,9 @@ order: 7
 
 ## Cloud vs. Self-Hosted
 
-| Flavor | `GITLAB_BASE_URL` | Notes |
-| --------------------- | ------------------------- | ----------------------------------------------- |
-| GitLab Cloud          | omit (default `https://gitlab.com`) | Works out of the box |
+| Flavor                | `GITLAB_BASE_URL`                   | Notes                                           |
+| --------------------- | ----------------------------------- | ----------------------------------------------- |
+| GitLab Cloud          | omit (default `https://gitlab.com`) | Works out of the box                            |
 | Self-managed instance | e.g. `https://gitlab.example.com`   | Protocol is kept; `http://` internal hosts work |
 
 ## Setup

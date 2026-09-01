@@ -4,6 +4,7 @@ sidebarLabel: "Jira Integration"
 description: "Fetch Jira Cloud issues, run the feasibility gate, implement with your coding agent, and post PRs and summaries back to the issue."
 section: "Code"
 order: 4
+sidebarHidden: true
 dateModified: 2026-07-23
 tags: ["jira", "devintern/code", "integration", "jira cloud"]
 ---

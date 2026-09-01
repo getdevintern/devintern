@@ -4,6 +4,7 @@ sidebarLabel: "Trello Integration"
 description: "Create Trello cards from AI drafts on the boards your team already uses."
 section: "PM"
 order: 5
+sidebarHidden: true
 ---
 
 # Create Trello Cards with @devintern/pm

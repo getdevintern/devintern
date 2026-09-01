@@ -1,8 +1,9 @@
 ---
 title: "Worker Daemon"
+sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
-section: "Server Automation"
-order: 0
+section: "Automation"
+order: 1
 dateModified: 2026-09-01
 ---
 
@@ -80,7 +81,7 @@ Because the occurrence is just a markdown task, you can reproduce or rerun any o
 devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
-You usually don't have to: the [dashboard](./dashboard.md#running-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
+You usually don't have to: the [dashboard](./dashboard.md#run-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
 
 ### Writing good prompts
 
@@ -103,15 +104,15 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 
 ### Troubleshooting
 
-| Symptom                                              | Likely cause                                                                                                                                                                                                                                |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately).                                                   |
-| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                                                                                 |
-| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                                                                       |
-| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                                                                        |
-| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                                                                          |
-| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                                                                      |
-| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
+| Symptom                                              | Likely cause                                                                                                                                                                              |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately). |
+| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                               |
+| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                     |
+| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                      |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                        |
+| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
+| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
 
 ## Scheduled story-point estimation
 

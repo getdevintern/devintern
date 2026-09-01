@@ -4,6 +4,7 @@ sidebarLabel: "Asana Integration"
 description: "Create structured Asana tasks from AI drafts in the projects your team already uses."
 section: "PM"
 order: 7
+sidebarHidden: true
 ---
 
 # Create Asana Tasks with @devintern/pm
