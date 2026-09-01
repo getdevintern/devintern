@@ -33,40 +33,6 @@ curl -fsSL https://bun.sh/install | bash
 bun install -g @getdevintern/code
 ```
 
-## Run Your First Task
-
-The fastest way to try DevIntern is with a markdown file. Create `first-task.md` in your repository:
-
-```markdown
-# Add a health check
-
-Add a `/health` endpoint that returns a successful JSON response.
-
-## Acceptance criteria
-
-- `GET /health` returns HTTP 200
-- The response body is `{ "status": "ok" }`
-- Add a test for the endpoint
-```
-
-Then point DevIntern at it:
-
-```bash
-devintern ./first-task.md
-```
-
-No task tracker account or credentials are required. DevIntern uses the filename as the task key, creates a feature branch, runs your installed AI agent, and commits a successful implementation. Add `--create-pr` once you have configured a repository host token.
-
-Every run:
-
-1. Loads the task and checks that it is clear enough to implement
-2. Creates a feature branch (`feature/first-task`)
-3. Runs your AI agent with the task and repository context
-4. Commits changes after a successful implementation
-5. Optionally opens a pull request and updates the task tracker
-
-See [Markdown File Tasks](./markdown-tasks.md) for optional frontmatter, status tracking, and batch queries.
-
 ## Initialize Configuration
 
 Navigate to your project directory and run:
@@ -86,6 +52,8 @@ In a terminal, this starts an interactive setup wizard that:
 - Offers to sign in to DevIntern on the spot (`devintern login` equivalent)
 - Finishes with a readiness checklist so your first run cannot fail on something setup could have caught
 - Writes your answers to `.devintern-code/.env`, creates `settings.json` for per-project configuration, and adds a whitelist block to your `.gitignore` (`.devintern-code/*` plus `!settings.json` and `!.env.example` exceptions) so credentials and local run state never get committed, while `settings.json` and the `.env.example` template stay trackable
+
+Not ready to connect a real task tracker yet? Choose **Markdown files** in the wizard. It configures a local task directory (`./tasks` by default), requires no tracker account or API credentials, and lets you switch to Jira, Linear, or another tracker later. See [Markdown File Tasks](./markdown-tasks.md) for the supported file format and workflow.
 
 For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write a commented configuration template instead:
 
@@ -117,11 +85,17 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 
 Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
 
-## Run a Tracker Task
+## Run Your First Task
 
 Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
 
-Run `devintern` with a task reference from your configured tracker:
+If you chose Markdown during setup, add `TASK-1.md` to your configured task directory and pass its filename without the extension:
+
+```bash
+devintern TASK-1
+```
+
+For a connected tracker, pass its task reference instead:
 
 **Jira**
 
