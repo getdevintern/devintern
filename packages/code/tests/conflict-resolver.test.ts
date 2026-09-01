@@ -185,6 +185,42 @@ describe("resolveConflictsOnPr", () => {
     rmSync(shipped, { recursive: true, force: true });
   });
 
+  test("removes the review worktree after a successful run", async () => {
+    let usedWorkDir: string | undefined;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        usedWorkDir = workDir;
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+    expect(result.outcome).toBe("resolved");
+    expect(usedWorkDir).toBeDefined();
+    expect(existsSync(usedWorkDir!)).toBe(false);
+  });
+
+  test("removes the review worktree after a failed run", async () => {
+    let usedWorkDir: string | undefined;
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        usedWorkDir = workDir;
+        // Leave conflicts unresolved: the merge must abort.
+        return { success: false, output: "agent gave up" };
+      },
+    });
+    expect(result.outcome).toBe("failed");
+    expect(usedWorkDir).toBeDefined();
+    expect(existsSync(usedWorkDir!)).toBe(false);
+  });
+
   test("commits for the agent when it resolves but forgets to commit", async () => {
     const result = await resolveConflictsOnPr(PR_URL, {
       cwd: repoDir,

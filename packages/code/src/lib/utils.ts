@@ -1601,13 +1601,16 @@ export class Utils {
    * Remove a git worktree directory and unregister it from git.
    *
    * @param worktreePath - Absolute worktree path
-   * @param options - Verbose logging
+   * @param options - Verbose logging and the owning repository directory
+   *   (`git worktree remove` must run against the repo that owns the
+   *   worktree; defaults to the current working directory)
    */
   static async removeReviewWorktree(
     worktreePath: string,
-    options?: { verbose?: boolean },
+    options?: { verbose?: boolean; cwd?: string },
   ): Promise<{ success: boolean; error?: string }> {
     const verbose = options?.verbose ?? false;
+    const cwd = options?.cwd;
 
     try {
       if (!existsSync(worktreePath)) {
@@ -1624,7 +1627,7 @@ export class Utils {
       // Try to remove via git first
       const removeResult = await Utils.executeGitCommand(
         ["worktree", "remove", worktreePath, "--force"],
-        { verbose },
+        { verbose, cwd },
       );
 
       if (!removeResult.success) {
