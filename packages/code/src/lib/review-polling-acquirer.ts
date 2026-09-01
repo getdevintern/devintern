@@ -80,6 +80,10 @@ export interface ReviewPollingGitHub {
 
 export interface ReviewPollingAcquirerOptions {
   intervalSeconds: number;
+  /** Whether feedback acquisition should run (state/base reconciliation always runs). */
+  shouldPollFeedback?: () => boolean;
+  /** Safety sweep cadence while relay is healthy. Defaults to 30 minutes. */
+  feedbackFallbackIntervalSeconds?: number;
   workerState: WorkerState;
   queue: WebhookQueue;
   github: ReviewPollingGitHub;
@@ -422,9 +426,11 @@ export class ReviewPollingAcquirer implements Acquirer {
   private deferCounts = new Map<string, number>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
+  private lastFeedbackPollAt: number;
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
+    this.lastFeedbackPollAt = (options.now ?? Date.now)();
   }
 
   private now(): number {
@@ -502,6 +508,12 @@ export class ReviewPollingAcquirer implements Acquirer {
       this.syncConflictWindow();
       const { workerState } = this.options;
       const allowedRepos = this.resolveAllowedRepos();
+      const fallbackMs = (this.options.feedbackFallbackIntervalSeconds ?? 30 * 60) * 1000;
+      const now = this.now();
+      const pollFeedback =
+        (this.options.shouldPollFeedback?.() ?? true) ||
+        now - this.lastFeedbackPollAt >= fallbackMs;
+      if (pollFeedback) this.lastFeedbackPollAt = now;
 
       // Reconcile the registry with GitHub first: one conditional GET per
       // watched PR whose result is shared with the poll loop below, so PRs
@@ -542,6 +554,7 @@ export class ReviewPollingAcquirer implements Acquirer {
             pr.repo,
             pr.prNumber,
             pr.createdAt,
+            pollFeedback,
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
           );
         } catch (error) {
@@ -560,6 +573,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     repo: string,
     prNumber: number,
     watchedSinceMs: number,
+    pollFeedback: boolean,
     prefetched?: ConditionalResult<PolledPr>,
   ): Promise<void> {
     const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
@@ -595,6 +609,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       const cachedPr = this.prCache.get(prKey);
       if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr);
     }
+
+    if (!pollFeedback) return;
 
     let actionable = false;
 
