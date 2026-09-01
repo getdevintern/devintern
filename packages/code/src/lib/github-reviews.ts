@@ -78,6 +78,20 @@ export interface FileContent {
 }
 
 /**
+ * Whether an error thrown by a GitHub API client call is an HTTP 404
+ * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
+ * the credential has no access. Callers mapping PR fetches to the agent PR
+ * registry use this to stop watching rows that can never be fetched again
+ * instead of erroring on every poll tick.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubNotFound(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("GitHub API error (404)");
+}
+
+/**
  * Client for interacting with GitHub's PR review APIs.
  */
 export class GitHubReviewsClient {

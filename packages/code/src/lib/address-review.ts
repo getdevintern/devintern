@@ -600,6 +600,7 @@ export async function addressReview(
     repo: `${owner}/${repo}`,
     prNumber,
     branch: pr.head.ref,
+    harness: resolveHarness({ warnDeprecated: false }).harness.name,
   });
   recordRunStage("change_request", {
     status: "succeeded",

@@ -1,17 +1,16 @@
 /**
  * GitHub App pairing for the unattended worker.
  *
- * The wizard step in `worker init` points at the hosted App install page and
- * records the outcome next to the workspace's relay pairing
+ * The verified `worker connect github` flow records its outcome next to the workspace's relay pairing
  * (`<workspace-home>/.devintern-code/github-app.json`). The record says
- * whether GitHub App events (`@mention` handling, PR comment events) are
- * enabled for the detected repository, so re-running the wizard can detect an
- * existing connection and setup summaries can remind about a skipped one.
+ * whether GitHub App events (`@mention` handling, PR comment events) were
+ * verified by the hosted relay pairing flow.
  *
- * This is bookkeeping only. In the normal relay-backed workspace path, the
- * central App's private key stays on DevIntern infrastructure and the worker
- * uses `GITHUB_TOKEN` for GitHub API calls. Customer-owned App credentials are
- * reserved for the advanced no-relay path and are not stored here.
+ * This is bookkeeping only. In the normal relay-backed workspace path, hosted
+ * App credentials stay on DevIntern infrastructure and the worker uses its
+ * local `GITHUB_TOKEN` for GitHub API calls, so nothing secret is stored in
+ * this file. Customer-owned App credentials are reserved for the advanced
+ * no-relay path and are not stored here either.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -29,6 +28,9 @@ export interface GitHubAppRecord {
   connectedAt?: string;
   /** When this record was last written (ISO timestamp; set by the saver). */
   recordedAt?: string;
+  /** Immutable ids returned by the verified hosted pairing, when available. */
+  installationId?: number;
+  repositoryId?: number;
 }
 
 function githubAppRecordPath(workingDir: string): string {
@@ -55,6 +57,8 @@ export function loadGitHubAppRecord(workingDir: string = process.cwd()): GitHubA
       connectedAt: typeof record.connectedAt === "string" ? record.connectedAt : undefined,
       recordedAt:
         typeof record.recordedAt === "string" ? record.recordedAt : new Date().toISOString(),
+      installationId: typeof record.installationId === "number" ? record.installationId : undefined,
+      repositoryId: typeof record.repositoryId === "number" ? record.repositoryId : undefined,
     };
   } catch {
     return null;

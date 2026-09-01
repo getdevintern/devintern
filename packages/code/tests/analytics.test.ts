@@ -220,6 +220,28 @@ describe("trackWorkerTaskRun", () => {
     );
   });
 
+  test("attributes manual automation runs from the dashboard Run now action", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[RUN_ORIGIN_ENV] = "manual";
+    let received: unknown;
+    setAnalyticsSenderForTests({
+      send: async (payload) => {
+        received = payload;
+      },
+    });
+
+    expect(trackWorkerTaskRun("failed", { cliVersion: "2.6.0", tracker: "markdown" })).toBe(true);
+    await Promise.resolve();
+
+    expect(received).toMatchObject({
+      event: "worker_task_run",
+      properties: {
+        outcome: "failed",
+        worker_trigger: "manual",
+      },
+    });
+  });
+
   test("does not emit for manual CLI task runs", async () => {
     process.env.POSTHOG_API_KEY = "phc_test";
     let called = false;

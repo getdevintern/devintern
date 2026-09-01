@@ -438,20 +438,16 @@ devintern worker init
 devintern worker
 ```
 
-See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). Cron of the CLI remains only as a gap filler for a wall-clock window (for example only at night) until the worker has quiet hours, and for `--estimate` schedules.
+See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). The worker natively supports **working windows (quiet hours)**, so "only at night" no longer needs cron — set `[worker.schedule]` in `workspace.toml`:
 
-```bash
-# Night-only drain, if you are not running the worker
-0 22 * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
+```toml
+[worker.schedule]
+active = ["22:00-06:00"]   # drain new tasks only during these local-time windows
+timezone = ""              # optional IANA name; blank = machine local time
+catch_up_missed = true     # one catch-up drain at startup after a fully missed window
 ```
 
-**Notes if you keep a timer:**
-
-- Always change to your project directory (`cd /path/to/your/project`) so the correct `.devintern-code/.env` is loaded
-- Use absolute paths or ensure PATH includes `devintern` and the agent binary
-- Redirect output to a log file (`>> /tmp/devintern-cron.log 2>&1`)
-- For Jira, use `ORDER BY created DESC` to process newest tasks first
-- Test your query manually before scheduling
+Outside the window nothing is killed mid-run — the in-flight task completes and no new tracker tasks start. Force one immediate drain with `devintern worker run-now`. The only CLI run still worth a timer is story-point estimation (`--estimate`).
 
 ## Troubleshooting
 

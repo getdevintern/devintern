@@ -29,7 +29,6 @@ import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
-  saveGitHubAppRecord,
 } from "./github-app-setup";
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
@@ -214,13 +213,6 @@ export interface WorkerInitDeps {
   }) => Promise<boolean>;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
-  /** Override the install/connect flow of the GitHub App step. */
-  setupGitHubApp?: (ctx: {
-    repo: string;
-    workspaceDir: string;
-    prompt: PromptFn;
-    log: LogFn;
-  }) => Promise<boolean>;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -348,51 +340,6 @@ async function defaultConnectRelay(options: {
   }
 
   return ok;
-}
-
-/**
- * Default GitHub App connect flow: point at the hosted install page, wait for
- * the user to finish the install, then record the pairing with the workspace.
- */
-async function defaultSetupGitHubApp(ctx: {
-  repo: string;
-  workspaceDir: string;
-  prompt: PromptFn;
-  log: LogFn;
-}): Promise<boolean> {
-  ctx.log(`   Open ${GITHUB_APP_INSTALL_URL} and install the DevIntern AI GitHub App`);
-  ctx.log(`   on ${ctx.repo} (grant it access to every repo the worker should watch).`);
-  await ctx.prompt("Press Enter once the App is installed: ");
-  saveGitHubAppRecord(
-    { repo: ctx.repo, enabled: true, connectedAt: new Date().toISOString() },
-    ctx.workspaceDir,
-  );
-  ctx.log(
-    `💾 Recorded the App pairing in ${join(ctx.workspaceDir, ".devintern-code", "github-app.json")}`,
-  );
-  return true;
-}
-
-/** Run the (overridable) install flow; logs a warning when it throws. */
-async function runGitHubAppSetup(
-  deps: WorkerInitDeps,
-  workspaceDir: string,
-  repo: string,
-  prompt: PromptFn,
-  log: LogFn,
-): Promise<boolean> {
-  const setup = deps.setupGitHubApp ?? defaultSetupGitHubApp;
-  try {
-    const ok = await setup({ repo, workspaceDir, prompt, log });
-    if (ok) {
-      log("✅ GitHub App events enabled (@mentions on any PR, PR comment events).");
-    }
-    return ok;
-  } catch (error) {
-    log(`⚠️  GitHub App setup failed: ${(error as Error).message}`);
-    log("   Polling still works; you can connect later with `devintern worker init`.");
-    return false;
-  }
 }
 
 /**
@@ -621,45 +568,21 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
       log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
       const existing = loadGitHubAppRecord(workspaceDir);
-      if (existing?.enabled ?? false) {
+      if (
+        existing?.enabled &&
+        existing.repo === githubRepo.toLowerCase() &&
+        typeof existing.installationId === "number" &&
+        typeof existing.repositoryId === "number"
+      ) {
         githubAppOutcome = "existing";
-        if (existing?.enabled && existing.repo !== githubRepo) {
-          log(
-            `   Existing pairing is for ${existing.repo}; reconfigure to point it at ${githubRepo}.`,
-          );
-        } else if (existing?.enabled) {
-          log(
-            `✅ GitHub App already connected to ${existing.repo} (${existing.connectedAt ?? "unknown date"}).`,
-          );
-        }
-        const reconfigure = (
-          await prompt("Reconfigure or replace the GitHub App connection? [y/N]: ")
-        )
-          .trim()
-          .toLowerCase();
-        if (reconfigure === "y" || reconfigure === "yes") {
-          githubAppOutcome = (await runGitHubAppSetup(deps, workspaceDir, githubRepo, prompt, log))
-            ? "connected"
-            : "existing";
-        }
+        log(
+          `✅ GitHub App already verified for ${existing.repo} (${existing.connectedAt ?? "unknown date"}).`,
+        );
       } else {
-        const installAnswer = (
-          await prompt("Install and connect the DevIntern GitHub App now? [Y/n]: ")
-        )
-          .trim()
-          .toLowerCase();
-        if (installAnswer === "n" || installAnswer === "no") {
-          githubAppOutcome = "skipped";
-          saveGitHubAppRecord({ repo: githubRepo, enabled: false }, workspaceDir);
-          log(`   Noted: GitHub App events stay off for ${githubRepo}.`);
-        } else {
-          githubAppOutcome = (await runGitHubAppSetup(deps, workspaceDir, githubRepo, prompt, log))
-            ? "connected"
-            : "skipped";
-          if (githubAppOutcome === "skipped") {
-            saveGitHubAppRecord({ repo: githubRepo, enabled: false }, workspaceDir);
-          }
-        }
+        githubAppOutcome = "skipped";
+        log("   No verified GitHub App pairing was recorded.");
+        log(`   Run: devintern worker connect github --repo ${githubRepo}`);
+        log("   The relay verifies the installation before it enables event routing.");
       }
     }
 

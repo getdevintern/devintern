@@ -71,6 +71,17 @@ describe("RepoManager", () => {
     expect(git(clonePath, "rev-parse origin/main")).toBe(git(originDir, "rev-parse main"));
   });
 
+  test("ensureBareClone applies a changed remote URL to an existing clone", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    const nextOrigin = join(rootDir, "next-origin");
+    mkdirSync(nextOrigin);
+    git(nextOrigin, "init -b main");
+
+    await manager.ensureBareClone({ ...repo, remote: `file://${nextOrigin}` });
+
+    expect(git(clonePath, "remote get-url origin")).toBe(`file://${nextOrigin}`);
+  });
+
   test("task worktrees are detached at origin/<branch> and see the origin remote", async () => {
     await manager.ensureBareClone(repo);
     const worktree = await manager.createTaskWorktree(repo, "BACK-42");

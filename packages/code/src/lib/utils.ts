@@ -1,6 +1,6 @@
 import { fetchWithRetry as sharedFetchWithRetry } from "@devintern/utils";
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import { basename, dirname, join } from "path";
 
 /**
@@ -1601,13 +1601,16 @@ export class Utils {
    * Remove a git worktree directory and unregister it from git.
    *
    * @param worktreePath - Absolute worktree path
-   * @param options - Verbose logging
+   * @param options - Verbose logging and the owning repository directory
+   *   (`git worktree remove` must run against the repo that owns the
+   *   worktree; defaults to the current working directory)
    */
   static async removeReviewWorktree(
     worktreePath: string,
-    options?: { verbose?: boolean },
+    options?: { verbose?: boolean; cwd?: string },
   ): Promise<{ success: boolean; error?: string }> {
     const verbose = options?.verbose ?? false;
+    const cwd = options?.cwd;
 
     try {
       if (!existsSync(worktreePath)) {
@@ -1624,7 +1627,7 @@ export class Utils {
       // Try to remove via git first
       const removeResult = await Utils.executeGitCommand(
         ["worktree", "remove", worktreePath, "--force"],
-        { verbose },
+        { verbose, cwd },
       );
 
       if (!removeResult.success) {
@@ -1785,6 +1788,10 @@ export class Utils {
               if (verbose) {
                 console.log(`📦 Installing dependencies...`);
               }
+              // Confine hook rewrites by dependency postinstalls (lefthook)
+              // to this worktree, before `bun install` gets a chance to
+              // touch the shared `.git/hooks`.
+              await Utils.isolateWorktreeHooks(worktreePath, { verbose });
               const installResult = await Utils.installDependencies(worktreePath, { verbose });
 
               if (!installResult.success) {
@@ -1966,6 +1973,10 @@ export class Utils {
       if (verbose) {
         console.log(`📦 Installing dependencies...`);
       }
+      // Confine hook rewrites by dependency postinstalls (lefthook) to this
+      // worktree, before `bun install` gets a chance to touch the shared
+      // `.git/hooks`.
+      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
       const installResult = await Utils.installDependencies(worktreePath, {
         verbose,
       });
@@ -2089,6 +2100,85 @@ export class Utils {
 
     // Drop any dangling registrations the removals left behind.
     await Utils.executeGitCommand(["worktree", "prune"], { verbose: false, cwd });
+  }
+
+  /**
+   * Point a linked review worktree's `core.hooksPath` at a private directory
+   * (via per-worktree git config) seeded with copies of the shared hooks.
+   *
+   * A linked worktree shares `.git/hooks` with the user's checkout. Dependency
+   * postinstalls that rewrite hooks (lefthook's `lefthook install`) would
+   * therefore clobber the user's real hooks with scripts hardcoding this
+   * ephemeral worktree's `node_modules` path — breaking every later push once
+   * the worktree is removed. Redirecting hooks first confines those rewrites
+   * to the private directory, where they stay valid for this run's pushes and
+   * vanish together with the worktree.
+   *
+   * The private directory lives in the worktree's git admin area
+   * (`<repo>/.git/worktrees/<name>/hooks`), which keeps it outside the working
+   * tree (invisible to `git status`, `git clean`, and `git add -A`) and lets
+   * `git worktree remove` clean it up automatically. The per-worktree config
+   * lives in the same admin area; `extensions.worktreeConfig` stays enabled in
+   * the shared config, which is harmless.
+   */
+  static async isolateWorktreeHooks(
+    worktreePath: string,
+    options?: { verbose?: boolean },
+  ): Promise<void> {
+    const verbose = options?.verbose ?? false;
+
+    const gitDir = await Utils.executeGitCommand(["rev-parse", "--absolute-git-dir"], {
+      cwd: worktreePath,
+    });
+    if (!gitDir.success || !gitDir.output.trim()) {
+      console.warn(`⚠️  Could not locate worktree git dir; hooks stay shared: ${gitDir.error}`);
+      return;
+    }
+    const hooksDir = join(gitDir.output.trim(), "hooks");
+
+    // Existing shared hooks (e.g. plain scripts installed outside a package's
+    // postinstall) keep working in the worktree: copy them into the isolated
+    // directory. This must run before `core.hooksPath` is set, because
+    // `git rev-parse --git-path hooks` resolves through it.
+    const sharedHooks = await Utils.executeGitCommand(["rev-parse", "--git-path", "hooks"], {
+      cwd: worktreePath,
+    });
+    if (sharedHooks.success && sharedHooks.output.trim() && existsSync(sharedHooks.output.trim())) {
+      const sharedDir = sharedHooks.output.trim();
+      try {
+        Utils.ensureDirectoryExists(hooksDir);
+        for (const entry of readdirSync(sharedDir)) {
+          if (entry.endsWith(".sample")) continue;
+          const source = join(sharedDir, entry);
+          if (!statSync(source).isFile()) continue;
+          copyFileSync(source, join(hooksDir, entry));
+          chmodSync(join(hooksDir, entry), 0o755);
+        }
+      } catch (error) {
+        console.warn(
+          `⚠️  Could not copy shared git hooks into the worktree: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    const enable = await Utils.executeGitCommand(["config", "extensions.worktreeConfig", "true"], {
+      cwd: worktreePath,
+    });
+    if (!enable.success) {
+      console.warn(`⚠️  Could not enable per-worktree git config: ${enable.error}`);
+      return;
+    }
+    const setPath = await Utils.executeGitCommand(
+      ["config", "--worktree", "core.hooksPath", hooksDir],
+      { cwd: worktreePath },
+    );
+    if (!setPath.success) {
+      console.warn(`⚠️  Could not redirect worktree git hooks: ${setPath.error}`);
+      return;
+    }
+    if (verbose) {
+      console.log(`   🔒 Git hooks isolated to ${hooksDir}`);
+    }
   }
 
   /**

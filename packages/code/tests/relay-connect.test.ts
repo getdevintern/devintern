@@ -93,8 +93,22 @@ describe("relay-connect auth", () => {
     expect(calls.length).toBe(0);
   });
 
-  test("connectGitHubRepo issues a token then registers the repo with the session", async () => {
-    const fetchImpl = mockFetch((_url, body) => {
+  test("connectGitHubRepo waits for verified GitHub App pairing", async () => {
+    const fetchImpl = mockFetch((url, body) => {
+      if (url.includes("/v1/github/pairings/")) {
+        return new Response(
+          JSON.stringify({
+            status: "complete",
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            repo: "Acme/WebApp",
+            installationId: 7001,
+            repositoryId: 9001,
+            registrations: [{ kind: "repo", key: "acme/webapp", createdAt: 1, lastEventAt: null }],
+          }),
+          { status: 200 },
+        );
+      }
       const action = (body as { action: string }).action;
       if (action === "issue-token") {
         return new Response(
@@ -106,12 +120,14 @@ describe("relay-connect auth", () => {
           { status: 200 },
         );
       }
-      expect(action).toBe("register-repo");
+      expect(action).toBe("begin-github-pairing");
       return new Response(
         JSON.stringify({
           customerId: "user_1",
           licenseSource: "solo-automation",
-          registrations: [{ kind: "repo", key: "acme/webapp", createdAt: 1, lastEventAt: null }],
+          installUrl: "https://github.com/apps/devintern-ai/installations/new?state=abc",
+          pairingStatusUrl: `${RELAY_URL}/v1/github/pairings/abc`,
+          expiresAt: Date.now() + 60_000,
         }),
         { status: 200 },
       );
@@ -127,15 +143,30 @@ describe("relay-connect auth", () => {
 
     expect(state.relayToken).toBe("drt_repo_1");
     expect(state.registrations[0]?.key).toBe("acme/webapp");
-    expect(calls.map((c) => (c.body as { action: string }).action)).toEqual([
+    expect(state.github?.repositoryId).toBe(9001);
+    expect(calls.filter((c) => c.body).map((c) => (c.body as { action: string }).action)).toEqual([
       "issue-token",
-      "register-repo",
+      "begin-github-pairing",
     ]);
     expect(calls.every((c) => c.auth === "Bearer supa-access")).toBe(true);
   });
 
   test("registerRelaySource returns an ingest URL and keeps the relay token", async () => {
-    const fetchImpl = mockFetch((_url, body) => {
+    const fetchImpl = mockFetch((url, body) => {
+      if (url.includes("/v1/github/pairings/")) {
+        return new Response(
+          JSON.stringify({
+            status: "complete",
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            repo: "acme/web",
+            installationId: 7001,
+            repositoryId: 9001,
+            registrations: [{ kind: "repo", key: "acme/web", createdAt: 1, lastEventAt: null }],
+          }),
+          { status: 200 },
+        );
+      }
       const action = (body as { action: string }).action;
       if (action === "issue-token") {
         return new Response(
@@ -206,7 +237,21 @@ describe("relay-connect auth", () => {
   });
 
   test("runWorkerConnect github path mints a token and registers the repo", async () => {
-    const fetchImpl = mockFetch((_url, body) => {
+    const fetchImpl = mockFetch((url, body) => {
+      if (url.includes("/v1/github/pairings/")) {
+        return new Response(
+          JSON.stringify({
+            status: "complete",
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            repo: "acme/web",
+            installationId: 7001,
+            repositoryId: 9001,
+            registrations: [{ kind: "repo", key: "acme/web", createdAt: 1, lastEventAt: null }],
+          }),
+          { status: 200 },
+        );
+      }
       const action = (body as { action: string }).action;
       if (action === "issue-token") {
         return new Response(
@@ -222,7 +267,9 @@ describe("relay-connect auth", () => {
         JSON.stringify({
           customerId: "user_1",
           licenseSource: "solo-automation",
-          registrations: [{ kind: "repo", key: "acme/web", createdAt: 1, lastEventAt: null }],
+          installUrl: "https://github.com/apps/devintern-ai/installations/new?state=abc",
+          pairingStatusUrl: `${RELAY_URL}/v1/github/pairings/abc`,
+          expiresAt: Date.now() + 60_000,
         }),
         { status: 200 },
       );
@@ -239,5 +286,10 @@ describe("relay-connect auth", () => {
       relayToken: string;
     };
     expect(saved.relayToken).toBe("drt_cli_1");
+    const appRecord = JSON.parse(
+      readFileSync(join(dir, ".devintern-code", "github-app.json"), "utf8"),
+    ) as { installationId: number; repositoryId: number };
+    expect(appRecord.installationId).toBe(7001);
+    expect(appRecord.repositoryId).toBe(9001);
   });
 });
