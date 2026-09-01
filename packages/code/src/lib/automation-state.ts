@@ -55,6 +55,16 @@ export class AutomationStateStore {
     }
   }
 
+  /**
+   * Remove schedule state for an automation retired by a live config reload
+   * (removed from the config entirely). Rows for entries still present in
+   * the config — even disabled — are kept so re-enabling retains the
+   * interval anchor.
+   */
+  unregister(automationId: string): void {
+    this.db.run("DELETE FROM automation_schedules WHERE automation_id = ?", [automationId]);
+  }
+
   get(automationId: string): AutomationScheduleState | null {
     const row = this.db
       .query("SELECT * FROM automation_schedules WHERE automation_id = ?")

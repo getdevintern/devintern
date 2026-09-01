@@ -60,7 +60,7 @@ Do not change production code."""
 
 Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
-Configuration is validated as a group at worker startup and changes require a restart. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
+Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is
 
@@ -101,7 +101,7 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 
 | Symptom | Likely cause |
 | ---------------------------- | ------------------------------------------------------------ |
-| No occurrences fire after editing the TOML | Config is loaded at startup — restart the worker. Startup validation errors name the offending entry. |
+| No occurrences fire after editing the TOML | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately). |
 | `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
 | `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
 | Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
@@ -128,6 +128,8 @@ query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 ```
 
 Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana, GitHub comment-only); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+
+Estimation entries live-reload with `workspace.toml`: added and re-enabled entries schedule their next future occurrence, changed schedules reset their cursor, query edits apply to the next sweep, and removed entries stop scheduling without interrupting a sweep already in progress.
 
 When an entry comes due the worker runs one-shot `devintern --estimate --query "<query>"` from the workspace home. That path keeps all of the interactive behavior: tickets younger than 24 hours are skipped, already-estimated tickets are skipped unless the ticket changed since the estimate, changed tickets are re-estimated with the estimate comment updated in place, points are written to the tracker field, and usage-limit aborts exit cleanly so the next occurrence retries. Each sweep is recorded with its own `estimate` origin (plus the schedule id) in the [dashboard](./dashboard.md) — it never shows up as a scheduled implement run.
 
@@ -250,7 +252,7 @@ conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d
 
 In scheduled mode the poller still detects every conflict on the first tick it appears and queues it durably (a pending base-sync event), but the agent is not invoked. When the scheduled window arrives — cron uses the worker host timezone, intervals are relative — the worker resolves all queued conflicts in one pass and logs the active mode and next window at startup. The window stays open for a grace period (`WORKER_RESOLVE_WINDOW_GRACE_MINUTES`, default 60) so quiet-period waits and retry backoffs inside the pass can still complete; anything unresolved when it closes waits for the next window. A window that arrives while the worker is down (missed nightly run) catches up on the first tick after restart. Stale resolutions cannot happen: before invoking the agent the worker re-fetches the PR, and closed/merged PRs or a conflict that resolved itself are dropped from the queue without spending tokens. The manual `devintern resolve-conflicts <pr-url>` command always works on demand, and once GitHub reports a PR conflict-free its queued event never triggers an agent run.
 
-The setting applies to the whole workspace and takes effect on worker restart, like the rest of `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
+The setting applies to the whole workspace and live-reloads with `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
 

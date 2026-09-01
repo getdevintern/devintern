@@ -33,7 +33,7 @@ dashboard = true
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window
 # to cut AI token spend. Requires exactly one schedule below, and a worker
-# restart to take effect. "disabled" turns it off entirely — conflicts
+# changes apply to the running worker. "disabled" turns it off entirely — conflicts
 # stay for manual resolution (devintern resolve-conflicts <pr-url>).
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
@@ -65,8 +65,9 @@ default_branch = "main"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 
-# Recurring work is loaded once when the worker starts. Each occurrence runs
-# the prompt through the normal task pipeline as a local markdown task.
+# Recurring work is hot-reloaded: edits apply to the running worker without a
+# restart. Each occurrence runs the prompt through the normal task pipeline as
+# a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
 # 
 # [[automations]]

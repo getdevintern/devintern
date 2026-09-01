@@ -137,6 +137,35 @@ describe("TaskPollingAcquirer", () => {
     return { acquirer, seenCursors };
   }
 
+  test("reads task_query dynamically and stays dormant while it is absent", async () => {
+    let query: string | undefined;
+    const seenQueries: string[] = [];
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: () => query,
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        async changesSince() {
+          return { changed: true, nextCursor: "1" };
+        },
+      },
+      workerState,
+      queue,
+      searchTasks: async (activeQuery) => {
+        seenQueries.push(activeQuery);
+        return { tasks: [] };
+      },
+      executeTask: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(seenQueries).toEqual([]);
+    query = "status=ready";
+    await acquirer.tick();
+    expect(seenQueries).toEqual(["status=ready"]);
+  });
+
   test("executes query matches when a change is detected", async () => {
     const executed: string[] = [];
     const { acquirer } = makeAcquirer({

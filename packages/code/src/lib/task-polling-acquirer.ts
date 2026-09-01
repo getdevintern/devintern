@@ -43,7 +43,7 @@ function hasUpdateStamp(task: ReadyTask): boolean {
 export interface TaskPollingAcquirerOptions {
   trackerType: string;
   /** The user's task-selection query (same language as `--query`). */
-  query: string;
+  query: string | (() => string | undefined);
   intervalSeconds: number;
   detector: ChangeDetector;
   workerState: WorkerState;
@@ -107,9 +107,11 @@ export class TaskPollingAcquirer implements Acquirer {
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
+    const query = this.resolveQuery();
     console.log(
       `🔎 Polling ${this.options.trackerType} every ${this.options.intervalSeconds}s ` +
-        `(query: ${this.options.query})`,
+        `(query: ${query ?? "disabled until task_query is configured"})`,
     );
     await this.tick();
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
@@ -123,14 +125,27 @@ export class TaskPollingAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Apply a new poll cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
+  }
+
   /** One detect → evaluate → dedupe → execute cycle. Skipped while busy. */
   async tick(): Promise<void> {
     if (this.busy) {
       return;
     }
+    const query = this.resolveQuery();
+    if (!query) return;
     this.busy = true;
 
-    const { detector, workerState, queue, query, searchTasks, executeTask, verbose } = this.options;
+    const { detector, workerState, queue, searchTasks, executeTask, verbose } = this.options;
     try {
       const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursor);
@@ -188,6 +203,11 @@ export class TaskPollingAcquirer implements Acquirer {
     } finally {
       this.busy = false;
     }
+  }
+
+  private resolveQuery(): string | undefined {
+    const raw = this.options.query;
+    return typeof raw === "function" ? raw() : raw;
   }
 
   /**
