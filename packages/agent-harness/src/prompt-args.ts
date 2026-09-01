@@ -14,10 +14,20 @@ import type { AgentHarness } from "./types.js";
  * interactive TUI when no prompt argument is present and then fail without a
  * controlling terminal.
  *
+ * Positional prompts that begin with `-` (markdown frontmatter, bullet lists)
+ * would be parsed as CLI flags and rejected. Harnesses that declare an
+ * `endOfOptionsMarker` get the marker emitted before such a prompt.
+ *
  * @param harness - Harness definition supplying the optional `promptFlag`.
  * @param prompt - Full prompt text.
  * @returns Argv entries to append after `harness.buildArgs()` output.
  */
 export function buildPromptArgs(harness: AgentHarness, prompt: string): string[] {
-  return harness.promptFlag ? [harness.promptFlag, prompt] : [prompt];
+  if (harness.promptFlag) {
+    return [harness.promptFlag, prompt];
+  }
+  if (prompt.startsWith("-") && harness.endOfOptionsMarker) {
+    return [harness.endOfOptionsMarker, prompt];
+  }
+  return [prompt];
 }
