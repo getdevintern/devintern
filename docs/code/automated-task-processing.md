@@ -15,7 +15,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), offers relay pairing plus the DevIntern GitHub App (`@mention` handling on any PR; skipped App steps are reminded in the summary), and can generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers verified relay pairing through the DevIntern GitHub App (`@mention` handling on any PR). GitHub pairing is enabled only after the relay verifies the App installation and requested repository; skipped pairing is reminded in the summary. The wizard can also generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked.
 
 Do not schedule `devintern --query` every few minutes. That is what the worker already does.
 
