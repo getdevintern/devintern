@@ -3,7 +3,7 @@ title: "Observability Dashboard"
 description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, aggregate stats, run retries, and worker logs"
 section: "Server Automation"
 order: 2
-dateModified: 2026-08-27
+dateModified: 2026-08-29
 ---
 
 # Observability Dashboard
@@ -28,11 +28,14 @@ The standalone command reads the database in read-only mode, so it is safe to ru
 
 ## What it shows
 
-- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, scheduled, or estimate), agent harness, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs; `origin=estimate` isolates story-point sweeps).
+- **Run list**: every run with its status, task key or automation id, origin (tracker task, PR mention, scheduled, or estimate), agent harness, git branch, PR link, and duration. The task key links straight to the tracker ticket when the tracker's URL can be derived from your configuration; filter by status or origin (`origin=scheduled` isolates automation runs; `origin=estimate` isolates story-point sweeps). The harness and branch are recorded when the run starts, so runs from before they were recorded show `–`.
 - **Run detail**: the task key header (linked to its tracker ticket when possible) plus a snapshot of the original task description — captured when the run started and rendered as markdown — followed by a stage-by-stage timeline: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
+- **Agent PRs**: every pull request the worker created that is still open — repo, PR number, branch, linked ticket key, and age — with a direct link to each PR on GitHub. The worker reconciles this list with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out automatically.
 - **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
 - **Logs**: the most recent worker log lines (timestamp, severity, message), filterable by level (`everything` / `warnings` / `errors`) with a search box over the loaded window. Lines that mention a task key link straight to that task's latest run in the Runs view.
-- **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
+- **Worker status**: whether the daemon is running, queued and failed events, the open agent PR count (linked to the Agent PRs view), and per-source poll cursors.
+
+Worker liveness is read from the daemon's lock file, in the project's `.devintern-code/` directory and in the workspace home (`~/.devintern`), so the header is accurate whether the worker runs in the foreground or as a launchd/systemd service. When no lock file is found in either location, the header says "worker status unknown" instead of "stopped" — the dashboard may simply be pointed at a different directory than the worker.
 
 Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
 
@@ -106,9 +109,10 @@ The dashboard is backed by a small read-only JSON API you can use directly, for 
 | --------------------------- | --------------------------------------------------------------------- |
 | `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled` and `origin=estimate` are supported |
 | `GET /api/runs/:id`         | One run with its stage timeline and retry metadata                     |
+| `GET /api/agent-prs`        | Open agent-created PRs with GitHub links, branches, and ticket keys   |
 | `POST /api/runs/:id/retry`  | Schedule a re-run of the task behind a failed/escalated/abandoned run (requires sign-in) |
 | `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
-| `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
+| `GET /api/worker`           | Worker liveness (`running`, `stopped`, or `unknown`), queue counts, agent PR counts, poll cursors |
 | `GET /api/logs`             | Recent worker log entries (`limit` 1–1000, default 500; `level` all/info/warn/error) |
 | `GET /api/health`           | Health check                                                          |
 

@@ -110,7 +110,7 @@ The schedule uses the same format as `[[automations]]`: a five-field cron expres
 
 Two things are never delayed by scheduled mode: review feedback on the agent's PRs is addressed immediately as usual, and you can always run `devintern resolve-conflicts <pr-url>` by hand to fix one PR without waiting for the window — once GitHub reports the PR conflict-free, the queued event never triggers an agent run.
 
-The setting is workspace-wide (per-repo overrides are not supported in v1) and, like the rest of `workspace.toml`, requires a worker restart to take effect. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
+The setting is workspace-wide (per-repo overrides are not supported in v1) and live-reloads with the rest of the runtime configuration. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
 
 Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
 
@@ -157,9 +157,18 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The fleet query comes from `[defaults].task_query`. A workspace with automations or estimations can omit the query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Workspace, automation, and estimation configuration — schedule included — is loaded at startup; restart the worker after editing it. Schedule state, leases, and the last-drain timestamp for catch-up (for automations and estimations) live in the central workspace database.
+The fleet query comes from `[defaults].task_query`. A workspace with automations or estimations can omit the query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Schedule state, leases, and the last-drain timestamp for catch-up (for automations and estimations) live in the central workspace database.
 
 While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
+
+### Editing workspace.toml while running
+
+The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
+
+- **Routing rules, repos, `task_query`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
+- **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
+- **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.
 
 `devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
 

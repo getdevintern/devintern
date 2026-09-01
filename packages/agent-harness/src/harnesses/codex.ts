@@ -96,6 +96,12 @@ export class CodexHarness implements AgentHarness {
   readonly imageInput = "native" as const;
   /** `--json` prints stdout as newline-delimited JSON events (thread/turn/item). */
   readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by clap; without this marker a
+   * prompt starting with `-` (e.g. markdown frontmatter) fails with a usage
+   * error. Verified `codex exec -- "<prompt>"` executes normally.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build trailing `-i` flags for native image attachment.

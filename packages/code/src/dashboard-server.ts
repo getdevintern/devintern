@@ -16,6 +16,7 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleAgentPrs,
   handleLogs,
   handleRetryRun,
   handleRuns,
@@ -151,6 +152,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/agent-prs") {
+          return json(handleAgentPrs(data));
         }
         if (pathname === "/api/logs") {
           return json(handleLogs(data, url.searchParams));
