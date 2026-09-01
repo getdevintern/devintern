@@ -3,7 +3,7 @@ title: "Relay (Instant Events)"
 description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
 section: "Server Automation"
 order: 3
-dateModified: 2026-08-04
+dateModified: 2026-09-01
 ---
 
 # Relay (Instant Events)
@@ -19,6 +19,8 @@ An envelope is a reference, not a payload:
   "source": "github",
   "eventType": "pr.review_submitted",
   "repo": "acme/webapp",
+  "repoId": 987654321,
+  "installationId": 12345678,
   "ref": { "pr": 142 },
   "deliveryId": "gh-delivery-uuid",
   "ts": "2026-07-03T10:00:00Z"
@@ -32,6 +34,10 @@ If the relay is unreachable, nothing breaks: the worker's regular polling keeps 
 ## How authentication works
 
 Connect is an interactive step. The default `devintern worker init` flow offers sign-in, registers GitHub plus the active tracker, and stores the workspace's durable pairing under `~/.devintern/`. The relay verifies the session and your automation entitlement, then mints a durable **relay token** (`drt_…`). The worker uses that token for `/v1/status` and `/v1/events` long-polls, so polling survives session rotation, logouts, and password changes.
+
+GitHub repository registration is completed through the DevIntern AI GitHub App. The CLI prints a short-lived installation URL and waits while GitHub authorizes the App. The relay verifies that the signed-in GitHub user can access the requested repository through that installation before it records anything. Routing then uses GitHub's immutable installation and repository IDs—not the user-supplied `owner/name` slug. An installation already associated with another DevIntern account cannot be claimed or overwritten.
+
+GitHub connections created before verified pairing was introduced must run `devintern worker connect github --repo owner/name` once again. Old local confirmation markers and slug-only relay routes are deliberately not trusted. Normal worker polling continues while GitHub instant events are unpaired.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
 
@@ -72,8 +78,8 @@ devintern login
 # Pair this repo for GitHub App delivery
 devintern worker connect
 
-# Then install the DevIntern AI GitHub App on the repository when prompted,
-# and run the worker as usual:
+# Open the printed GitHub App URL and authorize the requested repository.
+# The command waits for verification, then you can run the worker:
 devintern worker
 ```
 
@@ -85,8 +91,8 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.
 
 | Command                                             | Description                                                                |
 | --------------------------------------------------- | -------------------------------------------------------------------------- |
-| `devintern worker connect`                          | Register this repository for relay delivery (auto-detects the GitHub repo) |
-| `devintern worker connect github --repo owner/name` | Register a specific repository                                             |
+| `devintern worker connect`                          | Verify and pair this repository through the GitHub App (auto-detected)     |
+| `devintern worker connect github --repo owner/name` | Verify and pair a specific repository through the GitHub App               |
 | `devintern worker connect linear`                   | Self-register a Linear webhook for Issue events                            |
 | `devintern worker connect asana`                    | Self-register an Asana webhook for task events                             |
 | `devintern worker connect trello`                   | Self-register a Trello webhook for card events                             |
