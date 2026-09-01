@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { execSync } from "child_process";
 import { Option, program } from "commander";
 import { config } from "dotenv";
 import {
@@ -19,7 +18,6 @@ import {
   getAuthenticatedUser,
   login,
   logout,
-  requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
 import { checkLicense, requireLicense } from "@devintern/license-check";
@@ -631,6 +629,40 @@ if (process.argv[2] === "init") {
       process.exit(exitCode);
     }
 
+    // `devintern worker run-now` — ask a running workspace worker for one
+    // immediate drain, bypassing working windows without editing them.
+    if (process.argv[3] === "run-now") {
+      const args = process.argv.slice(4);
+      let workspacePath: string | undefined;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === "--workspace" && args[i + 1] && !args[i + 1]?.startsWith("-")) {
+          workspacePath = args[i + 1];
+          i++;
+        } else if (arg === "--help" || arg === "-h") {
+          console.log("Usage: devintern worker run-now [--workspace <path>]");
+          console.log("");
+          console.log("Ask the running workspace worker to drain ready tasks now,");
+          console.log("ignoring working windows (quiet hours) for this one pass.");
+          console.log("The worker picks up the request on its next poll interval");
+          console.log("(default 60s) and deletes the marker once served.");
+          process.exit(0);
+        }
+      }
+      const { resolveWorkspaceDir, workspaceConfigPath, workspaceRunNowPath } =
+        await import("./lib/workspace/paths");
+      const selectedDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+      if (!existsSync(workspaceConfigPath(selectedDir))) {
+        console.error(`❌ No workspace.toml at ${workspaceConfigPath(selectedDir)}.`);
+        process.exit(1);
+      }
+      writeFileSync(workspaceRunNowPath(selectedDir), "");
+      console.log(`✅ Run-now requested for ${workspaceConfigPath(selectedDir)}`);
+      console.log(`   Marker: ${workspaceRunNowPath(selectedDir)}`);
+      console.log("   The worker drains within one poll interval and removes the marker.");
+      process.exit(0);
+    }
+
     const args = process.argv.slice(3);
 
     if (args[0] === "init") {
@@ -697,7 +729,7 @@ if (process.argv[2] === "init") {
       } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
       } else if (arg === "--help" || arg === "-h") {
-        console.log("Usage: devintern worker [init] [options]");
+        console.log("Usage: devintern worker [init|run-now] [options]");
         console.log("       devintern worker connect [github|status] [--repo owner/name]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
@@ -713,6 +745,7 @@ if (process.argv[2] === "init") {
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
         console.log("                      query (live dry run), and license check");
+        console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
         console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
@@ -813,8 +846,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Options:");
         console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --host <host>  Host to bind to (default: 127.0.0.1; no authentication,");
-        console.log("                 so binding beyond localhost is not recommended)");
+        console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
+        console.log("                 accepted: 127.0.0.1, localhost, ::1)");
         console.log("  -h, --help     Display this help message");
         process.exit(0);
       }

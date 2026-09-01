@@ -154,7 +154,7 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
       {data && data.automations.length === 0 ? (
         <EmptyState
           title="No automations configured"
-          body='Add [[automations]] entries (a schedule plus a prompt) to workspace.toml — or .devintern-code/automations.toml for a single repo — and restart the worker. "Run now" then appears here for instant validation.'
+          body='Add [[automations]] entries (a schedule plus a prompt) to workspace.toml — or .devintern-code/automations.toml for a single repo. The worker reloads workspace changes automatically; "Run now" then appears here for instant validation.'
         />
       ) : null}
 
@@ -191,8 +191,8 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
           Press <code className="font-mono">Run now</code> to execute the automation immediately
           through the same pipeline as its scheduled runs — including estimation outputs — and
           record the attempt with the <code className="font-mono">manual</code> origin so you can
-          tell those runs apart in the run list. Triggering requires signing in with{" "}
-          <code className="font-mono">devintern login</code>.
+          tell those runs apart in the run list. The dashboard remains accessible only on this
+          machine through a loopback address.
         </p>
       ) : null}
     </div>

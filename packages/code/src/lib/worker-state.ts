@@ -27,6 +27,9 @@ export interface Cursor {
 
 export type AgentPrState = "open" | "closed";
 
+/** `worker_meta` key holding the epoch ms of the last executed task drain. */
+export const TASK_POLL_LAST_DRAIN_KEY = "task-poll:last-drain-at";
+
 export type AddressedCommentType = "review" | "conversation";
 
 export interface AgentPr {
@@ -127,6 +130,14 @@ export class WorkerState {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_agent_prs_state
       ON agent_prs(state)
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS worker_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
     `);
 
     this.db.run(`
@@ -311,6 +322,26 @@ export class WorkerState {
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ? WHERE repo = ? AND pr_number = ?`,
       [Date.now(), repo, prNumber],
+    );
+  }
+
+  /**
+   * Read one metadata value (e.g. the last task-drain timestamp used by
+   * working-window catch-up). Returns null when never written.
+   */
+  getMeta(key: string): string | null {
+    const row = this.db.query(`SELECT value FROM worker_meta WHERE key = ?`).get(key) as {
+      value: string;
+    } | null;
+    return row?.value ?? null;
+  }
+
+  /** Upsert one metadata value. */
+  setMeta(key: string, value: string): void {
+    this.db.run(
+      `INSERT INTO worker_meta (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, value, Date.now()],
     );
   }
 

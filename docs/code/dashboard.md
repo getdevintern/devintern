@@ -10,7 +10,7 @@ dateModified: 2026-09-01
 
 `devintern dashboard` serves a local web dashboard over the worker's run history: every task, PR mention, and scheduled automation the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), aggregate stats like success rate and runs per week, run-now triggers for scheduled automations, a retry action for failed runs, and the worker's own log output.
 
-All data is read from the worker's local database (`.devintern-code/queue.db`). Nothing is uploaded anywhere: the dashboard runs on your machine and binds to localhost by default.
+All data is read from the worker's local database (`.devintern-code/queue.db`). Nothing is uploaded anywhere: the dashboard runs on your machine and is restricted to a loopback address.
 
 ## Quick Start
 
@@ -60,18 +60,16 @@ In both modes the new attempt appears as a fresh run in the run list; the dashbo
 Safeguards:
 
 - A confirmation prompt states exactly what will be re-run before anything starts.
-- The actor must be signed in (`devintern login`); when `DASHBOARD_RETRY_EMAILS` is set, only those support-role email addresses may trigger retries.
+- The dashboard is reachable only over loopback; remote binds are refused.
 - Retries are serialized per task: while a retry is already scheduled or running (including an attempt recorded by the worker), further triggers are refused.
-- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`): who retried, when, and against which original run. The run detail page lists this history under "Retry history".
+- Every trigger is audited in `.devintern-code/queue.db` (`run_retry_audit`) as `local-dashboard`, with its timestamp and original run target. The run detail page lists this history under "Retry history".
 
 ### Environment variables
 
-| Variable                        | Description                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `DASHBOARD_PORT`                | Port to listen on when `--port` is not given                                                      |
-| `DASHBOARD_RETRY_EMAILS`        | Comma-separated allowlist of emails authorized to trigger retries; unset means any signed-in user |
-| `DASHBOARD_AUTOMATION_EMAILS`   | Comma-separated allowlist of emails authorized to trigger automation runs; unset means any signed-in user |
-| `WORKER_RETRY_INTERVAL_SECONDS` | How often the workspace worker drains scheduled dashboard retries (default 5, minimum 1)          |
+| Variable                        | Description                                                                              |
+| ------------------------------- | ---------------------------------------------------------------------------------------- |
+| `DASHBOARD_PORT`                | Port to listen on when `--port` is not given                                             |
+| `WORKER_RETRY_INTERVAL_SECONDS` | How often the workspace worker drains scheduled dashboard retries (default 5, minimum 1) |
 
 ## Running an automation now
 
@@ -87,7 +85,7 @@ How the trigger executes depends on where the dashboard runs:
 Feedback and safeguards:
 
 - The button shows progress while the run starts and reports success (with a pointer to the run list) or the exact refusal reason when it completes. The run itself then reports its stages like any other run.
-- The actor must be signed in (`devintern login`); when `DASHBOARD_AUTOMATION_EMAILS` is set, only those email addresses may trigger automation runs.
+- The action is available only through the loopback-bound dashboard.
 - Disabled automations show no run action and are refused with an explanation if triggered via the API.
 - A run already in progress (scheduled or manual) blocks further triggers until it finishes, and a second rapid trigger is debounced while the first is still starting.
 - Overlap follows the scheduler's at-most-once policy: while a manual run is active, a scheduled occurrence coming due is skipped (logged), never run concurrently.
@@ -113,31 +111,31 @@ A few behaviors worth knowing:
 
 ## Options
 
-| Option          | Description                                           |
-| --------------- | ----------------------------------------------------- |
-| `--port <port>` | Port to listen on (default: 4400 or `DASHBOARD_PORT`) |
-| `--host <host>` | Host to bind to (default: 127.0.0.1)                  |
+| Option          | Description                                                                      |
+| --------------- | -------------------------------------------------------------------------------- |
+| `--port <port>` | Port to listen on (default: 4400 or `DASHBOARD_PORT`)                            |
+| `--host <host>` | Loopback host to bind to (default: 127.0.0.1; also accepts `localhost` or `::1`) |
 
-The dashboard has no authentication. It binds to localhost by default; binding to another host means anyone who can reach that address can read your run history, so keep it on your own machine or behind something that handles access for you.
+The dashboard currently uses loopback access as its security boundary. Both standalone dashboard mode and the dashboard embedded in `devintern worker` reject non-loopback hosts; remote access is not supported until request-level authentication is implemented.
 
 With `devintern worker`, set `[workspace].dashboard = false` to disable the embedded dashboard or `[workspace].dashboard_port` to change its port. A dashboard startup failure is reported but does not stop task processing.
 
 ## JSON API
 
-The dashboard is backed by a small read-only JSON API you can use directly, for example from scripts:
+The dashboard is backed by a small local JSON API you can use directly, for example from scripts:
 
-| Endpoint                          | Returns                                                               |
-| --------------------------------- | --------------------------------------------------------------------- |
-| `GET /api/runs`                   | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled`, `origin=manual`, and `origin=estimate` are supported |
-| `GET /api/runs/:id`               | One run with its stage timeline and retry metadata                     |
-| `GET /api/automations`            | Configured scheduled automations with schedule state and last run      |
-| `POST /api/automations/:id/run`   | Trigger a manual run of a scheduled automation (requires sign-in)      |
-| `GET /api/agent-prs`              | Open agent-created PRs with GitHub links, branches, and ticket keys   |
-| `POST /api/runs/:id/retry`        | Schedule a re-run of the task behind a failed/escalated/abandoned run (requires sign-in) |
-| `GET /api/stats?window=30d`       | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
-| `GET /api/worker`                 | Worker liveness (`running`, `stopped`, or `unknown`), queue counts, agent PR counts, poll cursors |
-| `GET /api/logs`                   | Recent worker log entries (`limit` 1–1000, default 500; `level` all/info/warn/error) |
-| `GET /api/health`                 | Health check                                                          |
+| Endpoint                        | Returns                                                                                                                                         |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/runs`                 | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`); `origin=scheduled`, `origin=manual`, and `origin=estimate` are supported |
+| `GET /api/runs/:id`             | One run with its stage timeline and retry metadata                                                                                              |
+| `GET /api/automations`          | Configured scheduled automations with schedule state and last run                                                                               |
+| `POST /api/automations/:id/run` | Trigger a manual run of a scheduled automation                                                                                                  |
+| `GET /api/agent-prs`            | Open agent-created PRs with GitHub links, branches, and ticket keys                                                                             |
+| `POST /api/runs/:id/retry`      | Schedule a re-run of the task behind a failed/escalated/abandoned run                                                                           |
+| `GET /api/stats?window=30d`     | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                                                                                                  |
+| `GET /api/worker`               | Worker liveness (`running`, `stopped`, or `unknown`), queue counts, agent PR counts, poll cursors                                               |
+| `GET /api/logs`                 | Recent worker log entries (`limit` 1–1000, default 500; `level` all/info/warn/error)                                                            |
+| `GET /api/health`               | Health check                                                                                                                                    |
 
 ## License
 

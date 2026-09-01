@@ -3,12 +3,7 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import {
-  DashboardData,
-  handleAutomations,
-  handleRunAutomation,
-  resolveAllowedAutomationEmails,
-} from "../src/lib/dashboard-api";
+import { DashboardData, handleAutomations, handleRunAutomation } from "../src/lib/dashboard-api";
 import type { AutomationRunDeps, DashboardAutomationView } from "../src/lib/dashboard-api";
 import { startDashboardServer } from "../src/dashboard-server";
 import { RunStore } from "../src/lib/run-recorder";
@@ -159,35 +154,16 @@ describe("dashboard automations (Run now)", () => {
     }
   });
 
-  test("handleRunAutomation validates the id, existence, and permissions", async () => {
+  test("handleRunAutomation validates the id and existence", async () => {
     const state = harness(dbPath, dir);
     try {
       expect((await handleRunAutomation(state.data, "", { resolveActor: ACTOR })).status).toBe(400);
       expect((await handleRunAutomation(state.data, "nope", { resolveActor: ACTOR })).status).toBe(
         404,
       );
-
-      const denied = await handleRunAutomation(state.data, "dependency-health", {
-        resolveActor: async () => null,
-      });
-      expect(denied.status).toBe(403);
-      expect((denied.body as { error: string }).error).toContain("devintern login");
-
-      const notAllowed = await handleRunAutomation(state.data, "dependency-health", {
-        resolveActor: ACTOR,
-        allowedEmails: ["other@example.com"],
-      });
-      expect(notAllowed.status).toBe(403);
     } finally {
       state.data.close();
     }
-  });
-
-  test("the DASHBOARD_AUTOMATION_EMAILS allowlist is parsed like the retry allowlist", () => {
-    expect(
-      resolveAllowedAutomationEmails({ DASHBOARD_AUTOMATION_EMAILS: " A@x.com, b@y.com " }),
-    ).toEqual(["a@x.com", "b@y.com"]);
-    expect(resolveAllowedAutomationEmails({})).toEqual([]);
   });
 
   test("handleRunAutomation refuses disabled automations and in-progress runs", async () => {
@@ -359,7 +335,7 @@ describe("dashboard server automation routes", () => {
     }
   });
 
-  test("requires sign-in before triggering (403 without deps)", async () => {
+  test("allows a loopback trigger without a CLI sign-in session", async () => {
     const server = startDashboardServer({
       port: 0,
       dbPath,
@@ -368,10 +344,10 @@ describe("dashboard server automation routes", () => {
     });
     try {
       const base = `http://127.0.0.1:${server.port}`;
-      const denied = await fetch(`${base}/api/automations/dependency-health/run`, {
+      const response = await fetch(`${base}/api/automations/dependency-health/run`, {
         method: "POST",
       });
-      expect(denied.status).toBe(403);
+      expect(response.status).toBe(202);
     } finally {
       server.stop(true);
     }

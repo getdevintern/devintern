@@ -3,7 +3,7 @@ title: "Worker Daemon"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Server Automation"
 order: 0
-dateModified: 2026-08-26
+dateModified: 2026-08-27
 ---
 
 # Worker Daemon
@@ -60,7 +60,7 @@ Do not change production code."""
 
 Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
-Configuration is validated as a group at worker startup and changes require a restart. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
+Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is
 
@@ -101,15 +101,15 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 
 ### Troubleshooting
 
-| Symptom | Likely cause |
-| ---------------------------- | ------------------------------------------------------------ |
-| No occurrences fire after editing the TOML | Config is loaded at startup — restart the worker. Startup validation errors name the offending entry. |
-| `occurrence skipped: previous run is active` | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule. |
-| `occurrence skipped: repository is busy` | Another task holds the repo run lock; the next occurrence will retry. |
-| Scheduled runs missing from the dashboard | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log). |
-| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`. |
-| A run failed and you need to know why | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)). |
-| The dashboard Logs tab is empty | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
+| Symptom                                              | Likely cause                                                                                                                                                                                                                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately).                                                   |
+| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                                                                                 |
+| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                                                                       |
+| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                                                                        |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                                                                          |
+| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                                                                      |
+| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
 
 ## Scheduled story-point estimation
 
@@ -130,6 +130,8 @@ query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 ```
 
 Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana, GitHub comment-only); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+
+Estimation entries live-reload with `workspace.toml`: added and re-enabled entries schedule their next future occurrence, changed schedules reset their cursor, query edits apply to the next sweep, and removed entries stop scheduling without interrupting a sweep already in progress.
 
 When an entry comes due the worker runs one-shot `devintern --estimate --query "<query>"` from the workspace home. That path keeps all of the interactive behavior: tickets younger than 24 hours are skipped, already-estimated tickets are skipped unless the ticket changed since the estimate, changed tickets are re-estimated with the estimate comment updated in place, points are written to the tracker field, and usage-limit aborts exit cleanly so the next occurrence retries. Each sweep is recorded with its own `estimate` origin (plus the schedule id) in the [dashboard](./dashboard.md) — it never shows up as a scheduled implement run.
 
@@ -200,6 +202,22 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
+## Working windows (quiet hours)
+
+The drain of ready tasks can be limited to wall-clock windows — nights only is the classic case — using `[worker.schedule]` in `workspace.toml`:
+
+```toml
+[worker.schedule]
+active = ["22:00-06:00"]   # pickup allowed only inside these daily windows
+blocked = []               # subtract from active windows; wins on conflict
+timezone = ""              # optional IANA name; blank = machine local time
+catch_up_missed = true     # one catch-up drain if a whole window elapsed unused
+```
+
+Windows are wall-clock per day, may cross midnight (`start` greater than `end`), union when multiple are set, and resolve overlaps toward staying quiet (`blocked` always wins). Only **new-task pickup** pauses: review replies, @mentions, recurring automations, and relay events run normally, and any task already picked up finishes even after its window closes.
+
+Timezone and DST details, missed-window catch-up, and status surfaces (startup banner, one-log-line-per-flip, dashboard strip) are described in [Working windows](./automated-task-processing.md#working-windows-quiet-hours). To force an immediate drain without touching the schedule, run `devintern worker run-now`.
+
 ## Options
 
 The daemon itself takes almost no flags. Durable settings live in `workspace.toml`:
@@ -215,10 +233,10 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 ```
 
-| Option              | Description                                                         |
-| ------------------- | ------------------------------------------------------------------- |
+| Option               | Description                                                       |
+| -------------------- | ----------------------------------------------------------------- |
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`) |
-| `-v, --verbose`     | Verbose logging                                                     |
+| `-v, --verbose`      | Verbose logging                                                   |
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 
@@ -252,7 +270,7 @@ conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d
 
 In scheduled mode the poller still detects every conflict on the first tick it appears and queues it durably (a pending base-sync event), but the agent is not invoked. When the scheduled window arrives — cron uses the worker host timezone, intervals are relative — the worker resolves all queued conflicts in one pass and logs the active mode and next window at startup. The window stays open for a grace period (`WORKER_RESOLVE_WINDOW_GRACE_MINUTES`, default 60) so quiet-period waits and retry backoffs inside the pass can still complete; anything unresolved when it closes waits for the next window. A window that arrives while the worker is down (missed nightly run) catches up on the first tick after restart. Stale resolutions cannot happen: before invoking the agent the worker re-fetches the PR, and closed/merged PRs or a conflict that resolved itself are dropped from the queue without spending tokens. The manual `devintern resolve-conflicts <pr-url>` command always works on demand, and once GitHub reports a PR conflict-free its queued event never triggers an agent run.
 
-The setting applies to the whole workspace and takes effect on worker restart, like the rest of `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
+The setting applies to the whole workspace and live-reloads with `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
 
@@ -283,11 +301,11 @@ Polling reacts within one interval (about a minute). On its default path, `worke
 
 ## Seeing what the worker did
 
-Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) at `http://localhost:4400` by default; set `[workspace].dashboard = false` to disable it, or `[workspace].dashboard_port` to change the port. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
+Every run is recorded stage by stage in the local database. The worker serves the [observability dashboard](./dashboard.md) on the loopback-only address `http://localhost:4400` by default; set `[workspace].dashboard = false` to disable it, or `[workspace].dashboard_port` to change the port. You can also run `devintern dashboard` standalone at any time (it works with the worker stopped too). If the dashboard port is unavailable, the worker logs a warning and continues processing.
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you need a wall-clock window instead of a resident process, see [Night-only CLI runs](./automated-task-processing.md#night-only-cli-runs).
+The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## License
 

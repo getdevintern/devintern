@@ -6,9 +6,8 @@
  * UI built from `packages/dashboard-ui`. Started standalone by
  * `devintern dashboard`, or alongside the daemon by `devintern worker`.
  *
- * All data stays in the customer's SQLite; the server binds to localhost by
- * default and there is no authentication, so a non-loopback host is warned
- * about loudly.
+ * All data stays in the customer's SQLite. The dashboard uses the loopback
+ * interface as its access boundary and refuses non-loopback binds.
  */
 
 import { existsSync } from "fs";
@@ -30,6 +29,16 @@ import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation-acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
+const LOOPBACK_DASHBOARD_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/** Whether a dashboard bind target is an explicitly supported loopback host. */
+export function isLoopbackDashboardHost(host: string): boolean {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  return LOOPBACK_DASHBOARD_HOSTS.has(normalized);
+}
 
 export interface DashboardServerOptions {
   port?: number;
@@ -37,6 +46,8 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Live working-window snapshot provider (embedded dashboard). */
+  scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
   /**
    * Retry execution mode (default `spawn`). The workspace worker passes
    * `schedule` so dashboard retries are drained through the fleet pipeline;
@@ -112,21 +123,22 @@ export function startDashboardServer(
   const port =
     options.port ?? parseInt(process.env.DASHBOARD_PORT || String(DEFAULT_DASHBOARD_PORT), 10);
   const host = options.host ?? "127.0.0.1";
+  if (!isLoopbackDashboardHost(host)) {
+    throw new Error(
+      `Dashboard host "${host}" is not loopback. ` +
+        "Remote dashboard access is disabled until request authentication is implemented; " +
+        "use 127.0.0.1, localhost, or ::1.",
+    );
+  }
   const data = new DashboardData({
     dbPath: options.dbPath,
     workingDir: options.workingDir,
+    scheduleSnapshot: options.scheduleSnapshot,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
     logDirs: options.logDirs,
   });
   const uiDir = resolveUiDir();
-
-  if (host !== "127.0.0.1" && host !== "localhost") {
-    console.warn(
-      `⚠️  Dashboard binding to ${host} — it has no authentication. ` +
-        "Anyone who can reach this address can read run history.",
-    );
-  }
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;

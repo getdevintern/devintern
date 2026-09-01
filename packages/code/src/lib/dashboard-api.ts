@@ -1,10 +1,10 @@
 /**
  * Dashboard API
  *
- * Read-only JSON handlers over the worker's local state (SQLite run records,
- * agent PRs, cursors, queue counts, plus the tailed worker capture files).
- * Pure functions over a lazily opened read-only database so they are testable
- * without HTTP; `dashboard-server.ts` maps them to routes.
+ * JSON handlers over the worker's local state (SQLite run records, agent PRs,
+ * cursors, queue counts, plus the tailed worker capture files). Most reads use
+ * a lazily opened database; explicit local actions also write retry/audit state.
+ * `dashboard-server.ts` maps the handlers to routes.
  *
  * The database may not exist yet (fresh install, worker never run) or may
  * predate some tables (older versions). Every handler degrades to an empty
@@ -21,9 +21,9 @@ import type {
 import { loadStandaloneAutomationActions } from "./automation-manual";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import type { ScheduleSnapshot } from "./schedule";
 import {
   isRunRetriable,
-  resolveDashboardActor,
   RunRetryAuditStore,
   ScheduledRetryStore,
   spawnCliForceRetry,
@@ -79,6 +79,11 @@ export interface DashboardDataOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Live working-window snapshot from the worker process (embedded
+   * dashboard only; standalone servers return null).
+   */
+  scheduleSnapshot?: () => ScheduleSnapshot | null;
   /**
    * How a retry is executed. `spawn` (default) starts a detached CLI
    * subprocess — correct for a standalone `devintern dashboard` running
@@ -183,6 +188,7 @@ export class DashboardData {
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
   private stores: Stores | null = null;
+  private readonly scheduleSnapshot: () => ScheduleSnapshot | null;
   /** Lazy read-write connection for the retry audit trail. */
   private retryAuditStore: RunRetryAuditStore | null = null;
   /** Lazy read-write connection for scheduled retries (schedule mode). */
@@ -207,6 +213,7 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -454,6 +461,15 @@ export class DashboardData {
     return this.read([], (stores) => stores.state.listCursors());
   }
 
+  /** Working-window status from the worker process, or null when disabled. */
+  getScheduleSnapshot(): ScheduleSnapshot | null {
+    try {
+      return this.scheduleSnapshot();
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Tail the worker's capture files and link entries to their latest run.
    * File reads are bounded (see `readWorkerLogs`); a missing DB only skips
@@ -524,10 +540,6 @@ function conflict(message: string): ApiResponse {
   return { status: 409, body: { error: message } };
 }
 
-function forbidden(message: string): ApiResponse {
-  return { status: 403, body: { error: message } };
-}
-
 /** No-automation bridge for worker-embedded dashboards whose worker runs none. */
 const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
   list: () => [],
@@ -536,29 +548,13 @@ const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
 
 /**
  * Injectable collaborators for {@link handleRetryRun}, so tests can fake the
- * signed-in user and the spawned process.
+ * audit actor and spawned process.
  */
 export interface RetryHandlerDeps {
-  /** Resolve the acting support engineer; null = not signed in. */
+  /** Resolve an optional audit identity; loopback access is the security boundary. */
   resolveActor?: (workingDir: string) => Promise<RetryActor | null>;
   /** Start the CLI retry flow for a task. */
   spawn?: (taskKey: string, workingDir: string) => SpawnedRetryProcess;
-  /**
-   * Authorized support-role emails. When non-empty, only these may trigger a
-   * retry from the dashboard; when empty, any signed-in devintern user can.
-   */
-  allowedEmails?: readonly string[];
-}
-
-/**
- * Parse the comma-separated allowlist of authorized support roles
- * (`DASHBOARD_RETRY_EMAILS`).
- */
-export function resolveAllowedRetryEmails(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.DASHBOARD_RETRY_EMAILS ?? "")
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0);
 }
 
 /** How long a triggered retry blocks further retries of the same task. */
@@ -570,9 +566,7 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
  * Safeguards, in order:
  * 1. the run must exist,
  * 2. it must be eligible (failed/escalated/abandoned with a task key),
- * 3. the caller must be signed in (and on the support-role allowlist when
- *    `DASHBOARD_RETRY_EMAILS` is configured),
- * 4. no other retry may be in flight for the task (dashboard or worker — an
+ * 3. no other retry may be in flight for the task (dashboard or worker — an
  *    `in_progress` run for the same task key also blocks).
  *
  * Two execution modes, picked by the server options:
@@ -611,20 +605,8 @@ export async function handleRetryRun(
   }
   const taskKey = run.taskKey;
 
-  const actor =
-    (await deps.resolveActor?.(data.workingDir)) ?? (await resolveDashboardActor(data.workingDir));
-  if (!actor) {
-    return forbidden("sign in first with `devintern login` to retry runs");
-  }
-
-  const allowedEmails = deps.allowedEmails ?? resolveAllowedRetryEmails();
-  const actorEmail = actor.email?.toLowerCase();
-  if (
-    allowedEmails.length > 0 &&
-    (!actorEmail || !allowedEmails.some((entry) => entry.toLowerCase() === actorEmail))
-  ) {
-    return forbidden(`${actor.email ?? "this user"} is not authorized to retry runs`);
-  }
+  const actor = await deps.resolveActor?.(data.workingDir);
+  const actorLabel = actor?.email ?? "local-dashboard";
 
   // Concurrent retries: another dashboard retry for this task, or a live run
   // for the task (the worker records one as soon as it picks the ticket up).
@@ -646,14 +628,14 @@ export async function handleRetryRun(
 
   if (data.retryMode === "schedule") {
     const store = data.getScheduledRetryStore();
-    const scheduled = store.schedule({ taskKey, runId: id, actor: actor.email ?? "unknown" });
+    const scheduled = store.schedule({ taskKey, runId: id, actor: actorLabel });
     if (!scheduled.scheduled) {
       return conflict(`a retry of ${taskKey} is already scheduled or running`);
     }
     data.getRetryAuditStore().record({
       runId: id,
       taskKey,
-      actor: actor.email ?? "unknown",
+      actor: actorLabel,
       action: "scheduled",
       message: "queued for the worker",
     });
@@ -681,7 +663,7 @@ export async function handleRetryRun(
     data.getRetryAuditStore().record({
       runId: id,
       taskKey,
-      actor: actor.email ?? "unknown",
+      actor: actorLabel,
       action: "failed",
       message,
     });
@@ -691,7 +673,7 @@ export async function handleRetryRun(
   data.getRetryAuditStore().record({
     runId: id,
     taskKey,
-    actor: actor.email ?? "unknown",
+    actor: actorLabel,
     action: "triggered",
     command: spawned.command,
     pid: spawned.pid,
@@ -711,29 +693,13 @@ export async function handleRetryRun(
 
 /**
  * Injectable collaborators for {@link handleRunAutomation}, so tests can fake
- * the signed-in user and the manual-run trigger.
+ * the optional audit identity and manual-run trigger.
  */
 export interface AutomationRunDeps {
-  /** Resolve the acting user; null = not signed in. */
+  /** Resolve an optional audit identity; loopback access is the security boundary. */
   resolveActor?: (workingDir: string) => Promise<RetryActor | null>;
   /** Start one manual run of the automation. */
   trigger?: (automationId: string) => Promise<ManualTriggerOutcome>;
-  /**
-   * Authorized emails. When non-empty, only these may trigger manual runs
-   * from the dashboard; when empty, any signed-in devintern user can.
-   */
-  allowedEmails?: readonly string[];
-}
-
-/**
- * Parse the comma-separated allowlist of emails allowed to trigger manual
- * automation runs (`DASHBOARD_AUTOMATION_EMAILS`).
- */
-export function resolveAllowedAutomationEmails(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.DASHBOARD_AUTOMATION_EMAILS ?? "")
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0);
 }
 
 /**
@@ -753,9 +719,7 @@ export function handleAutomations(data: DashboardData): ApiResponse {
  *
  * Safeguards, in order:
  * 1. the automation must be configured,
- * 2. the caller must be signed in (and on the `DASHBOARD_AUTOMATION_EMAILS`
- *    allowlist when configured),
- * 3. the automation must be enabled — a disabled automation is refused with
+ * 2. the automation must be enabled — a disabled automation is refused with
  *    a message instead of silently running,
  * 4. no run of the automation may be in progress (dashboard or worker), and
  *    a second rapid trigger is debounced by an in-flight claim,
@@ -788,21 +752,6 @@ export async function handleRunAutomation(
   const automation = automations.find((item) => item.id === automationId);
   if (!automation) {
     return { status: 404, body: { error: `automation "${automationId}" not found` } };
-  }
-
-  const actor =
-    (await deps.resolveActor?.(data.workingDir)) ?? (await resolveDashboardActor(data.workingDir));
-  if (!actor) {
-    return forbidden("sign in first with `devintern login` to trigger automations");
-  }
-
-  const allowedEmails = deps.allowedEmails ?? resolveAllowedAutomationEmails();
-  const actorEmail = actor.email?.toLowerCase();
-  if (
-    allowedEmails.length > 0 &&
-    (!actorEmail || !allowedEmails.some((entry) => entry.toLowerCase() === actorEmail))
-  ) {
-    return forbidden(`${actor.email ?? "this user"} is not authorized to trigger automations`);
   }
 
   if (!automation.enabled) {
@@ -968,6 +917,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       worker: resolveWorkerStatus(data.workingDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
+      schedule: data.getScheduleSnapshot(),
       cursors: data.getCursors().map((cursor) => ({
         source: cursor.source,
         cursorValue: cursor.cursorValue,

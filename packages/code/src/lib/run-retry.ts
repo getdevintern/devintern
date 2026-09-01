@@ -12,11 +12,9 @@
  * succeeded/deferred runs and runs without a ticket are rejected up front.
  */
 
-import { createDefaultSupabaseAuthConfig, getAuthenticatedUser } from "@devintern/auth";
 import { Database } from "bun:sqlite";
-import { basename, join } from "path";
+import { basename } from "path";
 
-import { resolveConfigDir } from "@devintern/utils";
 import type { RunRecord, RunStatus } from "./run-recorder";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 
@@ -60,33 +58,9 @@ export function isRunRetriable(run: Pick<RunRecord, "status" | "taskKey">): Retr
   }
 }
 
-/** A parsed devintern sign-in session, reduced to what auditing needs. */
+/** Optional audit identity supplied by an embedding application. */
 export interface RetryActor {
   email: string | null;
-}
-
-/**
- * Resolve the acting user from the CLI login session
- * (`.devintern-code/.auth-session.json`). Null when nobody is signed in or
- * the session can no longer be validated.
- */
-export async function resolveDashboardActor(
-  workingDir: string = process.cwd(),
-): Promise<RetryActor | null> {
-  try {
-    const configDir = resolveConfigDir({
-      configDirName: ".devintern-code",
-      startDir: workingDir,
-    });
-    const user = await getAuthenticatedUser(
-      createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json")),
-    );
-    return user ? { email: user.email } : null;
-  } catch {
-    // Auth infrastructure unavailable (offline, corrupt session) — treat as
-    // signed out; the handler surfaces a sign-in hint.
-    return null;
-  }
 }
 
 /** One audited retry attempt against an original run. */

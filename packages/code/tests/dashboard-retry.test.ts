@@ -3,12 +3,7 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import {
-  DashboardData,
-  handleRetryRun,
-  handleRunDetail,
-  resolveAllowedRetryEmails,
-} from "../src/lib/dashboard-api";
+import { DashboardData, handleRetryRun, handleRunDetail } from "../src/lib/dashboard-api";
 import type { RetryHandlerDeps } from "../src/lib/dashboard-api";
 import { isRunRetriable, ScheduledRetryStore } from "../src/lib/run-retry";
 import type { SpawnedRetryProcess } from "../src/lib/run-retry";
@@ -135,31 +130,16 @@ describe("handleRetryRun", () => {
     }
   });
 
-  test("requires a signed-in actor", async () => {
+  test("uses a local audit identity when no signed-in actor is available", async () => {
     const id = seedFailedRun();
     const { deps } = stubDeps({ resolveActor: async () => null });
 
     const response = await handleRetryRun(data, String(id), deps);
-    expect(response.status).toBe(403);
-    expect((response.body as { error: string }).error).toContain("devintern login");
-  });
-
-  test("honors the support-role allowlist when configured", async () => {
-    const id = seedFailedRun();
-    const stranger = stubDeps({ allowedEmails: ["support-team@example.com"] });
-
-    const denied = await handleRetryRun(data, String(id), stranger.deps);
-    expect(denied.status).toBe(403);
-
-    const granted = await handleRetryRun(
-      data,
-      String(seedFailedRun()),
-      stubDeps({
-        allowedEmails: ["SUP@Example.com"],
-        resolveActor: async () => ({ email: "sup@example.com" }),
-      }).deps,
-    );
-    expect(granted.status).toBe(202);
+    expect(response.status).toBe(202);
+    const detail = handleRunDetail(data, String(id)).body as {
+      retry: { audit: { actor: string }[] };
+    };
+    expect(detail.retry.audit[0]?.actor).toBe("local-dashboard");
   });
 
   test("blocks concurrent retries of the same task", async () => {
@@ -392,15 +372,5 @@ describe("ScheduledRetryStore", () => {
     store.finish(store.claimNext()!.id, "done");
     expect(store.schedule({ taskKey: "PROJ-1", actor: "b@x.com" }).scheduled).toBe(true);
     store.close();
-  });
-});
-
-describe("resolveAllowedRetryEmails", () => {
-  test("parses a comma-separated allowlist case-insensitively", () => {
-    expect(resolveAllowedRetryEmails({ DASHBOARD_RETRY_EMAILS: " A@x.com ,b@y.io," })).toEqual([
-      "a@x.com",
-      "b@y.io",
-    ]);
-    expect(resolveAllowedRetryEmails({})).toEqual([]);
   });
 });
