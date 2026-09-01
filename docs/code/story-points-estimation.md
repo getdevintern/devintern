@@ -122,6 +122,8 @@ query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 
 Each entry needs a unique `id`, boolean `enabled`, a non-empty `query`, and exactly one of `cron` or `interval`. There is no `prompt` and no `repo`: a due entry runs one-shot `devintern --estimate --query "<query>"`, which estimates — never implements, branches, or opens PRs. Estimating does not depend on `[defaults].task_query`; an omitted or empty `[[estimations]]` table simply means estimation is off.
 
+You can add, remove, enable, disable, reschedule, or change the query of an estimation entry while the worker is running. The worker validates and reconciles the edit automatically without interrupting an in-progress sweep.
+
 Notes:
 
 - Works with Jira, Linear, Azure DevOps, Asana, and GitHub (comment-only). Trello/markdown workspaces fail at startup.

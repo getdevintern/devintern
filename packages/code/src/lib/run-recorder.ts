@@ -15,7 +15,13 @@
 import { Database } from "bun:sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled" | "estimate";
+export type RunOrigin =
+  | "task"
+  | "pr_mention"
+  | "conflict_resolution"
+  | "scheduled"
+  | "estimate"
+  | "manual";
 
 export type RunStatus =
   | "in_progress"
@@ -92,6 +98,7 @@ export interface RunFilter {
   taskKey?: string;
   status?: RunStatus;
   origin?: RunOrigin;
+  automationId?: string;
 }
 
 export interface RunStatsWeek {
@@ -327,6 +334,21 @@ export class RunStore {
   }
 
   /**
+   * Attach the working branch to a run.
+   *
+   * The branch is recorded once the pipeline has created (or resumed) it,
+   * because the actual branch name can gain an attempt suffix. Fields already
+   * set are never clobbered (`COALESCE`), so pr_mention runs that recorded
+   * their branch at start keep it.
+   *
+   * @param runId - Run id
+   * @param branch - Git branch the run operates on
+   */
+  setRunBranch(runId: number, branch: string): void {
+    this.db.run(`UPDATE runs SET branch = COALESCE(branch, ?) WHERE id = ?`, [branch, runId]);
+  }
+
+  /**
    * Attach the originating tracker ticket to a run.
    *
    * Fields already set are never clobbered (`COALESCE`), so a late snapshot
@@ -421,6 +443,10 @@ export class RunStore {
     if (filter.origin) {
       clauses.push("origin = ?");
       params.push(filter.origin);
+    }
+    if (filter.automationId) {
+      clauses.push("automation_id = ?");
+      params.push(filter.automationId);
     }
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
@@ -526,6 +552,7 @@ export class RunStore {
       conflict_resolution: 0,
       scheduled: 0,
       estimate: 0,
+      manual: 0,
     };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
@@ -698,6 +725,25 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Attach the working branch to the current run (no-op when no run is active).
+ * Called once the pipeline has created or resumed the feature branch, since
+ * the actual branch name can gain an attempt suffix that is unknowable at
+ * `beginRun` time.
+ *
+ * @param branch - Git branch the run operates on
+ */
+export function recordRunBranch(branch: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunBranch(currentRunId, branch);
+  } catch (error) {
+    warnOnce("branch", error);
   }
 }
 
