@@ -88,6 +88,11 @@ export interface RetryAuditEntry {
 /** Retry metadata embedded in a run-detail response. */
 export interface RetryInfo {
   eligible: boolean;
+  /**
+   * How the retry dispatches: `task` forces the task key through the CLI,
+   * `automation` re-runs the automation that produced the run.
+   */
+  kind?: "task" | "automation";
   reason?: string;
   /** Recent dashboard retries of this run, most recent first. */
   audit: RetryAuditEntry[];

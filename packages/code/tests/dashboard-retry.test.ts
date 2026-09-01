@@ -36,9 +36,12 @@ function stubDeps(overrides: Partial<RetryHandlerDeps> = {}): {
 }
 
 describe("isRunRetriable", () => {
-  test("failed, escalated, and abandoned runs with a task key are eligible", () => {
+  test("failed, escalated, and abandoned runs with a task key are eligible as task retries", () => {
     for (const status of ["failed", "escalated", "abandoned"] as RunStatus[]) {
-      expect(isRunRetriable({ status, taskKey: "PROJ-1" })).toEqual({ eligible: true });
+      expect(isRunRetriable({ status, taskKey: "PROJ-1" })).toEqual({
+        eligible: true,
+        kind: "task",
+      });
     }
   });
 
@@ -53,6 +56,51 @@ describe("isRunRetriable", () => {
   test("runs without a task key can never be retried", () => {
     expect(isRunRetriable({ status: "failed" }).eligible).toBe(false);
     expect(isRunRetriable({ status: "succeeded" }).reason).toContain("no task key");
+  });
+
+  test("failed automation runs retry as automation re-runs despite a markdown-stem key", () => {
+    for (const status of ["failed", "escalated", "abandoned"] as RunStatus[]) {
+      expect(
+        isRunRetriable({
+          status,
+          taskKey: "2026-08-31t21-00-00-845z",
+          origin: "scheduled",
+          automationId: "weekly-cleanup",
+        }),
+      ).toEqual({ eligible: true, kind: "automation" });
+      expect(
+        isRunRetriable({
+          status,
+          taskKey: "2026-08-31t21-00-00-845z",
+          origin: "manual",
+          automationId: "weekly-cleanup",
+        }),
+      ).toEqual({ eligible: true, kind: "automation" });
+    }
+  });
+
+  test("non-terminal automation runs follow the standard status rules", () => {
+    const run = {
+      taskKey: "2026-08-31t21-00-00-845z",
+      origin: "scheduled" as const,
+      automationId: "weekly-cleanup",
+    };
+    for (const status of ["succeeded", "in_progress", "deferred"] as RunStatus[]) {
+      const result = isRunRetriable({ ...run, status });
+      expect(result.eligible).toBe(false);
+      expect(result.reason).toBeString();
+    }
+  });
+
+  test("estimation sweeps are never hand-retriable", () => {
+    const result = isRunRetriable({
+      status: "failed",
+      taskKey: "PROJ-1",
+      origin: "estimate",
+      automationId: "weekly-estimates",
+    });
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toContain("estimation");
   });
 });
 
@@ -202,6 +250,137 @@ describe("handleRetryRun", () => {
     };
     expect(detailBody.retry.audit[0].action).toBe("failed");
     expect(detailBody.retry.audit[0].message).toContain("entry point missing");
+  });
+
+  test("re-runs the automation instead of forcing the markdown stem as a key", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "scheduled",
+      taskKey: "2026-08-31t21-00-00-845z",
+      automationId: "weekly-cleanup",
+    });
+    store.finishRun(id, "failed", "agent exited non-zero");
+    store.close();
+
+    const triggered: string[] = [];
+    const automationData = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      automationActions: {
+        list: () => [{ id: "weekly-cleanup", enabled: true, prompt: "tidy the repo" }],
+        trigger: (automationId) => {
+          triggered.push(automationId);
+          return Promise.resolve({ ok: true });
+        },
+      },
+    });
+
+    const { deps, spawned } = stubDeps();
+    const response = await handleRetryRun(automationData, String(id), deps);
+    expect(response.status).toBe(202);
+    const body = response.body as { status: string; automationId?: string };
+    expect(body.status).toBe("triggered");
+    expect(body.automationId).toBe("weekly-cleanup");
+    expect(triggered).toEqual(["weekly-cleanup"]);
+    // The task-key force path must never fire for an automation run.
+    expect(spawned).toEqual([]);
+
+    const detailBody = handleRunDetail(automationData, String(id)).body as {
+      retry: {
+        eligible: boolean;
+        kind?: string;
+        audit: { action: string; message?: string }[];
+      };
+    };
+    expect(detailBody.retry.eligible).toBe(true);
+    expect(detailBody.retry.kind).toBe("automation");
+    expect(detailBody.retry.audit[0].action).toBe("triggered");
+    expect(detailBody.retry.audit[0].message).toContain("weekly-cleanup");
+    automationData.close();
+  });
+
+  test("refuses an automation retry when a run of the automation is live", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "scheduled",
+      taskKey: "2026-08-31t21-00-00-845z",
+      automationId: "weekly-cleanup",
+    });
+    store.finishRun(id, "failed");
+    store.createRun({
+      origin: "scheduled",
+      taskKey: "2026-08-31t22-00-00-000z",
+      automationId: "weekly-cleanup",
+    }); // stays in_progress
+    store.close();
+
+    const automationData = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      automationActions: {
+        list: () => [{ id: "weekly-cleanup", enabled: true, prompt: "tidy the repo" }],
+        trigger: () => Promise.resolve({ ok: true }),
+      },
+    });
+
+    const response = await handleRetryRun(automationData, String(id), stubDeps().deps);
+    expect(response.status).toBe(409);
+    expect((response.body as { error: string }).error).toContain("in progress");
+    automationData.close();
+  });
+
+  test("refuses an automation retry when the automation left the config", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "scheduled",
+      taskKey: "2026-08-31t21-00-00-845z",
+      automationId: "removed-automation",
+    });
+    store.finishRun(id, "failed");
+    store.close();
+
+    const automationData = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      automationActions: {
+        list: () => [{ id: "weekly-cleanup", enabled: true, prompt: "tidy the repo" }],
+        trigger: () => Promise.resolve({ ok: true }),
+      },
+    });
+
+    const response = await handleRetryRun(automationData, String(id), stubDeps().deps);
+    expect(response.status).toBe(404);
+    expect((response.body as { error: string }).error).toContain("removed-automation");
+    automationData.close();
+  });
+
+  test("surfaces the automation trigger's refusal as a 409", async () => {
+    const store = new RunStore(dbPath);
+    const id = store.createRun({
+      origin: "scheduled",
+      taskKey: "2026-08-31t21-00-00-845z",
+      automationId: "weekly-cleanup",
+    });
+    store.finishRun(id, "failed");
+    store.close();
+
+    const automationData = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      automationActions: {
+        list: () => [{ id: "weekly-cleanup", enabled: true, prompt: "tidy the repo" }],
+        trigger: () =>
+          Promise.resolve({
+            ok: false,
+            reason: 'automation "weekly-cleanup" is disabled; enable it in the config first',
+          }),
+      },
+    });
+
+    const response = await handleRetryRun(automationData, String(id), stubDeps().deps);
+    expect(response.status).toBe(409);
+    expect((response.body as { error: string }).error).toContain("disabled");
+    automationData.close();
   });
 });
 

@@ -44,13 +44,19 @@ The ticket link and description snapshot work for remote trackers whose web URLs
 
 ## Retrying a run
 
-Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a **Retry this run** action on the run detail page. Confirming it schedules the same flow a support engineer would run by hand:
+Failed, escalated, and abandoned runs (and only those — succeeded runs have nothing to redo, deferred runs retry on their own schedule, and in-progress runs are still going) show a retry action on the run detail page, tailored to the run's type:
+
+- **Task runs** (a tracker ticket, PR mention, or markdown file) show **Retry this run**. Confirming it schedules the same flow a support engineer would run by hand:
 
 ```bash
 devintern PROJ-123 --force
 ```
 
-How the retry executes depends on where the dashboard runs:
+- **Automation runs** (origin `scheduled` or `manual` with an automation id) show **Re-run automation**. Their recorded "task key" is only the markdown occurrence file's stem — not a tracker key — so forcing it would just fail against the tracker. Instead, the retry re-triggers the automation itself through the exact "Run now" pipeline below (same overlap safeguards: no concurrent run, disabled automations are refused, spawn-mode debounce).
+
+Estimation sweeps are not hand-retriable; they re-run on their own schedule.
+
+How the retry executes depends on where the dashboard runs (task runs only; automation re-runs always go through the automation pipeline described below):
 
 - **Workspace worker (fleet mode)** — the default dashboard served by `devintern worker` inserts the retry into the shared workspace database, and the worker's retry-queue acquirer picks it up (default every 5 seconds, tunable with `WORKER_RETRY_INTERVAL_SECONDS`). The retry then runs through exactly the same pipeline as any fleet task: routing rules pick the repo, the task gets a disposable worktree from the bare clone, the per-repo environment applies, and the repo run lock serializes concurrent work. `--force` bypasses the incomplete-attempt retry gate, like the manual CLI flow.
 - **Standalone `devintern dashboard`** — when the dashboard runs by itself inside a repo checkout, it spawns `devintern <TASK> --force` as its own subprocess instead, mirroring the manual CLI flow; branch selection, worktree handling, and comments behave exactly like the CLI.
