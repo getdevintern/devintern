@@ -3,7 +3,7 @@ title: "Automated Task Processing"
 description: "Drain your backlog continuously with the worker daemon"
 section: "Server Automation"
 order: 5
-dateModified: 2026-08-27
+dateModified: 2026-09-01
 ---
 
 # Automated Task Processing
@@ -21,7 +21,7 @@ Do not schedule `devintern --query` every few minutes. That is what the worker a
 
 ## Requires an automation license
 
-Unattended execution (the worker, a systemd timer, cron, or any CI environment) requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds no matching license, the run fails immediately with:
+Unattended execution (the worker or any CI environment) requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds no matching license, the run fails immediately with:
 
 ```
 ❌ License check failed
@@ -81,7 +81,7 @@ The command writes a `.run-now` marker into the workspace home; the worker consu
 - Every open/close flip is logged exactly once: `🌙 [schedule] outside the working window … ` / `☀️ [schedule] working window opened …`.
 - The [dashboard](./dashboard.md) header shows the active state plus when the window next opens or closes; `/api/worker` exposes the same snapshot as JSON (`schedule`).
 
-The only CLI run still worth putting on a timer is story-point estimation, which the worker does not schedule yet — see [Story Points Estimation](./story-points-estimation.md). Omit `--pr-target-branch` there unless you intentionally want PRs against a non-default branch; the CLI detects `main`, `master`, or a custom default from the remote.
+Scheduled story-point estimation is a worker job too — see `[[estimations]]` in [Story Points Estimation](./story-points-estimation.md). No CLI runs on timers.
 
 ### Keeping unattended runs healthy
 
@@ -121,16 +121,10 @@ A `--user` service inherits your `$HOME` and reads this automatically; a system 
 
 While working a task, the AI agent often starts long-running processes to verify its changes: dev servers (`npm run dev`, `vite`), watchers, `docker compose up`, and so on. If the agent does not stop them, they would otherwise outlive the run and pile up across every execution.
 
-@devintern/code prevents this. Each agent is launched in its own process group, and the entire group (the agent plus anything it spawned) is torn down when the run ends, times out, or is interrupted — the same under the worker, systemd timers, cron, and macOS, so you do not need to do anything to enable it:
+@devintern/code prevents this. Each agent is launched in its own process group, and the entire group (the agent plus anything it spawned) is torn down when the run ends, times out, or is interrupted — the same however the worker is launched (systemd, launchd, a plain terminal), so you do not need to do anything to enable it:
 
-1. **In-process reaping (all platforms).** @devintern/code signals the whole process group on completion, on timeout, and on `SIGINT` / `SIGTERM` / `SIGHUP`. This protects schedulers without init-level cleanup of their own.
+1. **In-process reaping (all platforms).** @devintern/code signals the whole process group on completion, on timeout, and on `SIGINT` / `SIGTERM` / `SIGHUP`. This protects launch methods without init-level cleanup of their own.
 2. **systemd cgroup cleanup (Linux, bonus).** A systemd service confines all of its processes to a unit cgroup, and the default `KillMode=control-group` reaps that entire cgroup when the unit deactivates. This catches even processes that fully daemonize (call `setsid` themselves) and escape the process group.
-
-If you wrap @devintern/code in a timer on Linux and want this daemon-proof guarantee from plain cron too, wrap the command in a transient scope so its children share one cgroup:
-
-```bash
-systemd-run --user --scope --collect devintern --estimate --query '...' >> /tmp/devintern-cron.log 2>&1
-```
 
 #### Failure feedback on the task tracker
 
