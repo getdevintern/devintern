@@ -37,6 +37,8 @@ Connect is an interactive step. The default `devintern worker init` flow offers 
 
 GitHub repository registration is completed through the DevIntern AI GitHub App. The CLI prints a short-lived installation URL and waits while GitHub authorizes the App. The relay verifies that the signed-in GitHub user can access the requested repository through that installation before it records anything. Routing then uses GitHub's immutable installation and repository IDs—not the user-supplied `owner/name` slug. An installation already associated with another DevIntern account cannot be claimed or overwritten.
 
+The App's private key never reaches the worker: it fetches referenced PRs/comments and performs GitHub writes with its local `GITHUB_TOKEN`, so customer-owned `GITHUB_APP_ID` credentials are ignored in this relay-backed mode.
+
 GitHub connections created before verified pairing was introduced must run `devintern worker connect github --repo owner/name` once again. Old local confirmation markers and slug-only relay routes are deliberately not trusted. Normal worker polling continues while GitHub instant events are unpaired.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
@@ -75,7 +77,7 @@ devintern login
 # Automation license for the worker daemon
 # Set LICENSE_KEY in .devintern-code/.env (from https://devintern.com/account)
 
-# Pair this repo for GitHub App delivery
+# Pair the workspace repositories for central App delivery
 devintern worker connect
 
 # Open the printed GitHub App URL and authorize the requested repository.

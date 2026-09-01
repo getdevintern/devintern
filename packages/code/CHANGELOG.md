@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+### Changed
+
+- **Relay-backed workspaces use the central DevIntern AI App**: `worker init` registers every GitHub repository already present in `workspace.toml`, `worker connect github` verifies the hosted App installation and repository with the relay before enabling event routing, and `GITHUB_TOKEN` remains the only local GitHub API credential. Customer-owned `GITHUB_APP_ID` + private-key authentication remains available as the advanced no-relay/air-gapped path and for `devintern webhook serve`
+
 ## [2.7.1] - 2026-09-01
 
 Patch release: verified relay GitHub pairing (requires the deployed relay) and resolve-conflicts push reliability through PR pre-push hooks.

@@ -78,8 +78,9 @@ default_branch = "main"
 # repo = "backend"            # required in a multi-repo workspace
 `;
 
-const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or
-# GitHub App (GITHUB_APP_ID + private key), agent settings.
+const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
+# and agent settings. The hosted relay uses the central DevIntern AI App.
+# Advanced no-relay installs may add GITHUB_APP_ID + a private key here.
 # Per-repo overrides go in [repos.env] in workspace.toml.
 `;
 

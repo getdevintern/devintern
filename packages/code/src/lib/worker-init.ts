@@ -3,7 +3,7 @@
  *
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
  * `.env`, dry-runs the ready-tasks query, checks any automation license,
- * offers relay pairing plus the DevIntern GitHub App (@mention events), and
+ * offers relay pairing plus the central DevIntern App (@mention events), and
  * can emit a native service definition. Polling is always on; direct webhooks
  * run as a separate advanced service.
  *
@@ -25,10 +25,14 @@ import {
 import { defaultProbe, parseEnvContent } from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
-import { GITHUB_APP_INSTALL_URL, loadGitHubAppRecord } from "./github-app-setup";
+import {
+  GITHUB_APP_INSTALL_URL,
+  hasGitHubAppCredentials,
+  loadGitHubAppRecord,
+} from "./github-app-setup";
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
-import { runWorkerConnect } from "./relay-connect";
+import { hasGitHubRelayRegistration, loadRelayState, runWorkerConnect } from "./relay-connect";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
@@ -36,6 +40,8 @@ import {
 } from "./tracker-capabilities";
 import { ensureWorkspaceAndImport, writeWorkspaceDefaults } from "./workspace/init";
 import { loadWorkspaceConfig } from "./workspace/config";
+import type { WorkspaceConfig } from "./workspace/config";
+import { gitHubSlugFromRemote } from "./workspace/env";
 import { workspaceConfigPath } from "./workspace/paths";
 
 export type PromptFn = (question: string) => Promise<string>;
@@ -279,6 +285,17 @@ async function detectGitHubRepo(): Promise<string | null> {
   }
 }
 
+/** GitHub slugs already represented by a workspace, deduped in config order. */
+export function workspaceGitHubRepos(config: WorkspaceConfig): string[] {
+  return [
+    ...new Set(
+      config.repos
+        .map((repo) => repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote))
+        .filter((repo): repo is string => Boolean(repo)),
+    ),
+  ];
+}
+
 async function defaultConnectRelay(options: {
   projectRoot: string;
   workspaceDir: string;
@@ -293,19 +310,32 @@ async function defaultConnectRelay(options: {
     return user.accessToken;
   };
   const deps = { workingDir: options.workspaceDir, getAccessToken };
-  const repo = await detectGitHubRepo();
+  const workspace = loadWorkspaceConfig(workspaceConfigPath(options.workspaceDir));
+  const repos = workspaceGitHubRepos(workspace);
+  if (repos.length === 0) {
+    const detected = await detectGitHubRepo();
+    if (detected) repos.push(detected);
+  }
   let ok = true;
 
-  if (repo) {
-    ok =
-      (await runWorkerConnect(["github", "--repo", repo], () => Promise.resolve(repo), deps)) === 0;
+  if (repos.length > 0) {
+    for (const repo of repos) {
+      const repoOk =
+        (await runWorkerConnect(["github", "--repo", repo], () => Promise.resolve(repo), deps)) ===
+        0;
+      ok = repoOk && ok;
+    }
   } else {
     options.log("   No GitHub remote detected; skipping GitHub relay registration.");
   }
 
   if (options.trackerType !== "github" && options.trackerType !== "markdown") {
     const trackerOk =
-      (await runWorkerConnect([options.trackerType], () => Promise.resolve(repo), deps)) === 0;
+      (await runWorkerConnect(
+        [options.trackerType],
+        () => Promise.resolve(repos[0] ?? null),
+        deps,
+      )) === 0;
     ok = trackerOk && ok;
   }
 
@@ -439,6 +469,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
     // 5. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
+    let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
     log("\n5️⃣  Instant events (optional; polling always stays on)");
     const relayAnswer = (
       await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
@@ -482,6 +513,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             trackerType,
             log,
           });
+          relayConnected = connected || hasGitHubRelayRegistration(loadRelayState(workspaceDir));
           if (connected) {
             log(`✅ Relay pairing stored under ${workspaceDir}.`);
           } else {
@@ -500,9 +532,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
     }
 
-    // 6. GitHub App: @mention handling on PRs the agent did not create (and
-    // instant PR comment events through the relay) need App auth; a personal
-    // GITHUB_TOKEN already covers review polling on the agent's own PRs.
+    // 6. GitHub App: relay-backed workspaces install the central App and keep
+    // GitHub API access local through GITHUB_TOKEN. A customer-owned App is an
+    // advanced, no-relay path for air-gapped/direct installations only.
     let githubAppOutcome: "connected" | "existing" | "skipped" | "unavailable" = "unavailable";
     const detectGithubRepo = deps.detectGithubRepo ?? detectGitHubRepo;
     let githubRepo: string | null = null;
@@ -515,15 +547,27 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     if (!githubRepo) {
       log("\n6️⃣  GitHub App (@mentions)");
       log("   No GitHub remote detected; skipping the GitHub App step.");
+    } else if (!relayConnected) {
+      log(`\n6️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+      if (hasGitHubAppCredentials()) {
+        githubAppOutcome = "existing";
+        log("✅ Customer-owned GitHub App credentials found in the environment.");
+        log("   The worker will use that App for polling, @mentions, and GitHub API calls.");
+      } else {
+        githubAppOutcome = "skipped";
+        log("   Relay is not connected, so the hosted DevIntern App cannot deliver events here.");
+        log("   GITHUB_TOKEN still supports task PRs and review polling on the worker's own PRs.");
+        log(
+          "   For air-gapped @mentions or direct webhooks, configure a customer-owned GitHub App",
+        );
+        log("   with GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY_PATH/BASE64.");
+      }
     } else {
-      log(`\n6️⃣  GitHub App on ${githubRepo} (@mentions)`);
-      log(
-        "   Without it, review polling and replies work on PRs this worker created (via your GITHUB_TOKEN).",
-      );
-      log(
-        "   With it, @devintern-ai mentions on any PR — including other people's — react through the relay in seconds.",
-      );
-      const existing = loadGitHubAppRecord(workspaceDir);
+      log(`\n6️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+      log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
+      log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
+      log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
+      const existing = loadGitHubAppRecord(workspaceDir, githubRepo);
       if (
         existing?.enabled &&
         existing.repo === githubRepo.toLowerCase() &&
@@ -584,13 +628,19 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     log("   2. Open http://localhost:4400 to see worker status and runs.");
     log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
     if (githubAppOutcome === "skipped") {
-      log("\n⚠️  GitHub App events are not enabled:");
-      log(
-        `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
-      );
-      log(
-        "   on your repository, then re-run `devintern worker init` (or `devintern worker connect`).",
-      );
+      if (relayConnected) {
+        log("\n⚠️  Central GitHub App events are not enabled:");
+        log(
+          `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
+        );
+        log(
+          "   on your repositories, then re-run `devintern worker init` (or `devintern worker connect`).",
+        );
+      } else {
+        log("\nℹ️  Running without relay or a custom GitHub App:");
+        log("   GITHUB_TOKEN polling still handles the worker's own PRs.");
+        log("   See the advanced GitHub integration guide if this installation must stay offline.");
+      }
     }
     return { ok: true };
   } finally {

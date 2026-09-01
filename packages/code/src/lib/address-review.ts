@@ -15,7 +15,7 @@ import {
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
-import { GitHubReviewsClient } from "./github-reviews";
+import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
 import { beginRun, endRun, recordRunStage } from "./run-recorder";
 import { formatReviewPrompt } from "./review-formatter";
@@ -391,10 +391,12 @@ export async function addressReview(
     }
   }
 
-  // Initialize GitHub client. App auth takes precedence when configured so
-  // the bot identity resolves (`slug[bot]`) for @mention matching — a human
-  // GITHUB_TOKEN alone can never satisfy the commented-review mention gate.
-  const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
+  // Direct/no-relay runs prefer the customer-owned App so its bot identity
+  // resolves. Relay-backed workspace subprocesses receive a token-only mode
+  // override plus the central App's static mention alias.
+  const githubClient = new GitHubReviewsClient({
+    authMode: resolveGitHubAuthMode("app-first"),
+  });
 
   // Get PR details
   console.log("\n📋 Fetching PR details...");

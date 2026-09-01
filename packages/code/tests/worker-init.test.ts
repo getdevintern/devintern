@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import path from "path";
 
-import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
 import {
   generateWebhookSecret,
@@ -11,6 +11,7 @@ import {
   renderSystemdUnit,
   runWorkerInit,
   upsertEnvVars,
+  workspaceGitHubRepos,
 } from "../src/lib/worker-init";
 
 describe("upsertEnvVars", () => {
@@ -83,6 +84,29 @@ describe("generateWebhookSecret", () => {
     expect(a).toMatch(/^[0-9a-f]{64}$/);
     expect(generateWebhookSecret()).not.toBe(a);
   });
+});
+
+test("workspaceGitHubRepos registers every GitHub repo once", () => {
+  const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "https://github.com/acme/web.git"
+
+[[repos]]
+name = "mirror"
+remote = "https://git.example.com/acme/api.git"
+[repos.env]
+GITHUB_REPO = "acme/api"
+`);
+
+  expect(workspaceGitHubRepos(config)).toEqual(["acme/api", "acme/web"]);
 });
 
 describe("runWorkerInit", () => {
@@ -195,6 +219,31 @@ describe("runWorkerInit", () => {
   });
 
   describe("GitHub App step", () => {
+    const relayDeps = {
+      getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+      connectRelay: async () => true,
+    };
+    const savedAppEnv = {
+      appId: process.env.GITHUB_APP_ID,
+      keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+      keyBase64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
+    };
+
+    beforeEach(() => {
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+    });
+
+    afterEach(() => {
+      if (savedAppEnv.appId === undefined) delete process.env.GITHUB_APP_ID;
+      else process.env.GITHUB_APP_ID = savedAppEnv.appId;
+      if (savedAppEnv.keyPath === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppEnv.keyPath;
+      if (savedAppEnv.keyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+      else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppEnv.keyBase64;
+    });
+
     test("skips silently when no GitHub remote is detected", async () => {
       const result = await runWorkerInit(deps(["status=todo", "n"]));
       expect(result.ok).toBe(true);
@@ -204,7 +253,8 @@ describe("runWorkerInit", () => {
 
     test("an unverified repository points to the relay pairing command", async () => {
       const result = await runWorkerInit(
-        deps(["status=todo", "n", "n"], {
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
       );
@@ -219,7 +269,8 @@ describe("runWorkerInit", () => {
     test("does not trust a legacy press-Enter marker without verified GitHub ids", async () => {
       saveGitHubAppRecord({ repo: "acme/web", enabled: true }, workspaceDir);
       const result = await runWorkerInit(
-        deps(["status=todo", "n", "n"], {
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
       );
@@ -239,13 +290,29 @@ describe("runWorkerInit", () => {
         workspaceDir,
       );
       const result = await runWorkerInit(
-        deps(["status=todo", "n", "n"], {
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
       );
       expect(result.ok).toBe(true);
       expect(logs.join("\n")).toContain("GitHub App already verified for acme/web");
       expect(logs.join("\n")).not.toContain("GitHub App events are not enabled:");
+    });
+
+    test("custom App credentials are recognized only on the no-relay path", async () => {
+      process.env.GITHUB_APP_ID = "123456";
+      process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/key.pem";
+      const result = await runWorkerInit(
+        deps(["status=todo", "n", "n"], {
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("advanced no-relay mode");
+      expect(logs.join("\n")).toContain(
+        "Customer-owned GitHub App credentials found in the environment",
+      );
     });
   });
 

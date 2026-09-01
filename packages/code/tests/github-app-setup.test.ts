@@ -6,6 +6,7 @@ import path from "path";
 import {
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
+  loadGitHubAppRecords,
   saveGitHubAppRecord,
 } from "../src/lib/github-app-setup";
 
@@ -59,6 +60,24 @@ describe("github-app-setup", () => {
   test("disabled records survive a round-trip", () => {
     saveGitHubAppRecord({ repo: "acme/web", enabled: false }, tempDir);
     expect(loadGitHubAppRecord(tempDir)?.enabled).toBe(false);
+  });
+
+  test("preserves and selects verified records for multiple repositories", () => {
+    saveGitHubAppRecord(
+      { repo: "Acme/API", enabled: true, installationId: 7001, repositoryId: 9001 },
+      tempDir,
+    );
+    saveGitHubAppRecord(
+      { repo: "acme/web", enabled: true, installationId: 7001, repositoryId: 9002 },
+      tempDir,
+    );
+
+    expect(loadGitHubAppRecords(tempDir).map((record) => record.repo)).toEqual([
+      "acme/api",
+      "acme/web",
+    ]);
+    expect(loadGitHubAppRecord(tempDir, "ACME/API")?.repositoryId).toBe(9001);
+    expect(loadGitHubAppRecord(tempDir, "acme/web")?.repositoryId).toBe(9002);
   });
 
   test("credentials require GITHUB_APP_ID plus one private key source", () => {

@@ -35,6 +35,12 @@ export interface RelayRegistration {
   lastEventAt: number | null;
 }
 
+export interface VerifiedGitHubRelayRepository {
+  repo: string;
+  installationId: number;
+  repositoryId: number;
+}
+
 export interface RelayConnectState {
   relayUrl: string;
   customerId: string;
@@ -45,12 +51,57 @@ export interface RelayConnectState {
    * the relay exactly once; only its hash is stored server-side.
    */
   relayToken?: string;
-  /** Verified immutable GitHub App association, when GitHub is paired. */
+  /** Most recently verified association; retained for older state readers. */
   github?: {
     repo: string;
     installationId: number;
     repositoryId: number;
   };
+  /** All verified GitHub repositories paired for this workspace. */
+  githubRepositories?: VerifiedGitHubRelayRepository[];
+}
+
+function isVerifiedGitHubRepository(
+  repository: VerifiedGitHubRelayRepository | undefined,
+): repository is VerifiedGitHubRelayRepository {
+  return Boolean(
+    repository?.repo &&
+    Number.isSafeInteger(repository.installationId) &&
+    repository.installationId > 0 &&
+    Number.isSafeInteger(repository.repositoryId) &&
+    repository.repositoryId > 0,
+  );
+}
+
+/** Verified immutable GitHub associations, including the legacy single-repo field. */
+export function verifiedGitHubRelayRepositories(
+  state: RelayConnectState | null,
+): VerifiedGitHubRelayRepository[] {
+  if (!state) return [];
+  const repositories = [
+    ...(state.githubRepositories ?? []),
+    ...(state.github ? [state.github] : []),
+  ].filter(isVerifiedGitHubRepository);
+  const byRepositoryId = new Map<number, VerifiedGitHubRelayRepository>();
+  for (const repository of repositories) {
+    byRepositoryId.set(repository.repositoryId, {
+      ...repository,
+      repo: repository.repo.toLowerCase(),
+    });
+  }
+  return [...byRepositoryId.values()];
+}
+
+/** Whether this pairing can receive central GitHub App events. */
+export function hasGitHubRelayRegistration(
+  state: RelayConnectState | null,
+  repo?: string,
+): boolean {
+  if (!state?.relayToken) return false;
+  const repositories = verifiedGitHubRelayRepositories(state);
+  return repo
+    ? repositories.some((repository) => repository.repo === repo.toLowerCase())
+    : repositories.length > 0;
 }
 
 /** Resolve the relay URL: env override, else the hosted default. */
@@ -183,12 +234,15 @@ export async function ensureRelayToken(
   }
 
   const minted = await issueRelayToken(accessToken, deps);
+  const sameCustomer = existing?.customerId === minted.customerId;
   const state: RelayConnectState = {
     relayUrl,
     customerId: minted.customerId,
     connectedAt: new Date().toISOString(),
-    registrations: existing?.registrations ?? [],
+    registrations: sameCustomer ? existing.registrations : [],
     relayToken: minted.relayToken,
+    github: sameCustomer ? existing.github : undefined,
+    githubRepositories: sameCustomer ? existing.githubRepositories : undefined,
   };
   saveRelayState(state, workingDir);
   return { relayToken: minted.relayToken, state };
@@ -201,20 +255,33 @@ function mergeConnectState(
   relayToken: string | undefined,
 ): RelayConnectState {
   const previous = loadRelayState(workingDir);
+  const previousForCustomer = previous?.customerId === data.customerId ? previous : null;
+  const verifiedRepository =
+    data.repo && typeof data.installationId === "number" && typeof data.repositoryId === "number"
+      ? {
+          repo: data.repo.toLowerCase(),
+          installationId: data.installationId,
+          repositoryId: data.repositoryId,
+        }
+      : undefined;
+  const githubRepositories = verifiedGitHubRelayRepositories(previousForCustomer);
+  if (verifiedRepository && isVerifiedGitHubRepository(verifiedRepository)) {
+    const existingIndex = githubRepositories.findIndex(
+      (repository) =>
+        repository.repositoryId === verifiedRepository.repositoryId ||
+        repository.repo === verifiedRepository.repo,
+    );
+    if (existingIndex === -1) githubRepositories.push(verifiedRepository);
+    else githubRepositories[existingIndex] = verifiedRepository;
+  }
   const state: RelayConnectState = {
     relayUrl,
     customerId: data.customerId,
     connectedAt: new Date().toISOString(),
     registrations: data.registrations,
-    relayToken: relayToken ?? previous?.relayToken,
-    github:
-      data.repo && typeof data.installationId === "number" && typeof data.repositoryId === "number"
-        ? {
-            repo: data.repo,
-            installationId: data.installationId,
-            repositoryId: data.repositoryId,
-          }
-        : previous?.github,
+    relayToken: relayToken ?? previousForCustomer?.relayToken,
+    github: verifiedRepository ?? previousForCustomer?.github,
+    githubRepositories,
   };
   saveRelayState(state, workingDir);
   return state;
@@ -347,7 +414,7 @@ LICENSE_KEY is still required for the local unattended license gate when you
 run \`devintern worker\`.
 
 Targets:
-  github (default)   Register this repo for GitHub App webhook delivery
+  github (default)   Register this repo for central DevIntern App delivery
   linear             Self-register a Linear webhook (uses LINEAR_API_KEY)
   asana              Self-register an Asana webhook (uses ASANA_API_TOKEN and
                      ASANA_DEFAULT_PROJECT_GID)
@@ -615,6 +682,7 @@ export async function runWorkerConnect(
       },
       deps.workingDir,
     );
+    console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
     console.log("   Run the worker as usual: devintern worker [--query ...]");
     return 0;
   } catch (error) {
