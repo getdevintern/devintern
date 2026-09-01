@@ -8,6 +8,8 @@ import {
 } from "../tracker-capabilities";
 import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
 import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
+import { parseWorkerScheduleSection } from "../schedule";
+import type { WorkerScheduleConfig } from "../schedule";
 import { parseEstimationEntries } from "../estimation-config";
 import type { EstimationConfig } from "../estimation-config";
 import { parseToml } from "./toml";
@@ -83,9 +85,19 @@ export interface RoutingRule {
   labels: string[];
 }
 
+/** Worker-scoped settings from the `[worker]` table. */
+export interface WorkerSettings {
+  /**
+   * Working windows (quiet hours) gating new-task pickup; null when the
+   * `[worker.schedule]` table is absent or empty (pickup unrestricted).
+   */
+  schedule: WorkerScheduleConfig | null;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  worker: WorkerSettings;
   defaults: WorkspaceDefaults;
   repos: RepoConfig[];
   routing: RoutingRule[];
@@ -400,6 +412,10 @@ export function parseWorkspaceConfig(
   });
   errors.push(...automationResult.errors);
 
+  const workerTable = asTable(document.worker, "[worker]", errors);
+  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
+  errors.push(...schedule.errors);
+
   const estimationResult = parseEstimationEntries(document.estimations);
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
@@ -420,6 +436,7 @@ export function parseWorkspaceConfig(
 
   return {
     workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
+    worker: { schedule: schedule.config },
     defaults,
     repos,
     routing,

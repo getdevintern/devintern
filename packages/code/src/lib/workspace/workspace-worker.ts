@@ -16,6 +16,8 @@ import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { ChangeDetector } from "../change-detector";
+import { createPickupGate } from "../schedule";
+import type { PickupGate, ScheduleSnapshot } from "../schedule";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
 import {
@@ -36,6 +38,7 @@ import {
   workspaceDbPath,
   workspaceEnvPath,
   worktreesDir,
+  workspaceRunNowPath,
 } from "./paths";
 import { routeTask, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
@@ -170,6 +173,8 @@ export interface WorkspaceTaskAcquirerDeps {
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   query: string | (() => string | undefined);
   intervalSeconds: number;
+  /** Working-window gate (quiet hours); optional so tests can skip it. */
+  gate?: PickupGate;
   verbose?: boolean;
   /** Task runner (injected for tests; defaults to the CLI subprocess). */
   runTask?: (
@@ -376,6 +381,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     detector,
     workerState,
     queue,
+    gate: deps.gate,
     searchTasks: async (q) => {
       const { tasks } = await searchTasks(q);
       routables.clear();
@@ -560,6 +566,57 @@ export interface RunWorkspaceWorkerOptions {
   cliVersion?: string;
 }
 
+function formatClockTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Startup banner for working windows (quiet hours): what the windows are,
+ * whether pickup is currently allowed, and when the next flip happens.
+ */
+export function describePickupSchedule(gate: PickupGate): void {
+  const snapshot = gate.snapshot();
+  if (!snapshot.enabled) {
+    return;
+  }
+  const rules = [
+    ...snapshot.active.map((spec) => `active ${spec}`),
+    ...snapshot.blocked.map((spec) => `blocked ${spec}`),
+  ].join(", ");
+  console.log(`🕒 Working windows (${snapshot.timezone}): ${rules}`);
+  const next = snapshot.nextChange;
+  if (snapshot.pickupAllowed) {
+    console.log(
+      next
+        ? `   New-task pickup is open now; it closes at ${formatClockTime(next.at)}.`
+        : "   New-task pickup is open.",
+    );
+  } else {
+    console.log(
+      next
+        ? `🌙 New-task pickup is paused until ${formatClockTime(next.at)} — in-flight tasks finish normally; \`devintern worker run-now\` drains immediately.`
+        : "🌙 New-task pickup is paused — `devintern worker run-now` drains immediately.",
+    );
+  }
+}
+
+/** Log working-window flips exactly once per change (driven by poll ticks). */
+export function attachPickupScheduleLogger(gate: PickupGate): void {
+  gate.onChange((snapshot: ScheduleSnapshot) => {
+    if (snapshot.pickupAllowed) {
+      console.log(
+        `☀️  [schedule] working window opened (${snapshot.active.join(", ")}, ${snapshot.timezone}); new-task pickup resumed`,
+      );
+    } else {
+      const next = snapshot.nextChange;
+      const until = next ? ` until ${formatClockTime(next.at)}` : "";
+      console.log(
+        `🌙 [schedule] outside the working window${until}; no new tracker tasks are picked up (in-flight tasks continue, other activity is unaffected)`,
+      );
+    }
+  });
+}
+
 /**
  * Assemble and start the worker in workspace (fleet) mode.
  *
@@ -632,6 +689,14 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     workspaceDir,
     dbPath: state.dbPath,
   });
+
+  // Working windows (quiet hours): gate only the ready-task drain; reviews,
+  // mentions, automations, and relay events stay on their normal paths.
+  const pickupGate = createPickupGate(config.worker.schedule, {
+    runNowPath: workspaceRunNowPath(workspaceDir),
+  });
+  describePickupSchedule(pickupGate);
+  attachPickupScheduleLogger(pickupGate);
 
   await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
   // Keep sweeping while the worker runs, not only at startup: a long-lived
@@ -726,6 +791,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       searchTasks,
       query: () => config.defaults.taskQuery,
       intervalSeconds,
+      gate: pickupGate,
       verbose: options.verbose,
       coordinator,
     });
@@ -796,6 +862,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
           "[workspace].dashboard and dashboard_port are startup-only; restart the worker to change them.",
         );
       }
+      if (JSON.stringify(next.worker.schedule) !== JSON.stringify(current.worker.schedule)) {
+        throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
+      }
     },
     onApplied: applyReloadedConfig,
   });
@@ -806,7 +875,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       const { startDashboardServer } = await import("../../dashboard-server");
       // `schedule`: retries are drained by this worker's retry-queue acquirer
       // through the normal pipeline (never spawned from the workspace home).
-      startDashboardServer({ port: config.workspace.dashboardPort, retryMode: "schedule" });
+      startDashboardServer({
+        port: config.workspace.dashboardPort,
+        retryMode: "schedule",
+        scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
+      });
     } catch (error) {
       console.warn(
         `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,

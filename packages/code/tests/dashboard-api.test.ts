@@ -555,6 +555,33 @@ describe("dashboard server", () => {
     }
   });
 
+  test("handleWorkerStatus surfaces the working-window snapshot when provided", () => {
+    const snapshot = {
+      enabled: true,
+      pickupAllowed: false,
+      active: ["22:00-06:00"],
+      blocked: [],
+      timezone: "UTC",
+      catchUpMissed: true,
+      manualRequested: false,
+      nextChange: { at: Date.UTC(2026, 5, 16, 22, 0), kind: "open" as const },
+    };
+    const scheduled = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      scheduleSnapshot: () => snapshot,
+    });
+    const response = handleWorkerStatus(scheduled);
+    scheduled.close();
+    expect((response.body as { schedule: unknown }).schedule).toEqual(snapshot);
+
+    // Without a provider (standalone dashboard), the field is null.
+    const plain = new DashboardData({ dbPath, workingDir: dir });
+    const bare = handleWorkerStatus(plain);
+    plain.close();
+    expect((bare.body as { schedule: unknown }).schedule).toBeNull();
+  });
+
   test("POST /api/runs/:id/retry triggers the CLI flow end-to-end", async () => {
     const store = new RunStore(dbPath);
     const id = store.createRun({ origin: "task", taskKey: "PROJ-9" });

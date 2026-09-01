@@ -6,8 +6,9 @@ import { tmpdir } from "os";
 import { createMarkdownChangeDetector } from "../src/lib/change-detector";
 import { processedTaskId, TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
 import type { ReadyTask } from "../src/lib/task-polling-acquirer";
+import type { PickupGate } from "../src/lib/schedule";
+import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/worker-state";
 import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -109,6 +110,7 @@ describe("TaskPollingAcquirer", () => {
     tasks: ReadyTask[];
     executed: string[];
     executeResult?: boolean;
+    gate?: PickupGate;
   }) {
     let call = 0;
     const seenCursors: (string | null)[] = [];
@@ -116,6 +118,7 @@ describe("TaskPollingAcquirer", () => {
       trackerType: "markdown",
       query: "status=todo",
       intervalSeconds: 60,
+      gate: options.gate,
       detector: {
         source: "markdown",
         async changesSince(cursor) {
@@ -405,5 +408,143 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick(); // must not throw
     expect(workerState.getCursor("markdown")?.cursorValue).toBe("42");
+  });
+
+  describe("working-window gating", () => {
+    function stubGate(overrides: Partial<PickupGate> = {}): PickupGate {
+      return {
+        enabled: true,
+        pickupAllowed: () => false, // closed by default
+        consumeManualPickup: () => false,
+        shouldCatchUpOnStart: () => false,
+        snapshot: () => {
+          throw new Error("unused in acquirer tests");
+        },
+        onChange: () => {},
+        ...overrides,
+      };
+    }
+
+    test("a closed gate skips detection, evaluation, and execution entirely", async () => {
+      const executed: string[] = [];
+      const { acquirer, seenCursors } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate(),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+      expect(seenCursors).toEqual([]); // no detection while gated out
+      expect(workerState.getCursor("markdown")).toBeNull();
+    });
+
+    test("a manual run-now request opens the gate for exactly one tick", async () => {
+      const executed: string[] = [];
+      let pendingManual = false;
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          consumeManualPickup: () => {
+            const had = pendingManual;
+            pendingManual = false;
+            return had;
+          },
+        }),
+      });
+      // Simulate `devintern worker run-now`: the sentinel appears before tick 1.
+      pendingManual = true;
+
+      await acquirer.tick();
+      expect(executed).toEqual(["TASK-1"]);
+      expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
+
+      await acquirer.tick(); // request already consumed; window still closed
+      expect(executed).toEqual(["TASK-1"]);
+    });
+
+    test("a run-now consumption failure does not bypass a closed window", async () => {
+      const executed: string[] = [];
+      const { acquirer, seenCursors } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          consumeManualPickup: () => {
+            throw new Error("marker could not be removed");
+          },
+        }),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+      expect(seenCursors).toEqual([]);
+    });
+
+    test("an executed drain records its timestamp for catch-up bookkeeping", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [],
+        executed,
+      });
+
+      expect(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY)).toBeNull();
+      await acquirer.tick();
+      expect(Number(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY))).toBeGreaterThan(0);
+    });
+
+    test("gated-out ticks do not refresh the drain timestamp", async () => {
+      const executed: string[] = [];
+      workerState.setMeta(TASK_POLL_LAST_DRAIN_KEY, String(Date.parse("2026-06-15T00:00:00Z")));
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [],
+        executed,
+        gate: stubGate(),
+      });
+
+      await acquirer.tick();
+      expect(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY)).toBe(
+        String(Date.parse("2026-06-15T00:00:00Z")),
+      );
+    });
+
+    test("start() performs one bypassing catch-up drain when the gate says a window was missed", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-9", updated: "z" }],
+        executed,
+        gate: stubGate({ shouldCatchUpOnStart: () => true }),
+      });
+
+      await acquirer.start();
+      acquirer.stop();
+      expect(executed).toEqual(["TASK-9"]);
+    });
+
+    test("a broken gate cannot break polling", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          pickupAllowed: () => {
+            throw new Error("clock exploded");
+          },
+        }),
+      });
+
+      await acquirer.tick(); // failure degrades to open (fail-safe) + warn
+      expect(executed).toEqual(["TASK-1"]);
+    });
   });
 });

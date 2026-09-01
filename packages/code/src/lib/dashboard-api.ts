@@ -15,6 +15,7 @@ import { LockManager } from "./lock-manager";
 import type { LockStatus } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import type { ScheduleSnapshot } from "./schedule";
 import {
   isRunRetriable,
   resolveDashboardActor,
@@ -72,6 +73,11 @@ export interface DashboardDataOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Live working-window snapshot from the worker process (embedded
+   * dashboard only; standalone servers return null).
+   */
+  scheduleSnapshot?: () => ScheduleSnapshot | null;
   /**
    * How a retry is executed. `spawn` (default) starts a detached CLI
    * subprocess — correct for a standalone `devintern dashboard` running
@@ -149,6 +155,7 @@ export class DashboardData {
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
   private stores: Stores | null = null;
+  private readonly scheduleSnapshot: () => ScheduleSnapshot | null;
   /** Lazy read-write connection for the retry audit trail. */
   private retryAuditStore: RunRetryAuditStore | null = null;
   /** Lazy read-write connection for scheduled retries (schedule mode). */
@@ -164,6 +171,7 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     if (options.logDirs !== undefined) {
@@ -336,6 +344,15 @@ export class DashboardData {
 
   getCursors(): Cursor[] {
     return this.read([], (stores) => stores.state.listCursors());
+  }
+
+  /** Working-window status from the worker process, or null when disabled. */
+  getScheduleSnapshot(): ScheduleSnapshot | null {
+    try {
+      return this.scheduleSnapshot();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -708,6 +725,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       worker: resolveWorkerStatus(data.workingDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
+      schedule: data.getScheduleSnapshot(),
       cursors: data.getCursors().map((cursor) => ({
         source: cursor.source,
         cursorValue: cursor.cursorValue,
