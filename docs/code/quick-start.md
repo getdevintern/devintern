@@ -1,7 +1,7 @@
 ---
 title: "@devintern/code Quick Start"
 sidebarLabel: "Quick Start"
-description: "Install @devintern/code and turn your first tracker ticket into a pull request."
+description: "Install @devintern/code and turn a markdown task or tracker ticket into working code."
 section: "Automation"
 order: 0
 dateModified: 2026-09-01
@@ -10,14 +10,14 @@ tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 
 # @devintern/code Quick Start
 
-**@devintern/code** is your AI intern for automatically implementing tasks from your task tracker. It fetches task details, creates feature branches, runs your AI agent, commits changes, and optionally creates pull requests, all from a single command.
+**@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
 Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, and **local markdown files** (no PM account required).
 
 ## Prerequisites
 
 - **[Bun](https://bun.sh) runtime** (required to run @devintern/code)
-- Task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues), or local markdown files with no account at all
+- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues)
 - AI agent CLI installed (e.g., Claude Code, OpenCode, Codex, Cursor)
 - Git repository for your project
 
@@ -32,6 +32,40 @@ curl -fsSL https://bun.sh/install | bash
 # Install @devintern/code globally
 bun install -g @getdevintern/code
 ```
+
+## Run Your First Task
+
+The fastest way to try DevIntern is with a markdown file. Create `first-task.md` in your repository:
+
+```markdown
+# Add a health check
+
+Add a `/health` endpoint that returns a successful JSON response.
+
+## Acceptance criteria
+
+- `GET /health` returns HTTP 200
+- The response body is `{ "status": "ok" }`
+- Add a test for the endpoint
+```
+
+Then point DevIntern at it:
+
+```bash
+devintern ./first-task.md
+```
+
+No task tracker account or credentials are required. DevIntern uses the filename as the task key, creates a feature branch, runs your installed AI agent, and commits a successful implementation. Add `--create-pr` once you have configured a repository host token.
+
+Every run:
+
+1. Loads the task and checks that it is clear enough to implement
+2. Creates a feature branch (`feature/first-task`)
+3. Runs your AI agent with the task and repository context
+4. Commits changes after a successful implementation
+5. Optionally opens a pull request and updates the task tracker
+
+See [Markdown File Tasks](./markdown-tasks.md) for optional frontmatter, status tracking, and batch queries.
 
 ## Initialize Configuration
 
@@ -83,7 +117,7 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 
 Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
 
-## First Run
+## Run a Tracker Task
 
 Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
 
@@ -100,16 +134,6 @@ devintern PROJ-123 --create-pr
 ```bash
 devintern AbCdEf12 --create-pr
 ```
-
-Every run:
-
-1. **Fetches** task details (description, comments, attachments where supported)
-2. **Transitions** the task (Jira status or Trello list, when configured in `settings.json`)
-3. **Creates** a feature branch (`feature/proj-123`)
-4. **Runs** a clarity check (skippable with `--skip-clarity-check`)
-5. **Executes** your AI agent with formatted task context
-6. **Commits** changes automatically after successful implementation
-7. **Posts** a summary back to your task tracker
 
 ## What's Next?
 
