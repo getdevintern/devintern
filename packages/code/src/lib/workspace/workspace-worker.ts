@@ -958,13 +958,16 @@ export async function buildFleetEventAcquirers(options: {
     fleetGitHubSlugs,
   } = await import("./fleet-events");
 
-  const { hasGitHubRelayRegistration, loadRelayState, RELAY_BOT_LOGIN } =
+  const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
     await import("../relay-connect");
   const relayState = loadRelayState(workspaceDir);
   const relayToken = relayState?.relayToken;
   const relayUrl =
     process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
-  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRegistration(relayState));
+  // Accept a live legacy repo registration at runtime as well as the newer
+  // verified-id marker. The latter remains required when establishing a new
+  // pairing, but upgrading must not disable an already-delivering relay.
+  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
 
   // Hosted workspaces use the central App only for event delivery. All
   // follow-up GitHub reads/writes stay local and authenticate with the user's

@@ -40,7 +40,7 @@ GitHub repository registration is completed through the DevIntern AI GitHub App.
 
 The App's private key never reaches the worker: it fetches referenced PRs/comments and performs GitHub writes with its local `GITHUB_TOKEN`, so customer-owned `GITHUB_APP_ID` credentials are ignored in this relay-backed mode.
 
-GitHub connections created before verified pairing was introduced must run `devintern worker connect github --repo owner/name` once again. Old local confirmation markers and slug-only relay routes are deliberately not trusted. Normal worker polling continues while GitHub instant events are unpaired.
+GitHub connections created before verified pairing was introduced must run `devintern worker connect github --repo owner/name` once again from any managed repository. The CLI recognizes repositories listed in the fleet workspace and saves the verified connection where the worker reads it; no workspace-directory navigation is required. Old local confirmation markers are not treated as completed setup, while an existing live relay route remains usable during the upgrade.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
 
