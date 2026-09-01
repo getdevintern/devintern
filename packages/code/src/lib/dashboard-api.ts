@@ -13,6 +13,12 @@
 
 import { LockManager } from "./lock-manager";
 import type { LockStatus } from "./lock-manager";
+import type {
+  AutomationScheduleStatus,
+  DashboardAutomationActions,
+  ManualTriggerOutcome,
+} from "./automation-acquirer";
+import { loadStandaloneAutomationActions } from "./automation-manual";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
 import {
@@ -44,6 +50,7 @@ const RUN_ORIGINS: RunOrigin[] = [
   "conflict_resolution",
   "scheduled",
   "estimate",
+  "manual",
 ];
 
 const STATS_WINDOWS: Record<string, number | null> = {
@@ -86,6 +93,18 @@ export interface DashboardDataOptions {
    * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
    */
   inflightRetryTtlMs?: number;
+  /**
+   * How long a triggered manual automation run blocks further triggers of
+   * the automation; defaults to {@link INFLIGHT_RETRY_TTL_MS}.
+   */
+  inflightAutomationTtlMs?: number;
+  /**
+   * Automation listing/triggering overrides. The workspace worker passes its
+   * in-process scheduler so manual runs ride the exact scheduled pipeline;
+   * when omitted, a standalone dashboard falls back to the project's own
+   * `.devintern-code/automations.toml` (spawn path).
+   */
+  automationActions?: DashboardAutomationActions;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
   /** Tail window per capture file; tests shrink this for truncation cases. */
@@ -135,6 +154,21 @@ export interface OpenAgentPrView {
   updatedAt: number;
 }
 
+/** One configured scheduled automation as served by `GET /api/automations`. */
+export interface DashboardAutomationView {
+  id: string;
+  enabled: boolean;
+  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
+  schedule?: string;
+  repo?: string;
+  /** The prompt executed per occurrence. */
+  prompt: string;
+  /** Next scheduled occurrence (epoch ms), when the scheduler registered it. */
+  nextDueAt?: number;
+  /** Most recent run of this automation (any origin), description stripped. */
+  lastRun?: RunRecord;
+}
+
 /**
  * Lazily opened read-only view over the worker's SQLite database.
  *
@@ -160,12 +194,23 @@ export class DashboardData {
    */
   private inflightRetries = new Map<string, number>();
   private inflightRetryTtlMs: number;
+  /**
+   * Automation ids with a dashboard-triggered manual run in flight (same
+   * TTL rationale as {@linkcode inflightRetries}).
+   */
+  private inflightAutomationRuns = new Map<string, number>();
+  private inflightAutomationTtlMs: number;
+  /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
+  private automationActions: DashboardAutomationActions | null = null;
+  private automationActionsOverride?: DashboardAutomationActions;
 
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
+    this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
+    this.automationActionsOverride = options.automationActions;
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
       this.logDirs = options.logDirs;
@@ -228,6 +273,7 @@ export class DashboardData {
     taskKey?: string;
     status?: RunStatus;
     origin?: RunOrigin;
+    automationId?: string;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
@@ -298,6 +344,76 @@ export class DashboardData {
         this.inflightRetries.delete(taskKey);
       }
     }
+    for (const [automationId, claimedAt] of this.inflightAutomationRuns) {
+      if (now - claimedAt > this.inflightAutomationTtlMs) {
+        this.inflightAutomationRuns.delete(automationId);
+      }
+    }
+  }
+
+  /** Automation listing/triggering, defaulting to the standalone spawn path. */
+  getAutomationActions(): DashboardAutomationActions {
+    if (!this.automationActions) {
+      // Standalone dashboards (spawn mode) read the project's own automation
+      // config; a worker-embedded dashboard without an in-process scheduler
+      // has none to offer (workspace [[automations]] would need the fleet
+      // pipeline), so it serves an empty catalog rather than a wrong one.
+      this.automationActions =
+        this.automationActionsOverride ??
+        (this.retryMode === "spawn"
+          ? loadStandaloneAutomationActions(this.workingDir)
+          : EMPTY_AUTOMATION_ACTIONS);
+    }
+    return this.automationActions;
+  }
+
+  /**
+   * Dashboard catalog of configured automations with their schedule state and
+   * most recent run (any origin) — the "Run now" view's backing data.
+   */
+  getAutomations(): DashboardAutomationView[] {
+    let statuses: AutomationScheduleStatus[];
+    try {
+      statuses = this.getAutomationActions().list();
+    } catch {
+      return [];
+    }
+    return statuses.map((status) => {
+      const lastRun = this.read(
+        undefined,
+        (stores) => stores.runs.listRuns({ automationId: status.id, limit: 1, offset: 0 })[0],
+      );
+      return {
+        id: status.id,
+        enabled: status.enabled,
+        schedule: status.cron ?? status.interval,
+        repo: status.repo,
+        prompt: status.prompt,
+        nextDueAt: status.nextDueAt,
+        lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
+      };
+    });
+  }
+
+  /** True while a dashboard-triggered manual run for the automation is starting. */
+  hasInflightAutomationRun(automationId: string): boolean {
+    this.pruneInflightRetries();
+    return this.inflightAutomationRuns.has(automationId);
+  }
+
+  /** Claim the manual-run slot for an automation; false when one is already held. */
+  claimAutomationRun(automationId: string): boolean {
+    this.pruneInflightRetries();
+    if (this.inflightAutomationRuns.has(automationId)) {
+      return false;
+    }
+    this.inflightAutomationRuns.set(automationId, Date.now());
+    return true;
+  }
+
+  /** Give the manual-run slot back (the trigger failed; retry immediately). */
+  releaseAutomationRun(automationId: string): void {
+    this.inflightAutomationRuns.delete(automationId);
   }
 
   getStats(windowMs: number | null): RunStats | null {
@@ -411,6 +527,12 @@ function conflict(message: string): ApiResponse {
 function forbidden(message: string): ApiResponse {
   return { status: 403, body: { error: message } };
 }
+
+/** No-automation bridge for worker-embedded dashboards whose worker runs none. */
+const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
+  list: () => [],
+  trigger: async () => ({ ok: false, reason: "no automations are configured" }),
+};
 
 /**
  * Injectable collaborators for {@link handleRetryRun}, so tests can fake the
@@ -583,6 +705,144 @@ export async function handleRetryRun(
       taskKey,
       pid: spawned.pid,
       command: spawned.command,
+    },
+  };
+}
+
+/**
+ * Injectable collaborators for {@link handleRunAutomation}, so tests can fake
+ * the signed-in user and the manual-run trigger.
+ */
+export interface AutomationRunDeps {
+  /** Resolve the acting user; null = not signed in. */
+  resolveActor?: (workingDir: string) => Promise<RetryActor | null>;
+  /** Start one manual run of the automation. */
+  trigger?: (automationId: string) => Promise<ManualTriggerOutcome>;
+  /**
+   * Authorized emails. When non-empty, only these may trigger manual runs
+   * from the dashboard; when empty, any signed-in devintern user can.
+   */
+  allowedEmails?: readonly string[];
+}
+
+/**
+ * Parse the comma-separated allowlist of emails allowed to trigger manual
+ * automation runs (`DASHBOARD_AUTOMATION_EMAILS`).
+ */
+export function resolveAllowedAutomationEmails(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.DASHBOARD_AUTOMATION_EMAILS ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
+
+/**
+ * `GET /api/automations` — configured scheduled automations with their
+ * schedule state, next occurrence, and most recent run.
+ *
+ * @param data - Dashboard data source
+ */
+export function handleAutomations(data: DashboardData): ApiResponse {
+  return { status: 200, body: { automations: data.getAutomations() } };
+}
+
+/**
+ * `POST /api/automations/:id/run` — dashboard "Run now": trigger one manual
+ * run of a scheduled automation through the same pipeline a scheduled run
+ * uses (worker-embedded dashboard) or the standalone spawn path.
+ *
+ * Safeguards, in order:
+ * 1. the automation must be configured,
+ * 2. the caller must be signed in (and on the `DASHBOARD_AUTOMATION_EMAILS`
+ *    allowlist when configured),
+ * 3. the automation must be enabled — a disabled automation is refused with
+ *    a message instead of silently running,
+ * 4. no run of the automation may be in progress (dashboard or worker), and
+ *    a second rapid trigger is debounced by an in-flight claim,
+ * 5. the trigger itself re-validates overlap (schedule lease, busy repo) and
+ *    surfaces the reason on refusal.
+ *
+ * Returns 202 once the run started; it then shows up in the run list with
+ * origin `manual` and the automation's id.
+ *
+ * @param data - Dashboard data source (owns the in-flight guard)
+ * @param idParam - Raw automation id path segment
+ * @param deps - Injected collaborator overrides (tests)
+ */
+export async function handleRunAutomation(
+  data: DashboardData,
+  idParam: string,
+  deps: AutomationRunDeps = {},
+): Promise<ApiResponse> {
+  let automationId: string;
+  try {
+    automationId = decodeURIComponent(idParam).trim();
+  } catch {
+    return badRequest("invalid automation id");
+  }
+  if (!automationId) {
+    return badRequest("automation id is required");
+  }
+
+  const automations = data.getAutomations();
+  const automation = automations.find((item) => item.id === automationId);
+  if (!automation) {
+    return { status: 404, body: { error: `automation "${automationId}" not found` } };
+  }
+
+  const actor =
+    (await deps.resolveActor?.(data.workingDir)) ?? (await resolveDashboardActor(data.workingDir));
+  if (!actor) {
+    return forbidden("sign in first with `devintern login` to trigger automations");
+  }
+
+  const allowedEmails = deps.allowedEmails ?? resolveAllowedAutomationEmails();
+  const actorEmail = actor.email?.toLowerCase();
+  if (
+    allowedEmails.length > 0 &&
+    (!actorEmail || !allowedEmails.some((entry) => entry.toLowerCase() === actorEmail))
+  ) {
+    return forbidden(`${actor.email ?? "this user"} is not authorized to trigger automations`);
+  }
+
+  if (!automation.enabled) {
+    return conflict(`automation "${automationId}" is disabled; enable it in the config first`);
+  }
+
+  const activeRun = data.listRuns({ automationId, status: "in_progress", limit: 1, offset: 0 })
+    .runs[0];
+  if (activeRun) {
+    return conflict(
+      `automation "${automationId}" already has a run in progress (run ${activeRun.id}); wait for it to finish`,
+    );
+  }
+
+  // Standalone spawn mode: the spawned CLI needs a moment to create its run
+  // row, so rapid repeat triggers are debounced until the TTL lapses. The
+  // worker-embedded dashboard relies on the automation's schedule lease.
+  if (data.retryMode === "spawn" && !data.claimAutomationRun(automationId)) {
+    return conflict(`a manual run of "${automationId}" was just triggered and is starting`);
+  }
+
+  const trigger = deps.trigger ?? ((id: string) => data.getAutomationActions().trigger(id));
+  let outcome: ManualTriggerOutcome;
+  try {
+    outcome = await trigger(automationId);
+  } catch (error) {
+    data.releaseAutomationRun(automationId);
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, body: { error: `could not start the run: ${message}` } };
+  }
+  if (!outcome.ok) {
+    data.releaseAutomationRun(automationId);
+    return conflict(outcome.reason);
+  }
+
+  return {
+    status: 202,
+    body: {
+      status: "triggered",
+      automationId,
     },
   };
 }

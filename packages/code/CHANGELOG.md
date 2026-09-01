@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [2.7.0] - unreleased
+
+### Added
+
+- **Run scheduled automations now from the dashboard**: the new Automations tab lists every configured automation with its schedule, repo, next occurrence, and last run, and a **Run now** action executes it immediately through the exact scheduled pipeline (occurrence task file, worktree prep, per-repo environment, CLI subprocess) — so a new or edited configuration can be validated in seconds instead of waiting for the next schedule window. Manual runs are recorded with the new `manual` run origin (filterable in the run list) and carry the automation id, keeping them distinguishable from scheduled runs. The action requires signing in (`DASHBOARD_AUTOMATION_EMAILS` optionally restricts who may trigger), refuses disabled automations with an explanation, debounces rapid repeat triggers, and refuses a run while the automation already has one in progress — a scheduled occurrence coming due mid-run follows the usual at-most-once overlap policy. A standalone `devintern dashboard` lists the repo's own `.devintern-code/automations.toml` and triggers through the documented manual CLI flow
+
 ## [2.6.0] - 2026-08-28
 
 Worker resilience release: interrupted runs are recovered on startup, failure feedback no longer causes retry loops, conflict resolution reliably lands on the PR, and usage-limit detection covers every harness.

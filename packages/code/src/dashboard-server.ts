@@ -17,14 +17,17 @@ import { join, normalize, resolve } from "path";
 import {
   DashboardData,
   handleAgentPrs,
+  handleAutomations,
   handleLogs,
   handleRetryRun,
+  handleRunAutomation,
   handleRuns,
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
 } from "./lib/dashboard-api";
-import type { RetryHandlerDeps } from "./lib/dashboard-api";
+import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/dashboard-api";
+import type { DashboardAutomationActions } from "./lib/automation-acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 
@@ -42,6 +45,14 @@ export interface DashboardServerOptions {
   retryMode?: "spawn" | "schedule";
   /** Collaborator overrides for the retry action (tests). */
   retryDeps?: RetryHandlerDeps;
+  /**
+   * Automation listing/triggering overrides. The workspace worker passes its
+   * in-process scheduler so "Run now" rides the exact scheduled pipeline;
+   * a standalone dashboard falls back to the project's automations.toml.
+   */
+  automationActions?: DashboardAutomationActions;
+  /** Collaborator overrides for the manual-run action (tests). */
+  automationDeps?: AutomationRunDeps;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
 }
@@ -105,6 +116,7 @@ export function startDashboardServer(
     dbPath: options.dbPath,
     workingDir: options.workingDir,
     retryMode: options.retryMode,
+    automationActions: options.automationActions,
     logDirs: options.logDirs,
   });
   const uiDir = resolveUiDir();
@@ -118,6 +130,7 @@ export function startDashboardServer(
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
+  const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
   const server = Bun.serve({
     port,
@@ -131,11 +144,19 @@ export function startDashboardServer(
         if (retry) {
           return json(await handleRetryRun(data, retry[1], options.retryDeps));
         }
+        const automationRun =
+          request.method === "POST" ? pathname.match(automationRunPattern) : null;
+        if (automationRun) {
+          return json(await handleRunAutomation(data, automationRun[1], options.automationDeps));
+        }
         if (request.method !== "GET") {
           return json({ status: 405, body: { error: "method not allowed" } });
         }
         if (pathname === "/api/health") {
           return json({ status: 200, body: { status: "ok" } });
+        }
+        if (pathname === "/api/automations") {
+          return json(handleAutomations(data));
         }
         if (pathname === "/api/runs") {
           return json(handleRuns(data, url.searchParams));

@@ -27,7 +27,7 @@ export type AnalyticsEvent = "cli_run" | "worker_started" | "worker_task_run" | 
 
 export type WorkerTaskOutcome = "succeeded" | "failed" | "deferred" | "escalated" | "abandoned";
 
-export type WorkerTaskTrigger = "task" | "scheduled" | "estimate";
+export type WorkerTaskTrigger = "task" | "scheduled" | "estimate" | "manual";
 export type WorkerMode = "polling" | "relay" | "hybrid" | "scheduled";
 
 /** Internal marker inherited only by task subprocesses launched by the worker. */
@@ -249,7 +249,9 @@ export function trackWorkerTaskRun(
         ? "scheduled"
         : runOrigin === "estimate"
           ? "estimate"
-          : undefined;
+          : runOrigin === "manual"
+            ? "manual"
+            : undefined;
   if (!workerTrigger) return false;
 
   void track("worker_task_run", {

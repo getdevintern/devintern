@@ -78,6 +78,8 @@ Because the occurrence is just a markdown task, you can reproduce or rerun any o
 devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
+You usually don't have to: the [dashboard](./dashboard.md#running-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
+
 ### Writing good prompts
 
 The prompt replaces the ticket description the agent would normally read, so treat it like you would write a task for a new teammate:
@@ -93,7 +95,7 @@ Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_
 
 ### Schedule semantics
 
-Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed.
+Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed. A dashboard-triggered manual run holds the same lease while it is active, so a scheduled occurrence coming due mid-validation is skipped rather than run concurrently.
 
 On shutdown the scheduler stops its timer, terminates active automation subprocess groups, waits for them to exit, and leaves their claims recoverable in SQLite.
 

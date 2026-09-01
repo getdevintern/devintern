@@ -592,6 +592,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
+  /** In-process automation scheduler, exposed to the dashboard for "Run now". */
+  let automationActions: import("../automation-acquirer").DashboardAutomationActions | undefined;
 
   // First in the list and on a short interval: a dashboard-scheduled retry
   // gets picked up ahead of the slower pollers.
@@ -622,18 +624,25 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       throw new Error(`Invalid ${configPath}:\n- ${semanticErrors.join("\n- ")}`);
     }
 
-    acquirers.push(
-      new AutomationAcquirer({
-        automations: config.automations,
-        dbPath: state.dbPath,
-        extraArgs: fleetTaskArgs(config),
-        resolveContext: async (automation) =>
-          withCoordinatorSlot(
-            await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
-            coordinator,
-          ),
-      }),
-    );
+    const automationAcquirer = new AutomationAcquirer({
+      automations: config.automations,
+      dbPath: state.dbPath,
+      extraArgs: fleetTaskArgs(config),
+      resolveContext: async (automation) =>
+        withCoordinatorSlot(
+          await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+          coordinator,
+        ),
+    });
+    // The dashboard's "Run now" action goes through this same scheduler, so a
+    // manual run shares the scheduled pipeline (worktree prep, per-repo env,
+    // overlap lease) and its occurrences are indistinguishable apart from the
+    // recorded `manual` origin.
+    automationActions = {
+      list: () => automationAcquirer.listSchedules(),
+      trigger: (automationId) => automationAcquirer.triggerManual(automationId),
+    };
+    acquirers.push(automationAcquirer);
   }
 
   if (config.estimations.length > 0) {
@@ -703,8 +712,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
       // `schedule`: retries are drained by this worker's retry-queue acquirer
-      // through the normal pipeline (never spawned from the workspace home).
-      startDashboardServer({ port: config.workspace.dashboardPort, retryMode: "schedule" });
+      // through the normal pipeline (never spawned from the workspace home);
+      // automation "Run now" triggers go through the in-process scheduler.
+      startDashboardServer({
+        port: config.workspace.dashboardPort,
+        retryMode: "schedule",
+        automationActions,
+      });
     } catch (error) {
       console.warn(
         `⚠️  Dashboard could not start (${(error as Error).message}); the worker will continue.`,
