@@ -74,7 +74,6 @@ export interface DashboardDataOptions {
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
   /**
-  /**
    * Live working-window snapshot from the worker process (embedded
    * dashboard only; standalone servers return null).
    */

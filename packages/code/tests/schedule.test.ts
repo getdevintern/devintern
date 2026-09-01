@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -351,6 +351,23 @@ describe("missedMostRecentWindow / lastElapsedActiveWindow", () => {
     expect(missedMostRecentWindow(blockedOnly, clock, null, now)).toBe(false);
   });
 
+  test("fully blocked active windows never report catch-up", () => {
+    const fullyBlocked = configOf(["22:00-06:00"], ["22:00-06:00"], zone);
+    const now = Date.UTC(2026, 5, 15, 9, 0);
+    expect(lastElapsedActiveWindow(fullyBlocked, clock, now)).toBeNull();
+    expect(missedMostRecentWindow(fullyBlocked, clock, null, now)).toBe(false);
+  });
+
+  test("blocked intervals split the effective catch-up windows", () => {
+    const split = configOf(["08:00-14:00"], ["11:00-13:00"], zone);
+    const now = Date.UTC(2026, 5, 15, 15, 0);
+    expect(lastElapsedActiveWindow(split, clock, now)).toEqual({
+      startedAt: Date.UTC(2026, 5, 15, 13, 0),
+      endedAt: Date.UTC(2026, 5, 15, 14, 0),
+    });
+    expect(missedMostRecentWindow(split, clock, Date.UTC(2026, 5, 15, 10, 0), now)).toBe(true);
+  });
+
   test("catch_up_missed=false disables startup catch-up in the gate", () => {
     const parsed = parseWorkerScheduleSection({
       active: ["22:00-06:00"],
@@ -375,7 +392,7 @@ describe("PickupGate", () => {
   });
 
   afterEach(() => {
-    rmSync(runNowPath, { force: true });
+    rmSync(runNowPath, { force: true, recursive: true });
   });
 
   test("allows and blocks by minute of day, reporting flips once per change", () => {
@@ -407,7 +424,8 @@ describe("PickupGate", () => {
     });
     expect(gate.pickupAllowed()).toBe(false);
     writeFileSync(runNowPath, "");
-    expect(gate.pickupAllowed()).toBe(true); // manual request forces the gate open
+    expect(gate.snapshot().manualRequested).toBe(true);
+    expect(gate.pickupAllowed()).toBe(false); // only successful consumption grants the bypass
     expect(gate.consumeManualPickup()).toBe(true);
     expect(gate.consumeManualPickup()).toBe(false);
     expect(gate.pickupAllowed()).toBe(false);
@@ -416,6 +434,16 @@ describe("PickupGate", () => {
   test("without a sentinel path there is no manual override", () => {
     const gate = createPickupGate(configOf(["10:00-12:00"], [], "UTC"), { runNowPath: undefined });
     expect(gate.consumeManualPickup()).toBe(false);
+  });
+
+  test("an undeletable sentinel never holds a closed schedule open", () => {
+    const gate = createPickupGate(configOf(["10:00-12:00"], [], "UTC"), {
+      now: () => Date.parse("2026-06-15T23:00:00Z"),
+      runNowPath,
+    });
+    mkdirSync(runNowPath);
+    expect(() => gate.consumeManualPickup()).toThrow();
+    expect(gate.pickupAllowed()).toBe(false);
   });
 
   test("snapshot carries windows, resolved zone, and the next change", () => {
@@ -443,10 +471,14 @@ describe("PickupGate", () => {
     expect(gate.shouldCatchUpOnStart(Date.UTC(2026, 5, 13, 23, 0))).toBe(true);
   });
 
-  test("createPickupGate(null) yields an always-open disabled gate", () => {
-    const gate = createPickupGate(null);
+  test("createPickupGate(null) yields an always-open gate that clears run-now markers", () => {
+    writeFileSync(runNowPath, "");
+    const gate = createPickupGate(null, { runNowPath });
     expect(gate.enabled).toBe(false);
     expect(gate.pickupAllowed()).toBe(true);
+    expect(gate.snapshot().manualRequested).toBe(true);
+    expect(gate.consumeManualPickup()).toBe(true);
+    expect(gate.consumeManualPickup()).toBe(false);
     expect(gate.shouldCatchUpOnStart(null)).toBe(false);
     expect(gate.snapshot().enabled).toBe(false);
   });

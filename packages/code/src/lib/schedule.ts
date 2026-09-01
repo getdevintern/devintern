@@ -211,6 +211,31 @@ export function pickupAllowedAt(schedule: WorkerScheduleConfig, minutesOfDay: nu
   return schedule.active.some((w) => containsMinute(w, minutesOfDay));
 }
 
+/** Daily windows where pickup is effectively open after applying blocked overrides. */
+function effectiveActiveWindows(
+  schedule: WorkerScheduleConfig,
+): Array<{ startMinutes: number; endMinutes: number }> {
+  const allowed = Array.from({ length: MINUTES_PER_DAY }, (_, minute) =>
+    pickupAllowedAt(schedule, minute),
+  );
+  if (!allowed.some(Boolean) || allowed.every(Boolean)) {
+    return [];
+  }
+
+  const windows: Array<{ startMinutes: number; endMinutes: number }> = [];
+  for (let minute = 0; minute < MINUTES_PER_DAY; minute++) {
+    const previous = (minute + MINUTES_PER_DAY - 1) % MINUTES_PER_DAY;
+    if (!allowed[minute] || allowed[previous]) continue;
+
+    let endMinutes = (minute + 1) % MINUTES_PER_DAY;
+    while (allowed[endMinutes]) {
+      endMinutes = (endMinutes + 1) % MINUTES_PER_DAY;
+    }
+    windows.push({ startMinutes: minute, endMinutes });
+  }
+  return windows;
+}
+
 interface WallYMDhM {
   year: number;
   month: number;
@@ -388,7 +413,7 @@ export function nextTransition(
   return null;
 }
 
-/** The latest daily-window occurrence that fully elapsed before `nowMs`. */
+/** The latest effective pickup window that fully elapsed before `nowMs`. */
 export function lastElapsedActiveWindow(
   schedule: WorkerScheduleConfig,
   clock: WallClock,
@@ -396,8 +421,9 @@ export function lastElapsedActiveWindow(
   lookbackDays = 8,
 ): { startedAt: number; endedAt: number } | null {
   let latest: { startedAt: number; endedAt: number } | null = null;
+  const effectiveWindows = effectiveActiveWindows(schedule);
   for (const anchor of clock.dayAnchors(nowMs, lookbackDays, 0)) {
-    for (const window of schedule.active) {
+    for (const window of effectiveWindows) {
       const startedAt = clock.instantAt(anchor, window.startMinutes);
       const endAnchor = window.endMinutes <= window.startMinutes ? anchor + 86_400_000 : anchor;
       const endedAt = clock.instantAt(endAnchor, window.endMinutes);
@@ -500,21 +526,13 @@ class ScheduledPickupGate implements PickupGate {
 
   pickupAllowed(): boolean {
     const nowMs = this.nowMs();
-    const manualPending = this.peekRunNowFile();
-    const allowed = manualPending || pickupAllowedAt(this.config, this.clock.minutesOfDay(nowMs));
+    const allowed = pickupAllowedAt(this.config, this.clock.minutesOfDay(nowMs));
     this.publishIfFlipped(allowed, nowMs);
     return allowed;
   }
 
   consumeManualPickup(): boolean {
-    if (!this.deps.runNowPath) return false;
-    if (!existsSync(this.deps.runNowPath)) return false;
-    try {
-      unlinkSync(this.deps.runNowPath);
-    } catch {
-      // Another tick already consumed it; harmless.
-    }
-    return true;
+    return consumeRunNowFile(this.deps.runNowPath);
   }
 
   shouldCatchUpOnStart(lastDrainAt: number | null): boolean {
@@ -578,11 +596,14 @@ class ScheduledPickupGate implements PickupGate {
 /** Gate for schedules that do not restrict anything (no `[worker.schedule]`). */
 class OpenPickupGate implements PickupGate {
   readonly enabled = false;
+
+  constructor(private readonly deps: PickupGateDeps = {}) {}
+
   pickupAllowed(): boolean {
     return true;
   }
   consumeManualPickup(): boolean {
-    return false;
+    return consumeRunNowFile(this.deps.runNowPath);
   }
   shouldCatchUpOnStart(_lastDrainAt: number | null): boolean {
     return false;
@@ -595,7 +616,7 @@ class OpenPickupGate implements PickupGate {
       blocked: [],
       timezone: currentSystemTimeZone(),
       catchUpMissed: DEFAULT_CATCH_UP_MISSED,
-      manualRequested: false,
+      manualRequested: Boolean(this.deps.runNowPath && existsSync(this.deps.runNowPath)),
     };
   }
   onChange(): void {}
@@ -606,7 +627,19 @@ export function createPickupGate(
   config: WorkerScheduleConfig | null,
   deps: PickupGateDeps = {},
 ): PickupGate {
-  return config ? new ScheduledPickupGate(config, deps) : new OpenPickupGate();
+  return config ? new ScheduledPickupGate(config, deps) : new OpenPickupGate(deps);
+}
+
+function consumeRunNowFile(path: string | undefined): boolean {
+  if (!path || !existsSync(path)) return false;
+  try {
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    // A concurrent consumer may have won the race between exists and unlink.
+    if (!existsSync(path)) return false;
+    throw error;
+  }
 }
 
 export function currentSystemTimeZone(): string {

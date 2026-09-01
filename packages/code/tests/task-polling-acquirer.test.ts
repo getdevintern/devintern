@@ -469,6 +469,24 @@ describe("TaskPollingAcquirer", () => {
       expect(executed).toEqual(["TASK-1"]);
     });
 
+    test("a run-now consumption failure does not bypass a closed window", async () => {
+      const executed: string[] = [];
+      const { acquirer, seenCursors } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          consumeManualPickup: () => {
+            throw new Error("marker could not be removed");
+          },
+        }),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+      expect(seenCursors).toEqual([]);
+    });
+
     test("an executed drain records its timestamp for catch-up bookkeeping", async () => {
       const executed: string[] = [];
       const { acquirer } = makeAcquirer({
