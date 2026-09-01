@@ -12,6 +12,7 @@
  */
 
 import { LockManager } from "./lock-manager";
+import type { LockStatus } from "./lock-manager";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
 import {
@@ -668,20 +669,25 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  *
  * The worker writes `.worker.lock` under `.devintern-code/` of its working
  * directory (simple mode) or directly into the workspace home (fleet mode),
- * so both locations are consulted — a dashboard started from a different
- * directory than the worker must not report the worker as stopped. When no
- * readable lock file exists in either location, liveness is `unknown`: the
- * worker may be running elsewhere, and claiming "stopped" would be wrong.
+ * so both locations are consulted. A readable lock with a dead pid (a stale
+ * lock left behind by a crashed worker) must not shadow a live lock in the
+ * other location: the live lock wins, and `stopped` is only reported when
+ * every readable lock belongs to a dead process. When no readable lock file
+ * exists in either location, liveness is `unknown`: the worker may be
+ * running elsewhere, and claiming "stopped" would be wrong.
  *
  * @param workingDir - Project root the dashboard was started from
  */
 function resolveWorkerStatus(workingDir: string): WorkerStatusView {
-  const lock =
-    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE) ??
-    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true });
-  if (!lock) {
+  const locks = [
+    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
+    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true }),
+  ].filter((lock): lock is LockStatus => lock !== null);
+  if (locks.length === 0) {
     return { status: "unknown" };
   }
+  // A live lock beats a stale one regardless of which location it sits in.
+  const lock = locks.find((candidate) => candidate.running) ?? locks[0];
   return {
     status: lock.running ? "running" : "stopped",
     pid: lock.pid,

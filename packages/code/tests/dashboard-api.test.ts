@@ -280,6 +280,45 @@ describe("dashboard API", () => {
     expect(body.worker.lockFile).toBe(join(workspaceDir, ".worker.lock"));
   });
 
+  test("a stale project-dir lock does not shadow a live workspace lock", () => {
+    // A crashed worker leaves a lock whose pid is dead. If the current worker
+    // (fleet mode) has since taken the workspace-home lock, the stale lock
+    // must not win just because it was checked first.
+    const configDir = join(dir, ".devintern-code");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, ".worker.lock"),
+      JSON.stringify({ pid: 999999999, timestamp: "2026-08-26T06:03:49.220Z" }),
+    );
+    writeFileSync(
+      join(workspaceDir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const body = handleWorkerStatus(data).body as {
+      worker: { status: string; pid: number; lockFile?: string };
+    };
+    expect(body.worker.status).toBe("running");
+    expect(body.worker.pid).toBe(process.pid);
+    expect(body.worker.lockFile).toBe(join(workspaceDir, ".worker.lock"));
+  });
+
+  test("stopped is reported when every readable lock is stale", () => {
+    const configDir = join(dir, ".devintern-code");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, ".worker.lock"),
+      JSON.stringify({ pid: 999999999, timestamp: "2026-08-26T06:03:49.220Z" }),
+    );
+    writeFileSync(
+      join(workspaceDir, ".worker.lock"),
+      JSON.stringify({ pid: 999999998, timestamp: "2026-08-26T06:03:49.220Z" }),
+    );
+
+    const body = handleWorkerStatus(data).body as { worker: { status: string } };
+    expect(body.worker.status).toBe("stopped");
+  });
+
   test("worker status without any lock file is unknown, not stopped", () => {
     // Give the empty-DB path something to read gracefully too.
     const response = handleWorkerStatus(data);
