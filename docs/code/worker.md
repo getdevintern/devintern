@@ -222,7 +222,7 @@ Unattended automation is exactly where sandboxing the agent matters most: set `A
 
 ## Review feedback on the agent's PRs
 
-In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own.
+In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker (and PRs that disappear because a repository was renamed, transferred, or deleted) drop out of the open count within one poll.
 
 The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 

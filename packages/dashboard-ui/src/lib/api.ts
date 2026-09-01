@@ -130,13 +130,39 @@ export interface StatsResponse {
   } | null;
 }
 
+export type WorkerLiveness = "running" | "stopped" | "unknown";
+
+export interface WorkerStatus {
+  status: WorkerLiveness;
+  pid?: number;
+  startedAt?: string;
+  /** Lock file the status was read from; absent when it could not be determined. */
+  lockFile?: string;
+}
+
 export interface WorkerResponse {
-  worker: { running: boolean; pid?: number; startedAt?: string } | null;
+  worker: WorkerStatus;
   queue: { pending: number; processing: number; failed: number };
   agentPrs: { open: number; closed: number };
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+}
+
+/** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
+export interface AgentPrRecord {
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  branch?: string;
+  taskKey?: string;
+  ticketUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentPrsResponse {
+  prs: AgentPrRecord[];
 }
 
 export type WorkerLogLevel = "info" | "warn" | "error";
