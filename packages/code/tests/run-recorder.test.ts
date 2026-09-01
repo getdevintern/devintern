@@ -205,6 +205,25 @@ describe("RunStore", () => {
     expect(runs.map((r) => r.id).sort()).toEqual([first, second].sort());
   });
 
+  test("listRuns filters by automation id and status", () => {
+    const scheduled = store.createRun({
+      origin: "scheduled",
+      automationId: "dependency-health",
+    });
+    const manual = store.createRun({ origin: "manual", automationId: "dependency-health" });
+    store.createRun({ origin: "scheduled", automationId: "other-schedule" });
+
+    const all = store.listRuns({ automationId: "dependency-health" });
+    expect(all).toHaveLength(2);
+    expect(all.map((r) => r.id).sort()).toEqual([scheduled, manual].sort());
+
+    const manualOnly = store.listRuns({
+      automationId: "dependency-health",
+      origin: "manual",
+    });
+    expect(manualOnly.map((r) => r.id)).toEqual([manual]);
+  });
+
   test("latestRunByTaskKey returns the newest run per key in one query", () => {
     const firstProj = store.createRun({ origin: "task", taskKey: "PROJ-10" });
     store.finishRun(firstProj, "failed");

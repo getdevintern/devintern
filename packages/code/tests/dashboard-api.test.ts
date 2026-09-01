@@ -16,7 +16,7 @@ import { RunStore } from "../src/lib/run-recorder";
 import type { RunStats } from "../src/lib/run-recorder";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
-import { startDashboardServer } from "../src/dashboard-server";
+import { isLoopbackDashboardHost, startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -513,6 +513,16 @@ describe("dashboard server", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("accepts only explicit loopback bind hosts", () => {
+    for (const host of ["127.0.0.1", "localhost", "::1", "[::1]"]) {
+      expect(isLoopbackDashboardHost(host)).toBe(true);
+    }
+    for (const host of ["0.0.0.0", "192.168.1.20", "dashboard.example.com"]) {
+      expect(isLoopbackDashboardHost(host)).toBe(false);
+      expect(() => startDashboardServer({ host, port: 0 })).toThrow("is not loopback");
+    }
+  });
+
   test("serves the JSON API end-to-end", async () => {
     const store = new RunStore(dbPath);
     const id = store.createRun({ origin: "task", taskKey: "PROJ-1", harness: "claude-code" });
@@ -553,6 +563,33 @@ describe("dashboard server", () => {
     } finally {
       server.stop(true);
     }
+  });
+
+  test("handleWorkerStatus surfaces the working-window snapshot when provided", () => {
+    const snapshot = {
+      enabled: true,
+      pickupAllowed: false,
+      active: ["22:00-06:00"],
+      blocked: [],
+      timezone: "UTC",
+      catchUpMissed: true,
+      manualRequested: false,
+      nextChange: { at: Date.UTC(2026, 5, 16, 22, 0), kind: "open" as const },
+    };
+    const scheduled = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      scheduleSnapshot: () => snapshot,
+    });
+    const response = handleWorkerStatus(scheduled);
+    scheduled.close();
+    expect((response.body as { schedule: unknown }).schedule).toEqual(snapshot);
+
+    // Without a provider (standalone dashboard), the field is null.
+    const plain = new DashboardData({ dbPath, workingDir: dir });
+    const bare = handleWorkerStatus(plain);
+    plain.close();
+    expect((bare.body as { schedule: unknown }).schedule).toBeNull();
   });
 
   test("POST /api/runs/:id/retry triggers the CLI flow end-to-end", async () => {
@@ -610,27 +647,27 @@ describe("dashboard server", () => {
       });
       expect(repeat.status).toBe(409);
 
-      // Unauthorized requests are refused before anything spawns.
-      const deniedId = (() => {
+      // Loopback requests do not depend on a CLI sign-in session.
+      const localId = (() => {
         const s = new RunStore(dbPath);
         const failed = s.createRun({ origin: "task", taskKey: "PROJ-10" });
         s.finishRun(failed, "failed");
         s.close();
         return failed;
       })();
-      const noAuth = startDashboardServer({
+      const noSession = startDashboardServer({
         port: 0,
         dbPath,
         workingDir: dir,
         retryDeps: { resolveActor: async () => null, spawn: () => ({ command: "" }) },
       });
       try {
-        const denied = await fetch(`http://127.0.0.1:${noAuth.port}/api/runs/${deniedId}/retry`, {
+        const local = await fetch(`http://127.0.0.1:${noSession.port}/api/runs/${localId}/retry`, {
           method: "POST",
         });
-        expect(denied.status).toBe(403);
+        expect(local.status).toBe(202);
       } finally {
-        noAuth.stop(true);
+        noSession.stop(true);
       }
 
       // GET is not allowed on the retry route.

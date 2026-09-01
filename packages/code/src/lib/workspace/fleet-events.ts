@@ -164,13 +164,21 @@ export function createFleetMentionHandler(
  * executor when it is ready.
  */
 export function createFleetTaskEvaluator(options: {
-  query: string;
+  query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<void> {
   return async (taskKey) => {
-    const { tasks } = await options.searchTasks(options.query);
+    const rawQuery = options.query;
+    const query = typeof rawQuery === "function" ? rawQuery() : rawQuery;
+    if (!query) {
+      if (options.verbose) {
+        console.log(`   [fleet] task ${taskKey} changed but task_query is not configured.`);
+      }
+      return;
+    }
+    const { tasks } = await options.searchTasks(query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
     if (!task) {
       if (options.verbose) {

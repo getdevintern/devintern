@@ -874,6 +874,20 @@ describe("ReviewPollingAcquirer", () => {
     expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
   });
 
+  test("live reload can disable and re-enable conflict resolution", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(conflictGh());
+
+    made.acquirer.updateConflictResolution("disabled");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+
+    made.acquirer.updateConflictResolution("auto");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+  });
+
   test("start() surfaces the active conflict-resolution mode", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const logs: string[] = [];

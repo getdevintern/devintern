@@ -22,6 +22,7 @@ const RUN_ORIGINS: RunOrigin[] = [
   "conflict_resolution",
   "scheduled",
   "estimate",
+  "manual",
 ];
 
 /** Hand-rolled SVG bar chart of runs per week (keeps dependencies minimal). */

@@ -7,7 +7,9 @@ import {
   AUTOMATION_ID_ENV,
   AUTOMATION_ORIGIN_ENV,
   AutomationAcquirer,
+  MANUAL_ORIGIN_ENV_VALUE,
   MAX_TIMER_DELAY_MS,
+  automationRunEnv,
   nextAutomationDue,
   spawnAutomationProcess,
   writeAutomationTaskFile,
@@ -497,8 +499,402 @@ describe("AutomationAcquirer", () => {
     expect(stopFinished).toBe(true);
   });
 
+  describe("applyAutomations (live config reload)", () => {
+    const newDb = () => {
+      const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+      dbPaths.push(dbPath);
+      return dbPath;
+    };
+
+    test("schedules an automation added at runtime", async () => {
+      const dbPath = newDb();
+      let now = 0;
+      const acquirer = new AutomationAcquirer({
+        automations: [],
+        dbPath,
+        now: () => now,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {},
+        resolveContext: async () => null,
+      });
+      await acquirer.start();
+      const added: AutomationConfig = {
+        id: "added",
+        enabled: true,
+        prompt: "p",
+        interval: "15m",
+        intervalMs: 900_000,
+      };
+      acquirer.applyAutomations([added]);
+
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get("added")?.nextDueAt).toBe(900_000);
+      store.close();
+      await acquirer.stop();
+    });
+
+    test("drops schedule state for a fully removed automation and forgets its timer", async () => {
+      const dbPath = newDb();
+      let now = 0;
+      let timerCleared = false;
+      const automation: AutomationConfig = {
+        id: "retired",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+      };
+      const acquirer = new AutomationAcquirer({
+        automations: [automation],
+        dbPath,
+        now: () => now,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {
+          timerCleared = true;
+        },
+        resolveContext: async () => null,
+      });
+      await acquirer.start();
+
+      acquirer.applyAutomations([]);
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get("retired")).toBeNull();
+      store.close();
+      expect(timerCleared).toBe(true);
+      await acquirer.stop();
+    });
+
+    test("lets an active run of a removed automation finish before dropping state", async () => {
+      const dbPath = newDb();
+      let now = 0;
+      let resolveRun!: (ok: boolean) => void;
+      const automation: AutomationConfig = {
+        id: "in-flight",
+        enabled: true,
+        prompt: "p",
+        interval: "10ms",
+        intervalMs: 10,
+      };
+      const acquirer = new AutomationAcquirer({
+        automations: [automation],
+        dbPath,
+        now: () => now,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {},
+        resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+        spawnRun: () => ({
+          completion: new Promise((resolve) => (resolveRun = resolve)),
+          terminate() {},
+        }),
+      });
+      await acquirer.start();
+      now = 100;
+      await acquirer.tick();
+
+      // Removed from the config mid-run: the occurrence finishes naturally.
+      acquirer.applyAutomations([]);
+      const storeWhileRunning = new AutomationStateStore(dbPath);
+      expect(storeWhileRunning.get("in-flight")).not.toBeNull();
+      storeWhileRunning.close();
+
+      resolveRun(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const storeAfterFinish = new AutomationStateStore(dbPath);
+      expect(storeAfterFinish.get("in-flight")).toBeNull();
+      storeAfterFinish.close();
+      await acquirer.stop();
+    });
+
+    test("resets the cursor when the schedule spec changes; keeps it when unchanged", async () => {
+      const dbPath = newDb();
+      const fixedNow = 50_000;
+      const hourly: AutomationConfig = {
+        id: "resched",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+      };
+      const halfHourly: AutomationConfig = { ...hourly, interval: "30m", intervalMs: 1_800_000 };
+      const acquirer = new AutomationAcquirer({
+        automations: [hourly],
+        dbPath,
+        now: () => fixedNow,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {},
+        resolveContext: async () => null,
+      });
+      await acquirer.start();
+
+      const store = new AutomationStateStore(dbPath);
+      const anchoredAt = store.get("resched")?.nextDueAt;
+      expect(anchoredAt).toBe(fixedNow + 3_600_000);
+
+      // Unchanged spec (same definition object shape) keeps the anchor.
+      acquirer.applyAutomations([hourly]);
+      expect(store.get("resched")?.nextDueAt).toBe(anchoredAt);
+
+      // Changed spec resets the interval anchor.
+      acquirer.applyAutomations([halfHourly]);
+      expect(store.get("resched")?.nextDueAt).toBe(fixedNow + 1_800_000);
+      store.close();
+      await acquirer.stop();
+    });
+  });
+
   test("exports the scheduled-run attribution env marker names", () => {
     expect(AUTOMATION_ORIGIN_ENV).toBe("DEVINTERN_RUN_ORIGIN");
     expect(AUTOMATION_ID_ENV).toBe("DEVINTERN_AUTOMATION_ID");
+  });
+
+  test("builds attribution env per run origin", () => {
+    const automation: AutomationConfig = {
+      id: "dependency-health",
+      enabled: true,
+      prompt: "p",
+      interval: "1d",
+      intervalMs: 86_400_000,
+    };
+    expect(automationRunEnv(automation, { REPO_ENV: "x" })).toEqual({
+      REPO_ENV: "x",
+      [AUTOMATION_ORIGIN_ENV]: "scheduled",
+      [AUTOMATION_ID_ENV]: "dependency-health",
+    });
+    expect(automationRunEnv(automation, { REPO_ENV: "x" }, MANUAL_ORIGIN_ENV_VALUE)).toEqual({
+      REPO_ENV: "x",
+      [AUTOMATION_ORIGIN_ENV]: "manual",
+      [AUTOMATION_ID_ENV]: "dependency-health",
+    });
+    expect(MANUAL_ORIGIN_ENV_VALUE).toBe("manual");
+  });
+});
+
+describe("AutomationAcquirer triggerManual (dashboard Run now)", () => {
+  const dbPaths: string[] = [];
+  afterEach(() => {
+    for (const path of dbPaths.splice(0)) {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
+
+  function makeAutomation(id = "dependency-health"): AutomationConfig {
+    return { id, enabled: true, prompt: "p", interval: "15m", intervalMs: 900_000 };
+  }
+
+  test("runs the manual path through the same pipeline and releases the lease after completion", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let releases = 0;
+    let spawnedCwd: string | undefined;
+    let resolveRun!: (ok: boolean) => void;
+    const automation = makeAutomation();
+    const acquirer = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      now: () => now,
+      resolveContext: async () => {
+        return {
+          cwd: "/base-worktree",
+          env: {},
+          release: () => {
+            releases += 1;
+          },
+        };
+      },
+      spawnManualRun: (target, context) => {
+        expect(target.id).toBe("dependency-health");
+        spawnedCwd = context.cwd;
+        return {
+          completion: new Promise<boolean>((resolve) => (resolveRun = resolve)),
+          terminate() {},
+        };
+      },
+    });
+    await acquirer.start();
+
+    const outcome = await acquirer.triggerManual("dependency-health");
+    expect(outcome).toEqual({ ok: true });
+    expect(spawnedCwd).toBe("/base-worktree");
+
+    // The manual run holds the automation's overlap lease while active.
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("dependency-health")?.leaseOwner).toBeDefined();
+
+    resolveRun(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.get("dependency-health")?.leaseOwner).toBeUndefined();
+    expect(releases).toBe(1);
+    store.close();
+    await acquirer.stop();
+  });
+
+  test("releases the context and lease when spawning a manual run throws", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let releases = 0;
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation()],
+      dbPath,
+      now: () => 0,
+      resolveContext: async () => ({
+        cwd: "/tmp",
+        env: {},
+        release: () => {
+          releases += 1;
+        },
+      }),
+      spawnManualRun: () => {
+        throw new Error("spawn failed");
+      },
+    });
+    await acquirer.start();
+
+    await expect(acquirer.triggerManual("dependency-health")).rejects.toThrow("spawn failed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("dependency-health")?.leaseOwner).toBeUndefined();
+    expect(releases).toBe(1);
+    store.close();
+    await acquirer.stop();
+  });
+
+  test("rejects unknown, disabled, and duplicate triggers", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    const disabled: AutomationConfig = {
+      id: "off",
+      enabled: false,
+      prompt: "p",
+      interval: "15m",
+      intervalMs: 900_000,
+    };
+    let spawnCount = 0;
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation(), disabled],
+      dbPath,
+      now: () => 0,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnManualRun: () => {
+        spawnCount += 1;
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+    });
+    await acquirer.start();
+
+    expect(await acquirer.triggerManual("nope")).toEqual({
+      ok: false,
+      reason: 'automation "nope" is not configured',
+    });
+    expect(await acquirer.triggerManual("off")).toMatchObject({ ok: false });
+    expect(spawnCount).toBe(0);
+
+    expect((await acquirer.triggerManual("dependency-health")).ok).toBe(true);
+    const duplicate = await acquirer.triggerManual("dependency-health");
+    expect(duplicate).toMatchObject({ ok: false });
+    expect((duplicate as { reason: string }).reason).toContain("already running");
+    expect(spawnCount).toBe(1);
+    await acquirer.stop();
+  });
+
+  test("rejects while a scheduled run is active", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let resolveRun!: (ok: boolean) => void;
+    let scheduledSpawns = 0;
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation()],
+      dbPath,
+      now: () => now,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => {
+        scheduledSpawns += 1;
+        return {
+          completion: new Promise<boolean>((resolve) => (resolveRun = resolve)),
+          terminate() {},
+        };
+      },
+      spawnManualRun: () => ({ completion: Promise.resolve(true), terminate() {} }),
+    });
+    await acquirer.start();
+    now = 900_000;
+    await acquirer.tick();
+    expect(scheduledSpawns).toBe(1);
+
+    const outcome = await acquirer.triggerManual("dependency-health");
+    expect(outcome).toMatchObject({ ok: false });
+    expect(scheduledSpawns).toBe(1);
+
+    resolveRun(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await acquirer.stop();
+  });
+
+  test("surfaces a busy repository and gives the lease back", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation()],
+      dbPath,
+      now: () => 0,
+      resolveContext: async () => null,
+      spawnManualRun: () => ({ completion: Promise.resolve(true), terminate() {} }),
+    });
+    await acquirer.start();
+
+    const outcome = await acquirer.triggerManual("dependency-health");
+    expect(outcome).toMatchObject({ ok: false });
+    expect((outcome as { reason: string }).reason).toContain("busy");
+
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("dependency-health")?.leaseOwner).toBeUndefined();
+    store.close();
+    await acquirer.stop();
+  });
+
+  test("a scheduled occurrence coming due mid-manual-run is skipped, not run concurrently", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let scheduledSpawns = 0;
+    let resolveManual!: (ok: boolean) => void;
+    const automation: AutomationConfig = {
+      id: "overlap",
+      enabled: true,
+      prompt: "p",
+      interval: "10ms",
+      intervalMs: 10,
+    };
+    const acquirer = new AutomationAcquirer({
+      automations: [automation],
+      dbPath,
+      now: () => now,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => {
+        scheduledSpawns += 1;
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+      spawnManualRun: () => ({
+        completion: new Promise<boolean>((resolve) => (resolveManual = resolve)),
+        terminate() {},
+      }),
+    });
+    await acquirer.start();
+
+    expect((await acquirer.triggerManual("overlap")).ok).toBe(true);
+    now = 1000;
+    await acquirer.tick();
+    // The scheduled pipeline never ran while the manual run held the lease.
+    expect(scheduledSpawns).toBe(0);
+
+    const store = new AutomationStateStore(dbPath);
+    expect(store.get("overlap")?.nextDueAt).toBeGreaterThan(now);
+    store.close();
+    resolveManual(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await acquirer.stop();
   });
 });

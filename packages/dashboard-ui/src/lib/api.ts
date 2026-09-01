@@ -5,7 +5,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled" | "estimate";
+export type RunOrigin =
+  | "task"
+  | "pr_mention"
+  | "conflict_resolution"
+  | "scheduled"
+  | "estimate"
+  | "manual";
 
 export type RunStatus =
   | "in_progress"
@@ -82,6 +88,11 @@ export interface RetryAuditEntry {
 /** Retry metadata embedded in a run-detail response. */
 export interface RetryInfo {
   eligible: boolean;
+  /**
+   * How the retry dispatches: `task` forces the task key through the CLI,
+   * `automation` re-runs the automation that produced the run.
+   */
+  kind?: "task" | "automation";
   reason?: string;
   /** Recent dashboard retries of this run, most recent first. */
   audit: RetryAuditEntry[];
@@ -110,6 +121,45 @@ export async function triggerRunRetry(runId: number): Promise<{
   return { ok: response.ok, body };
 }
 
+/** One configured scheduled automation as served by `GET /api/automations`. */
+export interface AutomationSchedule {
+  id: string;
+  enabled: boolean;
+  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
+  schedule?: string;
+  repo?: string;
+  /** The prompt executed per occurrence. */
+  prompt: string;
+  /** Next scheduled occurrence (epoch ms). */
+  nextDueAt?: number;
+  /** Most recent run of this automation (any origin). */
+  lastRun?: RunRecord;
+}
+
+export interface AutomationsResponse {
+  automations: AutomationSchedule[];
+}
+
+/**
+ * Trigger a manual "Run now" execution of a scheduled automation. Resolves
+ * with the parsed JSON body regardless of status; callers should branch on
+ * `response.ok`.
+ */
+export async function triggerAutomation(automationId: string): Promise<{
+  ok: boolean;
+  body: { error?: string; status?: string };
+}> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    status?: string;
+  };
+  return { ok: response.ok, body };
+}
+
 export interface StatsResponse {
   window: string;
   stats: {
@@ -130,6 +180,18 @@ export interface StatsResponse {
   } | null;
 }
 
+/** Working-window (quiet hours) status from the worker process. */
+export interface ScheduleSnapshot {
+  enabled: boolean;
+  pickupAllowed: boolean;
+  active: string[];
+  blocked: string[];
+  timezone: string;
+  catchUpMissed: boolean;
+  manualRequested: boolean;
+  nextChange?: { at: number; kind: "open" | "close" };
+}
+
 export type WorkerLiveness = "running" | "stopped" | "unknown";
 
 export interface WorkerStatus {
@@ -144,6 +206,7 @@ export interface WorkerResponse {
   worker: WorkerStatus;
   queue: { pending: number; processing: number; failed: number };
   agentPrs: { open: number; closed: number };
+  schedule?: ScheduleSnapshot | null;
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;

@@ -33,6 +33,15 @@ export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): s
   return join(workspaceDir, "state", "queue.db");
 }
 
+/**
+ * Path of the "run now" sentinel. `devintern worker run-now` creates this
+ * file; a running worker consumes it on its next poll tick and drains once,
+ * ignoring working windows.
+ */
+export function workspaceRunNowPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".run-now");
+}
+
 /** Directory holding the worker-managed bare clones (`repos/<name>.git`). */
 export function reposDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "repos");
