@@ -275,7 +275,16 @@ This logs every API call, response, and retry attempt to the console. Leave it u
 
 ## Error Reporting
 
-The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+The CLI reports errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
+
+- Crashes and unhandled errors (any entry point: task runs, `worker`, `webhook serve`, `dashboard`, subcommands)
+- Task runs that fail mid-pipeline (agent errors, tracker/PR API failures) with context such as the task key, active tracker, and pipeline stage
+- Failed PR creation, failed estimation, and failed commits (which continue without completing that step)
+- Webhook review/comment processing failures
+
+What is **never** reported: task content, code, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent, and contexts contain only identifiers (task key, tracker type, stage/command names).
+
+To opt out:
 
 ```bash
 SENTRY_DISABLED=1

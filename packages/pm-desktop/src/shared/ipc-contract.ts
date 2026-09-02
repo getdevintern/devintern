@@ -72,6 +72,43 @@ export interface IpcError {
 
 export type IpcResult<T> = { ok: true; value: T } | { ok: false; error: IpcError };
 
+/** Where a renderer error originated. */
+export type RendererErrorKind = "error" | "unhandledrejection" | "react";
+
+/**
+ * Renderer-originated error forwarded to main for error tracking.
+ * Must never include secrets, tokens, or .env contents — only the message,
+ * stack, and (for React crashes) the component stack.
+ */
+export interface RendererErrorReport {
+  kind: RendererErrorKind;
+  message: string;
+  /** Renderer JS stack, when available. */
+  stack?: string;
+  /** React component stack, for error-boundary reports. */
+  componentStack?: string;
+}
+
+/**
+ * Validate an untyped {@link RendererErrorReport} from IPC. Returns `null`
+ * for anything malformed — bad reports are dropped, never echoed as errors
+ * (reporting must not feed back into reporting).
+ */
+export function parseRendererErrorReport(input: unknown): RendererErrorReport | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const { kind, message, stack, componentStack } = input as Record<string, unknown>;
+  if (kind !== "error" && kind !== "unhandledrejection" && kind !== "react") return null;
+  if (typeof message !== "string" || message.trim().length === 0) return null;
+  const report: RendererErrorReport = { kind, message: message.slice(0, 8000) };
+  if (typeof stack === "string" && stack.trim().length > 0) {
+    report.stack = stack.slice(0, 16000);
+  }
+  if (typeof componentStack === "string" && componentStack.trim().length > 0) {
+    report.componentStack = componentStack.slice(0, 16000);
+  }
+  return report;
+}
+
 /** Installed harness option for the header harness switcher. */
 export interface AvailableHarness {
   /** Registry id (e.g. `claude-code`). */
@@ -398,6 +435,13 @@ export interface PmDesktopApi {
   /** Enable or disable anonymous usage analytics. */
   setAnalyticsEnabled(enabled: boolean): Promise<IpcResult<null>>;
   /**
+   * Forward a renderer error (global handlers, unhandled rejections, React
+   * error boundary) to main for error tracking. Fire-and-forget: main-side
+   * reporting respects the telemetry toggle and SENTRY_DISABLED=1, and the
+   * result is always ok — malformed reports are dropped silently.
+   */
+  reportRendererError(report: RendererErrorReport): Promise<IpcResult<null>>;
+  /**
    * Persist `TASK_TRACKER` for a configured tracker and reload the session.
    * Open tickets are reset so composer/capabilities match the new backend.
    */
@@ -489,6 +533,7 @@ export const IPC_CHANNELS = {
   dismissCodeDiscovery: "pm:dismiss-code-discovery",
   getAnalyticsEnabled: "pm:get-analytics-enabled",
   setAnalyticsEnabled: "pm:set-analytics-enabled",
+  reportRendererError: "pm:report-renderer-error",
   switchTracker: "pm:switch-tracker",
   switchProjectKey: "pm:switch-project-key",
   switchHarness: "pm:switch-harness",

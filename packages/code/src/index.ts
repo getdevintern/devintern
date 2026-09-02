@@ -39,12 +39,12 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
+import { initSentryOnce } from "./lib/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
   captureError,
   findEnvFile,
   flushErrorTracking,
-  initErrorTracking,
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
@@ -463,7 +463,7 @@ function loadEnvironment(envFile?: string): string | null {
   const loaded = loadEnvironmentInner(envFile);
   // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
   // loading has had its chance to populate it.
-  initSentryOnce();
+  initSentryOnce(`code@${VERSION}`);
   return loaded;
 }
 
@@ -577,15 +577,8 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
 }
 
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
-let sentryInitialized = false;
-function initSentryOnce(): void {
-  if (sentryInitialized) return;
-  sentryInitialized = true;
-  initErrorTracking({
-    release: `code@${VERSION}`,
-    environment: process.env.NODE_ENV ?? "production",
-  });
-}
+// Shared entry-point init (worker/webhook standalone reuse this too); call sites
+// pass the release so standalone entries stay attributed to the CLI version.
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
@@ -1039,6 +1032,11 @@ if (process.argv[2] === "init") {
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
       console.error(`❌ Error: ${(error as Error).message}`);
+      // Thrown (unexpected) resolution errors are user actions that failed —
+      // reported like address-review; `failed`/`deferred` outcomes above are
+      // expected results and stay unreported.
+      captureError(error, { command: "resolve-conflicts", prUrl });
+      await flushErrorTracking();
       process.exitCode = 1;
     }
   })();
@@ -1991,6 +1989,13 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // A failed task run interrupted a user action — report it with the task
+    // context so Sentry shows which pipeline stage is failing for users.
+    captureError(error, {
+      taskKey,
+      tracker: process.env.TASK_TRACKER || "jira",
+      stage: "process-task",
+    });
 
     // Leave feedback on the ticket so a failed run never ends silently with
     // the task stranded in "In Progress" and no PR.
@@ -2006,6 +2011,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (totalTasks > 1) {
       throw error;
     }
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -2016,7 +2022,7 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
-    initSentryOnce();
+    initSentryOnce(`code@${VERSION}`);
 
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
@@ -2308,6 +2314,12 @@ async function main(): Promise<void> {
             error: (error as Error).message,
           });
           console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
+          // A failed estimation is a user action that did not complete.
+          captureError(error, {
+            taskKey,
+            tracker: process.env.TASK_TRACKER || "jira",
+            stage: "estimate",
+          });
           await finishTaskRun("failed", (error as Error).message);
         }
       }
@@ -2332,6 +2344,7 @@ async function main(): Promise<void> {
       }
       await flushAnalytics();
       if (estimationResults.failed > 0) {
+        await flushErrorTracking();
         process.exit(1);
       }
       return;
@@ -2403,6 +2416,9 @@ async function main(): Promise<void> {
           lockManager.release();
         }
         await flushAnalytics();
+        // Task failures were already captured in processSingleTask; make sure
+        // those events are sent before this exit.
+        await flushErrorTracking();
         process.exit(1);
       }
     }
@@ -2418,11 +2434,15 @@ async function main(): Promise<void> {
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // Setup/query failures that reach here were not captured by the per-task
+    // handlers (lock, tracker query, license, ...).
+    captureError(error, { stage: "main" });
     // Release lock before exiting on error
     if (lockManager) {
       lockManager.release();
     }
     await flushAnalytics();
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -3799,9 +3819,17 @@ async function runAgentHarness(
                 }
               } else {
                 console.log(`⚠️  PR creation failed: ${prResult.message}`);
+                // The run "succeeds" without a PR — a silent user-visible
+                // degradation worth tracking. prResult.message can quote API
+                // errors; captureError redacts token-like substrings.
+                captureError(new Error(prResult.message || "PR creation failed"), {
+                  taskKey,
+                  stage: "create-pr",
+                });
               }
             } catch (prError) {
               console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
+              captureError(prError, { taskKey, stage: "create-pr" });
             }
           };
           // --- End shared helpers ---
@@ -4176,6 +4204,9 @@ async function runAgentHarness(
                 console.log(
                   'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
                 );
+                // Agent output exists but was never committed — track the
+                // degradation; captureError redacts credential-like text.
+                captureError(commitError, { taskKey, stage: "commit" });
                 resolve(); // Still resolve since Agent succeeded
               });
           } else {
@@ -4231,6 +4262,8 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   if (lockManager) {
     lockManager.release();
   }
+  // Bounded; pending crash/handled-error events get a chance to send.
+  await flushErrorTracking();
   process.exit(exitCode);
 }
 
