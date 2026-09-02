@@ -4,6 +4,7 @@ sidebarLabel: "Jira Integration"
 description: "Turn AI-drafted stories into Jira Cloud issues with ADF descriptions, subtasks, and epic links."
 section: "PM"
 order: 4
+sidebarHidden: true
 dateModified: 2026-07-23
 tags: ["jira", "devintern/pm", "integration", "jira cloud"]
 ---

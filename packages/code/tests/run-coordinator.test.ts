@@ -3,6 +3,37 @@ import { describe, expect, test } from "bun:test";
 import { RunCoordinator } from "../src/lib/run-coordinator";
 
 describe("RunCoordinator", () => {
+  test("stays transparent until live estimations enable it", async () => {
+    const coordinator = new RunCoordinator(false);
+    const release = await coordinator.acquire();
+    let ran = false;
+    await coordinator.run(async () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
+    release();
+
+    coordinator.enable();
+    const held = await coordinator.acquire();
+    const waiting = coordinator.run(async () => "ran");
+    let settled = false;
+    void waiting.then(() => (settled = true));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(settled).toBe(false);
+    held();
+    expect(await waiting).toBe("ran");
+
+    coordinator.disableWhenIdle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const transparentRelease = await coordinator.acquire();
+    let transparentRan = false;
+    await coordinator.run(async () => {
+      transparentRan = true;
+    });
+    expect(transparentRan).toBe(true);
+    transparentRelease();
+  });
+
   test("runs held operations one at a time in FIFO order", async () => {
     const coordinator = new RunCoordinator();
     const events: string[] = [];

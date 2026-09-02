@@ -175,3 +175,51 @@ describe("LockManager custom lock file", () => {
     }
   });
 });
+
+describe("LockManager.readLockStatus", () => {
+  test("reads a nested project lock and reports liveness, pid, and path", () => {
+    const dir = join(
+      tmpdir(),
+      `lock-status-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(dir, { recursive: true });
+    try {
+      const lock = new LockManager(dir, ".worker.lock");
+      expect(lock.acquire().success).toBe(true);
+
+      const status = LockManager.readLockStatus(dir, ".worker.lock");
+      expect(status?.running).toBe(true);
+      expect(status?.pid).toBe(process.pid);
+      expect(status?.path).toBe(join(dir, ".devintern-code", ".worker.lock"));
+
+      lock.release();
+      expect(LockManager.readLockStatus(dir, ".worker.lock")).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("plainDir reads workspace locks that sit directly in the directory", () => {
+    const dir = join(
+      tmpdir(),
+      `lock-status-plain-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    );
+    mkdirSync(dir, { recursive: true });
+    try {
+      const workspaceLock = new LockManager(dir, ".worker.lock", { plainDir: true });
+      expect(workspaceLock.acquire().success).toBe(true);
+      expect(existsSync(join(dir, ".worker.lock"))).toBe(true);
+
+      // Nested lookup misses the plain lock; plainDir finds it.
+      expect(LockManager.readLockStatus(dir, ".worker.lock")).toBeNull();
+      const status = LockManager.readLockStatus(dir, ".worker.lock", { plainDir: true });
+      expect(status?.running).toBe(true);
+      expect(status?.pid).toBe(process.pid);
+      expect(status?.path).toBe(join(dir, ".worker.lock"));
+
+      workspaceLock.release();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

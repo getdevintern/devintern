@@ -4,6 +4,7 @@ sidebarLabel: "Linear Integration"
 description: "Fetch Linear issues, move workflow states, implement with your coding agent, and open PRs with summaries posted back."
 section: "Code"
 order: 5
+sidebarHidden: true
 dateModified: 2026-08-17
 tags: ["linear", "devintern/code", "integration"]
 ---

@@ -63,6 +63,10 @@ export interface MentionSweepAcquirerOptions {
   /** Base repo slug (`owner/repo`) the worker operates on. */
   repo: string;
   intervalSeconds: number;
+  /** Whether mention acquisition should run. */
+  shouldPollFeedback?: () => boolean;
+  /** Safety sweep cadence while relay is healthy. Defaults to 30 minutes. */
+  feedbackFallbackIntervalSeconds?: number;
   workerState: WorkerState;
   queue: WebhookQueue;
   github: MentionSweepGitHub;
@@ -134,13 +138,16 @@ export class MentionSweepAcquirer implements Acquirer {
   private busy = false;
   private botName: string | null | undefined; // undefined = not resolved yet
   private warnedNoBot = false;
+  private lastFeedbackPollAt: number;
 
   constructor(options: MentionSweepAcquirerOptions) {
     this.options = options;
+    this.lastFeedbackPollAt = Date.now();
   }
 
   /** Start sweeping: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
     console.log(
       `🔎 Sweeping ${this.options.repo} for @mentions every ${this.options.intervalSeconds}s`,
     );
@@ -156,6 +163,17 @@ export class MentionSweepAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Apply a new sweep cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
+  }
+
   /** One repo-wide sweep over both comment feeds. Skipped while busy. */
   async tick(): Promise<void> {
     if (this.busy) {
@@ -164,6 +182,15 @@ export class MentionSweepAcquirer implements Acquirer {
     this.busy = true;
 
     try {
+      const fallbackMs = (this.options.feedbackFallbackIntervalSeconds ?? 30 * 60) * 1000;
+      const now = Date.now();
+      if (
+        !(this.options.shouldPollFeedback?.() ?? true) &&
+        now - this.lastFeedbackPollAt < fallbackMs
+      ) {
+        return;
+      }
+      this.lastFeedbackPollAt = now;
       const botNames = botMentionCandidates(await this.resolveBotName());
       if (botNames.length === 0) {
         return;

@@ -134,6 +134,16 @@ describe("RunStore", () => {
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
   });
 
+  test("createRun persists the PR URL of PR-affected origins", () => {
+    const id = store.createRun({
+      origin: "conflict_resolution",
+      repo: "acme/widgets",
+      prNumber: 42,
+      prUrl: "https://github.com/acme/widgets/pull/42",
+    });
+    expect(store.getRun(id)?.prUrl).toBe("https://github.com/acme/widgets/pull/42");
+  });
+
   test("createRun persists the derived ticket URL and setRunTicket snapshots the description", () => {
     const id = store.createRun({
       origin: "task",
@@ -205,6 +215,25 @@ describe("RunStore", () => {
     expect(runs.map((r) => r.id).sort()).toEqual([first, second].sort());
   });
 
+  test("listRuns filters by automation id and status", () => {
+    const scheduled = store.createRun({
+      origin: "scheduled",
+      automationId: "dependency-health",
+    });
+    const manual = store.createRun({ origin: "manual", automationId: "dependency-health" });
+    store.createRun({ origin: "scheduled", automationId: "other-schedule" });
+
+    const all = store.listRuns({ automationId: "dependency-health" });
+    expect(all).toHaveLength(2);
+    expect(all.map((r) => r.id).sort()).toEqual([scheduled, manual].sort());
+
+    const manualOnly = store.listRuns({
+      automationId: "dependency-health",
+      origin: "manual",
+    });
+    expect(manualOnly.map((r) => r.id)).toEqual([manual]);
+  });
+
   test("latestRunByTaskKey returns the newest run per key in one query", () => {
     const firstProj = store.createRun({ origin: "task", taskKey: "PROJ-10" });
     store.finishRun(firstProj, "failed");
@@ -228,6 +257,20 @@ describe("RunStore", () => {
     expect(reopened.getRun(id)?.status).toBe("succeeded");
     expect(reopened.listStages(id)).toHaveLength(1);
     reopened.close();
+  });
+
+  test("setRunBranch attaches the working branch without clobbering", () => {
+    // Task runs learn their branch only after createFeatureBranch succeeds
+    // (the name can gain an attempt suffix), so it is attached post-hoc.
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-11", harness: "claude-code" });
+    store.setRunBranch(id, "feature/proj-11");
+    expect(store.getRun(id)?.branch).toBe("feature/proj-11");
+
+    // pr_mention runs record their branch at beginRun; a late write must not
+    // replace it.
+    const mention = store.createRun({ origin: "pr_mention", branch: "agent/task" });
+    store.setRunBranch(mention, "feature/proj-11");
+    expect(store.getRun(mention)?.branch).toBe("agent/task");
   });
 
   test("attempt numbers count per task key", () => {

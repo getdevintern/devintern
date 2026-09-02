@@ -12,6 +12,7 @@ import { Markdown } from "@/lib/markdown";
 import { triggerRunRetry, usePoll } from "@/lib/api";
 import type { RetryAuditEntry, RunDetailResponse, RunStageRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
+import { runWorkLink } from "@/lib/run-work";
 import { parseStageDetail } from "@/lib/stage-detail";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 
@@ -121,26 +122,44 @@ function RetryFeedback({ kind, message }: { kind: "success" | "error"; message: 
 /** Inline confirmation strip shown between the first click and the POST. */
 function RetryConfirm({
   taskKey,
+  kind = "task",
   busy,
   onCancel,
   onConfirm,
 }: {
   taskKey?: string;
+  kind?: "task" | "automation";
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const automation = kind === "automation";
   return (
     <div className="rounded-md border bg-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
-        Schedule a fresh run of{" "}
-        {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"} with{" "}
-        <code className="font-mono">--force</code>? The worker picks it up through its normal
-        pipeline (routing, worktree, per-repo environment) and skips the retry gate.
+        {automation ? (
+          <>
+            Start a fresh run of the automation that produced this run? The worker runs it through
+            its normal automation pipeline — the same flow a scheduled occurrence or Run now uses.
+          </>
+        ) : (
+          <>
+            Schedule a fresh run of{" "}
+            {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"} with{" "}
+            <code className="font-mono">--force</code>? The worker picks it up through its normal
+            pipeline (routing, worktree, per-repo environment) and skips the retry gate.
+          </>
+        )}
       </p>
       <div className="mt-2 flex gap-2">
         <Button size="sm" variant="destructive" onClick={onConfirm} disabled={busy}>
-          {busy ? "Scheduling…" : "Yes, schedule retry"}
+          {busy
+            ? automation
+              ? "Triggering…"
+              : "Scheduling…"
+            : automation
+              ? "Yes, re-run automation"
+              : "Yes, schedule retry"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
@@ -200,12 +219,21 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
       if (ok) {
         const scheduled = body.status === "scheduled";
         const pidSuffix = body.pid !== undefined ? ` (pid ${body.pid})` : "";
-        setFeedback({
-          kind: "success",
-          message: scheduled
-            ? `Retry scheduled. The worker will start a fresh run for ${data.run.taskKey} shortly.`
-            : `Retry triggered${pidSuffix}. A fresh run for ${data.run.taskKey} will appear in the run list shortly.`,
-        });
+        if (data.retry.kind === "automation") {
+          setFeedback({
+            kind: "success",
+            message: body.status
+              ? `Automation re-run triggered. A fresh run will appear in the run list shortly.`
+              : "Could not trigger the automation re-run.",
+          });
+        } else {
+          setFeedback({
+            kind: "success",
+            message: scheduled
+              ? `Retry scheduled. The worker will start a fresh run for ${data.run.taskKey} shortly.`
+              : `Retry triggered${pidSuffix}. A fresh run for ${data.run.taskKey} will appear in the run list shortly.`,
+          });
+        }
         setConfirming(false);
         refresh();
       } else {
@@ -237,14 +265,9 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
             <CardHeader>
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-semibold">
-                  <TicketKey
-                    label={
-                      data.run.taskKey ??
-                      data.run.automationId ??
-                      (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`)
-                    }
-                    href={data.run.ticketUrl}
-                  />
+                  {/* Same label rule as the runs list; PR-affected runs link
+                      the PR they operate on. */}
+                  <TicketKey {...runWorkLink(data.run)} />
                 </h2>
                 <StatusBadge status={data.run.status} />
                 {data.retry.eligible && !confirming ? (
@@ -256,7 +279,8 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                       setConfirming(true);
                     }}
                   >
-                    <RefreshCcw /> Retry this run
+                    <RefreshCcw />{" "}
+                    {data.retry.kind === "automation" ? "Re-run automation" : "Retry this run"}
                   </Button>
                 ) : null}
               </div>
@@ -269,6 +293,7 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                 <div className="mt-2">
                   <RetryConfirm
                     taskKey={data.run.taskKey}
+                    kind={data.retry.kind}
                     busy={posting}
                     onCancel={() => setConfirming(false)}
                     onConfirm={() => void handleRetry()}

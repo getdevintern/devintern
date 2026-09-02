@@ -56,8 +56,9 @@ JIRA_API_TOKEN=your-api-token-here
 # AGENT_CLI_PATH=/custom/path/to/claude
 # Optional: GitHub auth (see ENV_SETUP.md)
 # Personal / interactive (free CLI): GITHUB_TOKEN
-# Team / unattended automation: GitHub App — https://devintern.com/pricing/
+# Workspace automation: GITHUB_TOKEN + the central App through the hosted relay
 GITHUB_TOKEN=your-github-token-here
+# Advanced no-relay installs only:
 # GITHUB_APP_ID=123456
 # GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
 # Bitbucket
@@ -402,7 +403,7 @@ devintern MYAPP-456
 - Detects repository platform from git remote URL
 - PR title format: `[TASK-123] Task Summary`
 - PR body includes Claude's implementation details and links back to JIRA
-- GitHub: Requires `GITHUB_TOKEN` for personal CLI PR creation (see ENV_SETUP.md). A team GitHub App can also create PRs; `@mention` matching on any PR needs the App.
+- GitHub: Uses `GITHUB_TOKEN` for CLI and relay-backed workspace API access (see ENV_SETUP.md). The central DevIntern AI App supplies workspace events through the relay. Customer-owned Apps are an advanced no-relay option.
 - Bitbucket: Requires `BITBUCKET_TOKEN` (`Repositories: Write`), workspace auto-detected from git remote
 - Can be enabled with `--create-pr` flag
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
@@ -437,7 +438,16 @@ devintern worker init
 devintern worker
 ```
 
-See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). Cron of the CLI remains only as a gap filler for a wall-clock window (for example only at night) until the worker has quiet hours, and for `--estimate` schedules.
+See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). The worker natively supports **working windows (quiet hours)**, so "only at night" no longer needs cron — set `[worker.schedule]` in `workspace.toml`:
+
+```toml
+[worker.schedule]
+active = ["22:00-06:00"]   # drain new tasks only during these local-time windows
+timezone = ""              # optional IANA name; blank = machine local time
+catch_up_missed = true     # one catch-up drain at startup after a fully missed window
+```
+
+Outside the window nothing is killed mid-run — the in-flight task completes and no new tracker tasks start. Force one immediate drain with `devintern worker run-now`. The only CLI run still worth a timer is story-point estimation (`--estimate`).
 
 ### Built-in automation preset: docs-drift-guard
 
@@ -454,19 +464,6 @@ cron = "0 5 * * *"
 ```
 
 The preset analyzes newly merged default-branch commits against `docs/**`, `AGENTS.md`, `CLAUDE.md`, and `README*`, keeps a per-repository checkpoint so each run only looks at new commits, and publishes findings as deduplicated tracker tickets (`ticket` mode; GitHub Issues or GitLab required) or a documentation-only pull request (`pull_request` mode; GitHub remote required). See the [Docs Drift Guard guide](https://devintern.com/docs/code/docs-drift-guard) for options (`doc_paths`, `baseline_sha`), checkpoint/retry behavior, and prerequisites.
-
-```bash
-# Night-only drain, if you are not running the worker
-0 22 * * * cd /path/to/your/project && devintern --query 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-```
-
-**Notes if you keep a timer:**
-
-- Always change to your project directory (`cd /path/to/your/project`) so the correct `.devintern-code/.env` is loaded
-- Use absolute paths or ensure PATH includes `devintern` and the agent binary
-- Redirect output to a log file (`>> /tmp/devintern-cron.log 2>&1`)
-- For Jira, use `ORDER BY created DESC` to process newest tasks first
-- Test your query manually before scheduling
 
 ## Troubleshooting
 
@@ -503,14 +500,15 @@ The preset analyzes newly merged default-branch commits against `docs/**`, `AGEN
 
 7. **"PR creation failed"**
    - Ensure you have the correct token configured:
-     - GitHub: personal `GITHUB_TOKEN` or team/automation GitHub App (`GITHUB_APP_ID` + private key). `TASK_TRACKER=github` requires the token; `@mention` matching requires the App
+     - GitHub: `GITHUB_TOKEN`. `TASK_TRACKER=github` always requires it; relay-backed workspaces also use it for PR/review API calls
      - Bitbucket: `BITBUCKET_TOKEN`
    - Check token/App permissions:
      - GitHub classic token: needs `repo` scope
      - GitHub fine-grained token: needs `Pull requests: Read and write` + `Contents: Read`
-     - GitHub App: needs `Contents: Read` + `Pull requests: Read and write`
+     - Advanced customer-owned GitHub App: needs `Contents: Read` + `Pull requests: Read and write`
      - Bitbucket: needs `Repositories: Write`
-   - For GitHub App: Ensure the App is installed on the repository
+   - Standard workspace: ensure the central DevIntern AI App is installed and the repo is registered with the relay
+   - Advanced no-relay App: ensure your customer-owned App is installed on the repository
    - Verify you're in a repository with a remote origin
    - Confirm the repository platform is detected correctly
    - Use `--verbose` flag to see detailed error messages

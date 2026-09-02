@@ -55,6 +55,16 @@ export class AutomationStateStore {
     }
   }
 
+  /**
+   * Remove schedule state for an automation retired by a live config reload
+   * (removed from the config entirely). Rows for entries still present in
+   * the config — even disabled — are kept so re-enabling retains the
+   * interval anchor.
+   */
+  unregister(automationId: string): void {
+    this.db.run("DELETE FROM automation_schedules WHERE automation_id = ?", [automationId]);
+  }
+
   get(automationId: string): AutomationScheduleState | null {
     const row = this.db
       .query("SELECT * FROM automation_schedules WHERE automation_id = ?")
@@ -96,6 +106,20 @@ export class AutomationStateStore {
        WHERE automation_id = ? AND next_due_at <= ?
          AND lease_owner IS NOT NULL AND lease_expires_at > ?`,
       [nextDueAt, automationId, now, now],
+    );
+    return result.changes === 1;
+  }
+
+  /**
+   * Take the overlap lease for a manual ("Run now") run without touching the
+   * schedule cursor: while held, `claim` and `skipOverlap` see the lease and
+   * treat the manual run exactly like an active scheduled run.
+   */
+  acquireManual(automationId: string, owner: string, now: number, leaseMs: number): boolean {
+    const result = this.db.run(
+      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?
+       WHERE automation_id = ? AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
+      [owner, now + leaseMs, now, automationId, now],
     );
     return result.changes === 1;
   }

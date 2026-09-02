@@ -279,3 +279,8 @@ export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationCo
   const path = join(baseDir, SINGLE_REPO_AUTOMATIONS_PATH);
   return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
 }
+
+/** One-line description for dashboards: the entry's prompt, or the named preset's summary. */
+export function automationDisplayPrompt(automation: AutomationConfig): string {
+  return automation.prompt ?? getPreset(automation.preset ?? "")?.summary ?? "";
+}

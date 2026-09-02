@@ -4,6 +4,7 @@ sidebarLabel: "Trello Integration"
 description: "Fetch Trello cards, move lists, implement with your coding agent, and post results back to the card."
 section: "Code"
 order: 5
+sidebarHidden: true
 dateModified: 2026-07-23
 ---
 

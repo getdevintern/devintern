@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState, parseGitHubPrUrl } from "../src/lib/worker-state";
+import { WorkerState, parseGitHubPrUrl, recordAgentPrFromUrl } from "../src/lib/worker-state";
 
 describe("WorkerState", () => {
   let dbPath: string;
@@ -63,6 +63,7 @@ describe("WorkerState", () => {
         prNumber: 42,
         branch: "feature/proj-1",
         taskKey: "PROJ-1",
+        ticketUrl: "https://acme.atlassian.net/browse/PROJ-1",
       });
 
       const open = state.listOpenAgentPrs();
@@ -71,6 +72,7 @@ describe("WorkerState", () => {
       expect(open[0]?.prNumber).toBe(42);
       expect(open[0]?.branch).toBe("feature/proj-1");
       expect(open[0]?.taskKey).toBe("PROJ-1");
+      expect(open[0]?.ticketUrl).toBe("https://acme.atlassian.net/browse/PROJ-1");
       expect(open[0]?.state).toBe("open");
     });
 
@@ -123,6 +125,77 @@ describe("WorkerState", () => {
       state.recordAgentPr({ repo: "danii1/devintern", prNumber: 199 });
       expect(state.closeForeignAgentPrs([])).toEqual([]);
       expect(state.listOpenAgentPrs()).toHaveLength(1);
+    });
+
+    test("opening a pre-ticket-url database adds the column and keeps rows readable", () => {
+      const legacyPath = join(
+        tmpdir(),
+        `ws-legacy-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+      );
+      const { Database } = require("bun:sqlite");
+      const legacy = new Database(legacyPath);
+      legacy.run(`
+        CREATE TABLE agent_prs (
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          branch TEXT,
+          task_key TEXT,
+          state TEXT NOT NULL DEFAULT 'open',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (repo, pr_number)
+        )
+      `);
+      legacy.run(
+        `INSERT INTO agent_prs (repo, pr_number, task_key, created_at, updated_at)
+         VALUES ('acme/old', 1, 'OLD-1', 1, 1)`,
+      );
+      legacy.close();
+
+      const migrated = new WorkerState(legacyPath);
+      const open = migrated.listOpenAgentPrs();
+      expect(open).toHaveLength(1);
+      expect(open[0]?.taskKey).toBe("OLD-1");
+      expect(open[0]?.ticketUrl).toBeUndefined();
+      migrated.recordAgentPr({
+        repo: "acme/old",
+        prNumber: 2,
+        taskKey: "OLD-2",
+        ticketUrl: "https://acme.atlassian.net/browse/OLD-2",
+      });
+      expect(migrated.listOpenAgentPrs().find((pr) => pr.prNumber === 2)?.ticketUrl).toBe(
+        "https://acme.atlassian.net/browse/OLD-2",
+      );
+      migrated.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        rmSync(`${legacyPath}${suffix}`, { force: true });
+      }
+    });
+
+    test("recordAgentPrFromUrl freezes the ticket URL from the tracker active at record time", () => {
+      const prevTracker = process.env.TASK_TRACKER;
+      const prevJira = process.env.JIRA_BASE_URL;
+      process.env.TASK_TRACKER = "jira";
+      process.env.JIRA_BASE_URL = "https://acme.atlassian.net";
+      try {
+        recordAgentPrFromUrl("https://github.com/acme/widgets/pull/9", "feature/proj-3", "PROJ-3");
+      } finally {
+        // Simulate a later tracker switch: the stored link must not change.
+        if (prevTracker === undefined) delete process.env.TASK_TRACKER;
+        else process.env.TASK_TRACKER = prevTracker;
+        if (prevJira === undefined) delete process.env.JIRA_BASE_URL;
+        else process.env.JIRA_BASE_URL = prevJira;
+      }
+      // recordAgentPrFromUrl resolves the shared queue db; the isolation
+      // preload pins it to a unique temp path for this test process.
+      const shared = new WorkerState();
+      try {
+        const recorded = shared.listOpenAgentPrs("acme/widgets").find((pr) => pr.prNumber === 9);
+        expect(recorded?.taskKey).toBe("PROJ-3");
+        expect(recorded?.ticketUrl).toBe("https://acme.atlassian.net/browse/PROJ-3");
+      } finally {
+        shared.close();
+      }
     });
   });
 

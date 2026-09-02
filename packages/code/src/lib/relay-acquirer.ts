@@ -56,6 +56,8 @@ export interface RelayAcquirerOptions {
   /** Injected for tests. */
   fetchImpl?: typeof fetch;
   verbose?: boolean;
+  /** Records successful long polls so fallback acquirers can yield to relay. */
+  onPollSuccess?: () => void;
 }
 
 /** Dedupe source for relayed envelopes. */
@@ -145,6 +147,7 @@ export class RelayAcquirer implements Acquirer {
     }
 
     const body = (await response.json()) as { events: RelayEnvelope[]; cursor: number };
+    this.options.onPollSuccess?.();
     for (const envelope of body.events) {
       await this.dispatch(envelope);
       // Advance per envelope so a crash never re-delivers handled work

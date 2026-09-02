@@ -1,23 +1,23 @@
 /**
  * GitHub App pairing for the unattended worker.
  *
- * The wizard step in `worker init` points at the hosted App install page and
- * records the outcome next to the workspace's relay pairing
- * (`<workspace-home>/.devintern-code/github-app.json`). The record says
- * whether GitHub App events (`@mention` handling, PR comment events) are
- * enabled for the detected repository, so re-running the wizard can detect an
- * existing connection and setup summaries can remind about a skipped one.
+ * The verified `worker connect github` flow records its outcomes next to the
+ * workspace's relay pairing (`<workspace-home>/.devintern-code/github-app.json`).
+ * The records say whether GitHub App events (`@mention` handling, PR comment
+ * events) were verified by the hosted relay pairing flow for each repository.
  *
- * This is bookkeeping only: the worker itself still authenticates with
- * `GITHUB_APP_ID` + private key from the environment; nothing secret is
- * stored in this file.
+ * This is bookkeeping only. In the normal relay-backed workspace path, hosted
+ * App credentials stay on DevIntern infrastructure and the worker uses its
+ * local `GITHUB_TOKEN` for GitHub API calls, so nothing secret is stored in
+ * this file. Customer-owned App credentials are reserved for the advanced
+ * no-relay path and are not stored here either.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 /** Hosted DevIntern AI GitHub App (same install target as `worker connect`). */
-export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai";
+export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai/installations/new";
 
 export interface GitHubAppRecord {
   /** `owner/name` slug of the repository the step ran for. */
@@ -28,50 +28,75 @@ export interface GitHubAppRecord {
   connectedAt?: string;
   /** When this record was last written (ISO timestamp; set by the saver). */
   recordedAt?: string;
+  /** Immutable ids returned by the verified hosted pairing, when available. */
+  installationId?: number;
+  repositoryId?: number;
 }
 
 function githubAppRecordPath(workingDir: string): string {
   return join(resolve(workingDir, ".devintern-code"), "github-app.json");
 }
 
-/**
- * Load the persisted GitHub App pairing record for a workspace home, or null
- * when the step never ran there (or the file is unreadable).
- */
-export function loadGitHubAppRecord(workingDir: string = process.cwd()): GitHubAppRecord | null {
+function parseGitHubAppRecord(record: Partial<GitHubAppRecord>): GitHubAppRecord | null {
+  if (typeof record.repo !== "string" || !record.repo) return null;
+  return {
+    repo: record.repo.toLowerCase(),
+    enabled: record.enabled === true,
+    connectedAt: typeof record.connectedAt === "string" ? record.connectedAt : undefined,
+    recordedAt:
+      typeof record.recordedAt === "string" ? record.recordedAt : new Date().toISOString(),
+    installationId: typeof record.installationId === "number" ? record.installationId : undefined,
+    repositoryId: typeof record.repositoryId === "number" ? record.repositoryId : undefined,
+  };
+}
+
+/** Load all persisted pairings, migrating the original single-record shape on read. */
+export function loadGitHubAppRecords(workingDir: string = process.cwd()): GitHubAppRecord[] {
   const path = githubAppRecordPath(workingDir);
-  if (!existsSync(path)) {
-    return null;
-  }
+  if (!existsSync(path)) return [];
   try {
-    const record = JSON.parse(readFileSync(path, "utf8")) as Partial<GitHubAppRecord>;
-    if (typeof record.repo !== "string" || !record.repo) {
-      return null;
-    }
-    return {
-      repo: record.repo,
-      enabled: record.enabled === true,
-      connectedAt: typeof record.connectedAt === "string" ? record.connectedAt : undefined,
-      recordedAt:
-        typeof record.recordedAt === "string" ? record.recordedAt : new Date().toISOString(),
-    };
+    const data = JSON.parse(readFileSync(path, "utf8")) as
+      | Partial<GitHubAppRecord>
+      | { repositories?: Array<Partial<GitHubAppRecord>> };
+    const rawRecords = Array.isArray((data as { repositories?: unknown }).repositories)
+      ? ((data as { repositories: Array<Partial<GitHubAppRecord>> }).repositories ?? [])
+      : [data as Partial<GitHubAppRecord>];
+    return rawRecords
+      .map(parseGitHubAppRecord)
+      .filter((record): record is GitHubAppRecord => record !== null);
   } catch {
-    return null;
+    return [];
   }
 }
 
-/** Persist the GitHub App pairing record to `<workspace>/.devintern-code/`. */
+/** Load one persisted pairing, optionally selecting it by repository slug. */
+export function loadGitHubAppRecord(
+  workingDir: string = process.cwd(),
+  repo?: string,
+): GitHubAppRecord | null {
+  const records = loadGitHubAppRecords(workingDir);
+  return repo
+    ? (records.find((record) => record.repo === repo.toLowerCase()) ?? null)
+    : (records.at(-1) ?? null);
+}
+
+/** Persist or replace one repository pairing in `<workspace>/.devintern-code/`. */
 export function saveGitHubAppRecord(
   record: GitHubAppRecord,
   workingDir: string = process.cwd(),
 ): void {
   const path = githubAppRecordPath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(
-    path,
-    JSON.stringify({ ...record, recordedAt: new Date().toISOString() }, null, 2) + "\n",
-    "utf8",
-  );
+  const records = loadGitHubAppRecords(workingDir);
+  const normalized = {
+    ...record,
+    repo: record.repo.toLowerCase(),
+    recordedAt: new Date().toISOString(),
+  };
+  const existingIndex = records.findIndex((candidate) => candidate.repo === normalized.repo);
+  if (existingIndex === -1) records.push(normalized);
+  else records[existingIndex] = normalized;
+  writeFileSync(path, JSON.stringify({ repositories: records }, null, 2) + "\n", "utf8");
 }
 
 /**

@@ -40,6 +40,43 @@ export interface FleetEventDeps {
   coordinator?: RunCoordinator;
 }
 
+type AddressPr = (slug: string, prNumber: number) => Promise<boolean>;
+
+/**
+ * Serialize feedback handling per PR and collapse events received while a run
+ * is active into one follow-up reconciliation. Relay, review polling, and
+ * mention sweeping can all observe the same GitHub action; the follow-up run
+ * re-fetches feedback after the active run has persisted its addressed marks.
+ */
+export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
+  const active = new Map<string, { rerunRequested: boolean; promise: Promise<boolean> }>();
+
+  return async (slug, prNumber) => {
+    const key = `${slug.toLowerCase()}#${prNumber}`;
+    const existing = active.get(key);
+    if (existing) {
+      existing.rerunRequested = true;
+      return existing.promise;
+    }
+
+    const state = { rerunRequested: false, promise: Promise.resolve(false) };
+    state.promise = (async () => {
+      try {
+        let ok = true;
+        do {
+          state.rerunRequested = false;
+          ok = (await addressPr(slug, prNumber)) && ok;
+        } while (state.rerunRequested);
+        return ok;
+      } finally {
+        active.delete(key);
+      }
+    })();
+    active.set(key, state);
+    return state.promise;
+  };
+}
+
 /**
  * Resolve which workspace repo a GitHub `owner/repo` slug belongs to.
  *
@@ -69,9 +106,7 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
  *
  * @returns Handler resolving false when the slug maps to no workspace repo.
  */
-export function createFleetAddressPr(
-  deps: FleetEventDeps,
-): (slug: string, prNumber: number) => Promise<boolean> {
+export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
 
@@ -132,8 +167,9 @@ export function createFleetResolveConflicts(
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
+  sharedAddressPr?: AddressPr,
 ): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
-  const addressPr = createFleetAddressPr(deps);
+  const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
@@ -164,13 +200,21 @@ export function createFleetMentionHandler(
  * executor when it is ready.
  */
 export function createFleetTaskEvaluator(options: {
-  query: string;
+  query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<void> {
   return async (taskKey) => {
-    const { tasks } = await options.searchTasks(options.query);
+    const rawQuery = options.query;
+    const query = typeof rawQuery === "function" ? rawQuery() : rawQuery;
+    if (!query) {
+      if (options.verbose) {
+        console.log(`   [fleet] task ${taskKey} changed but task_query is not configured.`);
+      }
+      return;
+    }
+    const { tasks } = await options.searchTasks(query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
     if (!task) {
       if (options.verbose) {

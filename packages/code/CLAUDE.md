@@ -38,7 +38,7 @@ This file provides guidance to Claude Code when working with this repository.
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions
 - `GITHUB_TOKEN` - Personal / interactive GitHub PAT (required for `TASK_TRACKER=github`; enough for free CLI PRs and own-PR review polling)
-- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Team / unattended-automation GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, `devintern webhook serve` uses App first). See https://devintern.com/pricing/
+- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Advanced no-relay/air-gapped customer-owned GitHub App (`@mention` identity, direct `webhook serve`, and `slug[bot]` commits). Relay-backed workspaces use `GITHUB_TOKEN` locally and the central DevIntern AI App for events. See https://devintern.com/pricing/
 - `BITBUCKET_TOKEN` - Bitbucket auth
 - `PR_LABELS` - Optional comma-separated labels applied to created PRs (GitHub only). Set per repo in workspace.toml (`pr_labels`) for fleet mode
 - `WEBHOOK_SECRET` - GitHub webhook verification

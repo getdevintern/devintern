@@ -12,11 +12,9 @@
  * succeeded/deferred runs and runs without a ticket are rejected up front.
  */
 
-import { createDefaultSupabaseAuthConfig, getAuthenticatedUser } from "@devintern/auth";
 import { Database } from "bun:sqlite";
-import { basename, join } from "path";
+import { basename } from "path";
 
-import { resolveConfigDir } from "@devintern/utils";
 import type { RunRecord, RunStatus } from "./run-recorder";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 
@@ -35,17 +33,49 @@ export interface RetryEligibility {
  * Eligible: a terminal failed/escalated/abandoned run that belongs to a task
  * key (there must be something to re-invoke the CLI with). `deferred` is not
  * eligible — the worker already scheduled its own retry; `in_progress` and
- * `succeeded` are never eligible; PR mentions and automations without a task
- * key have no CLI entry point to force.
+ * `succeeded` are never eligible; PR mentions without a task key have no CLI
+ * entry point to force.
+ *
+ * Automation runs (origin `scheduled`/`manual` with an automation id) are
+ * eligible only as an automation re-run: their `taskKey` is the markdown
+ * occurrence file's stem, which has no meaning as a tracker key — forcing
+ * `devintern <stem>` would 404 against the tracker. Such runs report
+ * `kind: "automation"` so the retry handler re-triggers the automation
+ * instead. Estimation sweeps re-run on their schedule, not by hand.
  */
-export function isRunRetriable(run: Pick<RunRecord, "status" | "taskKey">): RetryEligibility {
+export type RetryKind = "task" | "automation";
+
+export interface RetryEligibility {
+  eligible: boolean;
+  /** How the retry must be dispatched (task-key force run vs automation re-run). */
+  kind?: RetryKind;
+  reason?: string;
+}
+
+export function isRunRetriable(
+  run: Pick<RunRecord, "status" | "taskKey" | "automationId"> & { origin?: RunRecord["origin"] },
+): RetryEligibility {
+  if (run.automationId) {
+    if (run.origin === "estimate") {
+      return { eligible: false, reason: "estimation sweeps re-run on their schedule" };
+    }
+    if (RETRIABLE_RUN_STATUSES.includes(run.status)) {
+      return { eligible: true, kind: "automation" };
+    }
+    return notRetriableByStatus(run.status);
+  }
   if (!run.taskKey) {
     return { eligible: false, reason: "this run has no task key to re-run" };
   }
   if (RETRIABLE_RUN_STATUSES.includes(run.status)) {
-    return { eligible: true };
+    return { eligible: true, kind: "task" };
   }
-  switch (run.status) {
+  return notRetriableByStatus(run.status);
+}
+
+/** Status-specific refusal for a run that is terminal but not re-runnable. */
+function notRetriableByStatus(status: RunStatus): RetryEligibility {
+  switch (status) {
     case "succeeded":
       return { eligible: false, reason: "this run already succeeded" };
     case "in_progress":
@@ -56,37 +86,13 @@ export function isRunRetriable(run: Pick<RunRecord, "status" | "taskKey">): Retr
         reason: "this run is deferred and will be retried automatically",
       };
     default:
-      return { eligible: false, reason: `runs in status "${run.status}" cannot be retried` };
+      return { eligible: false, reason: `runs in status "${status}" cannot be retried` };
   }
 }
 
-/** A parsed devintern sign-in session, reduced to what auditing needs. */
+/** Optional audit identity supplied by an embedding application. */
 export interface RetryActor {
   email: string | null;
-}
-
-/**
- * Resolve the acting user from the CLI login session
- * (`.devintern-code/.auth-session.json`). Null when nobody is signed in or
- * the session can no longer be validated.
- */
-export async function resolveDashboardActor(
-  workingDir: string = process.cwd(),
-): Promise<RetryActor | null> {
-  try {
-    const configDir = resolveConfigDir({
-      configDirName: ".devintern-code",
-      startDir: workingDir,
-    });
-    const user = await getAuthenticatedUser(
-      createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json")),
-    );
-    return user ? { email: user.email } : null;
-  } catch {
-    // Auth infrastructure unavailable (offline, corrupt session) — treat as
-    // signed out; the handler surfaces a sign-in hint.
-    return null;
-  }
 }
 
 /** One audited retry attempt against an original run. */

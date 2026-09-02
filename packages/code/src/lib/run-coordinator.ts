@@ -11,9 +11,27 @@
  */
 export class RunCoordinator {
   private tail: Promise<void> = Promise.resolve();
+  private transition = 0;
+
+  constructor(private enabled = true) {}
+
+  /** Enable serialization for newly started runs. */
+  enable(): void {
+    this.transition += 1;
+    this.enabled = true;
+  }
+
+  /** Disable after already-held and queued slots drain. */
+  disableWhenIdle(): void {
+    const transition = ++this.transition;
+    void this.tail.then(() => {
+      if (this.transition === transition) this.enabled = false;
+    });
+  }
 
   /** Wait for a free slot; returns the release function for that slot. */
   async acquire(): Promise<() => void> {
+    if (!this.enabled) return () => undefined;
     let release!: () => void;
     const turn = new Promise<void>((resolve) => {
       release = resolve;

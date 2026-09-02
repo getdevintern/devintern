@@ -40,6 +40,8 @@ devintern worker init
 devintern worker
 ```
 
+The standard workspace setup keeps `GITHUB_TOKEN` local and installs the central DevIntern AI GitHub App for relay events—no custom App ID, private key, webhook URL, or open port. Air-gapped/no-relay installations retain an advanced customer-owned App workflow.
+
 ## Documentation
 
 Full docs: **[devintern.com/docs/code](https://devintern.com/docs/code/quick-start)**
