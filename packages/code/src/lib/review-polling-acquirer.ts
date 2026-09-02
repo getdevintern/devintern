@@ -25,6 +25,7 @@
  */
 
 import { spawn } from "child_process";
+import { captureError } from "@devintern/utils";
 
 import {
   agentPrKey,
@@ -407,6 +408,7 @@ function runSubcommandViaCli(
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", (error) => {
+      captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
       console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
       resolve(false);
     });
@@ -558,6 +560,12 @@ export class ReviewPollingAcquirer implements Acquirer {
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
           );
         } catch (error) {
+          captureError(error, {
+            acquirer: this.name,
+            repo: pr.repo,
+            prNumber: pr.prNumber,
+            stage: "poll-pr",
+          });
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );

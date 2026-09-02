@@ -15,6 +15,8 @@
  * `processed_events` dedupe keeps the two from double-running work.
  */
 
+import { captureError } from "@devintern/utils";
+
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
@@ -214,6 +216,14 @@ export class RelayAcquirer implements Acquirer {
           }
       }
     } catch (error) {
+      captureError(error, {
+        acquirer: this.name,
+        eventType: envelope.eventType,
+        externalId,
+        repo: envelope.repo,
+        prNumber: envelope.ref.pr,
+        stage: "dispatch",
+      });
       console.warn(
         `⚠️  [relay] handler failed for ${envelope.eventType} (${externalId}): ${(error as Error).message}`,
       );

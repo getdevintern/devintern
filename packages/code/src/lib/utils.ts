@@ -1049,14 +1049,31 @@ export class Utils {
       // Check if this is a non-fixable git state error
       const fullError = [pushResult.error, pushResult.output].filter(Boolean).join("\n").trim();
 
-      const isNonFastForward =
-        fullError.includes("[rejected]") && fullError.includes("non-fast-forward");
-      const isFetchFirst =
-        fullError.includes("fetch first") || fullError.includes("Updates were rejected");
+      // Hook output can contain arbitrary text from the repository's test
+      // suite, including simulated non-fast-forward diagnostics from
+      // Git-related tests. Establish divergence from repository state after
+      // every failed push instead of trusting any output string. This also
+      // catches races whose server-side rejection omits the usual markers.
+      const latestRemote = await Utils.executeGitCommand(
+        ["ls-remote", "--heads", "origin", currentBranch],
+        { verbose: false, cwd },
+      );
+      const remoteSha = latestRemote.success
+        ? latestRemote.output.trim().split(/\s+/, 1)[0]
+        : undefined;
+      let remoteDiverged = false;
+
+      if (remoteSha) {
+        const remoteIsAncestor = await Utils.executeGitCommand(
+          ["merge-base", "--is-ancestor", remoteSha, "HEAD"],
+          { verbose: false, cwd },
+        );
+        remoteDiverged = !remoteIsAncestor.success;
+      }
 
       // Non-fast-forward and similar errors are not fixable by @devintern/code
       // They require manual intervention (pull, rebase, or force push)
-      if (isNonFastForward || isFetchFirst) {
+      if (remoteDiverged) {
         return {
           success: false,
           message: `Push rejected - branch diverged from remote. Run 'git pull --rebase' or 'git push --force' (dangerous): ${pushResult.error}`,

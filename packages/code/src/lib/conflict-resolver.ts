@@ -306,7 +306,8 @@ function isTransientPushRejection(message: string): boolean {
     message.includes("fetch first") ||
     message.includes("Updates were rejected") ||
     message.includes("[rejected]") ||
-    message.includes("stale info")
+    message.includes("stale info") ||
+    message.includes("branch diverged from remote")
   );
 }
 

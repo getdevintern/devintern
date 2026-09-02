@@ -799,15 +799,19 @@ exit 1
     git(repoDir, "config rerere.enabled true");
     git(repoDir, "config rerere.autoUpdate true");
 
-    const marker = join(testDir, "rejected-once-rerere");
+    // Prepare a real competing commit without publishing it yet. The first
+    // push hook advances the bare remote to this commit, making the push's
+    // force-with-lease stale and exercising an actual branch race rather than
+    // spoofing one with rejection-shaped hook output.
+    git(seedDir, "checkout feature/change");
+    git(seedDir, "commit --allow-empty -m 'concurrent branch update'");
+    const competingTip = git(seedDir, "rev-parse HEAD").trim();
+    git(seedDir, `push origin ${competingTip}:refs/devintern-test/competing-tip`);
     const hookPath = join(repoDir, ".git", "hooks", "pre-push");
     writeFileSync(
       hookPath,
       `#!/bin/sh
-if [ -f "${marker}" ]; then exit 0; fi
-touch "${marker}"
-echo "! [rejected]        feature/change -> feature/change (non-fast-forward)" >&2
-exit 1
+git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTip}"
 `,
       { mode: 0o755 },
     );
