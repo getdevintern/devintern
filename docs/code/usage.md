@@ -46,6 +46,9 @@ devintern TASK-123 --max-turns 1000
 # Skip automatic commit after AI agent completes
 devintern TASK-123 --no-auto-commit
 
+# Run directly in the current directory instead of an isolated git worktree
+devintern TASK-123 --no-worktree-isolation
+
 # Create pull request after implementation
 devintern TASK-123 --create-pr
 
@@ -63,6 +66,20 @@ devintern TASK-123 --skip-clarity-check
 # add a comment instead)
 devintern TASK-123 --force
 ```
+
+## Isolated Task Worktrees
+
+By default, each task runs in a disposable git worktree so your uncommitted changes, staged files, and current branch are never touched. Results land on the task's `feature/<task-key>` branch; the worktree is removed automatically on success, failure, and interruption.
+
+```bash
+# Default: isolated (recommended)
+devintern TASK-123
+
+# Legacy behavior: run directly in your working directory
+devintern TASK-123 --no-worktree-isolation
+```
+
+See [Worktree Isolation](./worktree-isolation.md) for lifecycle details, result access, orphan cleanup, and environment overrides.
 
 ## Markdown File Tasks
 

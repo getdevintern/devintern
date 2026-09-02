@@ -99,6 +99,12 @@ import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-c
 import { reportTaskFailure } from "./lib/failure-feedback";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
+import {
+  cleanupActiveWorktreeIsolation,
+  enterTaskWorktreeIsolation,
+  isWorktreeIsolationActive,
+} from "./lib/worktree-isolation";
+import type { WorktreeIsolationHandle } from "./lib/worktree-isolation";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
@@ -206,6 +212,7 @@ interface ProgramOptions {
   verbose: boolean;
   maxTurns: string;
   autoCommit: boolean;
+  worktreeIsolation: boolean; // --no-worktree-isolation runs in the user's checkout
   skipClarityCheck: boolean; // New option to skip clarity check
   createPr: boolean; // New option to create pull request
   prTargetBranch: string; // Target branch for PR
@@ -1163,6 +1170,10 @@ program
   .option("-v, --verbose", "Verbose output")
   .option("--max-turns <number>", "Maximum number of turns for Agent", "500")
   .option("--no-auto-commit", "Skip automatic git commit after Agent completes")
+  .option(
+    "--no-worktree-isolation",
+    "Run directly in the current directory instead of an isolated git worktree (your uncommitted changes are then subject to the task's git cleanup)",
+  )
   .option("--skip-clarity-check", "Skip running Agent for clarity assessment")
   .option("--create-pr", "Create pull request after implementation")
   .option(
@@ -2102,18 +2113,36 @@ async function main(): Promise<void> {
         }
       }
 
-      console.log("\n📥 Pulling latest changes from remote...");
-      const pullResult = await Utils.pullLatestChanges(options.prTargetBranch, {
-        verbose: options.verbose,
-      });
+      // With worktree isolation active, tasks never run in this checkout —
+      // fetch only. A pull here would fast-forward the user's own branch,
+      // which isolation promises not to touch.
+      if (await isWorktreeIsolationActive(options.git && options.worktreeIsolation !== false)) {
+        console.log("\n📥 Fetching latest changes from remote...");
+        const fetchResult = await Utils.executeGitCommand(["fetch", "origin", "--prune"], {
+          verbose: options.verbose,
+          timeoutMs: 60_000,
+        });
 
-      if (pullResult.success) {
-        console.log(`✅ ${pullResult.message}`);
+        if (fetchResult.success) {
+          console.log("✅ Fetched latest changes from remote");
+        } else {
+          console.log(`⚠️  Could not fetch from remote: ${fetchResult.error}`);
+          console.log("   Continuing with locally known state...\n");
+        }
       } else {
-        // Don't fail the entire workflow if pull fails - just warn the user
-        console.log(`⚠️  ${pullResult.message}`);
-        console.log("   Continuing without pulling latest changes...");
-        console.log("   You may want to pull manually before processing tasks.\n");
+        console.log("\n📥 Pulling latest changes from remote...");
+        const pullResult = await Utils.pullLatestChanges(options.prTargetBranch, {
+          verbose: options.verbose,
+        });
+
+        if (pullResult.success) {
+          console.log(`✅ ${pullResult.message}`);
+        } else {
+          // Don't fail the entire workflow if pull fails - just warn the user
+          console.log(`⚠️  ${pullResult.message}`);
+          console.log("   Continuing without pulling latest changes...");
+          console.log("   You may want to pull manually before processing tasks.\n");
+        }
       }
     }
 
@@ -2343,15 +2372,46 @@ async function main(): Promise<void> {
     for (let i = 0; i < tasksToProcess.length; i++) {
       const taskKey = tasksToProcess[i];
 
+      // Each task runs in its own disposable worktree so the user's checkout
+      // (uncommitted changes, staged files, current branch) is never touched.
+      // Non-git directories and opt-outs return null and run in place; a
+      // thrown entry (unwritable worktree root, failed base-ref fetch) must
+      // degrade the same way instead of aborting the remaining batch tasks.
+      let isolation: WorktreeIsolationHandle | null = null;
+      if (options.git && options.worktreeIsolation !== false) {
+        try {
+          isolation = await enterTaskWorktreeIsolation({
+            taskKey,
+            targetBranch: options.prTargetBranch,
+            autoCommit: options.autoCommit,
+            patchDir: join(resolveOutputDir(), taskKey.toLowerCase()),
+            verbose: options.verbose,
+          });
+        } catch (error) {
+          console.warn(
+            `⚠️  Could not isolate — running in your working directory (${(error as Error).message}).`,
+          );
+          console.warn("   Commit or stash to be safe.");
+        }
+      }
+
+      let succeeded = false;
       try {
         await processSingleTask(taskKey, i, tasksToProcess.length);
         results.successful++;
+        succeeded = true;
 
         if (i < tasksToProcess.length - 1) {
           console.log("\n" + "=".repeat(80));
           console.log("⏭️  Moving to next task...\n");
         }
       } catch (error) {
+        // Finish explicitly: the handling below may process.exit(), which
+        // would never reach the cleanup after this catch block. finish() is
+        // idempotent, so the call after this block stays safe for the
+        // non-exiting paths too.
+        isolation?.finish("failed");
+
         // Usage limit is account-global: abort the remaining batch instead of
         // hammering tasks that would all fail. Exit 0 so the scheduler retries
         // next window without marking the run failed.
@@ -2375,6 +2435,9 @@ async function main(): Promise<void> {
 
         console.log("⚠️  Continuing with remaining tasks...\n");
       }
+
+      // No-op when the catch block already finished this isolation.
+      isolation?.finish(succeeded ? "completed" : "failed");
     }
 
     // Print summary for batch operations
@@ -4207,6 +4270,9 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
+  // Remove the isolated task worktree first (synchronous, local git ops) so a
+  // slow tracker round-trip can never leave it orphaned behind the exit timer.
+  cleanupActiveWorktreeIsolation();
   // If a task is mid-flight, tell the tracker it was interrupted instead of
   // leaving it silently in "In Progress" with no PR and no feedback.
   const context = activeTaskContext;

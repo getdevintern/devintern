@@ -352,6 +352,18 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 └── attachments/                         # Jira attachments
 ```
 
+## Worktree Isolation
+
+Task runs execute in a disposable git worktree so your current work is never modified. See the [Worktree Isolation](./worktree-isolation.md) guide for behavior and lifecycle.
+
+```bash
+# Opt out and run directly in your working directory (or use --no-worktree-isolation)
+DEVINTERN_NO_WORKTREE_ISOLATION=1
+
+# Store isolated worktrees somewhere else (default: <repo>/.devintern-code/worktrees)
+# DEVINTERN_TASK_WORKTREE_DIR=/path/for/worktrees
+```
+
 ## Agent Harness
 
 Configure which AI agent runs and how long it can work:
