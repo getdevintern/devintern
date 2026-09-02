@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 
 import type { RepoConfig } from "../src/lib/workspace/config";
 import { RepoManager } from "../src/lib/workspace/repo-manager";
+import { Utils } from "../src/lib/utils";
 
 function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
@@ -100,6 +101,34 @@ describe("RepoManager", () => {
     await manager.removeTaskWorktree(repo.name, second);
     expect(existsSync(worktree)).toBe(false);
     expect(existsSync(second)).toBe(false);
+  });
+
+  test("per-worktree config keeps worktrees from a bare clone non-bare", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    const worktree = await manager.createTaskWorktree(repo, "BACK-43");
+
+    await Utils.isolateWorktreeHooks(worktree);
+
+    expect(git(clonePath, "rev-parse --is-bare-repository")).toBe("true");
+    expect(git(worktree, "rev-parse --is-bare-repository")).toBe("false");
+    expect(git(worktree, "rev-parse --is-inside-work-tree")).toBe("true");
+    expect(git(worktree, "config --show-origin --get core.hooksPath")).toContain("config.worktree");
+  });
+
+  test("ensureBareClone repairs an existing unsafe worktree-config layout", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    const worktree = await manager.createTaskWorktree(repo, "BACK-44");
+    const sharedConfig = join(clonePath, "config");
+
+    git(clonePath, `config --file ${sharedConfig} core.bare true`);
+    git(clonePath, `config --file ${sharedConfig} extensions.worktreeConfig true`);
+    expect(git(worktree, "rev-parse --is-bare-repository")).toBe("true");
+
+    await manager.ensureBareClone(repo);
+
+    expect(git(clonePath, "rev-parse --is-bare-repository")).toBe("true");
+    expect(git(worktree, "rev-parse --is-bare-repository")).toBe("false");
+    expect(git(worktree, "rev-parse --is-inside-work-tree")).toBe("true");
   });
 
   test("resolveDefaultBranch falls back to origin/HEAD when unset in config", async () => {
