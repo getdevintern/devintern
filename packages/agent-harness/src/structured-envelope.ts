@@ -39,9 +39,18 @@
  * - **pi** — `--mode json`: JSONL session events; the reply is the assistant
  *   `message` content of `message_end`, usage on the event-level `usage`
  *   (`input`, `output`, `cacheRead`, `cacheWrite`).
- * - **cursor / grok / deepseek** — single result object carrying the reply
- *   text in `result` (best-effort; these CLIs document "single result
- *   object" without pinning the field).
+ * - **cursor / deepseek** — single result object carrying the reply text in
+ *   `result` (best-effort; these CLIs document "single result object"
+ *   without pinning the field).
+ * - **grok** — `--output-format json`: one object carrying the reply text in
+ *   `text`, a Claude-style `usage` (plus `reasoning_tokens`/`total_tokens`),
+ *   and `total_cost_usd` when the bill is complete. Verified against the
+ *   open-source CLI (github.com/xai-org/grok-build,
+ *   `crates/codegen/xai-grok-pager/src/headless.rs`, `build_json_result`):
+ *   the field mix is deliberate (`text`/`stopReason`/`sessionId` camelCase,
+ *   usage snake_case) and frozen for external-tool compatibility. The reply
+ *   text may embed the JSON payload after narration prose — see
+ *   {@link parseReplyText}.
  * - **goose / antigravity** — single result envelope carrying the reply text
  *   in `response`.
  */
@@ -107,13 +116,86 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** Parse reply text as JSON, returning the text itself when it is not JSON. */
+/**
+ * Balanced top-level `{...}` spans of `text`, with brace matching that
+ * respects string state so braces inside string literals (and escapes)
+ * don't throw off the scan. Spans come in document order.
+ */
+function balancedObjectSpans(text: string): string[] {
+  const spans: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (start === -1) {
+      if (character === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        spans.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return spans;
+}
+
+/**
+ * Parse reply text as JSON, recovering the payload when the model wraps it
+ * in narration: a fenced ```json block, or a bare object embedded before /
+ * after prose (observed live on grok headless, where `text` reads
+ * `I'll inspect ...today.{"summary":...}`). Whole-text JSON still wins, and
+ * unparseable text is returned as-is so callers keep their raw-reply
+ * fallback instead of guessing.
+ */
 function parseReplyText(text: string): unknown {
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    return text;
+    // Not a whole-text document — try embedded-JSON recovery below.
   }
+  const fenced = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  if (fenced?.[1]) {
+    try {
+      return JSON.parse(fenced[1]) as unknown;
+    } catch {
+      // Fall through to balanced-span recovery.
+    }
+  }
+  for (const span of balancedObjectSpans(text)) {
+    try {
+      return JSON.parse(span) as unknown;
+    } catch {
+      // Try the next candidate span.
+    }
+  }
+  return text;
 }
 
 /** Collect only the defined fields of a partial usage record. */
@@ -154,7 +236,12 @@ function messageReplyText(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Claude-style usage object (`input_tokens` / `output_tokens` / cache). */
+/**
+ * Claude-style usage object: snake_case `input_tokens` / `output_tokens` /
+ * cache fields (claude-code, qwen), extended with `reasoning_tokens` /
+ * `total_tokens` where reported (grok). Absent fields stay out of the
+ * result via {@link usageOf}.
+ */
 function claudeStyleUsage(value: Record<string, unknown>): StructuredRunStats | undefined {
   const usage = value.usage;
   if (!isRecord(usage)) {
@@ -166,24 +253,29 @@ function claudeStyleUsage(value: Record<string, unknown>): StructuredRunStats | 
       outputTokens: asNumber(usage.output_tokens),
       cacheReadTokens: asNumber(usage.cache_read_input_tokens),
       cacheCreationTokens: asNumber(usage.cache_creation_input_tokens),
+      reasoningTokens: asNumber(usage.reasoning_tokens),
+      totalTokens: asNumber(usage.total_tokens),
     }),
   };
+}
+
+/**
+ * Usage + cost of a Claude-style single envelope: `usage` plus an optional
+ * top-level `total_cost_usd` (claude-code, grok).
+ */
+function claudeStyleStats(value: Record<string, unknown>): StructuredRunStats | undefined {
+  const costUsd = asNumber(value.total_cost_usd);
+  const usageStats = claudeStyleUsage(value);
+  if (!usageStats) {
+    return costUsd === undefined ? undefined : { costUsd };
+  }
+  return costUsd === undefined ? usageStats : { ...usageStats, costUsd };
 }
 
 /** Claude Code: single result envelope with usage + total cost. */
 const CLAUDE_CODE_ENVELOPE: HarnessEnvelopeSchema = {
   ...resultEnvelope("result"),
-  stats(value) {
-    if (!isRecord(value)) {
-      return undefined;
-    }
-    const costUsd = asNumber(value.total_cost_usd);
-    const claudeStats = claudeStyleUsage(value);
-    if (!claudeStats) {
-      return costUsd === undefined ? undefined : { costUsd };
-    }
-    return costUsd === undefined ? claudeStats : { ...claudeStats, costUsd };
-  },
+  stats: (value) => (isRecord(value) ? claudeStyleStats(value) : undefined),
 };
 
 /** Codex `--json`: thread/turn/item JSONL events. */
@@ -319,6 +411,17 @@ const PI_EVENTS: HarnessEnvelopeSchema = {
 };
 
 /**
+ * Grok Build `--output-format json`: single result envelope with the reply
+ * text in `text` and Claude-style usage + total cost. Shape verified against
+ * the open-source CLI (xai-org/grok-build `headless.rs` `build_json_result`)
+ * — the reply field is `text`, not `result`.
+ */
+const GROK_ENVELOPE: HarnessEnvelopeSchema = {
+  ...resultEnvelope("text"),
+  stats: (value) => (isRecord(value) ? claudeStyleStats(value) : undefined),
+};
+
+/**
  * Exact envelope schemas for the built-in structured-output harnesses, keyed
  * by `AgentHarness.name`. Harnesses without an entry here yield `{}` from
  * {@link extractHarnessStructuredReply} — add the schema when adding the
@@ -334,7 +437,7 @@ const ENVELOPE_SCHEMAS: Record<string, HarnessEnvelopeSchema> = {
   "kilo-code": CLINE_SAY_EVENTS,
   pi: PI_EVENTS,
   cursor: resultEnvelope("result"),
-  grok: resultEnvelope("result"),
+  grok: GROK_ENVELOPE,
   deepseek: resultEnvelope("result"),
   goose: resultEnvelope("response"),
   antigravity: resultEnvelope("response"),

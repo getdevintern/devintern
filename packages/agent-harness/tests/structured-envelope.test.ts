@@ -48,6 +48,41 @@ const OPENCODE_EVENTS = [
   },
 ];
 
+// Live envelope captured from `grok --output-format json` (Grok Build
+// 0.2.x, 2026-08): the model wrapped the JSON payload in narration prose, so
+// the reply text is not pure JSON. Field shape matches the open-source CLI
+// (xai-org/grok-build `headless.rs` `build_json_result`).
+const GROK_ENVELOPE_LIVE = {
+  text:
+    "I'll inspect the PM CLI startup flow so the story is grounded in how the app actually boots today." +
+    '{"summary":"Greet users with a hello when the PM CLI starts","description":"## User Story\\n\\nAs a `devpm` user, I want a brief hello when the CLI starts."}',
+  stopReason: "end_turn",
+  sessionId: "01a0611a-0b1e-7190-a8f6-8f0e76b60550",
+  requestId: "e0f7a82b-f744-45ef-aaeb-6aacc7f831b6",
+  thought: "Let me look at the PM CLI entry point and how it currently starts up.",
+  usage: {
+    input_tokens: 20282,
+    cache_read_input_tokens: 83968,
+    cache_creation_input_tokens: 0,
+    output_tokens: 2297,
+    reasoning_tokens: 1675,
+    total_tokens: 106547,
+  },
+  num_turns: 4,
+  total_cost_usd: 0.0163761,
+  total_cost_usd_ticks: 163761000,
+  modelUsage: {
+    "grok-4.6-build": {
+      inputTokens: 20282,
+      outputTokens: 2297,
+      cacheReadInputTokens: 83968,
+      cacheCreationInputTokens: 0,
+      modelCalls: 4,
+      costUSD: 0.0163761,
+    },
+  },
+};
+
 describe("extractHarnessStructuredReply", () => {
   test("claude-code envelope: reply, token usage, and cost", () => {
     const extracted = extractHarnessStructuredReply("claude-code", CLAUDE_ENVELOPE);
@@ -174,13 +209,68 @@ describe("extractHarnessStructuredReply", () => {
 
   test.each([
     ["cursor", { result: '{"a":1}' }],
-    ["grok", { result: '{"a":1}' }],
+    ["grok", { text: '{"a":1}' }],
     ["deepseek", { result: '{"a":1}' }],
     ["goose", { response: '{"a":1}' }],
     ["antigravity", { response: '{"a":1}' }],
   ])("%s single-result envelope reply field", (harnessName, envelope) => {
     const extracted = extractHarnessStructuredReply(harnessName, envelope);
     expect(extracted.reply).toEqual({ a: 1 });
+  });
+
+  test("grok live envelope: narrated text parses to the payload, usage + cost recovered", () => {
+    const extracted = extractHarnessStructuredReply("grok", GROK_ENVELOPE_LIVE);
+    expect(extracted.reply).toEqual({
+      summary: "Greet users with a hello when the PM CLI starts",
+      description:
+        "## User Story\n\nAs a `devpm` user, I want a brief hello when the CLI starts.",
+    });
+    expect(extracted.usage).toEqual({
+      inputTokens: 20282,
+      outputTokens: 2297,
+      cacheReadTokens: 83968,
+      cacheCreationTokens: 0,
+      reasoningTokens: 1675,
+      totalTokens: 106547,
+    });
+    expect(extracted.costUsd).toBe(0.0163761);
+  });
+
+  test("reply text with narration around the payload parses to the payload", () => {
+    const extracted = extractHarnessStructuredReply("claude-code", {
+      type: "result",
+      result: 'I\'ll inspect the flow first.{"summary":"S","description":"D"} Let me know.',
+    });
+    expect(extracted.reply).toEqual({ summary: "S", description: "D" });
+  });
+
+  test("fenced json block in reply text parses to the payload", () => {
+    const extracted = extractHarnessStructuredReply("claude-code", {
+      type: "result",
+      result: 'Here you go:\n```json\n{"summary":"S","description":"D"}\n```\nDone.',
+    });
+    expect(extracted.reply).toEqual({ summary: "S", description: "D" });
+  });
+
+  test("narrated payload with nested braces and escaped quotes survives the span scan", () => {
+    const extracted = extractHarnessStructuredReply("grok", {
+      text:
+        'Working on it.{"summary":"S","description":"has {braces} and \\"quotes\\"",' +
+        '"subtasks":[{"title":"T"}]}',
+    });
+    expect(extracted.reply).toEqual({
+      summary: "S",
+      description: 'has {braces} and "quotes"',
+      subtasks: [{ title: "T" }],
+    });
+  });
+
+  test("prose-only reply text stays raw (no JSON to recover)", () => {
+    const extracted = extractHarnessStructuredReply("claude-code", {
+      type: "result",
+      result: "I could not produce the story.",
+    });
+    expect(extracted.reply).toBe("I could not produce the story.");
   });
 
   test("unknown harness yields no reply and no stats (fail-open for callers)", () => {
@@ -203,6 +293,7 @@ describe("extractHarnessEventText", () => {
     expect(extractHarnessEventText("cline", { type: "say", say: "text", text: "hello" })).toBe(
       "hello",
     );
+    expect(extractHarnessEventText("grok", { text: "reply" })).toBe("reply");
     expect(extractHarnessEventText("claude-code", CLAUDE_ENVELOPE)).toBe(
       '{"summary": "S", "description": "D"}',
     );

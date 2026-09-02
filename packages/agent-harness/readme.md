@@ -114,7 +114,7 @@ open-question detectors) working exactly as before.
   | codex | `--json` | JSONL events |
   | cursor | `--output-format json` | single result object |
   | opencode | `--format json` | JSONL events |
-  | grok | `--output-format json` | single result object |
+  | grok | `--output-format json` | single result envelope (`text` + usage/cost) |
   | goose | `--output-format json` | single result object |
   | antigravity (agy, v1.1.8+) | `--output-format json` | single JSON envelope |
   | qwen | `--output-format json` | JSON array of messages |
@@ -139,13 +139,18 @@ open-question detectors) working exactly as before.
   | kimi | last `{role:"assistant"}` message → `content` (string or text blocks) | — |
   | cline, kilo-code | `type:"say", say:"text"` records → `text` | — |
   | pi | `message_end` → assistant `message.content` text blocks | event `usage.{input, output, cacheRead, cacheWrite}` |
-  | cursor, grok, deepseek | envelope `result` (best-effort) | — |
+  | grok | envelope `text` (may embed the payload after narration prose — recovered via balanced-span parsing) | `usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, total_tokens}`; `total_cost_usd` |
+  | cursor, deepseek | envelope `result` (best-effort) | — |
   | goose, antigravity | envelope `response` | — |
 
   Unknown harness names and values that match no schema return `{}` — callers
   must treat that as "envelope not understood" and fall back to their legacy
   extraction path. When adjusting a schema, verify the shape against the
-  upstream CLI docs and note the fields in the module header.
+  upstream CLI docs — or the upstream source when the CLI is open source
+  (grok: `xai-org/grok-build`) — and note the fields in the module header.
+  Reply text can embed the JSON payload after narration prose, so
+  `parseReplyText` also recovers fenced ```json blocks and balanced
+  `{...}` spans before falling back to the raw text.
 
 - **Detectors & streaming.** Usage-limit and max-turns detectors keep
   scanning the raw streams (JSON event lines can still match
