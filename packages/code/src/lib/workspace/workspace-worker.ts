@@ -952,6 +952,7 @@ export async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    coalescePrFeedbackRuns,
     createFleetResolveConflicts,
     createFleetMentionHandler,
     createFleetTaskEvaluator,
@@ -968,6 +969,13 @@ export async function buildFleetEventAcquirers(options: {
   // verified-id marker. The latter remains required when establishing a new
   // pairing, but upgrading must not disable an already-delivering relay.
   const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
+  const relayEnabled = Boolean(relayToken && relayUrl);
+  let relayLastSuccessAt = 0;
+  const relayHealthGraceMs = Math.max(90, intervalSeconds * 2) * 1000;
+  const shouldPollFeedback = () =>
+    !relayEnabled ||
+    relayLastSuccessAt === 0 ||
+    Date.now() - relayLastSuccessAt >= relayHealthGraceMs;
 
   // Hosted workspaces use the central App only for event delivery. All
   // follow-up GitHub reads/writes stay local and authenticate with the user's
@@ -1018,10 +1026,10 @@ export async function buildFleetEventAcquirers(options: {
       verbose,
       coordinator: options.coordinator,
     };
-    const fleetAddressPr = createFleetAddressPr(eventDeps);
+    const fleetAddressPr = coalescePrFeedbackRuns(createFleetAddressPr(eventDeps));
     addressPr = fleetAddressPr;
     const resolveConflicts = createFleetResolveConflicts(eventDeps);
-    const fleetHandleMention = createFleetMentionHandler(eventDeps);
+    const fleetHandleMention = createFleetMentionHandler(eventDeps, fleetAddressPr);
     handleMention = fleetHandleMention;
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
@@ -1031,6 +1039,7 @@ export async function buildFleetEventAcquirers(options: {
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,
+      shouldPollFeedback,
       workerState: state.workerState,
       queue: state.queue,
       github: {
@@ -1095,6 +1104,7 @@ export async function buildFleetEventAcquirers(options: {
       return new MentionSweepAcquirer({
         repo: slug,
         intervalSeconds,
+        shouldPollFeedback,
         workerState: state.workerState,
         queue: state.queue,
         github: {
@@ -1261,6 +1271,9 @@ export async function buildFleetEventAcquirers(options: {
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,
+          },
+          onPollSuccess: () => {
+            relayLastSuccessAt = Date.now();
           },
           verbose,
         }),

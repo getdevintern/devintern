@@ -181,12 +181,16 @@ describe("MentionSweepAcquirer", () => {
     reviewComments?: SweptComment[];
     botName?: string | null;
     pr?: Partial<SweptPrInfo>;
+    shouldPollFeedback?: () => boolean;
+    feedbackFallbackIntervalSeconds?: number;
   }) {
     const handled: Array<{ id: number; prNumber: number }> = [];
     const posted: string[] = [];
     const acquirer = new MentionSweepAcquirer({
       repo: "acme/widgets",
       intervalSeconds: 60,
+      shouldPollFeedback: options.shouldPollFeedback,
+      feedbackFallbackIntervalSeconds: options.feedbackFallbackIntervalSeconds,
       workerState,
       queue,
       github: {
@@ -215,6 +219,27 @@ describe("MentionSweepAcquirer", () => {
     const { acquirer, handled } = makeAcquirer({ issueComments: [comment({})] });
 
     await acquirer.tick();
+    await acquirer.tick();
+    expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
+  });
+
+  test("healthy relay suppresses mention polling between safety sweeps", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      shouldPollFeedback: () => false,
+    });
+
+    await acquirer.tick();
+    expect(handled).toEqual([]);
+  });
+
+  test("periodic fallback still sweeps mentions while relay is healthy", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      shouldPollFeedback: () => false,
+      feedbackFallbackIntervalSeconds: 0,
+    });
+
     await acquirer.tick();
     expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
   });

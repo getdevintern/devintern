@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- **Relay and polling no longer launch overlapping review runs**: a healthy relay is now the primary source for review feedback and mentions, with polling retained as a 30-minute safety sweep and automatically restored after relay silence. PR lifecycle and conflict reconciliation continue at the configured poll cadence. Feedback events from relay, review polling, and mention polling are serialized per PR and collapse into one post-run recheck, so the same GitHub action cannot start concurrent agents before its local addressed marker is persisted
 - **Repository-local relay setup updates the fleet worker**: running `devintern worker connect github` from a repository listed in `workspace.toml` now saves the verified connection into the fleet workspace automatically while continuing to reuse the repository's existing sign-in session. Relay-backed workers also preserve central-App routing for live pre-verification repo registrations, inject the `devintern-ai` mention alias, and force local GitHub reads/writes through `GITHUB_TOKEN`, so upgrading no longer makes `@devintern-ai` review feedback silently skip or resurrect a removed customer-owned App identity
 
 ## [2.7.1] - 2026-09-01

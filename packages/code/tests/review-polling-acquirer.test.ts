@@ -68,12 +68,16 @@ describe("ReviewPollingAcquirer", () => {
       conflictWindowGraceMs?: number;
       conflictResolution?: ConflictResolutionMode;
       disableResolveConflicts?: boolean;
+      shouldPollFeedback?: () => boolean;
+      feedbackFallbackIntervalSeconds?: number;
     } = {},
   ) {
     const addressed: string[] = [];
     const resolved: string[] = [];
     const acquirer = new ReviewPollingAcquirer({
       intervalSeconds: 60,
+      shouldPollFeedback: options.shouldPollFeedback,
+      feedbackFallbackIntervalSeconds: options.feedbackFallbackIntervalSeconds,
       workerState,
       queue,
       github: {
@@ -143,6 +147,38 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#42"]);
 
     // Same review on the next tick is deduped.
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("healthy relay suppresses feedback polling but not PR reconciliation", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      shouldPollFeedback: () => false,
+    });
+
+    await acquirer.tick();
+    expect(gh.seenPrEtag).toBeUndefined();
+    expect(gh.seenReviewsEtag).toBeUndefined();
+    expect(addressed).toEqual([]);
+  });
+
+  test("periodic fallback still sweeps feedback while relay is healthy", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const { acquirer, addressed } = makeAcquirer(
+      {
+        prState: "open",
+        reviews: [{ id: 1, state: "changes_requested", user: human }],
+        comments: [],
+      },
+      { shouldPollFeedback: () => false, feedbackFallbackIntervalSeconds: 0 },
+    );
+
     await acquirer.tick();
     expect(addressed).toEqual(["acme/widgets#42"]);
   });
