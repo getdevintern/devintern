@@ -17,7 +17,7 @@ import {
   probePmConnection,
   writePmProjectConfig,
 } from "@getdevintern/pm/init";
-import { IPC_CHANNELS } from "../shared/ipc-contract.ts";
+import { parseRendererErrorReport, IPC_CHANNELS } from "../shared/ipc-contract.ts";
 import type {
   ConnectGitHubRepoRequest,
   CreateTaskRequest,
@@ -74,6 +74,7 @@ import {
   updateProjectFromRemote,
 } from "./session.ts";
 import { listRecentProjectDirs, recordRecentProjectDir } from "./recent-projects.ts";
+import { captureErrorOnce } from "./error-tracking.ts";
 import { readSettings, updateSettings } from "./settings.ts";
 import { validateRequiredTools } from "./validate-tools.ts";
 
@@ -112,6 +113,13 @@ function toIpcError(error: unknown): { code: string; message: string; detail?: s
   return { code: "error", message: String(error) };
 }
 
+/**
+ * Error codes the handlers raise on purpose for user mistakes (bad input,
+ * missing auth, duplicate flow). They surface in the UI as guidance — not
+ * bugs — so they are not reported to error tracking.
+ */
+const USER_ERROR_CODES = new Set(["invalid_input", "auth_required", "in_progress"]);
+
 /** Wrap a handler so failures come back as a typed envelope, never a rejection. */
 function handle<A extends unknown[], T>(
   channel: string,
@@ -121,7 +129,15 @@ function handle<A extends unknown[], T>(
     try {
       return { ok: true, value: await handler(event, ...(args as A)) };
     } catch (error) {
-      return { ok: false, error: toIpcError(error) };
+      const envelope = toIpcError(error);
+      // Handled IPC failures used to be invisible: the envelope converted
+      // them away silently. Report real failures (engine/tracker/git errors)
+      // with the channel; user mistakes stay unreported. Deduped so a
+      // failing operation retried by the UI does not flood Sentry.
+      if (!USER_ERROR_CODES.has(envelope.code)) {
+        void captureErrorOnce(error, { operation: `ipc:${channel}` });
+      }
+      return { ok: false, error: envelope };
     }
   });
 }
@@ -641,6 +657,27 @@ export function registerIpcHandlers(options?: {
 
   handle(IPC_CHANNELS.setAnalyticsEnabled, async (_event, enabled: boolean) => {
     await setAnalyticsEnabled(enabled);
+    return null;
+  });
+
+  // Renderer → main error forwarding (window error/unhandledrejection/React
+  // boundary). Malformed reports are dropped silently: reporting must not
+  // feed back into reporting. Actual capture respects the telemetry toggle
+  // and SENTRY_DISABLED=1 via the shared tracking state.
+  handle(IPC_CHANNELS.reportRendererError, async (_event, report: unknown) => {
+    const parsed = parseRendererErrorReport(report);
+    if (!parsed) {
+      return null;
+    }
+    const error = new Error(parsed.message);
+    if (parsed.stack) {
+      error.stack = parsed.stack;
+    }
+    await captureErrorOnce(error, {
+      operation: "renderer",
+      kind: parsed.kind,
+      ...(parsed.componentStack ? { componentStack: parsed.componentStack } : {}),
+    });
     return null;
   });
 

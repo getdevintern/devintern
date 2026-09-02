@@ -211,13 +211,21 @@ Run `devpm init` once per project to create this file (guided wizard in a termin
 
 ## Error Reporting
 
-The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+The CLI and the DevIntern PM desktop app report errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
+
+- Crashes and unhandled errors in the CLI and the desktop app's main process
+- Failed desktop-app operations: agent runs (generate/edit/decompose stories, create tasks) and other IPC operations, with the failing channel as context
+- Renderer errors: uncaught window errors, unhandled promise rejections, and React crashes (reported with a component stack)
+
+What is **never** reported: prompts, ticket text, project paths, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent.
+
+To opt out:
 
 ```bash
 SENTRY_DISABLED=1
 ```
 
-Set this in your shell environment or in `.devintern-pm/.env`.
+Set this in your shell environment or in `.devintern-pm/.env`. In the desktop app, you can also disable **Settings → Anonymous analytics**: that toggle gates both usage analytics and error reporting (forwarded renderer errors included), and can be changed while the app is running.
 
 ## CLI Updates
 

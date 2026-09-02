@@ -12,6 +12,7 @@ import {
   flush as sentryFlush,
   init as sentryInit,
 } from "@sentry/node";
+import { redactText, redactValue } from "./redact.ts";
 
 /**
  * DevIntern Sentry project DSN (public, write-only).
@@ -41,6 +42,31 @@ interface ErrorTrackingState {
 
 let state: ErrorTrackingState | null = null;
 
+/** Minimal structural view of the Sentry event fields we scrub. */
+interface SentryEventLike {
+  extra?: Record<string, unknown>;
+  message?: string;
+  exception?: { values?: Array<{ value?: string }> };
+}
+
+/**
+ * Scrub secrets out of an event before it leaves the machine. Error messages
+ * can embed credentials (API errors quoting tokens, URLs with credentials),
+ * so this is defense-in-depth on top of callers never attaching secrets.
+ */
+function redactEvent<T extends SentryEventLike>(event: T): T {
+  event.extra = redactValue(event.extra) as T["extra"];
+  if (typeof event.message === "string") {
+    event.message = redactText(event.message);
+  }
+  for (const exceptionValue of event.exception?.values ?? []) {
+    if (typeof exceptionValue.value === "string") {
+      exceptionValue.value = redactText(exceptionValue.value);
+    }
+  }
+  return event;
+}
+
 /**
  * Initialize error tracking. Safe to call unconditionally: with
  * `SENTRY_DISABLED=1` (or an empty baked-in DSN) this is a no-op and
@@ -61,8 +87,9 @@ export function initErrorTracking(options: ErrorTrackingOptions): void {
       dsn,
       environment: options.environment,
       release: options.release,
-      // Respect live opt-out at send time.
-      beforeSend: (event) => (isEnabled() ? event : null),
+      // Respect live opt-out at send time, and scrub secrets from the event
+      // payload before it leaves the machine.
+      beforeSend: (event) => (isEnabled() ? redactEvent(event) : null),
       // We register our own process-level handlers so we can flush before
       // exiting; Sentry's default global handlers would double-report.
       defaultIntegrations: false,
