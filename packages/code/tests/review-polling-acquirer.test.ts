@@ -770,6 +770,7 @@ describe("ReviewPollingAcquirer", () => {
       origin: "conflict_resolution",
       repo: "acme/widgets",
       prNumber: 42,
+      prUrl: "https://github.com/acme/widgets/pull/42",
       branch: "agent/task",
       attempt: 1,
       status: "succeeded",

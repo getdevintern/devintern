@@ -56,6 +56,8 @@ export interface RunMeta {
   branch?: string;
   repo?: string;
   prNumber?: number;
+  /** Web URL of the PR this run references (known at start for PR-affected origins). */
+  prUrl?: string;
   automationId?: string;
   /** Tracker-assigned key of the originating ticket (same as `taskKey`). */
   ticketKey?: string;
@@ -257,9 +259,9 @@ export class RunStore {
   createRun(meta: RunMeta): number {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
-      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number,
+      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, pr_url,
        automation_id, ticket_key, ticket_url, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -268,6 +270,7 @@ export class RunStore {
         meta.branch ?? null,
         meta.repo ?? null,
         meta.prNumber ?? null,
+        meta.prUrl ?? null,
         meta.automationId ?? null,
         meta.ticketKey ?? null,
         meta.ticketUrl ?? null,

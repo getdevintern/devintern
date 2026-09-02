@@ -17,6 +17,7 @@ import {
 import { usePoll } from "@/lib/api";
 import type { RunOrigin, RunRecord, RunStatus, RunsResponse } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
+import { runWorkLink } from "@/lib/run-work";
 import { formatDuration, formatTime } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
@@ -153,38 +154,34 @@ export function RunsTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {runs.map((run) => (
-          <TableRow key={run.id} onClick={() => onOpenRun(run.id)} className="cursor-pointer">
-            <TableCell className="px-4 py-2.5 font-medium">
-              <TicketKey
-                label={
-                  run.taskKey ??
-                  run.automationId ??
-                  (run.prNumber ? `PR #${run.prNumber}` : `run ${run.id}`)
-                }
-                href={run.ticketUrl}
-              />
-            </TableCell>
-            <TableCell className="px-4 py-2.5 text-muted-foreground">
-              {formatRunOrigin(run.origin)}
-            </TableCell>
-            <TableCell className="px-4 py-2.5 text-muted-foreground">
-              {run.harness ?? "–"}
-            </TableCell>
-            <TableCell className="px-4 py-2.5">
-              <StatusBadge status={run.status} />
-            </TableCell>
-            <TableCell className="px-4 py-2.5">
-              <RunResult run={run} />
-            </TableCell>
-            <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
-              {formatTime(run.startedAt)}
-            </TableCell>
-            <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
-              {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}
-            </TableCell>
-          </TableRow>
-        ))}
+        {runs.map((run) => {
+          const work = runWorkLink(run);
+          return (
+            <TableRow key={run.id} onClick={() => onOpenRun(run.id)} className="cursor-pointer">
+              <TableCell className="px-4 py-2.5 font-medium">
+                <TicketKey label={work.label} href={work.href} />
+              </TableCell>
+              <TableCell className="px-4 py-2.5 text-muted-foreground">
+                {formatRunOrigin(run.origin)}
+              </TableCell>
+              <TableCell className="px-4 py-2.5 text-muted-foreground">
+                {run.harness ?? "–"}
+              </TableCell>
+              <TableCell className="px-4 py-2.5">
+                <StatusBadge status={run.status} />
+              </TableCell>
+              <TableCell className="px-4 py-2.5">
+                <RunResult run={run} />
+              </TableCell>
+              <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+                {formatTime(run.startedAt)}
+              </TableCell>
+              <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+                {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}
+              </TableCell>
+            </TableRow>
+          );
+        })}
       </TableBody>
     </Table>
   );
