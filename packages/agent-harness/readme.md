@@ -33,7 +33,14 @@ constrained modes).
    `registerHarness(new YourHarness())`. Registration is keyed by
    `harness.name`; without it `getHarness("your-id")` returns `undefined`.
 
-5. **Add an alias in [`HARNESS_ALIASES`](src/registry.ts)** if users may type a
+5. **If you set `supportsStructuredOutput`, add the harness's exact envelope
+   schema to [`src/structured-envelope.ts`](src/structured-envelope.ts)** —
+   the reply field(s) its JSON mode emits plus any usage/cost fields.
+   Harnesses without an entry yield no reply and no stats (callers fall back
+   to legacy raw-stdout extraction); a missing entry must never be papered
+   over with generic field-name sniffing.
+
+6. **Add an alias in [`HARNESS_ALIASES`](src/registry.ts)** if users may type a
    different id than the canonical name (a bare binary name such as `agy`).
    Aliases map alternate ids → canonical registered names and are *not* listed
    separately by `listHarnesses()`.
@@ -115,6 +122,30 @@ open-question detectors) working exactly as before.
   | kimi | `--output-format stream-json` | JSONL messages |
   | pi | `--mode json` (pairs with `-p`) | JSONL events |
   | deepseek (reasonix) | `--output-format json` | single result object |
+
+- **Envelope schemas & usage stats.** The shapes above differ from harness to
+  harness, so [`src/structured-envelope.ts`](src/structured-envelope.ts)
+  registers an **exact schema per harness** (keyed by `AgentHarness.name`):
+  [`extractHarnessStructuredReply`](src/structured-envelope.ts) recovers the
+  model's final reply — and the token usage / cost the envelope reports —
+  without any cross-harness field-name sniffing:
+
+  | Harness | Reply lives in | Usage / cost fields |
+  | --- | --- | --- |
+  | claude-code | envelope `result` (string or object) | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens`, `usage.cache_creation_input_tokens`; `total_cost_usd` |
+  | codex | last `item.completed` with `item.type:"agent_message"` → `item.text` | `turn.completed.usage.{input_tokens, cached_input_tokens, output_tokens, total_tokens}` |
+  | opencode | `type:"text"` events → `part.text` | `step_finish.part.tokens.{input, output, reasoning, cache.read, cache.write}`; `part.cost` |
+  | qwen | last `type:"result"` array entry → `result` | entry `usage` (Claude-style `*_tokens` fields) |
+  | kimi | last `{role:"assistant"}` message → `content` (string or text blocks) | — |
+  | cline, kilo-code | `type:"say", say:"text"` records → `text` | — |
+  | pi | `message_end` → assistant `message.content` text blocks | event `usage.{input, output, cacheRead, cacheWrite}` |
+  | cursor, grok, deepseek | envelope `result` (best-effort) | — |
+  | goose, antigravity | envelope `response` | — |
+
+  Unknown harness names and values that match no schema return `{}` — callers
+  must treat that as "envelope not understood" and fall back to their legacy
+  extraction path. When adjusting a schema, verify the shape against the
+  upstream CLI docs and note the fields in the module header.
 
 - **Detectors & streaming.** Usage-limit and max-turns detectors keep
   scanning the raw streams (JSON event lines can still match

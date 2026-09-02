@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { execSync, spawn as nodeSpawn } from "child_process";
+import { execSync, spawn as nodeSpawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -8,13 +8,23 @@ import { SmolvmSandboxProvider } from "../src/sandbox/providers/smolvm.js";
 import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
 
+// Bun's mock.module patches the existing module in place, so the namespace
+// cannot be used to call through after registration: capture the real
+// spawnSync up front and delegate to it from the stub below.
+const realSpawnSync = spawnSync;
+
 // The Linux Landlock preflight inside NonoSandboxProvider.wrapCommand shells
 // out to `nono run … -- true`; these tests assert argv composition, not the
-// host-dependent grant refinement, so stub the spawn to a fast no-op.
+// host-dependent grant refinement, so stub just that spawn to a fast no-op.
+// mock.module is process-global for the whole `bun test` run, so every other
+// export — and every non-`nono` spawnSync call — must delegate to the real
+// implementation, otherwise the stub leaks into other test files (e.g.
+// sandbox-detect.test.ts) and breaks their live-probe assertions.
 mock.module("child_process", () => ({
   execSync,
   spawn: nodeSpawn,
-  spawnSync: () => ({ status: 0, stdout: "", stderr: "" }),
+  spawnSync: (...callArgs: Parameters<typeof realSpawnSync>) =>
+    callArgs[0] === "nono" ? { status: 0, stdout: "", stderr: "" } : realSpawnSync(...callArgs),
 }));
 
 const { NonoSandboxProvider, parseDenyOverlaps, refineGrantsAgainstDenies } =

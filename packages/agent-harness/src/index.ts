@@ -144,3 +144,12 @@ export {
   assertStructuredOutputSupported,
   parseStructuredOutput,
 } from "./structured-output.js";
+
+// Per-harness structured (JSON) envelope schemas (reply + usage/cost stats)
+export {
+  extractHarnessEventText,
+  extractHarnessStructuredReply,
+  type HarnessStructuredReply,
+  type StructuredRunStats,
+  type StructuredTokenUsage,
+} from "./structured-envelope.js";

@@ -900,7 +900,7 @@ describe("engine structured output (JSON mode)", () => {
     return { source: { type: "prompt" as const, content: "x" }, promptStyle: "pm" as const };
   }
 
-  test("requests structured output and reads the payload from result.structured", async () => {
+  test("requests structured output and accepts a direct payload without an envelope", async () => {
     const seenOptions: AgentRunOptions[] = [];
     const engine = await createEngine(
       stubConfig({ supportsStructuredOutput: true }),
@@ -927,7 +927,7 @@ describe("engine structured output (JSON mode)", () => {
 
   test("unwraps a Claude Code result envelope before validating", async () => {
     const engine = await createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
+      stubConfig({ supportsStructuredOutput: true, name: "claude-code" }),
       { promptsDir: PROMPTS_DIR },
       {
         backend: stubBackend(),
@@ -951,9 +951,64 @@ describe("engine structured output (JSON mode)", () => {
     expect(draft).toEqual(STORY);
   });
 
+  test("surfaces token usage and cost from the harness envelope", async () => {
+    const usageEvents: Array<{ usage?: unknown; costUsd?: number }> = [];
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true, name: "claude-code" }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout: '{"type":"result","result":"payload"}',
+          structured: {
+            ok: true,
+            value: {
+              type: "result",
+              subtype: "success",
+              result: '{"summary": "S", "description": "D"}',
+              usage: { input_tokens: 12, output_tokens: 34, cache_read_input_tokens: 7 },
+              total_cost_usd: 0.05,
+            },
+          },
+        }),
+      },
+    );
+
+    const draft = await engine.generateStory(generateInput(), {
+      onAgentUsage: (stats) => usageEvents.push(stats),
+    });
+    expect(draft).toEqual(STORY);
+    expect(usageEvents).toEqual([
+      { usage: { inputTokens: 12, outputTokens: 34, cacheReadTokens: 7 }, costUsd: 0.05 },
+    ]);
+  });
+
+  test("does not surface usage when the envelope reports none", async () => {
+    const usageEvents: unknown[] = [];
+    const engine = await createEngine(
+      stubConfig({ supportsStructuredOutput: true, name: "claude-code" }),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          stdout: '{"type":"result","result":"payload"}',
+          structured: {
+            ok: true,
+            value: { type: "result", result: '{"summary": "S", "description": "D"}' },
+          },
+        }),
+      },
+    );
+
+    await engine.generateStory(generateInput(), {
+      onAgentUsage: (stats) => usageEvents.push(stats),
+    });
+    expect(usageEvents).toEqual([]);
+  });
+
   test("unwraps the last assistant message from an NDJSON event stream", async () => {
     const engine = await createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
+      stubConfig({ supportsStructuredOutput: true, name: "codex" }),
       { promptsDir: PROMPTS_DIR },
       {
         backend: stubBackend(),
@@ -979,9 +1034,9 @@ describe("engine structured output (JSON mode)", () => {
     expect(draft).toEqual(STORY);
   });
 
-  test("unwraps decomposition payloads from a buffered message array", async () => {
+  test("unwraps decomposition payloads from the qwen result entry", async () => {
     const engine = await createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
+      stubConfig({ supportsStructuredOutput: true, name: "qwen" }),
       { promptsDir: PROMPTS_DIR },
       {
         backend: stubBackend(),
@@ -990,10 +1045,12 @@ describe("engine structured output (JSON mode)", () => {
           structured: {
             ok: true,
             value: [
-              { type: "system", content: "session context" },
+              { type: "system", subtype: "session_start" },
               {
-                role: "assistant",
-                content: '{"subtasks": [{"summary": "A"}, {"summary": "B", "description": "b"}]}',
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: '{"subtasks": [{"summary": "A"}, {"summary": "B", "description": "b"}]}',
               },
             ],
           },
@@ -1011,7 +1068,7 @@ describe("engine structured output (JSON mode)", () => {
 
   test("repairs narration-prefixed JSON inside the envelope reply text", async () => {
     const engine = await createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
+      stubConfig({ supportsStructuredOutput: true, name: "claude-code" }),
       { promptsDir: PROMPTS_DIR },
       {
         backend: stubBackend(),
@@ -1150,7 +1207,7 @@ describe("readable stdout tap (structured streaming)", () => {
 
   function engineEmittingStdout(emit: (onStdout: (chunk: string) => void) => void) {
     return createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
+      stubConfig({ supportsStructuredOutput: true, name: "codex" }),
       { promptsDir: PROMPTS_DIR },
       {
         backend: stubBackend(),
@@ -1175,8 +1232,8 @@ describe("readable stdout tap (structured streaming)", () => {
       onStdout(
         '{"type":"item.completed","item":{"type":"agent_message","text":"Working on it"}}\n',
       );
-      // Envelope without a trailing newline: extracted on flush.
-      onStdout('{"type":"result","result":"All done"}');
+      // Final event without a trailing newline: extracted on flush.
+      onStdout('{"type":"item.completed","item":{"type":"agent_message","text":"All done"}}');
     });
 
     await engine.generateStory(generateInput(), {

@@ -253,7 +253,8 @@ export async function createEngine(
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
     const onAgentChunk = events?.onAgentChunk;
-    const dumpContext = { harness: config.agent.harness.name, cliPath: config.agent.path };
+    const harnessName = config.agent.harness.name;
+    const dumpContext = { harness: harnessName, cliPath: config.agent.path };
 
     type AttemptOutcome =
       | { ok: true; payload: T }
@@ -268,7 +269,9 @@ export async function createEngine(
       const rawStdoutForward = onAgentChunk
         ? (chunk: string) => onAgentChunk(chunk, "stdout")
         : undefined;
-      const stdoutTap = structuredMode ? createReadableStdoutTap(rawStdoutForward) : undefined;
+      const stdoutTap = structuredMode
+        ? createReadableStdoutTap(harnessName, rawStdoutForward)
+        : undefined;
       const result = await runAgent(config.agent.harness, config.agent.path, currentPrompt, {
         maxTurns: 100,
         skipPermissions: true,
@@ -297,11 +300,20 @@ export async function createEngine(
       }
 
       // Structured (JSON) mode: the runner already parsed the machine-readable
-      // payload from the CLI's output — unwrap harness envelopes (Claude Code
-      // result envelopes, NDJSON event streams, ...) and validate directly
-      // instead of scraping raw transcript text.
-      const fromStructured = structuredPayloadFromResult(result, validate, invalidMessage);
+      // payload from the CLI's output — unwrap it through the harness's exact
+      // envelope schema (Claude Code result envelopes, NDJSON event streams,
+      // ...) and validate directly instead of scraping raw transcript text.
+      const fromStructured = structuredPayloadFromResult(
+        result,
+        harnessName,
+        validate,
+        invalidMessage,
+      );
       if (fromStructured.ok) {
+        // Surface the token usage / cost the harness envelope reported, if any.
+        if (fromStructured.stats) {
+          events?.onAgentUsage?.(fromStructured.stats);
+        }
         return { ok: true, payload: fromStructured.payload };
       }
 
