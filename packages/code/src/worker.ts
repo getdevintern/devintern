@@ -10,7 +10,9 @@
  * Code, credentials, and agent execution never leave this machine.
  */
 
+import { flushErrorTracking } from "@devintern/utils";
 import { LockManager } from "./lib/lock-manager";
+import { initSentryOnce } from "./lib/sentry-init";
 import { startWorkerCapture } from "./lib/worker-capture";
 import type { WorkerCaptureHandle } from "./lib/worker-capture";
 
@@ -48,6 +50,11 @@ export async function startWorker(
   options: WorkerOptions,
   acquirers: Acquirer[] = [],
 ): Promise<void> {
+  // Entry-point safety net: the `devintern worker` CLI shell already
+  // initialized tracking, but startWorker must not depend on that — a no-op
+  // if initialized, a no-op with SENTRY_DISABLED=1 either way.
+  initSentryOnce();
+
   // Self-capture first so the startup banner lands in the log files the
   // dashboard tails; a capture failure never blocks the daemon.
   let capture: WorkerCaptureHandle | null = null;
@@ -79,7 +86,9 @@ export async function startWorker(
 
   if (acquirers.length === 0) {
     console.error("❌ No event sources enabled.");
-    console.error("   Set [defaults].task_query in workspace.toml, or add [[automations]].");
+    console.error(
+      "   Set [defaults].task_query in workspace.toml, or add [[automations]] / [[estimations]].",
+    );
     console.error("   Direct webhooks are a separate command:  devintern webhook serve");
     lock.release();
     process.exit(1);
@@ -110,6 +119,9 @@ export async function startWorker(
     // next start; shutdown never loses accepted work.
     lock.release();
     capture?.stop();
+    // Acquirers may have captured handled failures (poll/dispatch errors);
+    // give pending events a bounded chance to send before exiting.
+    await flushErrorTracking();
     console.log("👋 Worker stopped");
     process.exit(0);
   };

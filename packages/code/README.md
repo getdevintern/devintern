@@ -4,15 +4,16 @@
 [![License](https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue)](./LICENSE.md)
 [![Docs](https://img.shields.io/badge/Docs-devintern.com-blue)](https://devintern.com/docs/code/quick-start)
 
-**Turn tracker tickets into pull requests with any coding agent — on your keys, self-hosted.**
+**Run a self-hosted worker that turns tracker tickets across repositories into pull requests — with any coding agent, on your keys.**
 
-`devintern` watches your issue tracker (or a local markdown file), runs Claude Code / Codex / Cursor / OpenCode / others, and opens a ready-to-review PR. Interactive use is free forever.
+`devintern worker` polls ready work from your issue tracker (or local markdown files), routes each ticket to the right repository and isolated worktree, runs Claude Code / Codex / Cursor / OpenCode / others, and opens a ready-to-review PR. Interactive one-off runs are free forever.
 
 - **Trackers:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · markdown files
 - **Agents:** Claude Code · Codex · Cursor · OpenCode · Grok Build · and others
+- **Repositories:** one worker can route tickets across a multi-repo workspace
 - **BYOK:** your model keys, billed on your existing provider contract
 
-**Also useful:** feasibility questions go back on the ticket instead of a wrong PR; the agent self-reviews its diff before you see it; unattended pickup is available when you want it.
+**Also useful:** feasibility questions go back on the ticket instead of becoming a wrong PR; optional auto-review checks the diff before you see it; reviewer feedback returns to the same worker as commits on the existing branch.
 
 Pair with **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) to turn rough notes, logs, or Figma into well-specified tickets first.
 
@@ -33,7 +34,13 @@ devintern ./tasks/feature-spec.md --create-pr
 # Or configure a real tracker
 devintern init
 devintern PROJ-123 --create-pr
+
+# Or keep processing ready tickets across configured repositories
+devintern worker init
+devintern worker
 ```
+
+The standard workspace setup keeps `GITHUB_TOKEN` local and installs the central DevIntern AI GitHub App for relay events—no custom App ID, private key, webhook URL, or open port. Air-gapped/no-relay installations retain an advanced customer-owned App workflow.
 
 ## Documentation
 

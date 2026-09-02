@@ -27,9 +27,12 @@ import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn"
 import { parseEnvInteger } from "./lib/env-integer";
 import { resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
+import { initSentryOnce } from "./lib/sentry-init";
+import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
+import { WorkerState } from "./lib/worker-state";
 import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -544,6 +547,15 @@ async function processIssueCommentWithPersistence(
     if (eventId && webhookQueue) {
       webhookQueue.markFailed(eventId, (error as Error).message);
     }
+    // Usage-limit deferrals are re-queued, not failures; everything else is a
+    // PR-comment processing the user expected to happen.
+    if (!(error instanceof UsageLimitError)) {
+      captureError(error, {
+        stage: "webhook-comment",
+        pr: `${event.repository.full_name}#${event.issue.number}`,
+        eventId,
+      });
+    }
     throw error; // Re-throw so the queue's catch handler logs it
   }
 }
@@ -622,6 +634,20 @@ async function markCommentsAsAddressed(
     return;
   }
 
+  // Local dedupe marker: record every in-scope comment (replies included) so
+  // the thread dedupes fully. Reactions skip replies — the thread root carries
+  // the single human-readable 🎉.
+  const workerState = new WorkerState();
+  try {
+    workerState.markCommentsAddressed(
+      `${owner}/${repo}`,
+      "review",
+      comments.map((c) => c.id),
+    );
+  } finally {
+    workerState.close();
+  }
+
   const topLevelComments = comments.filter((c) => !c.isReply);
   const replyCount = comments.length - topLevelComments.length;
 
@@ -644,7 +670,8 @@ async function markCommentsAsAddressed(
       successCount++;
     } catch (error) {
       failCount++;
-      // Always log failures - they indicate a real problem
+      // Cosmetic only — dedupe is local, so a reaction failure can never
+      // cause the comment to be re-processed.
       console.warn(
         `   ⚠️  Failed to add reaction to comment ${comment.id}: ${(error as Error).message}`,
       );
@@ -652,10 +679,10 @@ async function markCommentsAsAddressed(
   }
 
   if (successCount > 0) {
-    console.log(`✅ Marked ${successCount} comment(s) as addressed with 🎉 reaction`);
+    console.log(`🎉 Reacted to ${successCount} comment(s) (visual feedback)`);
   }
   if (failCount > 0) {
-    console.warn(`⚠️  Failed to mark ${failCount} comment(s)`);
+    console.warn(`⚠️  Failed to mark ${failCount} comment(s) (cosmetic only)`);
   }
 }
 
@@ -701,21 +728,15 @@ async function processReviewAsync(
 
     console.log(`   Found ${allRawComments.length} total comment(s)`);
 
-    // Filter out comments that have already been addressed (have a "hooray" reaction)
-    const addressedCommentIds = new Set<number>();
-
-    for (const comment of allRawComments) {
-      try {
-        const reactions = await githubClient.getCommentReactions(owner, repo, comment.id);
-        const hasHoorayReaction = reactions.some((r) => r.content === "hooray");
-        if (hasHoorayReaction) {
-          addressedCommentIds.add(comment.id);
-        }
-      } catch (error) {
-        // Ignore errors, treat as not addressed
-        debugLog(config, `Failed to fetch reactions for comment ${comment.id}`);
-      }
-    }
+    // Local dedupe: filter out comments this worker already addressed. GitHub
+    // reactions are visual feedback only and carry no gating meaning.
+    const workerState = new WorkerState();
+    const addressedCommentIds = new Set(
+      allRawComments
+        .filter((c) => workerState.isCommentAddressed(`${owner}/${repo}`, "review", c.id))
+        .map((c) => c.id),
+    );
+    workerState.close();
 
     const rawComments = allRawComments.filter((c) => !addressedCommentIds.has(c.id));
     const alreadyAddressed = allRawComments.length - rawComments.length;
@@ -1192,6 +1213,15 @@ async function processReviewAsync(
     if (config.debug) {
       console.error((error as Error).stack);
     }
+    // This catch swallows (queue persistence treats the event as completed),
+    // so without reporting here a failed review would be invisible to error
+    // tracking. Usage-limit deferrals are expected scheduling, not failures.
+    if (!(error instanceof UsageLimitError)) {
+      captureError(error, {
+        stage: "webhook-review",
+        pr: `${owner}/${repo}#${prNumber}`,
+      });
+    }
   }
   // Note: We don't cleanup this branch's worktree here - it's reused across
   // reviews of the same PR for efficiency (deps stay cached). Worktrees from
@@ -1632,8 +1662,27 @@ export async function startWebhookServer(
   return server;
 }
 
-// CLI entry point
+// CLI entry point. When run via `devintern webhook serve`, index.ts owns
+// environment loading, Sentry init, and the process-level fatal handlers.
+// This standalone entry (`bun src/webhook-server.ts`) must set those up itself.
 if (import.meta.main) {
+  initSentryOnce();
+
+  const reportFatal = (kind: string, error: unknown): void => {
+    console.error(`❌ Uncaught ${kind}:`, error);
+    captureError(error, { command: "webhook-serve-standalone" });
+    void flushErrorTracking().finally(() => process.exit(1));
+  };
+  process.on("uncaughtException", (error) => reportFatal("exception", error));
+  process.on("unhandledRejection", (reason) => reportFatal("rejection", reason));
+
+  const stop = (signal: string): void => {
+    console.log(`\n🛑 Received ${signal}, stopping webhook server...`);
+    void flushErrorTracking().finally(() => process.exit(0));
+  };
+  process.on("SIGINT", () => stop("SIGINT"));
+  process.on("SIGTERM", () => stop("SIGTERM"));
+
   startWebhookServer();
 }
 

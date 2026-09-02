@@ -24,7 +24,9 @@ mock.module("child_process", () => ({
   execSync,
   spawn: nodeSpawn,
   spawnSync: (...callArgs: Parameters<typeof realSpawnSync>) =>
-    callArgs[0] === "nono" ? { status: 0, stdout: "", stderr: "" } : realSpawnSync(...callArgs),
+    callArgs[0] === "nono"
+      ? { status: 0, stdout: "", stderr: "" }
+      : realSpawnSync(...callArgs),
 }));
 
 const { NonoSandboxProvider, parseDenyOverlaps, refineGrantsAgainstDenies } =

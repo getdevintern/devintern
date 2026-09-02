@@ -7,6 +7,8 @@ export interface LockStatus {
   pid?: number;
   /** ISO timestamp the lock was taken. */
   startedAt?: string;
+  /** Absolute path of the lock file the status was read from. */
+  path?: string;
 }
 
 export class LockManager {
@@ -126,13 +128,20 @@ export class LockManager {
    *
    * @param workingDir - Project root used to locate the lock file
    * @param lockFileName - Lock file name (e.g. `.worker.lock`)
+   * @param options - `plainDir` reads the lock directly from `workingDir`
+   *                  instead of nesting `.devintern-code/` (workspace locks
+   *                  live in `~/.devintern/`, which is not a project root)
    * @returns Lock status, or `null` when no lock file exists (or it is unreadable)
    */
   static readLockStatus(
     workingDir: string = process.cwd(),
     lockFileName = ".pid.lock",
+    options: { plainDir?: boolean } = {},
   ): LockStatus | null {
-    const lockFilePath = join(resolve(workingDir, ".devintern-code"), lockFileName);
+    const configDir = options.plainDir
+      ? resolve(workingDir)
+      : resolve(workingDir, ".devintern-code");
+    const lockFilePath = join(configDir, lockFileName);
     if (!existsSync(lockFilePath)) {
       return null;
     }
@@ -146,6 +155,7 @@ export class LockManager {
         running: LockManager.isPidRunning(pid),
         pid,
         startedAt: typeof lockData.timestamp === "string" ? lockData.timestamp : undefined,
+        path: lockFilePath,
       };
     } catch {
       return null;

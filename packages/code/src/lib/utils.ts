@@ -1,7 +1,7 @@
 import { fetchWithRetry as sharedFetchWithRetry } from "@devintern/utils";
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "fs";
-import { basename, dirname, join } from "path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 
 /**
  * `git clean` arguments used everywhere the tool wipes a working directory.
@@ -1049,14 +1049,31 @@ export class Utils {
       // Check if this is a non-fixable git state error
       const fullError = [pushResult.error, pushResult.output].filter(Boolean).join("\n").trim();
 
-      const isNonFastForward =
-        fullError.includes("[rejected]") && fullError.includes("non-fast-forward");
-      const isFetchFirst =
-        fullError.includes("fetch first") || fullError.includes("Updates were rejected");
+      // Hook output can contain arbitrary text from the repository's test
+      // suite, including simulated non-fast-forward diagnostics from
+      // Git-related tests. Establish divergence from repository state after
+      // every failed push instead of trusting any output string. This also
+      // catches races whose server-side rejection omits the usual markers.
+      const latestRemote = await Utils.executeGitCommand(
+        ["ls-remote", "--heads", "origin", currentBranch],
+        { verbose: false, cwd },
+      );
+      const remoteSha = latestRemote.success
+        ? latestRemote.output.trim().split(/\s+/, 1)[0]
+        : undefined;
+      let remoteDiverged = false;
+
+      if (remoteSha) {
+        const remoteIsAncestor = await Utils.executeGitCommand(
+          ["merge-base", "--is-ancestor", remoteSha, "HEAD"],
+          { verbose: false, cwd },
+        );
+        remoteDiverged = !remoteIsAncestor.success;
+      }
 
       // Non-fast-forward and similar errors are not fixable by @devintern/code
       // They require manual intervention (pull, rebase, or force push)
-      if (isNonFastForward || isFetchFirst) {
+      if (remoteDiverged) {
         return {
           success: false,
           message: `Push rejected - branch diverged from remote. Run 'git pull --rebase' or 'git push --force' (dangerous): ${pushResult.error}`,
@@ -1601,13 +1618,16 @@ export class Utils {
    * Remove a git worktree directory and unregister it from git.
    *
    * @param worktreePath - Absolute worktree path
-   * @param options - Verbose logging
+   * @param options - Verbose logging and the owning repository directory
+   *   (`git worktree remove` must run against the repo that owns the
+   *   worktree; defaults to the current working directory)
    */
   static async removeReviewWorktree(
     worktreePath: string,
-    options?: { verbose?: boolean },
+    options?: { verbose?: boolean; cwd?: string },
   ): Promise<{ success: boolean; error?: string }> {
     const verbose = options?.verbose ?? false;
+    const cwd = options?.cwd;
 
     try {
       if (!existsSync(worktreePath)) {
@@ -1624,7 +1644,7 @@ export class Utils {
       // Try to remove via git first
       const removeResult = await Utils.executeGitCommand(
         ["worktree", "remove", worktreePath, "--force"],
-        { verbose },
+        { verbose, cwd },
       );
 
       if (!removeResult.success) {
@@ -1785,6 +1805,10 @@ export class Utils {
               if (verbose) {
                 console.log(`📦 Installing dependencies...`);
               }
+              // Confine hook rewrites by dependency postinstalls (lefthook)
+              // to this worktree, before `bun install` gets a chance to
+              // touch the shared `.git/hooks`.
+              await Utils.isolateWorktreeHooks(worktreePath, { verbose });
               const installResult = await Utils.installDependencies(worktreePath, { verbose });
 
               if (!installResult.success) {
@@ -1966,6 +1990,10 @@ export class Utils {
       if (verbose) {
         console.log(`📦 Installing dependencies...`);
       }
+      // Confine hook rewrites by dependency postinstalls (lefthook) to this
+      // worktree, before `bun install` gets a chance to touch the shared
+      // `.git/hooks`.
+      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
       const installResult = await Utils.installDependencies(worktreePath, {
         verbose,
       });
@@ -2089,6 +2117,149 @@ export class Utils {
 
     // Drop any dangling registrations the removals left behind.
     await Utils.executeGitCommand(["worktree", "prune"], { verbose: false, cwd });
+  }
+
+  /**
+   * Point a linked review worktree's `core.hooksPath` at a private directory
+   * (via per-worktree git config) seeded with copies of the shared hooks.
+   *
+   * A linked worktree shares `.git/hooks` with the user's checkout. Dependency
+   * postinstalls that rewrite hooks (lefthook's `lefthook install`) would
+   * therefore clobber the user's real hooks with scripts hardcoding this
+   * ephemeral worktree's `node_modules` path — breaking every later push once
+   * the worktree is removed. Redirecting hooks first confines those rewrites
+   * to the private directory, where they stay valid for this run's pushes and
+   * vanish together with the worktree.
+   *
+   * The private directory lives in the worktree's git admin area
+   * (`<repo>/.git/worktrees/<name>/hooks`), which keeps it outside the working
+   * tree (invisible to `git status`, `git clean`, and `git add -A`) and lets
+   * `git worktree remove` clean it up automatically. The per-worktree config
+   * lives in the same admin area; `extensions.worktreeConfig` stays enabled in
+   * the shared config, which is harmless.
+   */
+  static async isolateWorktreeHooks(
+    worktreePath: string,
+    options?: { verbose?: boolean },
+  ): Promise<void> {
+    const verbose = options?.verbose ?? false;
+
+    const gitDir = await Utils.executeGitCommand(["rev-parse", "--absolute-git-dir"], {
+      cwd: worktreePath,
+    });
+    if (!gitDir.success || !gitDir.output.trim()) {
+      console.warn(`⚠️  Could not locate worktree git dir; hooks stay shared: ${gitDir.error}`);
+      return;
+    }
+    const hooksDir = join(gitDir.output.trim(), "hooks");
+
+    // Existing shared hooks (e.g. plain scripts installed outside a package's
+    // postinstall) keep working in the worktree: copy them into the isolated
+    // directory. This must run before `core.hooksPath` is set, because
+    // `git rev-parse --git-path hooks` resolves through it.
+    const sharedHooks = await Utils.executeGitCommand(["rev-parse", "--git-path", "hooks"], {
+      cwd: worktreePath,
+    });
+    if (sharedHooks.success && sharedHooks.output.trim() && existsSync(sharedHooks.output.trim())) {
+      const sharedDir = sharedHooks.output.trim();
+      try {
+        Utils.ensureDirectoryExists(hooksDir);
+        for (const entry of readdirSync(sharedDir)) {
+          if (entry.endsWith(".sample")) continue;
+          const source = join(sharedDir, entry);
+          if (!statSync(source).isFile()) continue;
+          copyFileSync(source, join(hooksDir, entry));
+          chmodSync(join(hooksDir, entry), 0o755);
+        }
+      } catch (error) {
+        console.warn(
+          `⚠️  Could not copy shared git hooks into the worktree: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    const enable = await Utils.enableWorktreeConfig(worktreePath);
+    if (!enable.success) {
+      console.warn(`⚠️  Could not enable per-worktree git config: ${enable.error}`);
+      return;
+    }
+    const setPath = await Utils.executeGitCommand(
+      ["config", "--worktree", "core.hooksPath", hooksDir],
+      { cwd: worktreePath },
+    );
+    if (!setPath.success) {
+      console.warn(`⚠️  Could not redirect worktree git hooks: ${setPath.error}`);
+      return;
+    }
+    if (verbose) {
+      console.log(`   🔒 Git hooks isolated to ${hooksDir}`);
+    }
+  }
+
+  /**
+   * Enable per-worktree config without making linked worktrees from a bare
+   * repository inherit `core.bare=true` from the shared config.
+   *
+   * Git normally treats a linked worktree created from a bare repository as a
+   * work tree. Once `extensions.worktreeConfig` is enabled, however, a shared
+   * `core.bare=true` overrides that detection and every linked worktree starts
+   * rejecting checkout/reset/merge operations. Move the bare-only value to the
+   * main worktree's config before enabling the extension, as required by Git's
+   * worktree-config layout.
+   *
+   * This also repairs repositories where the extension was already enabled in
+   * the unsafe layout.
+   */
+  static async enableWorktreeConfig(
+    cwd: string,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    const commonDirResult = await Utils.executeGitCommand(["rev-parse", "--git-common-dir"], {
+      cwd,
+    });
+    if (!commonDirResult.success || !commonDirResult.output.trim()) {
+      return commonDirResult;
+    }
+
+    const commonDir = isAbsolute(commonDirResult.output.trim())
+      ? commonDirResult.output.trim()
+      : resolve(cwd, commonDirResult.output.trim());
+    const sharedConfig = join(commonDir, "config");
+    const mainWorktreeConfig = join(commonDir, "config.worktree");
+    const sharedBare = await Utils.executeGitCommand(
+      ["config", "--file", sharedConfig, "--get", "core.bare"],
+      { cwd },
+    );
+
+    if (sharedBare.success && sharedBare.output.trim().toLowerCase() === "true") {
+      const preserveBare = await Utils.executeGitCommand(
+        ["config", "--file", mainWorktreeConfig, "core.bare", "true"],
+        { cwd },
+      );
+      if (!preserveBare.success) {
+        return preserveBare;
+      }
+
+      const removeSharedBare = await Utils.executeGitCommand(
+        ["config", "--file", sharedConfig, "--unset-all", "core.bare"],
+        { cwd },
+      );
+      if (!removeSharedBare.success) {
+        // Another worker may have completed the same idempotent migration
+        // after our read. Only fail if the unsafe value is still present.
+        const remainingSharedBare = await Utils.executeGitCommand(
+          ["config", "--file", sharedConfig, "--get", "core.bare"],
+          { cwd },
+        );
+        if (remainingSharedBare.success) {
+          return removeSharedBare;
+        }
+      }
+    }
+
+    return Utils.executeGitCommand(
+      ["config", "--file", sharedConfig, "extensions.worktreeConfig", "true"],
+      { cwd },
+    );
   }
 
   /**

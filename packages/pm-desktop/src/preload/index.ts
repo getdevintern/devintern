@@ -89,6 +89,7 @@ const api: PmDesktopApi = {
   dismissCodeDiscovery: () => ipcRenderer.invoke(IPC_CHANNELS.dismissCodeDiscovery),
   getAnalyticsEnabled: () => ipcRenderer.invoke(IPC_CHANNELS.getAnalyticsEnabled),
   setAnalyticsEnabled: (enabled) => ipcRenderer.invoke(IPC_CHANNELS.setAnalyticsEnabled, enabled),
+  reportRendererError: (report) => ipcRenderer.invoke(IPC_CHANNELS.reportRendererError, report),
   switchTracker: (trackerId) => ipcRenderer.invoke(IPC_CHANNELS.switchTracker, trackerId),
   switchProjectKey: (projectKey) => ipcRenderer.invoke(IPC_CHANNELS.switchProjectKey, projectKey),
   switchHarness: (harnessName) => ipcRenderer.invoke(IPC_CHANNELS.switchHarness, harnessName),

@@ -5,7 +5,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type RunOrigin = "task" | "pr_mention" | "conflict_resolution" | "scheduled";
+export type RunOrigin =
+  | "task"
+  | "pr_mention"
+  | "conflict_resolution"
+  | "scheduled"
+  | "estimate"
+  | "manual";
 
 export type RunStatus =
   | "in_progress"
@@ -21,6 +27,7 @@ export interface RunRecord {
   automationId?: string;
   ticketKey?: string;
   ticketUrl?: string;
+  taskDescription?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;
@@ -61,6 +68,96 @@ export interface RunsResponse {
 export interface RunDetailResponse {
   run: RunRecord;
   stages: RunStageRecord[];
+  /** Retry action metadata for this run (eligibility + audit trail). */
+  retry: RetryInfo;
+}
+
+/** One audited dashboard retry of a run. */
+export interface RetryAuditEntry {
+  id: number;
+  runId: number;
+  taskKey?: string;
+  actor: string;
+  action: "triggered" | "scheduled" | "failed";
+  command?: string;
+  pid?: number;
+  message?: string;
+  createdAt: number;
+}
+
+/** Retry metadata embedded in a run-detail response. */
+export interface RetryInfo {
+  eligible: boolean;
+  /**
+   * How the retry dispatches: `task` forces the task key through the CLI,
+   * `automation` re-runs the automation that produced the run.
+   */
+  kind?: "task" | "automation";
+  reason?: string;
+  /** Recent dashboard retries of this run, most recent first. */
+  audit: RetryAuditEntry[];
+}
+
+/**
+ * Trigger a retry of a run: the fleet worker drains it through the normal
+ * pipeline (`schedule` mode) or the dashboard spawns `devintern <TASK>
+ * --force` (`triggered`, standalone dashboard). Resolves with the parsed JSON
+ * body regardless of status; callers should branch on `response.ok`.
+ */
+export async function triggerRunRetry(runId: number): Promise<{
+  ok: boolean;
+  body: { error?: string; status?: string; command?: string; pid?: number };
+}> {
+  const response = await fetch(`/api/runs/${runId}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    status?: string;
+    command?: string;
+    pid?: number;
+  };
+  return { ok: response.ok, body };
+}
+
+/** One configured scheduled automation as served by `GET /api/automations`. */
+export interface AutomationSchedule {
+  id: string;
+  enabled: boolean;
+  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
+  schedule?: string;
+  repo?: string;
+  /** The prompt executed per occurrence. */
+  prompt: string;
+  /** Next scheduled occurrence (epoch ms). */
+  nextDueAt?: number;
+  /** Most recent run of this automation (any origin). */
+  lastRun?: RunRecord;
+}
+
+export interface AutomationsResponse {
+  automations: AutomationSchedule[];
+}
+
+/**
+ * Trigger a manual "Run now" execution of a scheduled automation. Resolves
+ * with the parsed JSON body regardless of status; callers should branch on
+ * `response.ok`.
+ */
+export async function triggerAutomation(automationId: string): Promise<{
+  ok: boolean;
+  body: { error?: string; status?: string };
+}> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    status?: string;
+  };
+  return { ok: response.ok, body };
 }
 
 export interface StatsResponse {
@@ -83,13 +180,52 @@ export interface StatsResponse {
   } | null;
 }
 
+/** Working-window (quiet hours) status from the worker process. */
+export interface ScheduleSnapshot {
+  enabled: boolean;
+  pickupAllowed: boolean;
+  active: string[];
+  blocked: string[];
+  timezone: string;
+  catchUpMissed: boolean;
+  manualRequested: boolean;
+  nextChange?: { at: number; kind: "open" | "close" };
+}
+
+export type WorkerLiveness = "running" | "stopped" | "unknown";
+
+export interface WorkerStatus {
+  status: WorkerLiveness;
+  pid?: number;
+  startedAt?: string;
+  /** Lock file the status was read from; absent when it could not be determined. */
+  lockFile?: string;
+}
+
 export interface WorkerResponse {
-  worker: { running: boolean; pid?: number; startedAt?: string } | null;
+  worker: WorkerStatus;
   queue: { pending: number; processing: number; failed: number };
   agentPrs: { open: number; closed: number };
+  schedule?: ScheduleSnapshot | null;
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+}
+
+/** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
+export interface AgentPrRecord {
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  branch?: string;
+  taskKey?: string;
+  ticketUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentPrsResponse {
+  prs: AgentPrRecord[];
 }
 
 export type WorkerLogLevel = "info" | "warn" | "error";

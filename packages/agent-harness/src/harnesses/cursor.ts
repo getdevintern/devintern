@@ -33,6 +33,12 @@ export class CursorHarness implements AgentHarness {
   readonly supportedModes = ["plan", "readonly"] as const;
   /** `--output-format json` emits one result object on completion (requires `-p`). */
   readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by commander; without this
+   * marker a prompt starting with `-` (e.g. markdown frontmatter) fails with a
+   * usage error. Verified `cursor-agent -p -- "<prompt>"` parses correctly.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build Cursor `agent` CLI flags for non-interactive (`-p`) execution.

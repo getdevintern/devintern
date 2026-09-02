@@ -95,6 +95,7 @@ describe("RelayAcquirer", () => {
       handlers: {
         addressPr: async (repo, pr) => {
           log.addressed.push([repo, pr]);
+          return true;
         },
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
@@ -180,6 +181,39 @@ describe("RelayAcquirer", () => {
     expect(requests[0]).toContain("cursor=41");
   });
 
+  test("reports successful polls for fallback suppression", async () => {
+    let successes = 0;
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (successes === 0) {
+        return new Response(JSON.stringify({ events: [], cursor: 0 }), { status: 200 });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof fetch;
+    const acquirer = new RelayAcquirer({
+      relayUrl: RELAY_URL,
+      relayToken: "drt_test_token",
+      workerState,
+      queue,
+      fetchImpl,
+      isAgentPr: () => false,
+      handlers: {
+        addressPr: async () => false,
+        handlePrComment: async () => {},
+        evaluateTask: async () => {},
+      },
+      onPollSuccess: () => {
+        successes++;
+      },
+    });
+
+    acquirer.start();
+    await waitFor(() => successes === 1);
+    await acquirer.stop();
+    expect(successes).toBe(1);
+  });
+
   test("errors back off and the loop recovers", async () => {
     const { acquirer, requests } = makeAcquirer(
       [
@@ -234,7 +268,7 @@ describe("RelayAcquirer", () => {
       fetchImpl,
       isAgentPr: () => false,
       handlers: {
-        addressPr: async () => {},
+        addressPr: async () => false,
         handlePrComment: async () => {},
         evaluateTask: async (taskKey) => {
           if (taskKey === "BOOM-1") {

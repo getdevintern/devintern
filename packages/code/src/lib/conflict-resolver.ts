@@ -111,6 +111,61 @@ Instructions:
 When you are done, every conflict must be resolved and the merge commit created.`;
 }
 
+/** How many times a failed pre-push hook may be handed to the agent for fixing. */
+const MAX_HOOK_FIX_ATTEMPTS = 2;
+
+/** Characters of raw hook error output included in the agent's fix prompt. */
+const HOOK_ERROR_PROMPT_LENGTH = 1500;
+
+/** Build the agent prompt for fixing a failed pre-push hook on the merge commit. */
+export function buildHookFixPrompt(options: { branch: string; hookError: string }): string {
+  const rawError = options.hookError.trim();
+  const excerpt =
+    rawError.length > HOOK_ERROR_PROMPT_LENGTH
+      ? `…${rawError.slice(-HOOK_ERROR_PROMPT_LENGTH)}`
+      : rawError;
+  return `# Fix Pre-Push Hook Failures
+
+A \`git push\` of \`${options.branch}\` was rejected by a pre-push hook. The branch
+carries a merge commit that has NOT been published yet.
+
+Hook error output (may be truncated):
+\`\`\`
+${excerpt || "(no output captured — run the project's check scripts to reproduce)"}
+\`\`\`
+
+Instructions:
+1. Reproduce the failing checks with the project's own scripts (lint, format,
+   typecheck, tests) and fix the underlying issues. Change as little as possible.
+2. Stage everything with \`git add -A\`.
+3. Fold the fixes into the existing commit with \`git commit --amend --no-edit\`
+   (only if there is anything to fold in — the commit is a merge commit and must
+   keep both parents).
+4. Do NOT push. Do NOT rebase, reset, or create new commits beyond the amend.
+5. Do NOT abort or undo the merge.
+
+When you are done, the failing checks must pass locally and the working tree
+must be clean.`;
+}
+
+/**
+ * Fold leftover working-tree changes from a hook-fix agent run into the merge
+ * commit (amend keeps both parents). A no-op when the tree is already clean.
+ *
+ * @returns `true` when changes were found and successfully amended in.
+ */
+async function amendHookFixIntoMergeCommit(workDir: string): Promise<boolean> {
+  const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
+  if (!status.success || status.output.trim() === "") {
+    return false;
+  }
+  await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
+  const amend = await Utils.executeGitCommand(["commit", "--amend", "--no-edit"], {
+    cwd: workDir,
+  });
+  return amend.success;
+}
+
 /**
  * How many times the merge+push cycle may restart when a push is rejected
  * because the branch moved underneath us (or was rejected transiently).
@@ -251,7 +306,8 @@ function isTransientPushRejection(message: string): boolean {
     message.includes("fetch first") ||
     message.includes("Updates were rejected") ||
     message.includes("[rejected]") ||
-    message.includes("stale info")
+    message.includes("stale info") ||
+    message.includes("branch diverged from remote")
   );
 }
 
@@ -322,285 +378,365 @@ export async function resolveConflictsOnPr(
   // fast-forward pushes on top of whatever is actually published.
   let leaseSha = options.expectedHeadSha;
 
-  for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      console.log(`🔁 Retry ${attempt - 1}/${MAX_SYNC_ATTEMPTS - 1}: rebuilding the merge`);
-    }
+  // The worktree is prepared per attempt inside the loop below; tracking it
+  // here lets the finally block remove it on every exit path, so a one-shot
+  // `resolve-conflicts` run does not leave its worktree behind in /tmp.
+  let workDir: string | undefined;
 
-    const worktree = await Utils.prepareReviewWorktree(branch, { verbose, cwd });
-    if (!worktree.success || !worktree.path) {
-      return await failWith("setup", `worktree preparation failed: ${worktree.error}`);
-    }
-    const workDir = worktree.path;
-
-    if (leaseSha) {
-      const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
-      if (!preparedHead.success || preparedHead.output.trim() !== leaseSha) {
-        return { outcome: "deferred", message: "PR head changed during worktree preparation" };
+  const runAttempts = async (): Promise<ResolveConflictsResult> => {
+    for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        console.log(`🔁 Retry ${attempt - 1}/${MAX_SYNC_ATTEMPTS - 1}: rebuilding the merge`);
       }
-    }
 
-    // Commit attribution for the merge commit (matches address-review).
-    if (!process.env.GITHUB_TOKEN) {
-      const appAuth = GitHubAppAuth.fromEnvironment();
-      if (appAuth) {
-        try {
-          const author = await appAuth.getGitAuthor();
-          await Utils.executeGitCommand(["config", "user.name", author.name], { cwd: workDir });
-          await Utils.executeGitCommand(["config", "user.email", author.email], { cwd: workDir });
-        } catch {
-          // Local git config applies.
-        }
+      const worktree = await Utils.prepareReviewWorktree(branch, { verbose, cwd });
+      if (!worktree.success || !worktree.path) {
+        return await failWith("setup", `worktree preparation failed: ${worktree.error}`);
       }
-    }
+      workDir = worktree.path;
 
-    // A merge needs the common ancestor. Repos can be shallow from CI-style
-    // checkouts or from older devintern versions whose review fetch used
-    // --depth=1 (which shallows the whole repo); unshallow before merging.
-    const shallow = await Utils.executeGitCommand(["rev-parse", "--is-shallow-repository"], {
-      cwd: workDir,
-    });
-    if (shallow.output.trim() === "true") {
-      await Utils.executeGitCommand(["fetch", "--unshallow", "origin"], { cwd: workDir, verbose });
-    }
-    const baseFetch = await Utils.fetchRemoteBranch(baseRef, { cwd: workDir, verbose });
-    if (!baseFetch.success) {
-      return await failWith("setup", `base fetch failed: ${baseFetch.error}`);
-    }
-    // GitHub's PR API can report a stale `base.sha` long after the branch
-    // advanced (it only updates when GitHub recomputes the PR). Deferring on a
-    // mismatch would retry forever against a deterministic mismatch, so the
-    // freshly fetched ref is the source of truth for what to merge.
-    if (options.expectedBaseSha) {
-      const fetchedBase = await Utils.executeGitCommand(["rev-parse", `origin/${baseRef}`], {
-        cwd: workDir,
-      });
-      if (fetchedBase.success && fetchedBase.output.trim() !== options.expectedBaseSha) {
-        console.log(
-          `ℹ️  GitHub reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
-            `origin/${baseRef} is at ${fetchedBase.output.trim().slice(0, 7)}; syncing to the actual tip`,
-        );
-      }
-    }
-
-    const mergeTarget = `origin/${baseRef}`;
-    const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
-      cwd: workDir,
-      verbose,
-    });
-
-    let outcome: "clean" | "resolved";
-    if (merge.success) {
-      // Includes the already-up-to-date case: nothing to push, nothing to say.
-      const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
-      const ahead = await Utils.executeGitCommand(
-        ["rev-list", "--count", `origin/${branch}..HEAD`],
-        { cwd: workDir },
-      );
-      if (status.success && status.output.trim() === "" && ahead.output.trim() === "0") {
-        return { outcome: "skipped", message: "already up to date with base" };
-      }
-      outcome = "clean";
-      console.log(`✅ origin/${baseRef} merged cleanly`);
-    } else {
-      const conflicted = await Utils.executeGitCommand(["diff", "--name-only", "--diff-filter=U"], {
-        cwd: workDir,
-      });
-      const conflictedFiles = conflicted.output
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-
-      if (conflictedFiles.length === 0) {
-        // No unmerged paths: either the merge failed for a non-conflict
-        // reason (e.g. dirty tree) or `git rerere` auto-staged a previously
-        // recorded resolution (the merge command still exits non-zero).
-        // MERGE_HEAD distinguishes the two.
-        const mergeHead = await Utils.executeGitCommand(
-          ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
-          { cwd: workDir },
-        );
-        if (!mergeHead.success) {
-          await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
-          return await failWith("aborted", `merge failed: ${merge.error}`);
-        }
-        // rerere replayed an earlier identical resolution; finish the merge.
-        console.log(`♻️  Conflicts auto-resolved from a previous identical merge; committing`);
-        await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
-        const commit = await Utils.executeGitCommand(["commit", "--no-edit"], { cwd: workDir });
-        if (!commit.success) {
-          await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
-          return await failWith("aborted", `merge commit failed: ${commit.error}`);
-        }
-        outcome = "resolved";
-      } else {
-        console.log(`⚔️  ${conflictedFiles.length} conflicted file(s); handing to the agent`);
-        const agentResult = await agentRunner(
-          buildConflictPrompt({ baseRef, branch, conflictedFiles }),
-          workDir,
-          verbose,
-        );
-
-        // Trust the tree, not the agent's word: nothing may be left unmerged.
-        const unmerged = await Utils.executeGitCommand(["diff", "--name-only", "--diff-filter=U"], {
+      if (leaseSha) {
+        const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], {
           cwd: workDir,
         });
-        const stillConflicted = unmerged.output.trim() !== "";
-        const mergeHead = await Utils.executeGitCommand(
-          ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        if (!preparedHead.success || preparedHead.output.trim() !== leaseSha) {
+          return { outcome: "deferred", message: "PR head changed during worktree preparation" };
+        }
+      }
+
+      // Commit attribution for the merge commit (matches address-review).
+      if (!process.env.GITHUB_TOKEN) {
+        const appAuth = GitHubAppAuth.fromEnvironment();
+        if (appAuth) {
+          try {
+            const author = await appAuth.getGitAuthor();
+            await Utils.executeGitCommand(["config", "user.name", author.name], { cwd: workDir });
+            await Utils.executeGitCommand(["config", "user.email", author.email], {
+              cwd: workDir,
+            });
+          } catch {
+            // Local git config applies.
+          }
+        }
+      }
+
+      // A merge needs the common ancestor. Repos can be shallow from CI-style
+      // checkouts or from older devintern versions whose review fetch used
+      // --depth=1 (which shallows the whole repo); unshallow before merging.
+      const shallow = await Utils.executeGitCommand(["rev-parse", "--is-shallow-repository"], {
+        cwd: workDir,
+      });
+      if (shallow.output.trim() === "true") {
+        await Utils.executeGitCommand(["fetch", "--unshallow", "origin"], {
+          cwd: workDir,
+          verbose,
+        });
+      }
+      const baseFetch = await Utils.fetchRemoteBranch(baseRef, { cwd: workDir, verbose });
+      if (!baseFetch.success) {
+        return await failWith("setup", `base fetch failed: ${baseFetch.error}`);
+      }
+      // GitHub's PR API can report a stale `base.sha` long after the branch
+      // advanced (it only updates when GitHub recomputes the PR). Deferring on a
+      // mismatch would retry forever against a deterministic mismatch, so the
+      // freshly fetched ref is the source of truth for what to merge.
+      if (options.expectedBaseSha) {
+        const fetchedBase = await Utils.executeGitCommand(["rev-parse", `origin/${baseRef}`], {
+          cwd: workDir,
+        });
+        if (fetchedBase.success && fetchedBase.output.trim() !== options.expectedBaseSha) {
+          console.log(
+            `ℹ️  GitHub reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
+              `origin/${baseRef} is at ${fetchedBase.output.trim().slice(0, 7)}; syncing to the actual tip`,
+          );
+        }
+      }
+
+      const mergeTarget = `origin/${baseRef}`;
+      const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
+        cwd: workDir,
+        verbose,
+      });
+
+      let outcome: "clean" | "resolved";
+      if (merge.success) {
+        // Includes the already-up-to-date case: nothing to push, nothing to say.
+        const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
+        const ahead = await Utils.executeGitCommand(
+          ["rev-list", "--count", `origin/${branch}..HEAD`],
           { cwd: workDir },
         );
-
-        if (!agentResult.success || stillConflicted) {
-          await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
-          const message = stillConflicted
-            ? "agent left unresolved conflicts; merge aborted"
-            : "agent run failed; merge aborted";
-          return await failWith("aborted", message);
+        if (status.success && status.output.trim() === "" && ahead.output.trim() === "0") {
+          return { outcome: "skipped", message: "already up to date with base" };
         }
+        outcome = "clean";
+        console.log(`✅ origin/${baseRef} merged cleanly`);
+      } else {
+        const conflicted = await Utils.executeGitCommand(
+          ["diff", "--name-only", "--diff-filter=U"],
+          {
+            cwd: workDir,
+          },
+        );
+        const conflictedFiles = conflicted.output
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
 
-        if (mergeHead.success) {
-          // Agent resolved but did not commit; finish the merge.
+        if (conflictedFiles.length === 0) {
+          // No unmerged paths: either the merge failed for a non-conflict
+          // reason (e.g. dirty tree) or `git rerere` auto-staged a previously
+          // recorded resolution (the merge command still exits non-zero).
+          // MERGE_HEAD distinguishes the two.
+          const mergeHead = await Utils.executeGitCommand(
+            ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            { cwd: workDir },
+          );
+          if (!mergeHead.success) {
+            await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
+            return await failWith("aborted", `merge failed: ${merge.error}`);
+          }
+          // rerere replayed an earlier identical resolution; finish the merge.
+          console.log(`♻️  Conflicts auto-resolved from a previous identical merge; committing`);
           await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
           const commit = await Utils.executeGitCommand(["commit", "--no-edit"], { cwd: workDir });
           if (!commit.success) {
             await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
             return await failWith("aborted", `merge commit failed: ${commit.error}`);
           }
-        }
-        outcome = "resolved";
-      }
-    }
+          outcome = "resolved";
+        } else {
+          console.log(`⚔️  ${conflictedFiles.length} conflicted file(s); handing to the agent`);
+          const agentResult = await agentRunner(
+            buildConflictPrompt({ baseRef, branch, conflictedFiles }),
+            workDir,
+            verbose,
+          );
 
-    if (noPush) {
-      return { outcome, message: "merge committed (push skipped)" };
-    }
-
-    // Refresh the remote head immediately before pushing and use it as the
-    // atomic lease (`--force-with-lease`) even when no explicit expectation
-    // was provided — an interactive run gets the same race protection.
-    const headFetch = await Utils.executeGitCommand(
-      ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
-      { cwd: workDir, verbose },
-    );
-    if (!headFetch.success) {
-      return await failWith("push-failed", `head fetch before push failed: ${headFetch.error}`);
-    }
-    const remoteHead = await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], {
-      cwd: workDir,
-    });
-    if (!remoteHead.success) {
-      return await failWith("push-failed", `could not read remote head: ${remoteHead.error}`);
-    }
-    const remoteTip = remoteHead.output.trim();
-    if (leaseSha && remoteTip !== leaseSha) {
-      return { outcome: "deferred", message: "PR head changed before push" };
-    }
-
-    // The exact lease makes the head check above atomic with the push. The
-    // push helper also verifies that HEAD descends from the leased commit.
-    const push = await Utils.pushCurrentBranch({
-      cwd: workDir,
-      expectedBranch: branch,
-      expectedRemoteSha: leaseSha ?? remoteTip,
-      verbose,
-    });
-    if (!push.success) {
-      if (leaseSha) {
-        const refreshed = await Utils.executeGitCommand(
-          ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
-          { cwd: workDir, verbose },
-        );
-        const moved = refreshed.success
-          ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
-          : null;
-        const newTip = moved?.success ? moved.output.trim() : null;
-        if (newTip && newTip !== leaseSha) {
-          // Only incorporate forward movement: building on top of a human's
-          // new commits keeps the eventual push a fast-forward. Anything else
-          // (rollback, history rewrite) is left alone for a fresh attempt.
-          const forward = await Utils.executeGitCommand(
-            ["merge-base", "--is-ancestor", leaseSha, newTip],
+          // Trust the tree, not the agent's word: nothing may be left unmerged.
+          const unmerged = await Utils.executeGitCommand(
+            ["diff", "--name-only", "--diff-filter=U"],
+            {
+              cwd: workDir,
+            },
+          );
+          const stillConflicted = unmerged.output.trim() !== "";
+          const mergeHead = await Utils.executeGitCommand(
+            ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
             { cwd: workDir },
           );
-          if (forward.success && attempt < MAX_SYNC_ATTEMPTS) {
-            console.log(
-              `🔁 Branch moved forward during resolution (${leaseSha.slice(0, 7)} → ${newTip.slice(0, 7)}); retrying on top of it`,
-            );
-            leaseSha = newTip;
-            continue;
+
+          if (!agentResult.success || stillConflicted) {
+            await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
+            const message = stillConflicted
+              ? "agent left unresolved conflicts; merge aborted"
+              : "agent run failed; merge aborted";
+            return await failWith("aborted", message);
           }
-          console.warn(`⚠️  Leaving the branch alone after concurrent movement during push`);
-          return { outcome: "deferred", message: "PR head changed during push" };
+
+          if (mergeHead.success) {
+            // Agent resolved but did not commit; finish the merge.
+            await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
+            const commit = await Utils.executeGitCommand(["commit", "--no-edit"], {
+              cwd: workDir,
+            });
+            if (!commit.success) {
+              await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
+              return await failWith("aborted", `merge commit failed: ${commit.error}`);
+            }
+          }
+          outcome = "resolved";
         }
-      } else if (
-        attempt < MAX_SYNC_ATTEMPTS &&
-        isTransientPushRejection(`${push.message} ${push.hookError ?? ""}`)
-      ) {
-        console.log(
-          `🔁 Push rejected transiently (${push.message}); refreshing and retrying the merge`,
-        );
-        continue;
       }
-      return await failWith("push-failed", `push rejected: ${push.message}`);
+
+      if (noPush) {
+        return { outcome, message: "merge committed (push skipped)" };
+      }
+
+      // Refresh the remote head immediately before pushing and use it as the
+      // atomic lease (`--force-with-lease`) even when no explicit expectation
+      // was provided — an interactive run gets the same race protection.
+      const headFetch = await Utils.executeGitCommand(
+        ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+        { cwd: workDir, verbose },
+      );
+      if (!headFetch.success) {
+        return await failWith("push-failed", `head fetch before push failed: ${headFetch.error}`);
+      }
+      const remoteHead = await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], {
+        cwd: workDir,
+      });
+      if (!remoteHead.success) {
+        return await failWith("push-failed", `could not read remote head: ${remoteHead.error}`);
+      }
+      const remoteTip = remoteHead.output.trim();
+      if (leaseSha && remoteTip !== leaseSha) {
+        return { outcome: "deferred", message: "PR head changed before push" };
+      }
+
+      // The exact lease makes the head check above atomic with the push. The
+      // push helper also verifies that HEAD descends from the leased commit.
+      const pushOnce = () =>
+        Utils.pushCurrentBranch({
+          cwd: workDir,
+          expectedBranch: branch,
+          expectedRemoteSha: leaseSha ?? remoteTip,
+          verbose,
+        });
+      let push = await pushOnce();
+
+      // The PR repo's pre-push hooks run inside this ephemeral worktree and
+      // can fail for fixable reasons (lint, formatting, types). Hand the
+      // failure to the agent and retry, mirroring the review flow's hook
+      // fixer; without this the resolved merge never lands on the PR. A
+      // branch race is not fixable by the agent, so the lease is re-checked
+      // first to keep the existing defer/retry handling authoritative.
+      let hookFixAttempt = 0;
+      while (!push.success && push.hookError && hookFixAttempt < MAX_HOOK_FIX_ATTEMPTS) {
+        if (leaseSha) {
+          const refreshed = await Utils.executeGitCommand(
+            ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+            { cwd: workDir, verbose },
+          );
+          const moved = refreshed.success
+            ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
+            : null;
+          const newTip = moved?.success ? moved.output.trim() : null;
+          if (newTip && newTip !== leaseSha) {
+            break; // the post-push handling below defers or retries on races
+          }
+        }
+        hookFixAttempt++;
+        console.log(
+          `⚠️  Pre-push hook failed (attempt ${hookFixAttempt}/${MAX_HOOK_FIX_ATTEMPTS}); handing to the agent`,
+        );
+        let fixResult: { success: boolean; output: string };
+        try {
+          fixResult = await agentRunner(
+            buildHookFixPrompt({ branch, hookError: push.hookError }),
+            workDir,
+            verbose,
+          );
+        } catch (error) {
+          fixResult = { success: false, output: (error as Error).message };
+        }
+        // Trust the tree, not the agent's word: fold any leftover changes into
+        // the merge commit so the retry pushes a complete tree.
+        const amended = await amendHookFixIntoMergeCommit(workDir);
+        if (!fixResult.success && !amended) {
+          console.warn("⚠️  Hook-fix agent run failed; retrying the push anyway");
+        }
+        push = await pushOnce();
+      }
+
+      if (!push.success) {
+        if (leaseSha) {
+          const refreshed = await Utils.executeGitCommand(
+            ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+            { cwd: workDir, verbose },
+          );
+          const moved = refreshed.success
+            ? await Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: workDir })
+            : null;
+          const newTip = moved?.success ? moved.output.trim() : null;
+          if (newTip && newTip !== leaseSha) {
+            // Only incorporate forward movement: building on top of a human's
+            // new commits keeps the eventual push a fast-forward. Anything else
+            // (rollback, history rewrite) is left alone for a fresh attempt.
+            const forward = await Utils.executeGitCommand(
+              ["merge-base", "--is-ancestor", leaseSha, newTip],
+              { cwd: workDir },
+            );
+            if (forward.success && attempt < MAX_SYNC_ATTEMPTS) {
+              console.log(
+                `🔁 Branch moved forward during resolution (${leaseSha.slice(0, 7)} → ${newTip.slice(0, 7)}); retrying on top of it`,
+              );
+              leaseSha = newTip;
+              continue;
+            }
+            console.warn(`⚠️  Leaving the branch alone after concurrent movement during push`);
+            return { outcome: "deferred", message: "PR head changed during push" };
+          }
+        } else if (
+          attempt < MAX_SYNC_ATTEMPTS &&
+          isTransientPushRejection(`${push.message} ${push.hookError ?? ""}`)
+        ) {
+          console.log(
+            `🔁 Push rejected transiently (${push.message}); refreshing and retrying the merge`,
+          );
+          continue;
+        }
+        return await failWith("push-failed", `push rejected: ${push.message}`);
+      }
+
+      // The push was accepted. Verify GitHub actually sees the fix before
+      // declaring success: re-fetch the PR until the head carries the pushed
+      // commit and mergeability has been recomputed (bounded window).
+      const pushedRev = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
+      const pushedSha = pushedRev.success ? pushedRev.output.trim() : "";
+      // The push was accepted; if the local read of what was pushed fails, skip
+      // verification rather than compare against a sentinel — an empty SHA
+      // would deterministically report `head-moved` and post a false "the merge
+      // commit is missing" alarm on the PR.
+      const verification: PushVerification = pushedSha
+        ? await verifyPushLandedOnPr({
+            fetchPr: () => fetchPrNow(owner, repo, prNumber),
+            pushedSha,
+            attempts: options.verifyAttempts ?? DEFAULT_VERIFY_ATTEMPTS,
+            delayMs: options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
+          })
+        : {
+            status: "unverified",
+            reason: `could not read pushed SHA (${pushedRev.error || "empty rev-parse output"})`,
+          };
+
+      if (verification.status === "head-moved") {
+        return await failWith(
+          "landed-but-unconfirmed",
+          `the PR head does not include the pushed merge commit (GitHub reports ${verification.headSha.slice(0, 7) || "no head"})`,
+        );
+      }
+      if (verification.status === "dirty") {
+        return await failWith(
+          "landed-but-unconfirmed",
+          "GitHub still reports merge conflicts after the push (the base likely advanced again); re-run resolve-conflicts",
+        );
+      }
+
+      if (verification.status === "unverified") {
+        console.warn(
+          `⚠️  Could not confirm PR state after push (${verification.reason}); the remote accepted the merge commit.`,
+        );
+      }
+      if (!noComment) {
+        await postOutcomeComment(postComment, successCommentBody(outcome, baseRef));
+      }
+      const baseMessage =
+        outcome === "clean"
+          ? `caught up with ${baseRef} (clean merge)`
+          : `conflicts with ${baseRef} resolved and pushed`;
+      const verifiedNote =
+        verification.status === "clear"
+          ? "; verified conflict-free on the PR"
+          : "; GitHub has not confirmed mergeability yet";
+      console.log(`✅ ${baseMessage}${verifiedNote}`);
+      return { outcome, message: `${baseMessage}${verifiedNote}` };
     }
 
-    // The push was accepted. Verify GitHub actually sees the fix before
-    // declaring success: re-fetch the PR until the head carries the pushed
-    // commit and mergeability has been recomputed (bounded window).
-    const pushedRev = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
-    const pushedSha = pushedRev.success ? pushedRev.output.trim() : "";
-    // The push was accepted; if the local read of what was pushed fails, skip
-    // verification rather than compare against a sentinel — an empty SHA
-    // would deterministically report `head-moved` and post a false "the merge
-    // commit is missing" alarm on the PR.
-    const verification: PushVerification = pushedSha
-      ? await verifyPushLandedOnPr({
-          fetchPr: () => fetchPrNow(owner, repo, prNumber),
-          pushedSha,
-          attempts: options.verifyAttempts ?? DEFAULT_VERIFY_ATTEMPTS,
-          delayMs: options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
-        })
-      : {
-          status: "unverified",
-          reason: `could not read pushed SHA (${pushedRev.error || "empty rev-parse output"})`,
-        };
+    // Unreachable: every iteration returns or continues.
+    return { outcome: "failed", message: "resolution attempts exhausted" };
+  };
 
-    if (verification.status === "head-moved") {
-      return await failWith(
-        "landed-but-unconfirmed",
-        `the PR head does not include the pushed merge commit (GitHub reports ${verification.headSha.slice(0, 7) || "no head"})`,
-      );
+  try {
+    return await runAttempts();
+  } finally {
+    if (workDir) {
+      const removed = await Utils.removeReviewWorktree(workDir, { verbose, cwd });
+      if (!removed.success) {
+        console.warn(`⚠️  Failed to remove review worktree ${workDir}: ${removed.error}`);
+      }
     }
-    if (verification.status === "dirty") {
-      return await failWith(
-        "landed-but-unconfirmed",
-        "GitHub still reports merge conflicts after the push (the base likely advanced again); re-run resolve-conflicts",
-      );
-    }
-
-    if (verification.status === "unverified") {
-      console.warn(
-        `⚠️  Could not confirm PR state after push (${verification.reason}); the remote accepted the merge commit.`,
-      );
-    }
-    if (!noComment) {
-      await postOutcomeComment(postComment, successCommentBody(outcome, baseRef));
-    }
-    const baseMessage =
-      outcome === "clean"
-        ? `caught up with ${baseRef} (clean merge)`
-        : `conflicts with ${baseRef} resolved and pushed`;
-    const verifiedNote =
-      verification.status === "clear"
-        ? "; verified conflict-free on the PR"
-        : "; GitHub has not confirmed mergeability yet";
-    console.log(`✅ ${baseMessage}${verifiedNote}`);
-    return { outcome, message: `${baseMessage}${verifiedNote}` };
   }
-
-  // Unreachable: every iteration returns or continues.
-  return { outcome: "failed", message: "resolution attempts exhausted" };
 }
 
 function successCommentBody(outcome: "clean" | "resolved", baseRef: string): string {

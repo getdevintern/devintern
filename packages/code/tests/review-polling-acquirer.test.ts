@@ -13,9 +13,11 @@ import type {
   PolledPr,
   PolledReview,
 } from "../src/lib/review-polling-acquirer";
+import type { CronOrIntervalSchedule } from "../src/lib/automation-config";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { RunStore } from "../src/lib/run-recorder";
 import { WorkerState } from "../src/lib/worker-state";
+import type { ConflictResolutionMode } from "../src/lib/workspace/config";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -62,12 +64,20 @@ describe("ReviewPollingAcquirer", () => {
       quietPeriodSeconds?: number;
       now?: () => number;
       allowedRepos?: string[];
+      conflictSchedule?: CronOrIntervalSchedule;
+      conflictWindowGraceMs?: number;
+      conflictResolution?: ConflictResolutionMode;
+      disableResolveConflicts?: boolean;
+      shouldPollFeedback?: () => boolean;
+      feedbackFallbackIntervalSeconds?: number;
     } = {},
   ) {
     const addressed: string[] = [];
     const resolved: string[] = [];
     const acquirer = new ReviewPollingAcquirer({
       intervalSeconds: 60,
+      shouldPollFeedback: options.shouldPollFeedback,
+      feedbackFallbackIntervalSeconds: options.feedbackFallbackIntervalSeconds,
       workerState,
       queue,
       github: {
@@ -105,14 +115,19 @@ describe("ReviewPollingAcquirer", () => {
         addressed.push(`${repo}#${n}`);
         return true;
       },
-      resolveConflicts: async (repo, n) => {
-        resolved.push(`${repo}#${n}`);
-        return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
-      },
+      resolveConflicts: options.disableResolveConflicts
+        ? undefined
+        : async (repo, n) => {
+            resolved.push(`${repo}#${n}`);
+            return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
+          },
       quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
       runStore: options.runStore,
       now: options.now,
       allowedRepos: options.allowedRepos,
+      conflictSchedule: options.conflictSchedule,
+      conflictWindowGraceMs: options.conflictWindowGraceMs,
+      conflictResolution: options.conflictResolution,
     });
     return { acquirer, addressed, resolved };
   }
@@ -132,6 +147,38 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#42"]);
 
     // Same review on the next tick is deduped.
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("healthy relay suppresses feedback polling but not PR reconciliation", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      shouldPollFeedback: () => false,
+    });
+
+    await acquirer.tick();
+    expect(gh.seenPrEtag).toBeUndefined();
+    expect(gh.seenReviewsEtag).toBeUndefined();
+    expect(addressed).toEqual([]);
+  });
+
+  test("periodic fallback still sweeps feedback while relay is healthy", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const { acquirer, addressed } = makeAcquirer(
+      {
+        prState: "open",
+        reviews: [{ id: 1, state: "changes_requested", user: human }],
+        comments: [],
+      },
+      { shouldPollFeedback: () => false, feedbackFallbackIntervalSeconds: 0 },
+    );
+
     await acquirer.tick();
     expect(addressed).toEqual(["acme/widgets#42"]);
   });
@@ -723,6 +770,7 @@ describe("ReviewPollingAcquirer", () => {
       origin: "conflict_resolution",
       repo: "acme/widgets",
       prNumber: 42,
+      prUrl: "https://github.com/acme/widgets/pull/42",
       branch: "agent/task",
       attempt: 1,
       status: "succeeded",
@@ -730,6 +778,191 @@ describe("ReviewPollingAcquirer", () => {
     });
     expect(run?.harness).toBeTruthy();
     runStore.close();
+  });
+
+  const DAY_MS = 86_400_000;
+  const dailySchedule: CronOrIntervalSchedule = { interval: "1d", intervalMs: DAY_MS };
+
+  function conflictGh(): FakeGitHubState {
+    return {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      reviews: [],
+      comments: [],
+    };
+  }
+
+  function windowState(): { nextWindowAt: number; windowOpenUntil: number } {
+    const raw = workerState.getCursor("worker:conflict-window")?.cursorValue;
+    expect(raw).toBeTruthy();
+    return JSON.parse(raw!);
+  }
+
+  test("scheduled mode queues conflicts without invoking the resolver before the window", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const start = 1_750_000_000_000;
+    let now = start;
+    const made = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe("pending");
+
+    // Enabling scheduled mode only schedules the first window; nothing runs now.
+    const state = windowState();
+    expect(state.nextWindowAt).toBe(start + DAY_MS);
+    expect(state.windowOpenUntil).toBe(0);
+  });
+
+  test("queued conflicts resolve when the window arrives and queue again after it closes", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // The occurrence arrives: the queued conflict resolves in this tick.
+    now += DAY_MS + 1;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
+    expect(windowState().nextWindowAt).toBe(now + DAY_MS);
+
+    // A new conflict while the window's grace period is open resolves too.
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42", "acme/widgets#42"]);
+
+    // After the grace period closes, conflicts queue for the next window.
+    now += 61 * 60_000;
+    gh.baseSha = "base3";
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(2);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base3:head1")?.status).toBe("pending");
+  });
+
+  test("a window missed while the worker was down catches up on the first tick after restart", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Model a restart: a fresh acquirer over the same durable state, much later.
+    now += 2 * DAY_MS;
+    const restarted = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await restarted.acquirer.tick();
+    expect(restarted.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("a PR resolved manually never triggers the queued window run", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_750_000_000_000;
+    const gh = conflictGh();
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Someone (e.g. `devintern resolve-conflicts <pr-url>`) fixed it out of band.
+    gh.mergeableState = "clean";
+    now += DAY_MS + 1;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+  });
+
+  test("disabled mode never detects or resolves conflicts", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(conflictGh(), {
+      disableResolveConflicts: true,
+      conflictResolution: "disabled",
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+  });
+
+  test("live reload can disable and re-enable conflict resolution", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const made = makeAcquirer(conflictGh());
+
+    made.acquirer.updateConflictResolution("disabled");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")).toBeNull();
+
+    made.acquirer.updateConflictResolution("auto");
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+  });
+
+  test("start() surfaces the active conflict-resolution mode", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    try {
+      const scheduled = makeAcquirer(
+        { prState: "open", reviews: [], comments: [] },
+        {
+          conflictSchedule: { cron: "0 3 * * *" },
+        },
+      );
+      await scheduled.acquirer.start();
+      scheduled.acquirer.stop();
+
+      const auto = makeAcquirer({ prState: "open", reviews: [], comments: [] });
+      await auto.acquirer.start();
+      auto.acquirer.stop();
+
+      const disabled = makeAcquirer(
+        { prState: "open", reviews: [], comments: [] },
+        {
+          disableResolveConflicts: true,
+          conflictResolution: "disabled",
+        },
+      );
+      await disabled.acquirer.start();
+      disabled.acquirer.stop();
+    } finally {
+      console.log = original;
+    }
+    expect(
+      logs.some((line) => line.includes('conflict resolution: scheduled (cron "0 3 * * *")')),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("conflict resolution: auto"))).toBe(true);
+    expect(logs.some((line) => line.includes("conflict resolution: disabled"))).toBe(true);
   });
 
   test("start() unwatches open rows for repos outside allowedRepos", async () => {
@@ -762,6 +995,66 @@ describe("ReviewPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(addressed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("a PR deleted on GitHub (404 → gone) is unwatched within one tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        // The workspace adapter maps 404 responses to `gone`.
+        async fetchPr() {
+          return { data: null, notModified: false, gone: true };
+        },
+        async fetchReviews() {
+          throw new Error("must not be called for a gone PR");
+        },
+        async fetchReviewCommentsSince() {
+          throw new Error("must not be called for a gone PR");
+        },
+      },
+      addressPr: async () => {
+        throw new Error("must not be addressed");
+      },
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    expect(workerState.countAgentPrs().closed).toBe(1);
+  });
+
+  test("reconciliation shares one PR fetch with the poll loop", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let prFetches = 0;
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          prFetches += 1;
+          return {
+            data: { state: "open", mergeable_state: "clean" },
+            etag: 'W/"pr-1"',
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return { data: [], notModified: false };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+      },
+      addressPr: async () => true,
+    });
+
+    await acquirer.tick();
+    // One reconciliation fetch feeds the poll loop; a second would double
+    // the API cost of every tick.
+    expect(prFetches).toBe(1);
   });
 });
 

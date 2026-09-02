@@ -1,9 +1,21 @@
 import { readFileSync } from "fs";
 
-import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
-import { parseAutomationEntries } from "../automation-config";
-import type { AutomationConfig } from "../automation-config";
+import {
+  supportsEstimate,
+  supportsPolling,
+  trackersSupportingEstimate,
+  trackersSupportingPolling,
+} from "../tracker-capabilities";
+import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
+import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
+import { parseWorkerScheduleSection } from "../schedule";
+import type { WorkerScheduleConfig } from "../schedule";
+import { parseEstimationEntries } from "../estimation-config";
+import type { EstimationConfig } from "../estimation-config";
 import { parseToml } from "./toml";
+
+/** When automatic conflict resolution on the agent's PRs runs. */
+export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
 
 /** Workspace-wide settings from the `[workspace]` table. */
 export interface WorkspaceSettings {
@@ -13,6 +25,20 @@ export interface WorkspaceSettings {
   dashboard: boolean;
   /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
   dashboardPort?: number;
+  /**
+   * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
+   * they are detected; `scheduled` queues them during polling and resolves
+   * them in the configured window (see {@link WorkspaceSettings.conflictSchedule});
+   * `disabled` turns automatic conflict resolution off entirely — conflicts
+   * stay for manual resolution (`devintern resolve-conflicts <pr-url>`).
+   */
+  conflictResolution: ConflictResolutionMode;
+  /**
+   * Cron-or-interval window for scheduled conflict resolution (same format
+   * as `[[automations]]` schedules). Set only when `conflictResolution` is
+   * `"scheduled"`.
+   */
+  conflictSchedule?: CronOrIntervalSchedule;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -59,18 +85,30 @@ export interface RoutingRule {
   labels: string[];
 }
 
+/** Worker-scoped settings from the `[worker]` table. */
+export interface WorkerSettings {
+  /**
+   * Working windows (quiet hours) gating new-task pickup; null when the
+   * `[worker.schedule]` table is absent or empty (pickup unrestricted).
+   */
+  schedule: WorkerScheduleConfig | null;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  worker: WorkerSettings;
   defaults: WorkspaceDefaults;
   repos: RepoConfig[];
   routing: RoutingRule[];
   automations: AutomationConfig[];
+  estimations: EstimationConfig[];
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
+export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -240,12 +278,49 @@ export function parseWorkspaceConfig(
     },
   );
 
+  const conflictResolutionRaw = readString(
+    workspaceTable,
+    "conflict_resolution",
+    "[workspace]",
+    errors,
+  );
+  let conflictResolution = DEFAULT_CONFLICT_RESOLUTION;
+  let conflictSchedule: CronOrIntervalSchedule | undefined;
+  if (conflictResolutionRaw === "scheduled") {
+    conflictResolution = "scheduled";
+    conflictSchedule = parseCronOrIntervalSchedule(
+      workspaceTable,
+      {
+        label: "[workspace]",
+        cronKey: "conflict_resolution_cron",
+        intervalKey: "conflict_resolution_interval",
+      },
+      errors,
+    );
+  } else if (conflictResolutionRaw === "disabled") {
+    conflictResolution = "disabled";
+  } else if (conflictResolutionRaw && conflictResolutionRaw !== "auto") {
+    errors.push(`[workspace].conflict_resolution must be "auto", "scheduled", or "disabled".`);
+  }
+  if (conflictResolutionRaw !== "scheduled") {
+    for (const key of ["conflict_resolution_cron", "conflict_resolution_interval"] as const) {
+      if (workspaceTable[key] !== undefined) {
+        errors.push(`[workspace].${key} is only used when conflict_resolution = "scheduled".`);
+      }
+    }
+  }
+
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
   if (tracker && !supportsPolling(tracker)) {
     errors.push(
       `[defaults].tracker "${tracker}" does not support polling. ` +
         `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+    );
+  }
+  if (defaultsTable.estimate_query !== undefined) {
+    errors.push(
+      "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
     );
   }
   const defaults: WorkspaceDefaults = {
@@ -337,16 +412,36 @@ export function parseWorkspaceConfig(
   });
   errors.push(...automationResult.errors);
 
+  const workerTable = asTable(document.worker, "[worker]", errors);
+  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
+  errors.push(...schedule.errors);
+
+  const estimationResult = parseEstimationEntries(document.estimations);
+  errors.push(...estimationResult.errors);
+  // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
+  // with estimate support can serve them; fail the job at startup otherwise.
+  if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
+    for (const estimation of estimationResult.estimations) {
+      errors.push(
+        `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
+          `(supported: ${trackersSupportingEstimate().join(", ")}); ` +
+          `[defaults].tracker "${tracker}" does not.`,
+      );
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
   return {
-    workspace: { worktreesTtlDays, dashboard, dashboardPort },
+    workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
+    worker: { schedule: schedule.config },
     defaults,
     repos,
     routing,
     automations: automationResult.automations,
+    estimations: estimationResult.estimations,
   };
 }
 

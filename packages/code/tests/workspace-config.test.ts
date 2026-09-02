@@ -149,6 +149,139 @@ poll_interval = 0
     ).toThrow(/poll_interval must be a positive integer/);
   });
 
+  test("defaults conflict resolution to auto without a schedule", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("auto");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("parses scheduled conflict resolution with cron", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ cron: "0 3 * * *" });
+  });
+
+  test("parses scheduled conflict resolution with an interval", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule).toEqual({ interval: "1d", intervalMs: 86_400_000 });
+  });
+
+  test("scheduled conflict resolution requires exactly one schedule key", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 3 * * *"
+conflict_resolution_interval = "1d"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must set exactly one of conflict_resolution_cron or conflict_resolution_interval/);
+  });
+
+  test("rejects invalid scheduled conflict resolution schedules", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "99 bad"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/five-field cron expression/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "scheduled"
+conflict_resolution_interval = "30s"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/positive duration such as 15m, 6h, or 1d/);
+  });
+
+  test("rejects unknown conflict resolution modes", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "nightly"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/must be "auto", "scheduled", or "disabled"/);
+  });
+
+  test("parses disabled conflict resolution", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.conflictResolution).toBe("disabled");
+    expect(config.workspace.conflictSchedule).toBeUndefined();
+  });
+
+  test("rejects schedule keys with disabled conflict resolution", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "disabled"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
+  test("rejects schedule keys without scheduled mode", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "auto"
+conflict_resolution_cron = "0 3 * * *"
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/only used when conflict_resolution = "scheduled"/);
+  });
+
   test("rejects invalid pr_labels values", () => {
     expect(() =>
       parseWorkspaceConfig(`
@@ -186,6 +319,136 @@ pr_labels = [""]
 tracker = "fossil"
 `),
     ).toThrow(/does not support polling/);
+  });
+
+  describe("[[estimations]]", () => {
+    function configWithEstimations(table: string): string {
+      return `
+[defaults]
+tracker = "jira"
+task_query = "labels = devintern"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+${table}
+`;
+    }
+
+    test("parses scheduled estimation sweeps", () => {
+      const config = parseWorkspaceConfig(
+        configWithEstimations(`
+[[estimations]]
+id = "weekday-groom"
+enabled = true
+cron = "0 9 * * 1-5"
+query = "status = 'To Do' AND labels IN (NeedsEstimate)"
+
+[[estimations]]
+id = "sprint-gaps"
+enabled = true
+cron = "0 10 * * 3"
+query = "sprint in openSprints() AND \\"Story Points\\" is EMPTY"
+`),
+      );
+
+      expect(config.estimations).toHaveLength(2);
+      expect(config.estimations[0]).toMatchObject({
+        id: "weekday-groom",
+        enabled: true,
+        cron: "0 9 * * 1-5",
+        query: "status = 'To Do' AND labels IN (NeedsEstimate)",
+      });
+      expect(config.estimations[1]?.query).toContain("is EMPTY");
+    });
+
+    test("an omitted table leaves estimation off", () => {
+      expect(parseWorkspaceConfig(VALID_CONFIG).estimations).toEqual([]);
+    });
+
+    test("requires no repo or routing even with several repos", () => {
+      const config = parseWorkspaceConfig(
+        configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "labels IN (NeedsEstimate)"
+`),
+      );
+      // Estimation entries carry only schedule + query fields.
+      expect(config.estimations[0]).toEqual({
+        id: "groom",
+        enabled: true,
+        interval: "1d",
+        intervalMs: 86_400_000,
+        query: "labels IN (NeedsEstimate)",
+      });
+    });
+
+    test("rejects prompt and repo keys", () => {
+      expect(() =>
+        parseWorkspaceConfig(
+          configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "q"
+prompt = "implement it"
+repo = "backend"
+`),
+        ),
+      ).toThrow(/prompt is not supported[\s\S]*repo is not supported/s);
+    });
+
+    test("rejects the kind selector", () => {
+      expect(() =>
+        parseWorkspaceConfig(
+          configWithEstimations(`
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "q"
+kind = "estimate"
+`),
+        ),
+      ).toThrow(/kind is not supported/);
+    });
+
+    test("rejects [defaults].estimate_query", () => {
+      expect(() =>
+        parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+estimate_query = "labels = NeedsEstimate"
+`),
+      ).toThrow(/\[defaults\]\.estimate_query is not supported/);
+    });
+
+    test.each(["trello", "markdown"])(
+      "fails startup on trackers that cannot estimate (%s)",
+      (tracker) => {
+        expect(() =>
+          parseWorkspaceConfig(`
+[defaults]
+tracker = "${tracker}"
+
+[[repos]]
+name = "board"
+remote = "git@github.com:acme/board.git"
+
+[[estimations]]
+id = "groom"
+enabled = true
+interval = "1d"
+query = "list:'To Do'"
+`),
+        ).toThrow(/requires a tracker that supports --estimate/);
+      },
+    );
   });
 
   test("rejects duplicate repo names", () => {
@@ -279,6 +542,71 @@ repo = "missing"
     expect(message).toMatch(/tracker is required/);
     expect(message).toMatch(/\.remote is required/);
     expect(message).toMatch(/does not match any/);
+  });
+});
+
+describe("parseWorkspaceConfig [worker.schedule] (quiet hours)", () => {
+  test("parses working windows into config.worker.schedule", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker.schedule]
+active = ["22:00-06:00", "12:00-13:00"]
+blocked = ["01:30-02:30"]
+timezone = "Europe/Berlin"
+catch_up_missed = false
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+
+    expect(config.worker.schedule?.active.map((w) => w.spec)).toEqual([
+      "22:00-06:00",
+      "12:00-13:00",
+    ]);
+    expect(config.worker.schedule?.blocked.map((w) => w.spec)).toEqual(["01:30-02:30"]);
+    expect(config.worker.schedule?.timezone).toBe("Europe/Berlin");
+    expect(config.worker.schedule?.catchUpMissed).toBe(false);
+  });
+
+  test("no [worker] section leaves the schedule disabled", () => {
+    const config = parseWorkspaceConfig(VALID_CONFIG);
+    expect(config.worker.schedule).toBeNull();
+  });
+
+  test("an empty [worker.schedule] section stays disabled", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker.schedule]
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.schedule).toBeNull();
+  });
+
+  test("schedule problems are collected alongside other errors", () => {
+    let message = "";
+    try {
+      parseWorkspaceConfig(`
+[defaults]
+tracker = ""
+
+[worker.schedule]
+active = ["25:99-06:00"]
+timezone = "Nowhere/Land"
+`);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/\[worker\.schedule\]\.active/);
+    expect(message).toMatch(/is not a valid IANA timezone/);
+    expect(message).toMatch(/tracker is required/);
   });
 });
 

@@ -14,7 +14,7 @@ async function runAddressReviewCLI(
   const proc = Bun.spawn({
     cmd: ["bun", CLI_PATH, "address-review", ...args],
     cwd: options.cwd,
-    env: { ...process.env, ...options.env },
+    env: { ...process.env, SENTRY_DISABLED: "1", ...options.env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -298,7 +298,7 @@ describe.concurrent("Address Review - Worktree Integration", () => {
 
       // Fail at the GitHub API step (auth or transient network) — proves we got past arg parsing.
       expect(output).toMatch(
-        /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ECONNREFUSED|fetch failed/i,
+        /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ETIMEOUT|ECONNREFUSED|fetch failed/i,
       );
 
       // Command should exit with non-zero status due to API failure

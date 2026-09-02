@@ -2,9 +2,9 @@
 title: "@devintern/code Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
-section: "Code"
-order: 2
-dateModified: 2026-08-26
+section: "Automation"
+order: 4
+dateModified: 2026-09-01
 ---
 
 # @devintern/code Configuration
@@ -83,32 +83,49 @@ You can also pass file paths directly as arguments without setting `TASK_TRACKER
 
 ## GitHub authentication
 
-**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). That is enough for free CLI use from your terminal (`devintern TICKET-123`, `--create-pr`).
+### Standard workspace setup
 
-**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern webhook serve`, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+Set `GITHUB_TOKEN` for interactive runs and workspace automation. When the workspace is paired with the hosted relay, the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) delivers events and the token stays on your machine for GitHub API reads/writes. You do not create a GitHub App or handle an App private key.
 
-The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
+Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
 
-| What you want | Need |
-| --- | --- |
-| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
-| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
-| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` (solo) or GitHub App (if already configured) |
-| `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
-| Commits attributed to `slug[bot]` | GitHub App |
+| What you want                                                 | Need                                                           |
+| ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Implement tickets and open PRs from the CLI (personal)        | `GITHUB_TOKEN`                                                 |
+| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute)                     |
+| Worker review polling and replies                             | `GITHUB_TOKEN`                                                 |
+| `@devintern-ai` on any PR (standard workspace)                | `GITHUB_TOKEN` + relay + central DevIntern AI App installation |
+| Air-gapped mentions or `devintern webhook serve`              | Customer-owned GitHub App (advanced)                           |
+| Custom `slug[bot]` attribution                                | Customer-owned GitHub App (advanced)                           |
 
-Set both when you run mention-driven automation and also use GitHub Issues as a tracker. See [GitHub Issues Integration](./github-issues-integration.md) and [GitHub Integration](./github-integration.md).
+See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Integration](./github-integration.md) guide.
 
 **Precedence when both are set:**
 
-- CLI and PR creation use `GITHUB_TOKEN`
-- `devintern webhook serve` prefers the App so the bot identity (`slug[bot]`) resolves
+- Relay-backed workspace: only `GITHUB_TOKEN` is used locally; custom App credentials are ignored
+- No-relay workspace: a complete customer-owned App is preferred, with `GITHUB_TOKEN` as fallback
+- CLI and PR creation: `GITHUB_TOKEN` is preferred
+- `devintern webhook serve`: the customer-owned App is preferred so its bot identity resolves
 
-Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
+Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. An ID alone is not a usable credential.
+
+### Bot mention aliases
+
+Relay-backed workspaces recognize `devintern-ai` automatically. Advanced installations can add other bot logins as aliases:
+
+```bash
+GITHUB_BOT_ALIASES=devintern-ai
+```
+
+The value is a comma-separated list of logins (with or without the `[bot]` suffix). Aliases count everywhere mentions are matched: commented reviews, inline comment scopes, and the `@mention` sweep.
+
+### Which feedback gets re-processed
+
+Addressed feedback is tracked locally in the worker's state database, so a comment is never processed twice on the same machine. A 🎉 reaction is also left on each addressed comment as visual feedback for humans — it carries no gating meaning, so reaction-permission problems can never cause feedback to be re-processed.
 
 ### GitHub Personal Access Token
 
-For personal / interactive CLI use, and for `TASK_TRACKER=github`:
+For interactive CLI use, relay-backed workspaces, and `TASK_TRACKER=github`:
 
 ```bash
 GITHUB_TOKEN=your-github-token
@@ -118,7 +135,7 @@ GITHUB_TOKEN=your-github-token
 - **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
-> **`Contents` must be *Read and write*, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
+> **`Contents` must be _Read and write_, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
 
 #### How git picks push credentials
 
@@ -130,9 +147,9 @@ Pushes use git's ambient credential chain — devintern does not inject tokens i
 
 The worker dry-runs a push against each configured GitHub HTTPS remote at startup and warns when it is rejected (`✅ [fleet] push access verified for <repo>` / a `⚠️ [fleet] … rejects pushes` line), so credential problems surface before the first task burns its pickup.
 
-### GitHub App Authentication
+### Advanced: customer-owned GitHub App
 
-For team / unattended automation (`@mention` matching, `webhook serve`, `slug[bot]` commit attribution):
+Use this only when the hosted relay cannot be used—for example an air-gapped installation—or when operating `devintern webhook serve` against your own endpoint. It provides no-relay `@mention` identity, installation API tokens, and custom `slug[bot]` attribution.
 
 ```bash
 GITHUB_APP_ID=123456
@@ -155,10 +172,11 @@ Both the ID and a private key are required.
 2. Set repository permissions:
    - **Contents:** Read and write
    - **Pull requests:** Read and write
+   - **Issues:** Read and write
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation and PR creation. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
@@ -257,7 +275,16 @@ This logs every API call, response, and retry attempt to the console. Leave it u
 
 ## Error Reporting
 
-The CLI reports crashes and unhandled errors to DevIntern's Sentry project by default. To opt out:
+The CLI reports errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
+
+- Crashes and unhandled errors (any entry point: task runs, `worker`, `webhook serve`, `dashboard`, subcommands)
+- Task runs that fail mid-pipeline (agent errors, tracker/PR API failures) with context such as the task key, active tracker, and pipeline stage
+- Failed PR creation, failed estimation, and failed commits (which continue without completing that step)
+- Webhook review/comment processing failures
+
+What is **never** reported: task content, code, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent, and contexts contain only identifiers (task key, tracker type, stage/command names).
+
+To opt out:
 
 ```bash
 SENTRY_DISABLED=1

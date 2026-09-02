@@ -2,8 +2,9 @@
  * Review polling acquirer (worker Mode 1, Tier 1): watch the agent's own PRs.
  *
  * Each tick, for every open PR in the `agent_prs` registry:
- * 1. Conditional GET on the PR itself — closed/merged PRs leave the watch
- *    list; 304s (rate-limit-free) reuse cached metadata for base-sync checks.
+ * 1. The reconciler conditionally GETs the PR itself — closed/merged/gone
+ *    PRs leave the watch list (and the dashboard's open count); 304s
+ *    (rate-limit-free) reuse cached metadata for base-sync checks.
  * 2. Conditional GET on the review list — a new `changes_requested` review
  *    by a human is implicitly addressed to the agent (its own PR), no
  *    @mention required.
@@ -24,12 +25,27 @@
  */
 
 import { spawn } from "child_process";
+import { captureError } from "@devintern/utils";
 
+import {
+  agentPrKey,
+  agentPrStateCursorSource,
+  applyAgentPrFetch,
+  reconcileOpenAgentPrs,
+} from "./agent-pr-reconciler";
+import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
+import { nextScheduleOccurrence } from "./automation-config";
+import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
+import type { ConflictResolutionMode } from "./workspace/config";
 import type { Acquirer } from "../worker";
+
+// The PR-state protocol types live with the reconciler, which shares them;
+// re-exported so poller consumers keep their existing import paths.
+export type { ConditionalResult, PolledPr };
 
 export interface PolledReview {
   id: number;
@@ -41,20 +57,6 @@ export interface PolledComment {
   id: number;
   user: { login: string; type: string };
   created_at: string;
-}
-
-export interface ConditionalResult<T> {
-  data: T | null;
-  etag?: string;
-  notModified: boolean;
-}
-
-export interface PolledPr {
-  state: string;
-  /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
-  mergeable_state?: string;
-  head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
-  base?: { sha: string; ref?: string };
 }
 
 export interface AutomaticResolveResult {
@@ -79,6 +81,10 @@ export interface ReviewPollingGitHub {
 
 export interface ReviewPollingAcquirerOptions {
   intervalSeconds: number;
+  /** Whether feedback acquisition should run (state/base reconciliation always runs). */
+  shouldPollFeedback?: () => boolean;
+  /** Safety sweep cadence while relay is healthy. Defaults to 30 minutes. */
+  feedbackFallbackIntervalSeconds?: number;
   workerState: WorkerState;
   queue: WebhookQueue;
   github: ReviewPollingGitHub;
@@ -103,16 +109,53 @@ export interface ReviewPollingAcquirerOptions {
    * Repo slugs (`owner/repo`) this worker manages. Open registry rows for
    * any other repo (e.g. left behind after a rename/transfer) are
    * auto-unwatched at startup and skipped on every tick. Omit to watch the
-   * whole registry (previous behavior).
+   * whole registry (previous behavior). May be a factory so live config
+   * reloads (repos added to `workspace.toml`) apply on later ticks.
    */
-  allowedRepos?: string[];
+  allowedRepos?: string[] | (() => string[]);
   verbose?: boolean;
+  /**
+   * Schedule gating automatic conflict resolution (workspace scheduled
+   * mode, `[workspace].conflict_resolution = "scheduled"`). When set,
+   * conflicting PRs are still detected and queued on every tick, but the
+   * agent is invoked only inside the scheduled window. Omit for `auto`
+   * mode: resolve as soon as a conflict is detected (default).
+   */
+  conflictSchedule?: CronOrIntervalSchedule;
+  /**
+   * Workspace conflict-resolution mode (`[workspace].conflict_resolution`),
+   * surfaced in the startup log. `"disabled"` means the caller omits
+   * `resolveConflicts`, so base-sync detection never runs and conflicts
+   * stay for manual resolution. Defaults to `"scheduled"` when
+   * `conflictSchedule` is set, else `"auto"`.
+   */
+  conflictResolution?: ConflictResolutionMode;
+  /**
+   * How long a scheduled window stays open for resolution attempts once it
+   * arrives (covers quiet-period waits, retry backoff, and a serial pass
+   * over several PRs). Defaults to `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`
+   * or 60 minutes.
+   */
+  conflictWindowGraceMs?: number;
 }
 
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
+/** Durable cursor source for the scheduled conflict-resolution window. */
+const CONFLICT_WINDOW_SOURCE = "worker:conflict-window";
 const prRunTails = new Map<string, Promise<void>>();
+
+/** Default minutes a scheduled conflict-resolution window stays open. */
+export const DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES = 60;
+
+/** Durable state for scheduled conflict resolution (persisted per worker). */
+interface ConflictWindowState {
+  /** Next scheduled occurrence (ms epoch). */
+  nextWindowAt: number;
+  /** Resolution attempts are allowed until this instant (0 = none opened yet). */
+  windowOpenUntil: number;
+}
 
 /**
  * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
@@ -210,12 +253,15 @@ async function serializePrRun<T>(
  * @param prNumber - Pull request number
  * @param opts - Working directory and environment for the subprocess;
  *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both
+ *               per-repo env; direct callers inherit both.
  */
 export function runAddressReviewViaCli(
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+  } = {},
 ): Promise<boolean> {
   return serializePrRun(repo, prNumber, () =>
     runSubcommandViaCli("address-review", repo, prNumber, opts),
@@ -348,17 +394,21 @@ function runSubcommandViaCli(
   subcommand: string,
   repo: string,
   prNumber: number,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+  } = {},
 ): Promise<boolean> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit"],
       cwd: opts.cwd,
       env: opts.env ?? process.env,
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", (error) => {
+      captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
       console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
       resolve(false);
     });
@@ -376,18 +426,27 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
+  private conflictWindowState: ConflictWindowState | null | undefined;
+  private lastFeedbackPollAt: number;
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
+    this.lastFeedbackPollAt = (options.now ?? Date.now)();
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
     // Drop stale registry rows for repos this worker no longer manages
     // (e.g. after a rename/transfer) so they never hit the API again.
-    const { allowedRepos, workerState } = this.options;
+    const allowedRepos = this.resolveAllowedRepos();
     if (allowedRepos && allowedRepos.length > 0) {
-      for (const pr of workerState.closeForeignAgentPrs(allowedRepos)) {
+      for (const pr of this.options.workerState.closeForeignAgentPrs(allowedRepos)) {
         console.log(
           `🧹 [${this.name}] ${pr.repo}#${pr.prNumber} is not part of this project; unwatching`,
         );
@@ -397,6 +456,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       `🔎 Polling reviews on agent PRs every ${this.options.intervalSeconds}s ` +
         `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
     );
+    this.syncConflictWindow();
+    this.logConflictMode();
     await this.tick();
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
   }
@@ -409,6 +470,35 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Apply a new poll cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
+  }
+
+  /** Apply conflict-resolution mode and schedule changes from workspace reloads. */
+  updateConflictResolution(
+    conflictResolution: ConflictResolutionMode,
+    conflictSchedule?: CronOrIntervalSchedule,
+  ): void {
+    this.options.conflictResolution = conflictResolution;
+    this.options.conflictSchedule = conflictSchedule;
+    this.conflictWindowState = null;
+    this.deferCounts.clear();
+    this.syncConflictWindow();
+    this.logConflictMode();
+  }
+
+  private resolveAllowedRepos(): string[] | undefined {
+    const raw = this.options.allowedRepos;
+    return typeof raw === "function" ? raw() : raw;
+  }
+
   /** One polling cycle over all watched PRs. Skipped while busy. */
   async tick(): Promise<void> {
     if (this.busy) {
@@ -417,9 +507,41 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      const allowedRepos = this.options.allowedRepos;
-      const watchedPrs = this.options.workerState.listOpenAgentPrs();
-      const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
+      this.syncConflictWindow();
+      const { workerState } = this.options;
+      const allowedRepos = this.resolveAllowedRepos();
+      const fallbackMs = (this.options.feedbackFallbackIntervalSeconds ?? 30 * 60) * 1000;
+      const now = this.now();
+      const pollFeedback =
+        (this.options.shouldPollFeedback?.() ?? true) ||
+        now - this.lastFeedbackPollAt >= fallbackMs;
+      if (pollFeedback) this.lastFeedbackPollAt = now;
+
+      // Reconcile the registry with GitHub first: one conditional GET per
+      // watched PR whose result is shared with the poll loop below, so PRs
+      // closed or deleted outside the worker leave the watch list (and the
+      // dashboard's open count) within this tick even if per-PR polling
+      // later errors out.
+      const fresh = new Map<string, ConditionalResult<PolledPr>>();
+      const reconciliation = await reconcileOpenAgentPrs({
+        workerState,
+        github: this.options.github,
+        watched: workerState.listOpenAgentPrs(),
+        allowedRepos,
+        etagFor: (repo, prNumber) =>
+          this.prCache.has(agentPrKey(repo, prNumber))
+            ? workerState.getCursor(agentPrStateCursorSource(repo, prNumber))?.etag
+            : undefined,
+        fresh,
+      });
+      for (const closure of reconciliation.closed) {
+        console.log(
+          `🧹 [${this.name}] ${closure.repo}#${closure.prNumber} is ${closure.reason}; unwatching`,
+        );
+      }
+
+      const watchedPrs = workerState.listOpenAgentPrs();
+      const watchedKeys = new Set(watchedPrs.map((pr) => agentPrKey(pr.repo, pr.prNumber)));
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
@@ -430,8 +552,20 @@ export class ReviewPollingAcquirer implements Acquirer {
           continue;
         }
         try {
-          await this.pollPr(pr.repo, pr.prNumber, pr.createdAt);
+          await this.pollPr(
+            pr.repo,
+            pr.prNumber,
+            pr.createdAt,
+            pollFeedback,
+            fresh.get(agentPrKey(pr.repo, pr.prNumber)),
+          );
         } catch (error) {
+          captureError(error, {
+            acquirer: this.name,
+            repo: pr.repo,
+            prNumber: pr.prNumber,
+            stage: "poll-pr",
+          });
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
@@ -443,31 +577,37 @@ export class ReviewPollingAcquirer implements Acquirer {
   }
 
   /** Poll a single PR; triggers at most one address-review run. */
-  private async pollPr(repo: string, prNumber: number, watchedSinceMs: number): Promise<void> {
+  private async pollPr(
+    repo: string,
+    prNumber: number,
+    watchedSinceMs: number,
+    pollFeedback: boolean,
+    prefetched?: ConditionalResult<PolledPr>,
+  ): Promise<void> {
     const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
 
-    // 1. PR state (ETag-cached): unwatch closed/merged PRs.
-    const prSource = `github:pr:${repo}#${prNumber}`;
-    const prCursor = workerState.getCursor(prSource);
-    const prKey = this.prKey(repo, prNumber);
-    // Hydrate once per process even when an ETag survived a restart, then use
-    // conditional requests on normal polling ticks.
-    const prResult = await github.fetchPr(
-      repo,
-      prNumber,
-      this.prCache.has(prKey) ? prCursor?.etag : undefined,
-    );
-    if (!prResult.notModified) {
-      if (prResult.etag) {
-        workerState.setCursor(prSource, "state", prResult.etag);
-      }
-      if (prResult.data && prResult.data.state !== "open") {
-        console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${prResult.data.state}; unwatching`);
-        workerState.markAgentPrClosed(repo, prNumber);
+    // 1. PR state (ETag-cached): unwatch closed/merged/gone PRs. When the
+    //    reconciliation pass already fetched this PR, its result is reused
+    //    (and already applied), so no second request is spent here.
+    const prSource = agentPrStateCursorSource(repo, prNumber);
+    const prKey = agentPrKey(repo, prNumber);
+    const prResult =
+      prefetched ??
+      (await github.fetchPr(
+        repo,
+        prNumber,
+        this.prCache.has(prKey) ? workerState.getCursor(prSource)?.etag : undefined,
+      ));
+    if (!prefetched) {
+      const closure = applyAgentPrFetch(workerState, { repo, prNumber }, prResult);
+      if (closure) {
+        console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${closure.reason}; unwatching`);
         this.clearPrCache(prKey);
         return;
       }
+    }
 
+    if (!prResult.notModified) {
       if (prResult.data) this.prCache.set(prKey, prResult.data);
 
       if (resolveConflicts && prResult.data) {
@@ -477,6 +617,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       const cachedPr = this.prCache.get(prKey);
       if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr);
     }
+
+    if (!pollFeedback) return;
 
     let actionable = false;
 
@@ -540,7 +682,7 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
     const { github, queue, resolveConflicts, runStore } = this.options;
-    if (!resolveConflicts) return;
+    if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
 
     // The event key includes the head SHA so that new commits on the branch
@@ -588,6 +730,13 @@ export class ReviewPollingAcquirer implements Acquirer {
     const backoffMs = baseSyncRetryBackoffMs(event.attempts);
     if (backoffMs > 0 && now - event.updatedAt < backoffMs) return;
 
+    // Scheduled mode, outside the window: the conflict stays queued (the
+    // event above is durable) and the agent is not invoked. A manual
+    // `devintern resolve-conflicts <pr-url>` still runs on demand; once the
+    // PR is no longer conflicting, the mergeability check above keeps the
+    // queued event out of execution without spending tokens.
+    if (this.options.conflictSchedule && !this.conflictWindowOpen(now)) return;
+
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 
@@ -630,6 +779,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           origin: "conflict_resolution",
           repo,
           prNumber,
+          prUrl: `https://github.com/${repo}/pull/${prNumber}`,
           branch: fresh.head.ref,
           harness: this.options.harness ?? process.env.AGENT_HARNESS ?? "claude-code",
           attempt,
@@ -691,8 +841,112 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  private prKey(repo: string, prNumber: number): string {
-    return `${repo.toLowerCase()}#${prNumber}`;
+  /**
+   * Advance the durable scheduled-window state for this tick. Auto mode
+   * (no schedule) is a no-op. The first tick after enabling scheduled mode
+   * only schedules the next occurrence — conflicts detected from now on
+   * queue for it instead of running. When an occurrence arrives, a grace
+   * window opens so pending conflicts resolve on the following ticks.
+   */
+  private syncConflictWindow(): void {
+    if (this.options.conflictResolution === "disabled") return;
+    const schedule = this.options.conflictSchedule;
+    if (!schedule) return;
+    const now = this.now();
+    if (this.conflictWindowState === undefined) {
+      this.conflictWindowState = null;
+      const raw = this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as Partial<ConflictWindowState>;
+          if (
+            typeof parsed.nextWindowAt === "number" &&
+            typeof parsed.windowOpenUntil === "number"
+          ) {
+            this.conflictWindowState = {
+              nextWindowAt: parsed.nextWindowAt,
+              windowOpenUntil: parsed.windowOpenUntil,
+            };
+          }
+        } catch {
+          // Corrupt state re-initializes below.
+        }
+      }
+    }
+
+    let state = this.conflictWindowState;
+    if (!state) {
+      state = { nextWindowAt: nextScheduleOccurrence(schedule, now), windowOpenUntil: 0 };
+      this.saveConflictWindowState(state);
+      return;
+    }
+    if (now >= state.nextWindowAt) {
+      // Fresh window: each window gets its own defer budget, and anything
+      // still pending (including from a missed window while the worker was
+      // down) resolves now.
+      this.deferCounts.clear();
+      state = {
+        nextWindowAt: nextScheduleOccurrence(schedule, now),
+        windowOpenUntil: now + this.conflictWindowGraceMs(),
+      };
+      this.saveConflictWindowState(state);
+      console.log(
+        `⏰ [${this.name}] conflict-resolution window open until ${new Date(
+          state.windowOpenUntil,
+        ).toISOString()}; queued conflicts will resolve now`,
+      );
+    }
+  }
+
+  /** Scheduled mode only: are resolution attempts currently allowed? */
+  private conflictWindowOpen(now: number): boolean {
+    const state = this.conflictWindowState;
+    return state != null && now <= state.windowOpenUntil;
+  }
+
+  private saveConflictWindowState(state: ConflictWindowState): void {
+    this.conflictWindowState = state;
+    this.options.workerState.setCursor(CONFLICT_WINDOW_SOURCE, JSON.stringify(state));
+  }
+
+  private conflictWindowGraceMs(): number {
+    return (
+      this.options.conflictWindowGraceMs ??
+      parseEnvInteger(
+        "WORKER_RESOLVE_WINDOW_GRACE_MINUTES",
+        DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES,
+        { min: 0 },
+      ) * 60_000
+    );
+  }
+
+  private scheduleLabel(): string {
+    const schedule = this.options.conflictSchedule;
+    if (!schedule) return "auto";
+    return schedule.cron ? `cron "${schedule.cron}"` : `interval ${schedule.interval}`;
+  }
+
+  /** Surface the active conflict-resolution mode on worker startup. */
+  private logConflictMode(): void {
+    const mode =
+      this.options.conflictResolution ?? (this.options.conflictSchedule ? "scheduled" : "auto");
+    if (mode === "disabled") {
+      console.log(
+        `⏸️  [${this.name}] conflict resolution: disabled (conflicts stay for manual resolution)`,
+      );
+      return;
+    }
+    if (!this.options.conflictSchedule) {
+      console.log(
+        `🔀 [${this.name}] conflict resolution: auto (immediately when a conflict is detected)`,
+      );
+      return;
+    }
+    const nextWindowAt = this.conflictWindowState?.nextWindowAt;
+    console.log(
+      `⏰ [${this.name}] conflict resolution: scheduled (${this.scheduleLabel()})` +
+        (nextWindowAt ? `; next window ${new Date(nextWindowAt).toISOString()}` : ""),
+    );
   }
 
   private baseSyncExternalId(repo: string, prNumber: number, baseSha: string, headSha: string) {

@@ -16,6 +16,7 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
+import type { RunCoordinator } from "../run-coordinator";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -27,11 +28,53 @@ export interface FleetEventDeps {
   runReview?: (
     repo: string,
     prNumber: number,
-    opts: { cwd: string; env: Record<string, string | undefined> },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+    },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
+  /** Process-level agent-run gate; only set when scheduled estimation exists. */
+  coordinator?: RunCoordinator;
+}
+
+type AddressPr = (slug: string, prNumber: number) => Promise<boolean>;
+
+/**
+ * Serialize feedback handling per PR and collapse events received while a run
+ * is active into one follow-up reconciliation. Relay, review polling, and
+ * mention sweeping can all observe the same GitHub action; the follow-up run
+ * re-fetches feedback after the active run has persisted its addressed marks.
+ */
+export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
+  const active = new Map<string, { rerunRequested: boolean; promise: Promise<boolean> }>();
+
+  return async (slug, prNumber) => {
+    const key = `${slug.toLowerCase()}#${prNumber}`;
+    const existing = active.get(key);
+    if (existing) {
+      existing.rerunRequested = true;
+      return existing.promise;
+    }
+
+    const state = { rerunRequested: false, promise: Promise.resolve(false) };
+    state.promise = (async () => {
+      try {
+        let ok = true;
+        do {
+          state.rerunRequested = false;
+          ok = (await addressPr(slug, prNumber)) && ok;
+        } while (state.rerunRequested);
+        return ok;
+      } finally {
+        active.delete(key);
+      }
+    })();
+    active.set(key, state);
+    return state.promise;
+  };
 }
 
 /**
@@ -63,9 +106,7 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
  *
  * @returns Handler resolving false when the slug maps to no workspace repo.
  */
-export function createFleetAddressPr(
-  deps: FleetEventDeps,
-): (slug: string, prNumber: number) => Promise<boolean> {
+export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
 
@@ -80,10 +121,12 @@ export function createFleetAddressPr(
     await repoManager.ensureBareClone(repo);
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
-    return runReview(slug, prNumber, {
-      cwd: base,
-      env: buildRepoEnv(repo, workspaceDir),
-    });
+    const invoke = () =>
+      runReview(slug, prNumber, {
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir),
+      });
+    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
   };
 }
 
@@ -105,12 +148,14 @@ export function createFleetResolveConflicts(
     await repoManager.ensureBareClone(repo);
     await repoManager.fetch(repo.name);
     const base = await repoManager.ensureBaseWorktree(repo);
-    return runResolve(slug, prNumber, {
-      cwd: base,
-      env: buildRepoEnv(repo, workspaceDir),
-      expectedHeadSha: expected.headSha,
-      expectedBaseSha: expected.baseSha,
-    });
+    const invoke = () =>
+      runResolve(slug, prNumber, {
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir),
+        expectedHeadSha: expected.headSha,
+        expectedBaseSha: expected.baseSha,
+      });
+    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
   };
 }
 
@@ -122,8 +167,9 @@ export function createFleetResolveConflicts(
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
+  sharedAddressPr?: AddressPr,
 ): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
-  const addressPr = createFleetAddressPr(deps);
+  const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
@@ -154,13 +200,21 @@ export function createFleetMentionHandler(
  * executor when it is ready.
  */
 export function createFleetTaskEvaluator(options: {
-  query: string;
+  query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<void> {
   return async (taskKey) => {
-    const { tasks } = await options.searchTasks(options.query);
+    const rawQuery = options.query;
+    const query = typeof rawQuery === "function" ? rawQuery() : rawQuery;
+    if (!query) {
+      if (options.verbose) {
+        console.log(`   [fleet] task ${taskKey} changed but task_query is not configured.`);
+      }
+      return;
+    }
+    const { tasks } = await options.searchTasks(query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
     if (!task) {
       if (options.verbose) {

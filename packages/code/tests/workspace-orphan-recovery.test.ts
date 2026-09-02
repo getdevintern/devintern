@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
 import { RunStore } from "../src/lib/run-recorder";
+import { ScheduledRetryStore } from "../src/lib/run-retry";
 import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
 
@@ -84,5 +85,34 @@ describe("recoverOrphanedWorkspaceRuns", () => {
 
     expect(store.getRun(done)?.status).toBe("succeeded");
     expect(store.getRun(done)?.outcomeReason).toBeUndefined();
+  });
+
+  test("settles scheduled retries left running by the previous worker", async () => {
+    process.env.TASK_TRACKER = "jira";
+    delete process.env.JIRA_BASE_URL;
+
+    const retryStore = new ScheduledRetryStore(dbPath);
+    retryStore.schedule({ taskKey: "PROJ-1", actor: "sup@example.com" });
+    retryStore.schedule({ taskKey: "PROJ-2", actor: "sup@example.com" });
+    retryStore.claimNext(); // PROJ-1 → running
+    retryStore.claimNext(); // PROJ-2 → running
+
+    await recoverOrphanedWorkspaceRuns({
+      config: workspaceConfig(),
+      workspaceDir,
+      dbPath,
+    });
+
+    // Both rows were settled, so the dashboard's per-task guard unblocks and
+    // the operator can schedule again.
+    expect(retryStore.hasActive("PROJ-1")).toBe(false);
+    expect(retryStore.hasActive("PROJ-2")).toBe(false);
+    expect(retryStore.hasPending()).toBe(false);
+
+    // Sanity: a fresh schedule is accepted after recovery.
+    expect(retryStore.schedule({ taskKey: "PROJ-1", actor: "sup@example.com" }).scheduled).toBe(
+      true,
+    );
+    retryStore.close();
   });
 });

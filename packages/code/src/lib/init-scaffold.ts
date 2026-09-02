@@ -199,28 +199,27 @@ AGENT_HARNESS=claude-code
 # Optional: Enable verbose logging by default
 # VERBOSE=true
 
-# Optional: GitHub authentication (PRs, worker reviews, @mentions)
+# Optional: GitHub authentication (PRs and worker reviews)
 #
-# Personal / interactive (free CLI): GITHUB_TOKEN
-# Team / unattended automation: GitHub App (GITHUB_APP_ID + private key)
-# See https://devintern.com/pricing/
-# Complementary, not alternatives. Unattended runs also need LICENSE_KEY.
+# Normal CLI and workspace mode: GITHUB_TOKEN
+# Workspace @mentions use the central DevIntern AI App through the relay;
+# its App ID and private key never belong in this file.
+# Unattended runs also need LICENSE_KEY. See https://devintern.com/pricing/
 #
 #   GITHUB_TOKEN (personal access token)
 #     Personal / interactive CLI use, and required for TASK_TRACKER=github
 #     (Issues). App credentials cannot substitute.
-#     Enough for --create-pr and worker review polling on the agent's own PRs.
+#     Used for --create-pr and all local GitHub API work in relay-backed workspaces.
 #     Create at: https://github.com/settings/tokens
 #     Classic: 'repo' scope (or 'public_repo' for public repos only)
 #     Fine-grained: 'Pull requests: Read and write' + 'Contents: Read'
 #     (add 'Issues: Read and write' when TASK_TRACKER=github)
 # GITHUB_TOKEN=your-github-token-here
 #
-#   GitHub App (GITHUB_APP_ID + private key)
-#     Team / unattended automation: @mention matching on any PR (worker
-#     mention sweep and devintern webhook serve) and slug[bot]
-#     commit attribution.
-#     Also creates PRs when no GITHUB_TOKEN is set.
+#   Customer-owned GitHub App (advanced, no-relay installations only)
+#     Use this for air-gapped polling or devintern webhook serve when events
+#     cannot pass through the hosted relay. It provides @mention identity,
+#     installation API tokens, and slug[bot] commit attribution.
 #     Both GITHUB_APP_ID and a private key are required; ID alone is ignored.
 #     Create at: https://github.com/settings/apps (or your org's settings)
 #     Install the App on your repositories after generating a private key.
@@ -234,7 +233,8 @@ AGENT_HARNESS=claude-code
 #
 # Precedence when both are set:
 #   CLI / PR creation: GITHUB_TOKEN is used.
-#   webhook serve: the App is used (bot identity).
+#   Relay-backed workspace: GITHUB_TOKEN is used; custom App credentials are ignored.
+#   No-relay workspace / webhook serve: the custom App is preferred (bot identity).
 
 # Bitbucket app password for creating pull requests
 # Create at: https://bitbucket.org/account/settings/app-passwords/

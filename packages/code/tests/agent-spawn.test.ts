@@ -39,6 +39,12 @@ describe("buildHeadlessAgentArgs", () => {
     );
   });
 
+  test("dash-leading prompts get an end-of-options marker so they are not parsed as flags", () => {
+    const frontmatter = "---\ntype: Task\n---\nCheck merged PRs and write tweets";
+    const args = buildHeadlessAgentArgs(new OpencodeHarness(), frontmatter, runOptions);
+    expect(args.slice(-2)).toEqual(["--", frontmatter]);
+  });
+
   test("headless stdio ignores stdin so TUI CLIs cannot attach a TTY", () => {
     expect(HEADLESS_AGENT_STDIO).toEqual(["ignore", "pipe", "pipe"]);
   });

@@ -9,6 +9,7 @@ const sentryCalls = {
     | { release?: string; environment?: string; beforeSend?: (event: unknown) => unknown }
     | undefined,
   captured: [] as unknown[],
+  capturedExtras: [] as Array<Record<string, unknown> | undefined>,
 };
 
 // Mock Sentry directly so @devintern/utils keeps its real exports for other test files.
@@ -16,14 +17,21 @@ mock.module("@sentry/node", () => ({
   init: (opts: typeof sentryCalls.initOpts) => {
     sentryCalls.initOpts = opts;
   },
-  captureException: (error: unknown) => {
+  captureException: (error: unknown, hint?: { extra?: Record<string, unknown> }) => {
     sentryCalls.captured.push(error);
+    sentryCalls.capturedExtras.push(hint?.extra);
   },
   flush: async () => true,
 }));
 
-const { captureError, initErrorTrackingFromSettings, setTelemetryEnabled, shutdownErrorTracking } =
-  await import("./error-tracking.ts");
+const {
+  captureError,
+  captureErrorOnce,
+  initErrorTrackingFromSettings,
+  resetErrorDeduplicationForTests,
+  setTelemetryEnabled,
+  shutdownErrorTracking,
+} = await import("./error-tracking.ts");
 
 describe("error-tracking", () => {
   let tempDir: string;
@@ -39,6 +47,8 @@ describe("error-tracking", () => {
     }
     sentryCalls.initOpts = undefined;
     sentryCalls.captured = [];
+    sentryCalls.capturedExtras = [];
+    resetErrorDeduplicationForTests();
     delete process.env.SENTRY_DISABLED;
   });
 
@@ -85,5 +95,39 @@ describe("error-tracking", () => {
 
   test("shutdown resolves even when unused", async () => {
     await shutdownErrorTracking();
+  });
+
+  test("captureError forwards context to Sentry", async () => {
+    await setupSettings();
+    await initErrorTrackingFromSettings("1.2.3");
+
+    await captureError(new Error("with context"), { operation: "ipc:pm:create-task" });
+    expect(sentryCalls.capturedExtras[0]).toEqual({ operation: "ipc:pm:create-task" });
+  });
+
+  test("captureErrorOnce dedupes repeats per operation within the window", async () => {
+    await setupSettings();
+    await initErrorTrackingFromSettings("1.2.3");
+
+    const error = new Error("repeated failure");
+    await captureErrorOnce(error, { operation: "ipc:pm:create-task" });
+    await captureErrorOnce(error, { operation: "ipc:pm:create-task" });
+    await captureErrorOnce(error, { operation: "ipc:pm:create-task" });
+    expect(sentryCalls.captured).toHaveLength(1);
+
+    // A different operation reports independently.
+    await captureErrorOnce(error, { operation: "renderer" });
+    expect(sentryCalls.captured).toHaveLength(2);
+    expect(sentryCalls.capturedExtras[1]).toEqual({ operation: "renderer" });
+  });
+
+  test("captureErrorOnce stays silent when telemetry is opted out", async () => {
+    await setupSettings(false);
+    await initErrorTrackingFromSettings("1.2.3");
+
+    // Forwarded renderer errors must be suppressed by the same opt-out.
+    await captureErrorOnce(new Error("forwarded from renderer"), { operation: "renderer" });
+    await captureError(new Error("direct"), { operation: "renderer" });
+    expect(sentryCalls.captured).toHaveLength(0);
   });
 });

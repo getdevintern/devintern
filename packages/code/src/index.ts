@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { execSync } from "child_process";
 import { Option, program } from "commander";
 import { config } from "dotenv";
 import {
@@ -19,7 +18,6 @@ import {
   getAuthenticatedUser,
   login,
   logout,
-  requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
 import { checkLicense, requireLicense } from "@devintern/license-check";
@@ -41,12 +39,12 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
+import { initSentryOnce } from "./lib/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
   captureError,
   findEnvFile,
   flushErrorTracking,
-  initErrorTracking,
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
@@ -84,8 +82,17 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunBranch,
+  recordRunPr,
+  recordRunStage,
+  recordRunTicket,
+} from "./lib/run-recorder";
 import type { RunStatus } from "./lib/run-recorder";
+import { buildTicketUrl } from "./lib/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
@@ -150,7 +157,9 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 function isWorkerTaskProcess(): boolean {
   const origin = process.env[RUN_ORIGIN_ENV];
-  return origin === "worker" || origin === "scheduled";
+  return (
+    origin === "worker" || origin === "scheduled" || origin === "estimate" || origin === "manual"
+  );
 }
 
 /** Finish the local run record and emit exactly one outcome event for worker tasks. */
@@ -454,7 +463,7 @@ function loadEnvironment(envFile?: string): string | null {
   const loaded = loadEnvironmentInner(envFile);
   // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
   // loading has had its chance to populate it.
-  initSentryOnce();
+  initSentryOnce(`code@${VERSION}`);
   return loaded;
 }
 
@@ -568,15 +577,8 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
 }
 
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
-let sentryInitialized = false;
-function initSentryOnce(): void {
-  if (sentryInitialized) return;
-  sentryInitialized = true;
-  initErrorTracking({
-    release: `code@${VERSION}`,
-    environment: process.env.NODE_ENV ?? "production",
-  });
-}
+// Shared entry-point init (worker/webhook standalone reuse this too); call sites
+// pass the release so standalone entries stay attributed to the CLI version.
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
@@ -618,6 +620,40 @@ if (process.argv[2] === "init") {
         }
       });
       process.exit(exitCode);
+    }
+
+    // `devintern worker run-now` — ask a running workspace worker for one
+    // immediate drain, bypassing working windows without editing them.
+    if (process.argv[3] === "run-now") {
+      const args = process.argv.slice(4);
+      let workspacePath: string | undefined;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === "--workspace" && args[i + 1] && !args[i + 1]?.startsWith("-")) {
+          workspacePath = args[i + 1];
+          i++;
+        } else if (arg === "--help" || arg === "-h") {
+          console.log("Usage: devintern worker run-now [--workspace <path>]");
+          console.log("");
+          console.log("Ask the running workspace worker to drain ready tasks now,");
+          console.log("ignoring working windows (quiet hours) for this one pass.");
+          console.log("The worker picks up the request on its next poll interval");
+          console.log("(default 60s) and deletes the marker once served.");
+          process.exit(0);
+        }
+      }
+      const { resolveWorkspaceDir, workspaceConfigPath, workspaceRunNowPath } =
+        await import("./lib/workspace/paths");
+      const selectedDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+      if (!existsSync(workspaceConfigPath(selectedDir))) {
+        console.error(`❌ No workspace.toml at ${workspaceConfigPath(selectedDir)}.`);
+        process.exit(1);
+      }
+      writeFileSync(workspaceRunNowPath(selectedDir), "");
+      console.log(`✅ Run-now requested for ${workspaceConfigPath(selectedDir)}`);
+      console.log(`   Marker: ${workspaceRunNowPath(selectedDir)}`);
+      console.log("   The worker drains within one poll interval and removes the marker.");
+      process.exit(0);
     }
 
     const args = process.argv.slice(3);
@@ -686,7 +722,7 @@ if (process.argv[2] === "init") {
       } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
       } else if (arg === "--help" || arg === "-h") {
-        console.log("Usage: devintern worker [init] [options]");
+        console.log("Usage: devintern worker [init|run-now] [options]");
         console.log("       devintern worker connect [github|status] [--repo owner/name]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
@@ -702,6 +738,7 @@ if (process.argv[2] === "init") {
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
         console.log("                      query (live dry run), and license check");
+        console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
         console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
@@ -802,8 +839,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Options:");
         console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --host <host>  Host to bind to (default: 127.0.0.1; no authentication,");
-        console.log("                 so binding beyond localhost is not recommended)");
+        console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
+        console.log("                 accepted: 127.0.0.1, localhost, ::1)");
         console.log("  -h, --help     Display this help message");
         process.exit(0);
       }
@@ -903,10 +940,15 @@ if (process.argv[2] === "init") {
     try {
       await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
-      endRun("failed", (error as Error).message);
-      console.error(`❌ Error: ${(error as Error).message}`);
+      endRun("failed", message);
+      captureError(error, { command: "address-review", prUrl });
+      console.error(`❌ Error: ${message}`);
+      // This is a handled exception, so the process-level fatal handlers do
+      // not run. Flush explicitly before the subprocess reports failure.
+      await flushErrorTracking();
       process.exit(1);
     }
   })();
@@ -990,6 +1032,11 @@ if (process.argv[2] === "init") {
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
       console.error(`❌ Error: ${(error as Error).message}`);
+      // Thrown (unexpected) resolution errors are user actions that failed —
+      // reported like address-review; `failed`/`deferred` outcomes above are
+      // expected results and stay unreported.
+      captureError(error, { command: "resolve-conflicts", prUrl });
+      await flushErrorTracking();
       process.exitCode = 1;
     }
   })();
@@ -1427,12 +1474,26 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Structured run record for this attempt (skips above are not attempts).
     // Scheduled automations run through this same pipeline with their prompt
     // materialized as a markdown task; env markers attribute those runs.
+    // Dashboard "Run now" triggers use the same markers with a `manual`
+    // origin so run history distinguishes them from scheduled runs.
     const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
+    const trackerName = process.env.TASK_TRACKER || "jira";
+    const isManualAutomationRun =
+      scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
     beginRun({
-      origin: scheduledAutomationId ? "scheduled" : "task",
+      origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
       taskKey: workflowKey,
-      tracker: process.env.TASK_TRACKER || "jira",
+      tracker: trackerName,
+      // The harness that will implement this run (resolved at startup).
+      harness: resolvedAgent.harness.name,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+      // Ticket link for remote trackers only: markdown-file inputs and
+      // materialized automation prompts have no tracker page, and deriving
+      // URLs from their synthetic keys would point nowhere.
+      ticketUrl:
+        markdownInput || scheduledAutomationId
+          ? undefined
+          : buildTicketUrl(trackerName, workflowKey),
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
@@ -1475,6 +1536,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.error("❌ Error formatting task details:", formatError);
       throw formatError;
     }
+
+    // Snapshot the ticket's description as markdown for the run record so the
+    // dashboard shows what was asked even if the ticket changes or is deleted.
+    recordRunTicket({
+      description: TaskFormatter.buildTaskDescriptionMarkdown(taskDetails),
+    });
 
     // Display summary
     console.log("\n📋 Task Summary:");
@@ -1660,6 +1727,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
       if (branchResult.success) {
         console.log(`✅ ${branchResult.message}`);
+        // Record the actual branch (it can gain an attempt suffix) so the
+        // dashboard shows which branch a run worked on.
+        recordRunBranch(branchResult.branchName);
       } else {
         // Branch creation failed - this is critical for safety
         console.error(`\n❌ Failed to create feature branch: ${branchResult.message}`);
@@ -1919,6 +1989,13 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // A failed task run interrupted a user action — report it with the task
+    // context so Sentry shows which pipeline stage is failing for users.
+    captureError(error, {
+      taskKey,
+      tracker: process.env.TASK_TRACKER || "jira",
+      stage: "process-task",
+    });
 
     // Leave feedback on the ticket so a failed run never ends silently with
     // the task stranded in "In Progress" and no PR.
@@ -1934,6 +2011,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (totalTasks > 1) {
       throw error;
     }
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -1944,7 +2022,7 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
-    initSentryOnce();
+    initSentryOnce(`code@${VERSION}`);
 
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
@@ -2145,6 +2223,19 @@ async function main(): Promise<void> {
 
           estimationResults.total++;
 
+          // Structured run record for this attempt (skips above are not
+          // attempts). Estimation is its own dashboard origin — never an
+          // implement run — and scheduled sweeps carry the schedule id.
+          const estimationScheduleId = process.env.DEVINTERN_AUTOMATION_ID;
+          beginRun({
+            origin: "estimate",
+            taskKey,
+            tracker: activeTrackerType,
+            // Every origin records the harness that executed it.
+            harness: resolvedAgent.harness.name,
+            ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
+          });
+
           // Fetch comments and linked resources
           const comments = await tracker.getComments(taskKey);
           const linkedResources = tracker.extractLinkedResources(task);
@@ -2201,10 +2292,15 @@ async function main(): Promise<void> {
               error: "Failed to parse estimation response",
             });
           }
+          await finishTaskRun(
+            result ? "succeeded" : "failed",
+            result ? undefined : "Failed to parse estimation response",
+          );
         } catch (error) {
           // Usage limit is account-global — abort the rest of the estimation
           // batch and exit 0 so the scheduler retries next window.
           if (error instanceof UsageLimitError) {
+            await finishTaskRun("deferred", error.message);
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
@@ -2218,6 +2314,13 @@ async function main(): Promise<void> {
             error: (error as Error).message,
           });
           console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
+          // A failed estimation is a user action that did not complete.
+          captureError(error, {
+            taskKey,
+            tracker: process.env.TASK_TRACKER || "jira",
+            stage: "estimate",
+          });
+          await finishTaskRun("failed", (error as Error).message);
         }
       }
 
@@ -2241,6 +2344,7 @@ async function main(): Promise<void> {
       }
       await flushAnalytics();
       if (estimationResults.failed > 0) {
+        await flushErrorTracking();
         process.exit(1);
       }
       return;
@@ -2312,6 +2416,9 @@ async function main(): Promise<void> {
           lockManager.release();
         }
         await flushAnalytics();
+        // Task failures were already captured in processSingleTask; make sure
+        // those events are sent before this exit.
+        await flushErrorTracking();
         process.exit(1);
       }
     }
@@ -2327,11 +2434,15 @@ async function main(): Promise<void> {
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // Setup/query failures that reach here were not captured by the per-task
+    // handlers (lock, tracker query, license, ...).
+    captureError(error, { stage: "main" });
     // Release lock before exiting on error
     if (lockManager) {
       lockManager.release();
     }
     await flushAnalytics();
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -3226,7 +3337,7 @@ async function runAgentHarness(
         model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
-      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
+      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
       console.log(`   Timeout: ${timeoutMinutes} minutes`);
       console.log(
@@ -3708,9 +3819,17 @@ async function runAgentHarness(
                 }
               } else {
                 console.log(`⚠️  PR creation failed: ${prResult.message}`);
+                // The run "succeeds" without a PR — a silent user-visible
+                // degradation worth tracking. prResult.message can quote API
+                // errors; captureError redacts token-like substrings.
+                captureError(new Error(prResult.message || "PR creation failed"), {
+                  taskKey,
+                  stage: "create-pr",
+                });
               }
             } catch (prError) {
               console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
+              captureError(prError, { taskKey, stage: "create-pr" });
             }
           };
           // --- End shared helpers ---
@@ -4085,6 +4204,9 @@ async function runAgentHarness(
                 console.log(
                   'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
                 );
+                // Agent output exists but was never committed — track the
+                // degradation; captureError redacts credential-like text.
+                captureError(commitError, { taskKey, stage: "commit" });
                 resolve(); // Still resolve since Agent succeeded
               });
           } else {
@@ -4140,6 +4262,8 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   if (lockManager) {
     lockManager.release();
   }
+  // Bounded; pending crash/handled-error events get a chance to send.
+  await flushErrorTracking();
   process.exit(exitCode);
 }
 

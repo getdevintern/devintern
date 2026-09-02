@@ -403,6 +403,34 @@ If you need clarification on any requirements or if the task description is uncl
     }
   }
 
+  /**
+   * Reduce a task's description to markdown, mirroring how the agent prompt
+   * renders it: rendered HTML goes through the HTML converter, plain strings
+   * (markdown-native trackers) pass through unchanged, and other rich content
+   * (e.g. Jira ADF) goes through the per-tracker rich-content converter.
+   *
+   * @param taskDetails - Normalized task details (only descriptions are read)
+   * @param richContentConverter - Converter for tracker-native rich content
+   * @returns Markdown text, or `undefined` when there is no description
+   */
+  static buildTaskDescriptionMarkdown(
+    taskDetails: Pick<FormattedTaskDetails, "renderedDescription" | "description">,
+    richContentConverter: RichContentConverter = convertADFToMarkdown,
+  ): string | undefined {
+    if (taskDetails.renderedDescription) {
+      return this.convertHtmlToMarkdown(taskDetails.renderedDescription).trim() || undefined;
+    }
+    const { description } = taskDetails;
+    if (description === undefined || description === null) {
+      return undefined;
+    }
+    if (typeof description === "string") {
+      return description.trim() || undefined;
+    }
+    const markdown = richContentConverter(description).trim();
+    return markdown || undefined;
+  }
+
   /** Format a byte count as a human-readable size string. */
   static formatFileSize(bytes: number): string {
     if (bytes === 0) return "0 Bytes";

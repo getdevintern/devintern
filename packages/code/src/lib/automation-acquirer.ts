@@ -4,11 +4,11 @@ import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
 import { join } from "path";
 
-import { CronExpressionParser } from "cron-parser";
 import { resolveConfigDir } from "@devintern/utils";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
+import { nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
@@ -16,6 +16,8 @@ import { RUN_ORIGIN_ENV } from "./analytics";
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
 export const AUTOMATION_ORIGIN_ENV = RUN_ORIGIN_ENV;
 export const AUTOMATION_ID_ENV = "DEVINTERN_AUTOMATION_ID";
+/** Origin recorded for dashboard-triggered ("Run now") automation runs. */
+export const MANUAL_ORIGIN_ENV_VALUE = "manual";
 
 const LEASE_MS = 2 * 60_000;
 const HEARTBEAT_MS = 30_000;
@@ -39,14 +41,48 @@ export interface SpawnedAutomationRun {
   terminate(): void;
 }
 
+/** Result of a dashboard "Run now" trigger for one automation. */
+export type ManualTriggerOutcome = { ok: true } | { ok: false; reason: string };
+
+/** One configured schedule as exposed to the dashboard. */
+export interface AutomationScheduleStatus {
+  id: string;
+  enabled: boolean;
+  cron?: string;
+  interval?: string;
+  repo?: string;
+  prompt: string;
+  /** Durable next occurrence (epoch ms); absent before first registration. */
+  nextDueAt?: number;
+}
+
+/**
+ * What the dashboard needs to list and trigger automations. The workspace
+ * worker supplies it from its in-process {@linkcode AutomationAcquirer}; a
+ * standalone dashboard falls back to the project-config spawn path
+ * (`lib/automation-manual.ts`).
+ */
+export interface DashboardAutomationActions {
+  list(): AutomationScheduleStatus[];
+  trigger(automationId: string): Promise<ManualTriggerOutcome>;
+}
+
 export interface AutomationAcquirerOptions {
   automations: AutomationConfig[];
   dbPath: string;
-  /** Per-task CLI flags; defaults to `--create-pr`. */
-  extraArgs?: string[];
+  /**
+   * Per-task CLI flags; defaults to `--create-pr`. May be a factory so live
+   * config reloads (e.g. `[defaults].worker_task_args`) apply to later runs.
+   */
+  extraArgs?: string[] | (() => string[]);
   resolveContext: (automation: AutomationConfig) => Promise<AutomationRunContext | null>;
   now?: () => number;
   spawnRun?: (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun;
+  /** Test-only runner override for manual ("Run now") runs. */
+  spawnManualRun?: (
+    automation: AutomationConfig,
+    context: AutomationRunContext,
+  ) => SpawnedAutomationRun;
   leaseMs?: number;
   heartbeatMs?: number;
   terminationGraceMs?: number;
@@ -54,6 +90,12 @@ export interface AutomationAcquirerOptions {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   setInterval?: (callback: () => void, ms: number) => ReturnType<typeof setInterval>;
   clearInterval?: (timer: ReturnType<typeof setInterval>) => void;
+  /** Namespace durable schedule state when another job type reuses this scheduler. */
+  stateId?: (automation: AutomationConfig) => string;
+  /** User-facing job kind used in log lines; defaults to "automation". */
+  jobKind?: string;
+  /** Acquirer name override (worker banner / analytics worker mode). */
+  name?: string;
 }
 
 interface ActiveAutomationRun {
@@ -63,16 +105,15 @@ interface ActiveAutomationRun {
 
 /** Calculate the first future occurrence after `afterMs` (cron uses host timezone). */
 export function nextAutomationDue(automation: AutomationConfig, afterMs: number): number {
-  if (automation.intervalMs) return afterMs + automation.intervalMs;
-  if (!automation.cron) throw new Error(`Automation "${automation.id}" has no schedule`);
-  return CronExpressionParser.parse(automation.cron, { currentDate: new Date(afterMs) })
-    .next()
-    .getTime();
+  if (!automation.intervalMs && !automation.cron) {
+    throw new Error(`Automation "${automation.id}" has no schedule`);
+  }
+  return nextScheduleOccurrence(automation, afterMs);
 }
 
 /** One-timer scheduler with durable UTC cursors and per-automation leases. */
 export class AutomationAcquirer implements Acquirer {
-  readonly name = "scheduled-automations";
+  readonly name: string;
   private options: AutomationAcquirerOptions;
   private store: AutomationStateStore;
   private owner = `${process.pid}:${randomUUID()}`;
@@ -83,6 +124,7 @@ export class AutomationAcquirer implements Acquirer {
 
   constructor(options: AutomationAcquirerOptions) {
     this.options = options;
+    this.name = options.name ?? "scheduled-automations";
     this.store = new AutomationStateStore(options.dbPath);
   }
 
@@ -90,10 +132,10 @@ export class AutomationAcquirer implements Acquirer {
     this.stopped = false;
     const now = this.now();
     for (const automation of this.options.automations.filter((item) => item.enabled)) {
-      this.store.register(automation, nextAutomationDue(automation, now));
+      this.store.register(automation, nextAutomationDue(automation, now), this.stateId(automation));
     }
     console.log(
-      `⏰ Scheduling ${this.options.automations.filter((item) => item.enabled).length} enabled automation(s)`,
+      `⏰ Scheduling ${this.options.automations.filter((item) => item.enabled).length} enabled ${this.jobKind()}(s)`,
     );
     await this.tick();
   }
@@ -121,20 +163,75 @@ export class AutomationAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Replace the automation set at runtime (live workspace.toml reload).
+   *
+   * Reconciles durable schedule state without interrupting active work:
+   *
+   * - Newly added or rescheduled entries register (a changed schedule resets
+   *   the cursor; an unchanged one retains the prior interval anchor).
+   * - Entries removed from the config retire: removed-but-active runs finish
+   *   their current occurrence naturally, then their schedule state is
+   *   dropped. Fully removed inactive entries are unregistered immediately.
+   * - Entries merely disabled keep their schedule rows so re-enabling later
+   *   keeps the anchor, matching restart semantics.
+   */
+  applyAutomations(next: AutomationConfig[]): void {
+    const previous = this.options.automations;
+    this.options.automations = next;
+
+    const now = this.now();
+    for (const automation of next.filter((item) => item.enabled)) {
+      try {
+        this.store.register(
+          automation,
+          nextAutomationDue(automation, now),
+          this.stateId(automation),
+        );
+      } catch (error) {
+        console.error(
+          `❌ [${this.jobKind()}:${automation.id}] invalid schedule after reload: ` +
+            `${(error as Error).message}`,
+        );
+      }
+    }
+
+    for (const retired of previous.filter((item) => !next.some((n) => n.id === item.id))) {
+      const active = this.active.get(retired.id);
+      if (active) {
+        // Let the in-flight occurrence run to completion; drop its state only
+        // after it ends and only if the id was not re-added in the meantime.
+        void active.lifecycle
+          .catch(() => undefined)
+          .then(() => {
+            if (!this.options.automations.some((item) => item.id === retired.id)) {
+              this.store.unregister(this.stateId(retired));
+            }
+          });
+      } else {
+        this.store.unregister(this.stateId(retired));
+      }
+    }
+
+    this.scheduleNext();
+  }
+
   private async runTick(): Promise<void> {
     const leaseMs = this.options.leaseMs ?? LEASE_MS;
+    const kind = this.jobKind();
     for (const automation of this.options.automations.filter((item) => item.enabled)) {
-      let state = this.store.get(automation.id);
+      const stateId = this.stateId(automation);
+      let state = this.store.get(stateId);
       if (!state) continue;
 
       if (this.active.has(automation.id)) {
         const active = this.active.get(automation.id) as ActiveAutomationRun;
-        if (!this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs)) {
-          console.warn(`⏭️  [automation:${automation.id}] terminating: lease was lost`);
+        if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
+          console.warn(`⏭️  [${kind}:${automation.id}] terminating: lease was lost`);
           active.run.terminate();
           await active.lifecycle;
         }
-        state = this.store.get(automation.id);
+        state = this.store.get(stateId);
         if (!state) continue;
       }
       if (state.nextDueAt > this.now()) continue;
@@ -143,16 +240,14 @@ export class AutomationAcquirer implements Acquirer {
       if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > overlapNow) {
         const skipNow = this.now();
         const nextDue = nextAutomationDue(automation, skipNow);
-        if (this.store.skipOverlap(automation.id, skipNow, nextDue)) {
-          console.warn(
-            `⏭️  [automation:${automation.id}] occurrence skipped: previous run is active`,
-          );
+        if (this.store.skipOverlap(stateId, skipNow, nextDue)) {
+          console.warn(`⏭️  [${kind}:${automation.id}] occurrence skipped: previous run is active`);
         }
         continue;
       }
       const claimNow = this.now();
       const nextDue = nextAutomationDue(automation, claimNow);
-      if (!this.store.claim(automation.id, this.owner, claimNow, nextDue, leaseMs)) continue;
+      if (!this.store.claim(stateId, this.owner, claimNow, nextDue, leaseMs)) continue;
 
       let context: AutomationRunContext | null = null;
       try {
@@ -162,7 +257,7 @@ export class AutomationAcquirer implements Acquirer {
         const clearHeartbeatInterval = this.options.clearInterval ?? clearInterval;
         const preparationHeartbeat = setHeartbeatInterval(
           () => {
-            if (!this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs)) {
+            if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
               ownsClaim = false;
             }
           },
@@ -175,59 +270,41 @@ export class AutomationAcquirer implements Acquirer {
           clearHeartbeatInterval(preparationHeartbeat);
         }
         if (!context) {
-          console.warn(`⏭️  [automation:${automation.id}] occurrence skipped: repository is busy`);
-          this.store.release(automation.id, this.owner);
+          console.warn(
+            `⏭️  [${kind}:${automation.id}] occurrence skipped: ${this.busySkipReason()}`,
+          );
+          this.store.release(stateId, this.owner);
           continue;
         }
         if (this.stopped) {
-          this.store.release(automation.id, this.owner);
+          this.store.release(stateId, this.owner);
           await context.release();
           continue;
         }
-        ownsClaim &&= this.store.heartbeat(automation.id, this.owner, this.now(), leaseMs);
+        ownsClaim &&= this.store.heartbeat(stateId, this.owner, this.now(), leaseMs);
         if (!ownsClaim) {
-          console.warn(`⏭️  [automation:${automation.id}] occurrence skipped: lease was lost`);
+          console.warn(`⏭️  [${kind}:${automation.id}] occurrence skipped: lease was lost`);
           await context.release();
           continue;
         }
-        console.log(`\n⏰ [automation:${automation.id}] starting scheduled run`);
+        console.log(`\n⏰ [${kind}:${automation.id}] starting scheduled run`);
+        const extraArgs = this.options.extraArgs;
+        const args =
+          typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
           : defaultSpawnRun(
               automation,
               context,
-              this.options.extraArgs ?? workerTaskArgs(),
+              args,
+              "scheduled",
               this.options.terminationGraceMs,
             );
-        const active: ActiveAutomationRun = {
-          run,
-          lifecycle: Promise.resolve(),
-        };
-        active.lifecycle = run.completion
-          .then((ok) =>
-            console.log(
-              ok
-                ? `✅ [automation:${automation.id}] completed`
-                : `⚠️  [automation:${automation.id}] did not complete cleanly`,
-            ),
-          )
-          .catch((error) =>
-            console.error(`❌ [automation:${automation.id}] ${(error as Error).message}`),
-          )
-          .finally(async () => {
-            try {
-              this.store.release(automation.id, this.owner);
-              await context?.release();
-            } finally {
-              if (this.active.get(automation.id) === active) this.active.delete(automation.id);
-              this.scheduleNext();
-            }
-          });
-        this.active.set(automation.id, active);
+        this.trackActiveRun(automation, stateId, context, run);
       } catch (error) {
-        this.store.release(automation.id, this.owner);
+        this.store.release(stateId, this.owner);
         await context?.release();
-        console.error(`❌ [automation:${automation.id}] ${(error as Error).message}`);
+        console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`);
       }
     }
     this.scheduleNext();
@@ -237,13 +314,190 @@ export class AutomationAcquirer implements Acquirer {
     return (this.options.now ?? Date.now)();
   }
 
+  /**
+   * Track a spawned run until it settles: heartbeat-driven ticks observe it,
+   * `stop()` terminates it, and its cleanup releases the schedule lease plus
+   * the run context (repo lock, coordinator slot) exactly once.
+   */
+  private trackActiveRun(
+    automation: AutomationConfig,
+    stateId: string,
+    context: AutomationRunContext,
+    run: SpawnedAutomationRun,
+  ): void {
+    const kind = this.jobKind();
+    const active: ActiveAutomationRun = {
+      run,
+      lifecycle: Promise.resolve(),
+    };
+    active.lifecycle = run.completion
+      .then((ok) =>
+        console.log(
+          ok
+            ? `✅ [${kind}:${automation.id}] completed`
+            : `⚠️  [${kind}:${automation.id}] did not complete cleanly`,
+        ),
+      )
+      .catch((error) => console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`))
+      .finally(async () => {
+        try {
+          this.store.release(stateId, this.owner);
+          await context.release();
+        } finally {
+          if (this.active.get(automation.id) === active) this.active.delete(automation.id);
+          this.scheduleNext();
+        }
+      });
+    this.active.set(automation.id, active);
+  }
+
+  /**
+   * Dashboard "Run now": execute one automation occurrence immediately through
+   * the same pipeline a scheduled run uses (context resolution, task-file
+   * materialization, CLI subprocess), attributed with the `manual` origin so
+   * run history distinguishes it from scheduled runs.
+   *
+   * The manual run holds the automation's overlap lease while active, so a
+   * scheduled occurrence coming due mid-run is coalesced (skipped) instead of
+   * running concurrently, and a second manual trigger is rejected while one
+   * is in flight.
+   */
+  async triggerManual(automationId: string): Promise<ManualTriggerOutcome> {
+    const automation = this.options.automations.find((item) => item.id === automationId);
+    if (!automation) {
+      return { ok: false, reason: `automation "${automationId}" is not configured` };
+    }
+    if (!automation.enabled) {
+      return {
+        ok: false,
+        reason: `automation "${automationId}" is disabled; enable it in the config first`,
+      };
+    }
+    if (this.stopped) {
+      return { ok: false, reason: "the worker is shutting down; try again after it restarts" };
+    }
+    if (this.active.has(automationId)) {
+      return { ok: false, reason: `automation "${automationId}" is already running` };
+    }
+
+    const stateId = this.stateId(automation);
+    const state = this.store.get(stateId);
+    if (!state) {
+      return {
+        ok: false,
+        reason: `automation "${automationId}" is not registered yet; wait for the config reload and try again`,
+      };
+    }
+    const leaseMs = this.options.leaseMs ?? LEASE_MS;
+    const now = this.now();
+    if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > now) {
+      return { ok: false, reason: `automation "${automationId}" is already running` };
+    }
+    if (!this.store.acquireManual(stateId, this.owner, this.now(), leaseMs)) {
+      return {
+        ok: false,
+        reason: `could not acquire the run slot for "${automationId}"; try again`,
+      };
+    }
+
+    let context: AutomationRunContext | null = null;
+    const heartbeatMs = Math.min(this.options.heartbeatMs ?? HEARTBEAT_MS, leaseMs / 2);
+    const setHeartbeatInterval = this.options.setInterval ?? setInterval;
+    const clearHeartbeatInterval = this.options.clearInterval ?? clearInterval;
+    const preparationHeartbeat = setHeartbeatInterval(
+      () => {
+        this.store.heartbeat(stateId, this.owner, this.now(), leaseMs);
+      },
+      Math.max(1, heartbeatMs),
+    );
+    (preparationHeartbeat as { unref?: () => void }).unref?.();
+    try {
+      context = await this.options.resolveContext(automation);
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message };
+    } finally {
+      clearHeartbeatInterval(preparationHeartbeat);
+      if (context === null) {
+        // Declined (busy repo) or rejected — give the lease back so the
+        // scheduler can proceed with the next occurrence.
+        this.store.release(stateId, this.owner);
+      }
+    }
+    if (!context) {
+      return {
+        ok: false,
+        reason: `the repository for "${automationId}" is busy with another run; try again shortly`,
+      };
+    }
+    if (this.stopped) {
+      this.store.release(stateId, this.owner);
+      await context.release();
+      return { ok: false, reason: "the worker is shutting down; try again after it restarts" };
+    }
+    if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
+      await context.release();
+      return { ok: false, reason: `the run slot for "${automationId}" was lost; try again` };
+    }
+
+    console.log(`\n⏰ [${this.jobKind()}:${automationId}] starting manual run (dashboard)`);
+    const extraArgs = this.options.extraArgs;
+    const args = typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
+    let run: SpawnedAutomationRun;
+    try {
+      run = this.options.spawnManualRun
+        ? this.options.spawnManualRun(automation, context)
+        : spawnManualAutomationRun(automation, context, args, this.options.terminationGraceMs);
+    } catch (error) {
+      this.store.release(stateId, this.owner);
+      try {
+        await context.release();
+      } catch (releaseError) {
+        console.error(
+          `❌ [${this.jobKind()}:${automationId}] cleanup failed: ${(releaseError as Error).message}`,
+        );
+      }
+      throw error;
+    }
+    this.trackActiveRun(automation, stateId, context, run);
+    return { ok: true };
+  }
+
+  /** Dashboard catalog: every configured schedule with its durable next-due state. */
+  listSchedules(): AutomationScheduleStatus[] {
+    return this.options.automations.map((automation) => {
+      const state = this.store.get(this.stateId(automation));
+      return {
+        id: automation.id,
+        enabled: automation.enabled,
+        cron: automation.cron,
+        interval: automation.interval,
+        repo: automation.repo,
+        prompt: automation.prompt,
+        nextDueAt: state?.nextDueAt,
+      };
+    });
+  }
+
+  private jobKind(): string {
+    return this.options.jobKind ?? "automation";
+  }
+
+  /** Reason logged when `resolveContext` declines a due occurrence. */
+  private busySkipReason(): string {
+    return this.options.jobKind === undefined ? "repository is busy" : "worker is busy";
+  }
+
+  private stateId(automation: AutomationConfig): string {
+    return this.options.stateId?.(automation) ?? automation.id;
+  }
+
   private scheduleNext(): void {
     if (this.stopped) return;
     if (this.timer) (this.options.clearTimer ?? clearTimeout)(this.timer);
     const now = this.now();
     const dueTimes = this.options.automations
       .filter((item) => item.enabled)
-      .map((item) => this.store.get(item.id)?.nextDueAt)
+      .map((item) => this.store.get(this.stateId(item))?.nextDueAt)
       .filter((value): value is number => value !== undefined);
     const heartbeatAt =
       this.active.size > 0 ? now + (this.options.heartbeatMs ?? HEARTBEAT_MS) : Infinity;
@@ -302,26 +556,60 @@ export function writeAutomationTaskFile(
   return filePath;
 }
 
+/**
+ * Attribution env for an automation subprocess: the run origin (`scheduled`
+ * for occurrences, `manual` for dashboard "Run now") plus the owning
+ * schedule id.
+ */
+export function automationRunEnv(
+  automation: AutomationConfig,
+  base?: Record<string, string | undefined>,
+  originValue: string = "scheduled",
+): Record<string, string | undefined> {
+  return {
+    ...base,
+    [AUTOMATION_ORIGIN_ENV]: originValue,
+    [AUTOMATION_ID_ENV]: automation.id,
+  };
+}
+
 function defaultSpawnRun(
   automation: AutomationConfig,
   context: AutomationRunContext,
   extraArgs: string[],
+  originValue: string,
   terminationGraceMs?: number,
 ): SpawnedAutomationRun {
   const taskFile = writeAutomationTaskFile(automation, context);
-  const env: Record<string, string | undefined> = {
-    ...context.env,
-    [AUTOMATION_ORIGIN_ENV]: "scheduled",
-    [AUTOMATION_ID_ENV]: automation.id,
-  };
   return spawnAutomationProcess(
     process.execPath,
     [process.argv[1] as string, taskFile, ...extraArgs],
     {
       cwd: context.cwd,
-      env,
+      env: automationRunEnv(automation, context.env, originValue),
       terminationGraceMs,
     },
+  );
+}
+
+/**
+ * Manual ("Run now") spawn: the identical pipeline as a scheduled run — same
+ * materialized task file, same CLI arguments, same working directory and env —
+ * with only the run-origin marker set to `manual` so run records stay
+ * distinguishable in the dashboard.
+ */
+export function spawnManualAutomationRun(
+  automation: AutomationConfig,
+  context: AutomationRunContext,
+  extraArgs: string[],
+  terminationGraceMs?: number,
+): SpawnedAutomationRun {
+  return defaultSpawnRun(
+    automation,
+    context,
+    extraArgs,
+    MANUAL_ORIGIN_ENV_VALUE,
+    terminationGraceMs,
   );
 }
 

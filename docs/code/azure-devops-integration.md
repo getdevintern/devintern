@@ -4,6 +4,7 @@ sidebarLabel: "Azure DevOps Integration"
 description: "Fetch Azure DevOps work items, run WIQL batches, implement with your coding agent, and post PRs and state transitions back."
 section: "Code"
 order: 5
+sidebarHidden: true
 dateModified: 2026-07-23
 tags: ["azure-devops", "devintern/code", "integration"]
 ---

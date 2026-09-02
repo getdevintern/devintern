@@ -1,10 +1,10 @@
 /**
  * Dashboard API
  *
- * Read-only JSON handlers over the worker's local state (SQLite run records,
- * agent PRs, cursors, queue counts, plus the tailed worker capture files).
- * Pure functions over a lazily opened read-only database so they are testable
- * without HTTP; `dashboard-server.ts` maps them to routes.
+ * JSON handlers over the worker's local state (SQLite run records, agent PRs,
+ * cursors, queue counts, plus the tailed worker capture files). Most reads use
+ * a lazily opened database; explicit local actions also write retry/audit state.
+ * `dashboard-server.ts` maps the handlers to routes.
  *
  * The database may not exist yet (fresh install, worker never run) or may
  * predate some tables (older versions). Every handler degrades to an empty
@@ -12,8 +12,23 @@
  */
 
 import { LockManager } from "./lock-manager";
+import type { LockStatus } from "./lock-manager";
+import type {
+  AutomationScheduleStatus,
+  DashboardAutomationActions,
+  ManualTriggerOutcome,
+} from "./automation-acquirer";
+import { loadStandaloneAutomationActions } from "./automation-manual";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
+import type { ScheduleSnapshot } from "./schedule";
+import {
+  isRunRetriable,
+  RunRetryAuditStore,
+  ScheduledRetryStore,
+  spawnCliForceRetry,
+} from "./run-retry";
+import type { RetryActor, RetryKind, RunRetryAuditEntry, SpawnedRetryProcess } from "./run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { resolveQueueDbPath, WebhookQueue } from "./webhook-queue";
@@ -29,7 +44,14 @@ const RUN_STATUSES: RunStatus[] = [
   "escalated",
   "abandoned",
 ];
-const RUN_ORIGINS: RunOrigin[] = ["task", "pr_mention", "conflict_resolution", "scheduled"];
+const RUN_ORIGINS: RunOrigin[] = [
+  "task",
+  "pr_mention",
+  "conflict_resolution",
+  "scheduled",
+  "estimate",
+  "manual",
+];
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,
@@ -57,6 +79,37 @@ export interface DashboardDataOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Live working-window snapshot from the worker process (embedded
+   * dashboard only; standalone servers return null).
+   */
+  scheduleSnapshot?: () => ScheduleSnapshot | null;
+  /**
+   * How a retry is executed. `spawn` (default) starts a detached CLI
+   * subprocess — correct for a standalone `devintern dashboard` running
+   * inside a repo. `schedule` inserts a row into the workspace DB that the
+   * workspace worker drains through its normal fleet pipeline (routing,
+   * per-repo worktree, env, repo lock); used when the dashboard runs
+   * alongside the fleet worker.
+   */
+  retryMode?: "spawn" | "schedule";
+  /**
+   * How long a triggered retry blocks further retries of its task
+   * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
+   */
+  inflightRetryTtlMs?: number;
+  /**
+   * How long a triggered manual automation run blocks further triggers of
+   * the automation; defaults to {@link INFLIGHT_RETRY_TTL_MS}.
+   */
+  inflightAutomationTtlMs?: number;
+  /**
+   * Automation listing/triggering overrides. The workspace worker passes its
+   * in-process scheduler so manual runs ride the exact scheduled pipeline;
+   * when omitted, a standalone dashboard falls back to the project's own
+   * `.devintern-code/automations.toml` (spawn path).
+   */
+  automationActions?: DashboardAutomationActions;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
   /** Tail window per capture file; tests shrink this for truncation cases. */
@@ -69,10 +122,62 @@ interface Stores {
   queue: WebhookQueue;
 }
 
+/** Retry metadata embedded in a run-detail response. */
+export interface RunRetryInfo {
+  eligible: boolean;
+  /**
+   * How the retry dispatches: `task` forces the task key through the CLI
+   * (`devintern <TASK> --force`), `automation` re-runs the automation that
+   * produced the run (its markdown stem is not a tracker key).
+   */
+  kind?: RetryKind;
+  reason?: string;
+  /** Recent dashboard retries of this run, most recent first. */
+  audit: RunRetryAuditEntry[];
+}
+
 /** A log entry extended with the latest matching run, when one exists. */
 export interface EnrichedLogEntry extends LogEntry {
   runId?: number;
   runStatus?: RunStatus;
+}
+
+/** Worker liveness as reported by `GET /api/worker`. */
+export type WorkerLiveness = "running" | "stopped" | "unknown";
+
+export interface WorkerStatusView {
+  status: WorkerLiveness;
+  pid?: number;
+  startedAt?: string;
+  /** Lock file the status was read from; absent when undeterminable. */
+  lockFile?: string;
+}
+
+/** One open agent PR as served by `GET /api/agent-prs`. */
+export interface OpenAgentPrView {
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  branch?: string;
+  taskKey?: string;
+  ticketUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One configured scheduled automation as served by `GET /api/automations`. */
+export interface DashboardAutomationView {
+  id: string;
+  enabled: boolean;
+  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
+  schedule?: string;
+  repo?: string;
+  /** The prompt executed per occurrence. */
+  prompt: string;
+  /** Next scheduled occurrence (epoch ms), when the scheduler registered it. */
+  nextDueAt?: number;
+  /** Most recent run of this automation (any origin), description stripped. */
+  lastRun?: RunRecord;
 }
 
 /**
@@ -85,13 +190,40 @@ export interface EnrichedLogEntry extends LogEntry {
 export class DashboardData {
   readonly dbPath: string;
   readonly workingDir: string;
+  readonly retryMode: "spawn" | "schedule";
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
   private stores: Stores | null = null;
+  private readonly scheduleSnapshot: () => ScheduleSnapshot | null;
+  /** Lazy read-write connection for the retry audit trail. */
+  private retryAuditStore: RunRetryAuditStore | null = null;
+  /** Lazy read-write connection for scheduled retries (schedule mode). */
+  private scheduledRetryStore: ScheduledRetryStore | null = null;
+  /**
+   * Task keys with a dashboard-triggered retry in flight (task key → claimed
+   * at). The spawned CLI needs a moment to create its run row, so claims are
+   * held until the TTL lapses rather than released with the HTTP response.
+   */
+  private inflightRetries = new Map<string, number>();
+  private inflightRetryTtlMs: number;
+  /**
+   * Automation ids with a dashboard-triggered manual run in flight (same
+   * TTL rationale as {@linkcode inflightRetries}).
+   */
+  private inflightAutomationRuns = new Map<string, number>();
+  private inflightAutomationTtlMs: number;
+  /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
+  private automationActions: DashboardAutomationActions | null = null;
+  private automationActionsOverride?: DashboardAutomationActions;
 
   constructor(options: DashboardDataOptions = {}) {
     this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
+    this.retryMode = options.retryMode ?? "spawn";
+    this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
+    this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
+    this.automationActionsOverride = options.automationActions;
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
       this.logDirs = options.logDirs;
@@ -144,15 +276,22 @@ export class DashboardData {
     return this.ensureStores() === null;
   }
 
+  /**
+   * List runs for `/api/runs`.
+   *
+   * Task descriptions are stripped here: they are polled every few seconds
+   * and would multiply the payload dozens of times; run detail serves them.
+   */
   listRuns(filter: {
     taskKey?: string;
     status?: RunStatus;
     origin?: RunOrigin;
+    automationId?: string;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
     return this.read({ runs: [], total: 0 }, (stores) => ({
-      runs: stores.runs.listRuns(filter),
+      runs: stores.runs.listRuns(filter).map((run) => ({ ...run, taskDescription: undefined })),
       total: stores.runs.countFilteredRuns(filter),
     }));
   }
@@ -167,6 +306,130 @@ export class DashboardData {
     });
   }
 
+  /** Eligibility plus audit history for a run's retry action. */
+  getRetryInfo(runId: number): RunRetryInfo | null {
+    const detail = this.getRunDetail(runId);
+    if (!detail) {
+      return null;
+    }
+    const eligibility = isRunRetriable(detail.run);
+    return {
+      eligible: eligibility.eligible,
+      kind: eligibility.kind,
+      reason: eligibility.reason,
+      audit: this.getRetryAuditStore().listForRun(runId),
+    };
+  }
+
+  /** True while a dashboard-triggered retry for the task is in flight. */
+  hasInflightRetry(taskKey: string): boolean {
+    this.pruneInflightRetries();
+    return this.inflightRetries.has(taskKey);
+  }
+
+  getRetryAuditStore(): RunRetryAuditStore {
+    if (!this.retryAuditStore) {
+      this.retryAuditStore = new RunRetryAuditStore(this.dbPath);
+    }
+    return this.retryAuditStore;
+  }
+
+  /** Store backing the schedule mode of the retry action. */
+  getScheduledRetryStore(): ScheduledRetryStore {
+    if (!this.scheduledRetryStore) {
+      this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
+    }
+    return this.scheduledRetryStore;
+  }
+
+  /** Claim the retry slot for a task; false when one is already held. */
+  claimRetry(taskKey: string): boolean {
+    this.pruneInflightRetries();
+    if (this.inflightRetries.has(taskKey)) {
+      return false;
+    }
+    this.inflightRetries.set(taskKey, Date.now());
+    return true;
+  }
+
+  private pruneInflightRetries(now = Date.now()): void {
+    for (const [taskKey, claimedAt] of this.inflightRetries) {
+      if (now - claimedAt > this.inflightRetryTtlMs) {
+        this.inflightRetries.delete(taskKey);
+      }
+    }
+    for (const [automationId, claimedAt] of this.inflightAutomationRuns) {
+      if (now - claimedAt > this.inflightAutomationTtlMs) {
+        this.inflightAutomationRuns.delete(automationId);
+      }
+    }
+  }
+
+  /** Automation listing/triggering, defaulting to the standalone spawn path. */
+  getAutomationActions(): DashboardAutomationActions {
+    if (!this.automationActions) {
+      // Standalone dashboards (spawn mode) read the project's own automation
+      // config; a worker-embedded dashboard without an in-process scheduler
+      // has none to offer (workspace [[automations]] would need the fleet
+      // pipeline), so it serves an empty catalog rather than a wrong one.
+      this.automationActions =
+        this.automationActionsOverride ??
+        (this.retryMode === "spawn"
+          ? loadStandaloneAutomationActions(this.workingDir)
+          : EMPTY_AUTOMATION_ACTIONS);
+    }
+    return this.automationActions;
+  }
+
+  /**
+   * Dashboard catalog of configured automations with their schedule state and
+   * most recent run (any origin) — the "Run now" view's backing data.
+   */
+  getAutomations(): DashboardAutomationView[] {
+    let statuses: AutomationScheduleStatus[];
+    try {
+      statuses = this.getAutomationActions().list();
+    } catch {
+      return [];
+    }
+    return statuses.map((status) => {
+      const lastRun = this.read(
+        undefined,
+        (stores) => stores.runs.listRuns({ automationId: status.id, limit: 1, offset: 0 })[0],
+      );
+      return {
+        id: status.id,
+        enabled: status.enabled,
+        schedule: status.cron ?? status.interval,
+        repo: status.repo,
+        prompt: status.prompt,
+        nextDueAt: status.nextDueAt,
+        lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
+      };
+    });
+  }
+
+  /** True while a dashboard-triggered manual run for the automation is starting. */
+  hasInflightAutomationRun(automationId: string): boolean {
+    this.pruneInflightRetries();
+    return this.inflightAutomationRuns.has(automationId);
+  }
+
+  /** Claim the manual-run slot for an automation; false when one is already held. */
+  claimAutomationRun(automationId: string): boolean {
+    this.pruneInflightRetries();
+    if (this.inflightAutomationRuns.has(automationId)) {
+      return false;
+    }
+    this.inflightAutomationRuns.set(automationId, Date.now());
+    return true;
+  }
+
+  /** Give the manual-run slot back (the trigger failed; retry immediately). */
+  releaseAutomationRun(automationId: string): void {
+    this.inflightAutomationRuns.delete(automationId);
+  }
+
   getStats(windowMs: number | null): RunStats | null {
     return this.read(null, (stores) => stores.runs.getStats(windowMs));
   }
@@ -179,8 +442,39 @@ export class DashboardData {
     return this.read({ open: 0, closed: 0 }, (stores) => stores.state.countAgentPrs());
   }
 
+  /**
+   * Open agent-created PRs with their GitHub URLs (`GET /api/agent-prs`).
+   * Ticket links are frozen in the registry by the worker at PR-creation
+   * time (from the tracker configured then), so they survive tracker
+   * switches and stay correct even when this dashboard process runs
+   * without tracker configuration.
+   */
+  getOpenAgentPrs(): OpenAgentPrView[] {
+    return this.read([], (stores) =>
+      stores.state.listOpenAgentPrs().map((pr) => ({
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+        prUrl: `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+        branch: pr.branch,
+        taskKey: pr.taskKey,
+        ticketUrl: pr.ticketUrl,
+        createdAt: pr.createdAt,
+        updatedAt: pr.updatedAt,
+      })),
+    );
+  }
+
   getCursors(): Cursor[] {
     return this.read([], (stores) => stores.state.listCursors());
+  }
+
+  /** Working-window status from the worker process, or null when disabled. */
+  getScheduleSnapshot(): ScheduleSnapshot | null {
+    try {
+      return this.scheduleSnapshot();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -238,11 +532,369 @@ export class DashboardData {
       this.stores.queue.close();
       this.stores = null;
     }
+    this.retryAuditStore?.close();
+    this.retryAuditStore = null;
+    this.scheduledRetryStore?.close();
+    this.scheduledRetryStore = null;
   }
 }
 
 function badRequest(message: string): ApiResponse {
   return { status: 400, body: { error: message } };
+}
+
+function conflict(message: string): ApiResponse {
+  return { status: 409, body: { error: message } };
+}
+
+/** No-automation bridge for worker-embedded dashboards whose worker runs none. */
+const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
+  list: () => [],
+  trigger: async () => ({ ok: false, reason: "no automations are configured" }),
+};
+
+/**
+ * Injectable collaborators for {@link handleRetryRun}, so tests can fake the
+ * audit actor and spawned process.
+ */
+export interface RetryHandlerDeps {
+  /** Resolve an optional audit identity; loopback access is the security boundary. */
+  resolveActor?: (workingDir: string) => Promise<RetryActor | null>;
+  /** Start the CLI retry flow for a task. */
+  spawn?: (taskKey: string, workingDir: string) => SpawnedRetryProcess;
+  /** Re-run the automation that produced the run (automation-run retries). */
+  trigger?: (automationId: string) => Promise<ManualTriggerOutcome>;
+}
+
+/** How long a triggered retry blocks further retries of the same task. */
+const INFLIGHT_RETRY_TTL_MS = 60_000;
+
+/**
+ * `POST /api/runs/:id/retry` — re-run this run's task.
+ *
+ * Safeguards, in order:
+ * 1. the run must exist,
+ * 2. it must be eligible (failed/escalated/abandoned with a task key),
+ * 3. no other retry may be in flight for the task (dashboard or worker — an
+ *    `in_progress` run for the same task key also blocks).
+ *
+ * The action is run-type specific:
+ * - Task runs re-invoke the CLI with the tracker key. Two execution modes,
+ *   picked by the server options: `schedule` (workspace worker) inserts a
+ *   `pending` row into the `scheduled_retries` table which the worker drains
+ *   through the normal fleet pipeline (routing, per-repo worktree, env, repo
+ *   lock) with `--force`; `spawn` (standalone dashboard, default) spawns
+ *   `devintern <TASK> --force` as a detached subprocess.
+ * - Automation runs re-trigger the automation that produced them (the exact
+ *   "Run now" pipeline with the same overlap safeguards). Their `taskKey` is
+ *   the markdown occurrence file's stem — not a tracker key — so forcing it
+ *   would only 404 against the tracker.
+ *
+ * Returns 202 once the retry is queued; the new attempt then shows up in the
+ * run list like any other run.
+ *
+ * @param data - Dashboard data source (also owns the in-flight guard)
+ * @param idParam - Raw id path segment
+ * @param deps - Injected collaborator overrides (tests)
+ */
+export async function handleRetryRun(
+  data: DashboardData,
+  idParam: string,
+  deps: RetryHandlerDeps = {},
+): Promise<ApiResponse> {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+
+  const detail = data.getRunDetail(id);
+  if (!detail) {
+    return { status: 404, body: { error: `run ${id} not found` } };
+  }
+  const run = detail.run;
+
+  const eligibility = isRunRetriable(run);
+  if (!eligibility.eligible) {
+    return conflict(`not retriable: ${eligibility.reason ?? "unknown reason"}`);
+  }
+
+  const actor = await deps.resolveActor?.(data.workingDir);
+  const actorLabel = actor?.email ?? "local-dashboard";
+
+  // Automation runs: re-run the automation (its taskKey is only the markdown
+  // occurrence file's stem and must never be forced as a tracker key).
+  if (eligibility.kind === "automation" && run.automationId) {
+    return retryAutomationRun(data, run, id, actorLabel, deps.trigger);
+  }
+
+  if (!run.taskKey) {
+    return conflict(`not retriable: ${eligibility.reason ?? "unknown reason"}`);
+  }
+  const taskKey = run.taskKey;
+
+  // Concurrent retries: another dashboard retry for this task, or a live run
+  // for the task (the worker records one as soon as it picks the ticket up).
+  if (data.retryMode === "schedule") {
+    if (data.getScheduledRetryStore().hasActive(taskKey)) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+  } else if (data.hasInflightRetry(taskKey)) {
+    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
+  }
+  const activeRun = data
+    .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
+    .runs.find((candidate) => candidate.status === "in_progress" && candidate.id !== run.id);
+  if (activeRun) {
+    return conflict(
+      `${taskKey} already has a run in progress (run ${activeRun.id}); wait for it to finish`,
+    );
+  }
+
+  if (data.retryMode === "schedule") {
+    const store = data.getScheduledRetryStore();
+    const scheduled = store.schedule({ taskKey, runId: id, actor: actorLabel });
+    if (!scheduled.scheduled) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+    data.getRetryAuditStore().record({
+      runId: id,
+      taskKey,
+      actor: actorLabel,
+      action: "scheduled",
+      message: "queued for the worker",
+    });
+    return {
+      status: 202,
+      body: {
+        status: "scheduled",
+        runId: id,
+        taskKey,
+      },
+    };
+  }
+
+  if (!data.claimRetry(taskKey)) {
+    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
+  }
+
+  let spawned: SpawnedRetryProcess;
+  try {
+    spawned = deps.spawn
+      ? deps.spawn(taskKey, data.workingDir)
+      : spawnCliForceRetry({ taskKey, workingDir: data.workingDir });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    data.getRetryAuditStore().record({
+      runId: id,
+      taskKey,
+      actor: actorLabel,
+      action: "failed",
+      message,
+    });
+    return { status: 500, body: { error: `could not start the retry: ${message}` } };
+  }
+
+  data.getRetryAuditStore().record({
+    runId: id,
+    taskKey,
+    actor: actorLabel,
+    action: "triggered",
+    command: spawned.command,
+    pid: spawned.pid,
+  });
+
+  return {
+    status: 202,
+    body: {
+      status: "triggered",
+      runId: id,
+      taskKey,
+      pid: spawned.pid,
+      command: spawned.command,
+    },
+  };
+}
+
+/**
+ * Re-run the automation behind a retriable automation run — the same
+ * safeguards as the dashboard's "Run now" trigger (configured, no run in
+ * progress, spawn-mode debounce), with the retry audit trail recording it.
+ *
+ * @param data - Dashboard data source (owns the in-flight automation guard)
+ * @param run - The terminal automation run being retried
+ * @param runId - The retried run's id (audit anchor)
+ * @param actorLabel - Audit identity for the trail
+ * @param triggerOverride - Test-only trigger override
+ */
+async function retryAutomationRun(
+  data: DashboardData,
+  run: RunRecord,
+  runId: number,
+  actorLabel: string,
+  triggerOverride?: (automationId: string) => Promise<ManualTriggerOutcome>,
+): Promise<ApiResponse> {
+  const automationId = run.automationId as string;
+  if (!data.getAutomations().some((item) => item.id === automationId)) {
+    return {
+      status: 404,
+      body: { error: `automation "${automationId}" not found; re-enable it in the config first` },
+    };
+  }
+
+  const activeRun = data.listRuns({ automationId, status: "in_progress", limit: 1, offset: 0 })
+    .runs[0];
+  if (activeRun) {
+    return conflict(
+      `automation "${automationId}" already has a run in progress (run ${activeRun.id}); wait for it to finish`,
+    );
+  }
+
+  if (data.retryMode === "spawn" && !data.claimAutomationRun(automationId)) {
+    return conflict(`a manual run of "${automationId}" was just triggered and is starting`);
+  }
+
+  const trigger = triggerOverride ?? ((id: string) => data.getAutomationActions().trigger(id));
+  let outcome: ManualTriggerOutcome;
+  try {
+    outcome = await trigger(automationId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    data.releaseAutomationRun(automationId);
+    data.getRetryAuditStore().record({
+      runId,
+      taskKey: run.taskKey,
+      actor: actorLabel,
+      action: "failed",
+      message: `automation re-run: ${message}`,
+    });
+    return { status: 500, body: { error: `could not start the automation re-run: ${message}` } };
+  }
+  if (!outcome.ok) {
+    data.releaseAutomationRun(automationId);
+    return conflict(outcome.reason);
+  }
+
+  data.getRetryAuditStore().record({
+    runId,
+    taskKey: run.taskKey,
+    actor: actorLabel,
+    action: "triggered",
+    message: `re-ran automation "${automationId}"`,
+  });
+
+  return {
+    status: 202,
+    body: {
+      status: "triggered",
+      runId,
+      automationId,
+    },
+  };
+}
+
+/**
+ * Injectable collaborators for {@link handleRunAutomation}, so tests can fake
+ * the optional audit identity and manual-run trigger.
+ */
+export interface AutomationRunDeps {
+  /** Resolve an optional audit identity; loopback access is the security boundary. */
+  resolveActor?: (workingDir: string) => Promise<RetryActor | null>;
+  /** Start one manual run of the automation. */
+  trigger?: (automationId: string) => Promise<ManualTriggerOutcome>;
+}
+
+/**
+ * `GET /api/automations` — configured scheduled automations with their
+ * schedule state, next occurrence, and most recent run.
+ *
+ * @param data - Dashboard data source
+ */
+export function handleAutomations(data: DashboardData): ApiResponse {
+  return { status: 200, body: { automations: data.getAutomations() } };
+}
+
+/**
+ * `POST /api/automations/:id/run` — dashboard "Run now": trigger one manual
+ * run of a scheduled automation through the same pipeline a scheduled run
+ * uses (worker-embedded dashboard) or the standalone spawn path.
+ *
+ * Safeguards, in order:
+ * 1. the automation must be configured,
+ * 2. the automation must be enabled — a disabled automation is refused with
+ *    a message instead of silently running,
+ * 4. no run of the automation may be in progress (dashboard or worker), and
+ *    a second rapid trigger is debounced by an in-flight claim,
+ * 5. the trigger itself re-validates overlap (schedule lease, busy repo) and
+ *    surfaces the reason on refusal.
+ *
+ * Returns 202 once the run started; it then shows up in the run list with
+ * origin `manual` and the automation's id.
+ *
+ * @param data - Dashboard data source (owns the in-flight guard)
+ * @param idParam - Raw automation id path segment
+ * @param deps - Injected collaborator overrides (tests)
+ */
+export async function handleRunAutomation(
+  data: DashboardData,
+  idParam: string,
+  deps: AutomationRunDeps = {},
+): Promise<ApiResponse> {
+  let automationId: string;
+  try {
+    automationId = decodeURIComponent(idParam).trim();
+  } catch {
+    return badRequest("invalid automation id");
+  }
+  if (!automationId) {
+    return badRequest("automation id is required");
+  }
+
+  const automations = data.getAutomations();
+  const automation = automations.find((item) => item.id === automationId);
+  if (!automation) {
+    return { status: 404, body: { error: `automation "${automationId}" not found` } };
+  }
+
+  if (!automation.enabled) {
+    return conflict(`automation "${automationId}" is disabled; enable it in the config first`);
+  }
+
+  const activeRun = data.listRuns({ automationId, status: "in_progress", limit: 1, offset: 0 })
+    .runs[0];
+  if (activeRun) {
+    return conflict(
+      `automation "${automationId}" already has a run in progress (run ${activeRun.id}); wait for it to finish`,
+    );
+  }
+
+  // Standalone spawn mode: the spawned CLI needs a moment to create its run
+  // row, so rapid repeat triggers are debounced until the TTL lapses. The
+  // worker-embedded dashboard relies on the automation's schedule lease.
+  if (data.retryMode === "spawn" && !data.claimAutomationRun(automationId)) {
+    return conflict(`a manual run of "${automationId}" was just triggered and is starting`);
+  }
+
+  const trigger = deps.trigger ?? ((id: string) => data.getAutomationActions().trigger(id));
+  let outcome: ManualTriggerOutcome;
+  try {
+    outcome = await trigger(automationId);
+  } catch (error) {
+    data.releaseAutomationRun(automationId);
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, body: { error: `could not start the run: ${message}` } };
+  }
+  if (!outcome.ok) {
+    data.releaseAutomationRun(automationId);
+    return conflict(outcome.reason);
+  }
+
+  return {
+    status: 202,
+    body: {
+      status: "triggered",
+      automationId,
+    },
+  };
 }
 
 /**
@@ -283,7 +935,8 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
 }
 
 /**
- * `GET /api/runs/:id` — a run with its stages in insertion order.
+ * `GET /api/runs/:id` — a run with its stages in insertion order and its
+ * retry action metadata (eligibility + audit trail).
  *
  * @param data - Dashboard data source
  * @param idParam - Raw id path segment
@@ -297,7 +950,14 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
   if (!detail) {
     return { status: 404, body: { error: `run ${id} not found` } };
   }
-  return { status: 200, body: detail };
+  const eligibility = isRunRetriable(detail.run);
+  const retry: RunRetryInfo = {
+    eligible: eligibility.eligible,
+    kind: eligibility.kind,
+    reason: eligibility.reason,
+    audit: data.getRetryAuditStore().listForRun(id),
+  };
+  return { status: 200, body: { run: detail.run, stages: detail.stages, retry } };
 }
 
 /**
@@ -316,19 +976,50 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 }
 
 /**
+ * Resolve worker liveness from the daemon's lock file.
+ *
+ * The worker writes `.worker.lock` under `.devintern-code/` of its working
+ * directory (simple mode) or directly into the workspace home (fleet mode),
+ * so both locations are consulted. A readable lock with a dead pid (a stale
+ * lock left behind by a crashed worker) must not shadow a live lock in the
+ * other location: the live lock wins, and `stopped` is only reported when
+ * every readable lock belongs to a dead process. When no readable lock file
+ * exists in either location, liveness is `unknown`: the worker may be
+ * running elsewhere, and claiming "stopped" would be wrong.
+ *
+ * @param workingDir - Project root the dashboard was started from
+ */
+function resolveWorkerStatus(workingDir: string): WorkerStatusView {
+  const locks = [
+    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
+    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true }),
+  ].filter((lock): lock is LockStatus => lock !== null);
+  if (locks.length === 0) {
+    return { status: "unknown" };
+  }
+  // A live lock beats a stale one regardless of which location it sits in.
+  const lock = locks.find((candidate) => candidate.running) ?? locks[0];
+  return {
+    status: lock.running ? "running" : "stopped",
+    pid: lock.pid,
+    startedAt: lock.startedAt,
+    lockFile: lock.path,
+  };
+}
+
+/**
  * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors.
  *
  * @param data - Dashboard data source
  */
 export function handleWorkerStatus(data: DashboardData): ApiResponse {
-  const lock = LockManager.readLockStatus(data.workingDir, WORKER_LOCK_FILE);
   return {
     status: 200,
     body: {
-      worker:
-        lock === null ? null : { running: lock.running, pid: lock.pid, startedAt: lock.startedAt },
+      worker: resolveWorkerStatus(data.workingDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
+      schedule: data.getScheduleSnapshot(),
       cursors: data.getCursors().map((cursor) => ({
         source: cursor.source,
         cursorValue: cursor.cursorValue,
@@ -338,6 +1029,18 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbMissing: data.dbMissing,
     },
   };
+}
+
+/**
+ * `GET /api/agent-prs` — open agent-created PRs with GitHub links.
+ *
+ * The registry is reconciled with GitHub by the worker's review polling, so
+ * PRs merged or closed outside the worker drop out within one poll cycle.
+ *
+ * @param data - Dashboard data source
+ */
+export function handleAgentPrs(data: DashboardData): ApiResponse {
+  return { status: 200, body: { prs: data.getOpenAgentPrs() } };
 }
 
 /**
