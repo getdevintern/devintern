@@ -195,6 +195,8 @@ With GitHub credentials in the workspace `.env`, the fleet worker also reacts to
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
 - **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Tracker relay events work even when GitHub polling credentials are not configured. Events for repositories not in the workspace are ignored.
 
+To reconnect after adding repositories, run `devintern workspace connect`. The command walks every GitHub repository in `workspace.toml`, skips already verified App pairings, and guides you through verification for the rest. `devintern workspace connect status` also reports workspace repositories that still need verification. Tracker targets such as `devintern workspace connect linear` reuse credentials from the shared workspace `.env`.
+
 Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
 
 ## Skipped tasks

@@ -4,7 +4,7 @@ description: "Connect the worker to the DevIntern relay for instant PR and task 
 section: "Server Automation"
 order: 3
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-09-02
 ---
 
 # Relay (Instant Events)
@@ -102,8 +102,12 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.
 | `devintern worker connect azure-devops`             | Self-register work item service hooks                                    |
 | `devintern worker connect jira`                     | Print the one-time Jira admin webhook setup with your private ingest URL |
 | `devintern worker connect status`                   | Show registrations, buffered events, and per-source freshness            |
+| `devintern workspace connect`                       | Verify every unpaired GitHub repository in the fleet workspace           |
+| `devintern workspace connect status`                | Show relay status and workspace repositories still awaiting verification |
 
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
+
+Workspace connect uses the same verified GitHub App flow as `worker connect`, storing the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file.
 
 ## Environment variables
 

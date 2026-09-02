@@ -7,6 +7,7 @@ Relay-first worker release: central-App GitHub auth with verified pairing, seria
 ### Changed
 
 - **Relay-backed workspaces use the central DevIntern AI App**: `worker init` registers every GitHub repository already present in `workspace.toml`, `worker connect github` verifies the hosted App installation and repository with the relay before enabling event routing, and `GITHUB_TOKEN` remains the only local GitHub API credential. Customer-owned `GITHUB_APP_ID` + private-key authentication remains available as the advanced no-relay/air-gapped path and for `devintern webhook serve`
+- **Fleet relay setup can be resumed without repeating worker init**: `devintern workspace connect` verifies every unpaired GitHub repository in `workspace.toml` through the central App, skips immutable repository IDs that are already paired, and continues across per-repository failures. Tracker targets reuse the workspace `.env`, while `workspace connect status` identifies repositories still awaiting verified pairing
 - **Dashboard run list shows accurate PR links and meaningful run identifiers**: PR-affected runs (mentions, conflict resolutions) persist the PR web URL at run start, so the work column links the tracker task, automation id, or the affected PR itself — and shows no PR link until the PR actually exists; the result column links its outcome to the right PR. Every run origin records the harness that executed it (estimation runs included), and pre-automation-id runs fall back to their occurrence identifier
 
 ### Fixed
