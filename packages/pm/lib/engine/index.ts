@@ -20,11 +20,7 @@ import type { CreatedTask, LabelListResult, TaskBackend } from "../backends/inde
 import type { Config } from "../config.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
-import {
-  createReadableStdoutTap,
-  structuredOutputEnvEnabled,
-  structuredPayloadFromResult,
-} from "./structured.js";
+import { createReadableStdoutTap, structuredPayloadFromResult } from "./structured.js";
 import { EngineError } from "./types.js";
 import type {
   EngineCallEvents,
@@ -181,13 +177,6 @@ export interface CreateEngineOptions {
    * Defaults to cwd; desktop hosts pass the project directory.
    */
   baseDir?: string;
-  /**
-   * Explicit structured (JSON) output override. When omitted, engine runs
-   * request JSON mode from harnesses that support it unless the project opts
-   * out via `AGENT_STRUCTURED_OUTPUT` in the environment. Set `false` to
-   * force the legacy plain-text extraction path.
-   */
-  structuredOutput?: boolean;
 }
 
 function isStoryPayload(value: unknown): value is StoryDraft {
@@ -223,13 +212,12 @@ export async function createEngine(
   const promptsDir = options.promptsDir ?? defaultPromptsDir();
   const model = options.model;
   /**
-   * Structured (JSON) mode is capability-gated: only harnesses whose CLI
-   * documents a JSON output flag are asked for machine-readable output.
-   * Harnesses without the capability keep the plain-text path unchanged.
+   * Structured (JSON) mode is capability-gated: harnesses whose CLI documents
+   * a JSON output flag are always asked for machine-readable output, and the
+   * engine treats their parsed payload as authoritative. Harnesses without
+   * the capability keep the plain-text path unchanged.
    */
-  const structuredMode =
-    config.agent.harness.supportsStructuredOutput === true &&
-    (options.structuredOutput ?? structuredOutputEnvEnabled());
+  const structuredMode = config.agent.harness.supportsStructuredOutput === true;
 
   const defaultProjectKey =
     config.jira?.defaultProjectKey ||

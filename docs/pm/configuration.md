@@ -175,19 +175,6 @@ The model string is harness-specific — see your harness's CLI docs for accepte
 
 In the DevIntern PM desktop app, set the same override per project from **Settings → Agent model**; it persists to `.devintern-pm/.env` (same file the CLI reads) and applies to new agent runs immediately.
 
-### Structured (JSON) output
-
-When the configured harness supports a JSON output mode (all built-in harnesses do), devpm asks the agent CLI for machine-readable output instead of styled transcript text and reads the parsed payload directly. This keeps generated descriptions clean in Jira, Linear, and other trackers — no narration text, fenced ```` ```json ```` blocks, or repaired-JSON artifacts — and reduces retries caused by malformed output. The live agent output view still shows readable assistant text.
-
-If a specific harness misbehaves in JSON mode, opt the project out with `AGENT_STRUCTURED_OUTPUT` in `.devintern-pm/.env`:
-
-```bash
-# .devintern-pm/.env
-AGENT_STRUCTURED_OUTPUT=0
-```
-
-Accepted disabling values: `0`, `false`, `off`, `no` (case-insensitive). Anything else keeps structured output enabled (the default). Harnesses without a documented JSON mode are never asked for it and always use the plain-text path, with the same tolerant JSON extraction and one automatic corrective retry as before.
-
 **Advanced spawn tuning** (rarely needed):
 
 ```bash

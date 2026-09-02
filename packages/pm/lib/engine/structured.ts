@@ -32,24 +32,6 @@ import { extractJsonPayload } from "./json.js";
 import { EngineError } from "./types.js";
 
 /**
- * Environment variable that opts a project out of structured (JSON) agent
- * output — an escape hatch for harness-specific JSON-mode quirks. Accepted
- * disabling values: `0`, `false`, `off`, `no` (case-insensitive). Read from
- * the same environment `.devintern-pm/.env` is loaded into, so both the CLI
- * and the desktop app honor it.
- */
-export const STRUCTURED_OUTPUT_ENV_VAR = "AGENT_STRUCTURED_OUTPUT";
-
-/** True unless {@link STRUCTURED_OUTPUT_ENV_VAR} opts the project out. */
-export function structuredOutputEnvEnabled(): boolean {
-  const raw = process.env[STRUCTURED_OUTPUT_ENV_VAR]?.trim().toLowerCase();
-  if (raw === undefined || raw === "") {
-    return true;
-  }
-  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
-}
-
-/**
  * Object field names that may carry the model's reply text across harness
  * envelope shapes (Claude `result`, Antigravity/Goose `response`, Codex event
  * `text`, Qwen/Kimi/Cline message `content`, error `message`).

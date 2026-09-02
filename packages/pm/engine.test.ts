@@ -3,7 +3,6 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getModuleDir } from "./lib/runtime/path.js";
 import { createEngine, DEFAULT_ISSUE_TYPES, EngineError, extractJsonPayload } from "./lib/engine";
-import { STRUCTURED_OUTPUT_ENV_VAR } from "./lib/engine/structured.js";
 import type { StoryDraft } from "./lib/engine";
 import type { Config } from "./lib/config";
 import type { CreatedTask, ProjectInfo, TaskBackend } from "./lib/backends";
@@ -1141,64 +1140,6 @@ describe("engine structured output (JSON mode)", () => {
     const draft = await engine.generateStory(generateInput());
     expect(draft).toEqual(STORY);
     expect(seenOptions[0]?.structuredOutput).toBe(false);
-  });
-
-  test("honors the structuredOutput opt-out option", async () => {
-    const seenOptions: AgentRunOptions[] = [];
-    const engine = await createEngine(
-      stubConfig({ supportsStructuredOutput: true }),
-      { promptsDir: PROMPTS_DIR, structuredOutput: false },
-      {
-        backend: stubBackend(),
-        runAgent: async (_harness, _path, _prompt, options) => {
-          seenOptions.push(options);
-          return {
-            stdout: '{"summary": "S", "description": "D"}',
-            stderr: "",
-            exitCode: 0,
-            maxTurnsReached: false,
-          };
-        },
-      },
-    );
-
-    const draft = await engine.generateStory(generateInput());
-    expect(draft).toEqual(STORY);
-    expect(seenOptions[0]?.structuredOutput).toBe(false);
-  });
-
-  test("honors the AGENT_STRUCTURED_OUTPUT opt-out env var", async () => {
-    const previous = process.env[STRUCTURED_OUTPUT_ENV_VAR];
-    process.env[STRUCTURED_OUTPUT_ENV_VAR] = "0";
-    try {
-      const seenOptions: AgentRunOptions[] = [];
-      const engine = await createEngine(
-        stubConfig({ supportsStructuredOutput: true }),
-        { promptsDir: PROMPTS_DIR },
-        {
-          backend: stubBackend(),
-          runAgent: async (_harness, _path, _prompt, options) => {
-            seenOptions.push(options);
-            return {
-              stdout: '{"summary": "S", "description": "D"}',
-              stderr: "",
-              exitCode: 0,
-              maxTurnsReached: false,
-            };
-          },
-        },
-      );
-
-      const draft = await engine.generateStory(generateInput());
-      expect(draft).toEqual(STORY);
-      expect(seenOptions[0]?.structuredOutput).toBe(false);
-    } finally {
-      if (previous === undefined) {
-        delete process.env[STRUCTURED_OUTPUT_ENV_VAR];
-      } else {
-        process.env[STRUCTURED_OUTPUT_ENV_VAR] = previous;
-      }
-    }
   });
 });
 
