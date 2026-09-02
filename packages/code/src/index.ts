@@ -947,10 +947,15 @@ if (process.argv[2] === "init") {
     try {
       await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
-      endRun("failed", (error as Error).message);
-      console.error(`❌ Error: ${(error as Error).message}`);
+      endRun("failed", message);
+      captureError(error, { command: "address-review", prUrl });
+      console.error(`❌ Error: ${message}`);
+      // This is a handled exception, so the process-level fatal handlers do
+      // not run. Flush explicitly before the subprocess reports failure.
+      await flushErrorTracking();
       process.exit(1);
     }
   })();
