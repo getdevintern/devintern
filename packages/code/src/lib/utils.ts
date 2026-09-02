@@ -1,7 +1,7 @@
 import { fetchWithRetry as sharedFetchWithRetry } from "@devintern/utils";
 import { spawn } from "child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
-import { basename, dirname, join } from "path";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 
 /**
  * `git clean` arguments used everywhere the tool wipes a working directory.
@@ -2161,9 +2161,7 @@ export class Utils {
       }
     }
 
-    const enable = await Utils.executeGitCommand(["config", "extensions.worktreeConfig", "true"], {
-      cwd: worktreePath,
-    });
+    const enable = await Utils.enableWorktreeConfig(worktreePath);
     if (!enable.success) {
       console.warn(`⚠️  Could not enable per-worktree git config: ${enable.error}`);
       return;
@@ -2179,6 +2177,72 @@ export class Utils {
     if (verbose) {
       console.log(`   🔒 Git hooks isolated to ${hooksDir}`);
     }
+  }
+
+  /**
+   * Enable per-worktree config without making linked worktrees from a bare
+   * repository inherit `core.bare=true` from the shared config.
+   *
+   * Git normally treats a linked worktree created from a bare repository as a
+   * work tree. Once `extensions.worktreeConfig` is enabled, however, a shared
+   * `core.bare=true` overrides that detection and every linked worktree starts
+   * rejecting checkout/reset/merge operations. Move the bare-only value to the
+   * main worktree's config before enabling the extension, as required by Git's
+   * worktree-config layout.
+   *
+   * This also repairs repositories where the extension was already enabled in
+   * the unsafe layout.
+   */
+  static async enableWorktreeConfig(
+    cwd: string,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    const commonDirResult = await Utils.executeGitCommand(["rev-parse", "--git-common-dir"], {
+      cwd,
+    });
+    if (!commonDirResult.success || !commonDirResult.output.trim()) {
+      return commonDirResult;
+    }
+
+    const commonDir = isAbsolute(commonDirResult.output.trim())
+      ? commonDirResult.output.trim()
+      : resolve(cwd, commonDirResult.output.trim());
+    const sharedConfig = join(commonDir, "config");
+    const mainWorktreeConfig = join(commonDir, "config.worktree");
+    const sharedBare = await Utils.executeGitCommand(
+      ["config", "--file", sharedConfig, "--get", "core.bare"],
+      { cwd },
+    );
+
+    if (sharedBare.success && sharedBare.output.trim().toLowerCase() === "true") {
+      const preserveBare = await Utils.executeGitCommand(
+        ["config", "--file", mainWorktreeConfig, "core.bare", "true"],
+        { cwd },
+      );
+      if (!preserveBare.success) {
+        return preserveBare;
+      }
+
+      const removeSharedBare = await Utils.executeGitCommand(
+        ["config", "--file", sharedConfig, "--unset-all", "core.bare"],
+        { cwd },
+      );
+      if (!removeSharedBare.success) {
+        // Another worker may have completed the same idempotent migration
+        // after our read. Only fail if the unsafe value is still present.
+        const remainingSharedBare = await Utils.executeGitCommand(
+          ["config", "--file", sharedConfig, "--get", "core.bare"],
+          { cwd },
+        );
+        if (remainingSharedBare.success) {
+          return removeSharedBare;
+        }
+      }
+    }
+
+    return Utils.executeGitCommand(
+      ["config", "--file", sharedConfig, "extensions.worktreeConfig", "true"],
+      { cwd },
+    );
   }
 
   /**
