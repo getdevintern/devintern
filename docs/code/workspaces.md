@@ -4,14 +4,14 @@ sidebarLabel: "Multiple Repositories"
 description: "Drive many repositories with one devintern worker: a single workspace.toml, routing rules, and per-task worktrees"
 section: "Automation"
 order: 2
-dateModified: 2026-09-01
+dateModified: 2026-09-03
 ---
 
 # Workspaces (Multi-Repo Fleet)
 
 Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe your repos once in `~/.devintern/workspace.toml`, point the worker at one tracker query, and route each ready task to the right repository with explicit rules when there is more than one repo.
 
-The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (import + `[defaults].task_query`) and you add more repos later with `devintern workspace import`.
+The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (add + `[defaults].task_query`) and you add more repos later with `devintern worker add-repo`.
 
 Workspace mode runs under the same automation license as the rest of the worker: any Supporter, Team, or Business key (or an active trial) covers it — one license spans all of your own repos in the fleet.
 
@@ -126,19 +126,19 @@ The scheduling is identical; only where the work runs changes:
 ## Creating a workspace
 
 ```bash
-devintern workspace init      # scaffold ~/.devintern/workspace.toml and .env
+devintern worker scaffold     # scaffold ~/.devintern/workspace.toml and .env
 cd ~/code/backend
-devintern workspace import    # add this repo to the workspace
+devintern worker add-repo     # add this repo to the workspace
 cd ~/code/frontend
-devintern workspace import
+devintern worker add-repo
 ```
 
-`workspace import` reads the repo's origin remote and its `.devintern-code/.env`:
+`worker add-repo` reads the repo's origin remote and its `.devintern-code/.env`:
 
 - The remote becomes a `[[repos]]` entry (name derived from the remote, unique and filesystem-safe; default branch from `origin/HEAD` when it differs from the workspace default).
 - Env keys the workspace does not have yet are merged into the shared `.env`. Values that conflict with the workspace `.env` are kept repo-local in that repo's `[repos.env]`; nothing is silently overwritten.
 - When the repo's env carries a default project key (Jira or Linear), a starter routing rule is seeded for it.
-- Re-running import for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
+- Re-running `add-repo` for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
 - `.devintern-code/settings.json` needs no migration: it travels with the repo and applies inside each task worktree.
 
 ## Environment
@@ -194,6 +194,8 @@ With GitHub credentials in the workspace `.env`, the fleet worker also reacts to
 - **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
 - **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. Relay envelopes carry the repository, so events route to the right repo automatically; task events re-run the fleet query and go through the same routing rules. Tracker relay events work even when GitHub polling credentials are not configured. Events for repositories not in the workspace are ignored.
+
+To reconnect after adding repositories, run `devintern worker connect`. The command walks every GitHub repository in `workspace.toml`, skips already verified App pairings, and guides you through verification for the rest. `devintern worker connect status` also reports workspace repositories that still need verification. Tracker targets such as `devintern worker connect linear` reuse credentials from the shared workspace `.env`.
 
 Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
 

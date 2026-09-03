@@ -32,13 +32,13 @@ import {
 } from "./github-app-setup";
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
-import { hasGitHubRelayRegistration, loadRelayState, runWorkerConnect } from "./relay-connect";
+import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
   trackersSupportingPolling,
 } from "./tracker-capabilities";
-import { ensureWorkspaceAndImport, writeWorkspaceDefaults } from "./workspace/init";
+import { ensureWorkspaceAndAddRepo, writeWorkspaceDefaults } from "./workspace/init";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
@@ -312,17 +312,11 @@ async function defaultConnectRelay(options: {
   const deps = { workingDir: options.workspaceDir, getAccessToken };
   const workspace = loadWorkspaceConfig(workspaceConfigPath(options.workspaceDir));
   const repos = workspaceGitHubRepos(workspace);
-  if (repos.length === 0) {
-    const detected = await detectGitHubRepo();
-    if (detected) repos.push(detected);
-  }
   let ok = true;
 
   if (repos.length > 0) {
     for (const repo of repos) {
-      const repoOk =
-        (await runWorkerConnect(["github", "--repo", repo], () => Promise.resolve(repo), deps)) ===
-        0;
+      const repoOk = (await connectRelayTarget("github", { ...deps, repo })) === 0;
       ok = repoOk && ok;
     }
   } else {
@@ -330,12 +324,7 @@ async function defaultConnectRelay(options: {
   }
 
   if (options.trackerType !== "github" && options.trackerType !== "markdown") {
-    const trackerOk =
-      (await runWorkerConnect(
-        [options.trackerType],
-        () => Promise.resolve(repos[0] ?? null),
-        deps,
-      )) === 0;
+    const trackerOk = (await connectRelayTarget(options.trackerType, deps)) === 0;
     ok = trackerOk && ok;
   }
 
@@ -387,7 +376,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const bootstrap =
       deps.bootstrapWorkspace ??
       (async (opts) => {
-        const result = await ensureWorkspaceAndImport(opts.cwd, opts.log);
+        const result = await ensureWorkspaceAndAddRepo(opts.cwd, opts.log);
         if (!result.ok) {
           return { error: result.error };
         }
@@ -581,7 +570,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       } else {
         githubAppOutcome = "skipped";
         log("   No verified GitHub App pairing was recorded.");
-        log(`   Run: devintern worker connect github --repo ${githubRepo}`);
+        log("   Run: devintern worker connect github");
         log("   The relay verifies the installation before it enables event routing.");
       }
     }

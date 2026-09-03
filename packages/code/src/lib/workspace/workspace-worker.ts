@@ -636,7 +636,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.repos.length === 0) {
     console.error(
       `❌ No repos configured in ${configPath}.\n` +
-        "   Add [[repos]] entries (or run `devintern workspace import` inside an existing repo).",
+        "   Add [[repos]] entries (or run `devintern worker add-repo` inside an existing repo).",
     );
     process.exit(1);
   }

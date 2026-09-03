@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
 order: 1
-dateModified: 2026-09-01
+dateModified: 2026-09-03
 ---
 
 # Worker Daemon
@@ -24,14 +24,14 @@ devintern worker
 
 `worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
-In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; later imports can be registered by running `devintern worker connect github --repo owner/name` from the repository. The CLI saves the connection into its fleet workspace automatically.
+In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
 
 If the relay is intentionally unavailable, the wizard does not offer the hosted App. Polling and the worker's own PRs still work with `GITHUB_TOKEN`; air-gapped mention handling uses the advanced customer-owned App setup in [GitHub authentication](./configuration.md#advanced-customer-owned-github-app).
 
 Or configure by hand and start directly:
 
 ```bash
-# After a workspace exists (worker init, or workspace init + import)
+# After a workspace exists (`worker init`, or `worker scaffold` + `worker add-repo`)
 devintern worker
 
 # Advanced: run the repo-local GitHub webhook listener separately
@@ -300,7 +300,7 @@ In the standard setup, pair the workspace with the relay and install the central
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). While relay long-polls are healthy, review and mention acquisition yields to relay and runs only a 30-minute safety sweep; PR lifecycle and conflict reconciliation continue at the normal polling interval. If relay delivery stops, normal feedback polling resumes after a short grace period. Events from different acquisition paths for the same PR are serialized and collapsed into one follow-up check, so fallback coverage cannot start overlapping agent runs. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). While relay long-polls are healthy, review and mention acquisition yields to relay and runs only a 30-minute safety sweep; PR lifecycle and conflict reconciliation continue at the normal polling interval. If relay delivery stops, normal feedback polling resumes after a short grace period. Events from different acquisition paths for the same PR are serialized and collapsed into one follow-up check, so fallback coverage cannot start overlapping agent runs. Run `worker connect` after adding repositories or to add or rotate tracker registrations.
 
 ## Seeing what the worker did
 

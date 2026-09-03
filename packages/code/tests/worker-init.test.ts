@@ -261,7 +261,7 @@ describe("runWorkerInit", () => {
       expect(result.ok).toBe(true);
       const all = logs.join("\n");
       expect(all).toContain("No verified GitHub App pairing was recorded");
-      expect(all).toContain("devintern worker connect github --repo acme/web");
+      expect(all).toContain("devintern worker connect github");
       expect(all).toContain("GitHub App events are not enabled:");
       expect(loadGitHubAppRecord(workspaceDir)).toBeNull();
     });

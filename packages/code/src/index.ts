@@ -606,20 +606,34 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
   (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    // `devintern worker connect ...` — pair this repo with the Mode 2 relay.
+    // `devintern worker connect ...` — pair the configured fleet with the
+    // Mode 2 relay.
     if (process.argv[3] === "connect") {
-      const { runWorkerConnect } = await import("./lib/relay-connect");
-      const exitCode = await runWorkerConnect(process.argv.slice(4), async () => {
-        try {
-          const detected = await new PRManager().detectRepository();
-          return detected.platform === "github" ? detected.repository : null;
-        } catch {
-          return null;
-        }
-      });
+      const { runWorkerConnectCommand } = await import("./lib/worker-connect");
+      const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
       process.exit(exitCode);
+    }
+
+    if (process.argv[3] === "scaffold") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker scaffold");
+        console.log("");
+        console.log("Create ~/.devintern/workspace.toml and the shared .env without the wizard.");
+        process.exit(0);
+      }
+      const { runWorkerScaffold } = await import("./lib/workspace/init");
+      process.exit(runWorkerScaffold());
+    }
+
+    if (process.argv[3] === "add-repo") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker add-repo");
+        console.log("");
+        console.log("Add the current Git repository to the worker workspace.");
+        process.exit(0);
+      }
+      const { runWorkerAddRepo } = await import("./lib/workspace/init");
+      process.exit(await runWorkerAddRepo(process.cwd()));
     }
 
     // `devintern worker run-now` — ask a running workspace worker for one
@@ -659,11 +673,18 @@ if (process.argv[2] === "init") {
     const args = process.argv.slice(3);
 
     if (args[0] === "init") {
+      if (args.some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker init");
+        console.log("");
+        console.log("Interactively configure unattended automation and a native user service.");
+        process.exit(0);
+      }
+      loadedEnvPath = loadEnvironment();
       const { runWorkerInit } = await import("./lib/worker-init");
       const { isInteractive } = await import("./lib/init-wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: `devintern workspace init` + `workspace import`,");
+        console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
         console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
         process.exit(1);
       }
@@ -722,13 +743,13 @@ if (process.argv[2] === "init") {
       } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
       } else if (arg === "--help" || arg === "-h") {
-        console.log("Usage: devintern worker [init|run-now] [options]");
-        console.log("       devintern worker connect [github|status] [--repo owner/name]");
+        console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
+        console.log("       devintern worker connect [target] [--workspace <path>]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
-        console.log("events arrive in seconds without webhook setup; see connect --help.");
+        console.log("`worker connect` pairs workspace repos with the DevIntern relay (Mode 2)");
+        console.log("so events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
         console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
         console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
@@ -738,6 +759,9 @@ if (process.argv[2] === "init") {
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
         console.log("                      query (live dry run), and license check");
+        console.log("  scaffold            Create workspace.toml and the shared .env only");
+        console.log("  add-repo            Add the current repository to the worker workspace");
+        console.log("  connect             Pair workspace repos or its tracker with the relay");
         console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
@@ -746,8 +770,14 @@ if (process.argv[2] === "init") {
         console.log("  -v, --verbose       Verbose logging");
         console.log("  -h, --help          Display this help message");
         process.exit(0);
+      } else if (!arg.startsWith("-")) {
+        console.error(`❌ Unknown worker command: ${arg}`);
+        console.error("   Run `devintern worker --help` for available commands.");
+        process.exit(1);
       }
     }
+
+    loadedEnvPath = loadEnvironment();
 
     const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
       await import("./lib/workspace/paths");
@@ -789,30 +819,10 @@ if (process.argv[2] === "init") {
     return;
   })();
 } else if (process.argv[2] === "workspace") {
-  // Workspace management: scaffold or grow the multi-repo fleet config.
-  // No license gate here - enforcement lives on the worker's workspace mode.
-  (async () => {
-    const sub = process.argv[3];
-    if (sub === "init") {
-      const { runWorkspaceInit } = await import("./lib/workspace/init");
-      process.exit(runWorkspaceInit());
-    }
-    if (sub === "import") {
-      const { runWorkspaceImport } = await import("./lib/workspace/init");
-      process.exit(await runWorkspaceImport(process.cwd()));
-    }
-    console.log("Usage: devintern workspace <command>");
-    console.log("");
-    console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
-    console.log("The fleet worker serves every repo listed there; see `devintern worker --help`.");
-    console.log("");
-    console.log("Commands:");
-    console.log("  init      Create the workspace config and shared .env");
-    console.log("  import    Add the current repo to the workspace (run inside the repo);");
-    console.log("            merges its .devintern-code/.env into the workspace .env and");
-    console.log("            keeps conflicting values repo-local in [repos.env]");
-    process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
-  })();
+  console.error("❌ Unknown command: workspace");
+  console.error("   Workspace setup and management live under `devintern worker`.");
+  console.error("   Run `devintern worker --help` for available commands.");
+  process.exit(1);
 } else if (process.argv[2] === "dashboard") {
   // Local observability dashboard, standalone: reads the worker's SQLite
   // read-only, so it works whether or not the worker is running.

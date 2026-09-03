@@ -459,7 +459,7 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
   } catch (error) {
     throw new Error(
       `Cannot read workspace config at ${path}: ${error instanceof Error ? error.message : String(error)}\n` +
-        "Run `devintern workspace init` to create one.",
+        "Run `devintern worker scaffold` to create one.",
     );
   }
   return parseWorkspaceConfig(text, path);

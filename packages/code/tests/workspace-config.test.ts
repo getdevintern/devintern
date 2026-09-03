@@ -652,7 +652,7 @@ describe("workspace paths", () => {
     expect(config.repos.map((repo) => repo.name)).toEqual(["backend", "frontend"]);
 
     expect(() => loadWorkspaceConfig(join(workspaceDir, "missing.toml"))).toThrow(
-      /devintern workspace init/,
+      /devintern worker scaffold/,
     );
   });
 });
