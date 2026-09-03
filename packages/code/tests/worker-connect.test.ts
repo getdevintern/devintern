@@ -4,18 +4,19 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { saveRelayState } from "../src/lib/relay-connect";
-import { runWorkspaceConnect } from "../src/lib/workspace/connect";
+import { runWorkerConnectCommand } from "../src/lib/worker-connect";
 
-describe("runWorkspaceConnect", () => {
+describe("runWorkerConnectCommand", () => {
   let workspaceDir: string;
   let logs: string[];
   let errors: string[];
   const originalLog = console.log;
   const originalError = console.error;
   const savedLinearKey = process.env.LINEAR_API_KEY;
+  const savedWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
 
   beforeEach(() => {
-    workspaceDir = mkdtempSync(join(tmpdir(), "devintern-workspace-connect-"));
+    workspaceDir = mkdtempSync(join(tmpdir(), "devintern-worker-connect-"));
     mkdirSync(workspaceDir, { recursive: true });
     writeFileSync(
       join(workspaceDir, "workspace.toml"),
@@ -39,6 +40,7 @@ GITHUB_REPO = "acme/api"
       "utf8",
     );
     writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=workspace-key\n", "utf8");
+    process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
     logs = [];
     errors = [];
     console.log = (...values: unknown[]) => logs.push(values.join(" "));
@@ -50,10 +52,12 @@ GITHUB_REPO = "acme/api"
     console.error = originalError;
     if (savedLinearKey === undefined) delete process.env.LINEAR_API_KEY;
     else process.env.LINEAR_API_KEY = savedLinearKey;
+    if (savedWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+    else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspaceDir;
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test("pairs every unverified repo and continues after a failure", async () => {
+  test("pairs every unverified workspace repo and continues after a failure", async () => {
     saveRelayState(
       {
         relayUrl: "https://relay.test",
@@ -67,7 +71,7 @@ GITHUB_REPO = "acme/api"
     );
     const calls: string[][] = [];
 
-    const result = await runWorkspaceConnect([], {
+    const result = await runWorkerConnectCommand([], async () => null, {
       workspaceDir,
       runConnect: async (args) => {
         calls.push(args);
@@ -79,6 +83,25 @@ GITHUB_REPO = "acme/api"
     expect(calls).toEqual([["github", "--repo", "acme/web"]]);
     expect(logs.join("\n")).toContain("acme/api is already verified");
     expect(errors.join("\n")).toContain("1 workspace repository pairing(s) failed");
+  });
+
+  test("an explicit repo bypasses fleet-wide connect", async () => {
+    const calls: string[][] = [];
+
+    const result = await runWorkerConnectCommand(
+      ["github", "--repo", "acme/web"],
+      async () => null,
+      {
+        workspaceDir,
+        runConnect: async (args) => {
+          calls.push(args);
+          return 0;
+        },
+      },
+    );
+
+    expect(result).toBe(0);
+    expect(calls).toEqual([["github", "--repo", "acme/web"]]);
   });
 
   test("status reports workspace repos without verified pairing", async () => {
@@ -94,7 +117,7 @@ GITHUB_REPO = "acme/api"
       workspaceDir,
     );
 
-    const result = await runWorkspaceConnect(["status"], {
+    const result = await runWorkerConnectCommand(["status"], async () => null, {
       workspaceDir,
       runConnect: async () => 0,
     });
@@ -107,7 +130,7 @@ GITHUB_REPO = "acme/api"
     process.env.LINEAR_API_KEY = "shell-key";
     let observedKey: string | undefined;
 
-    const result = await runWorkspaceConnect(["linear"], {
+    const result = await runWorkerConnectCommand(["linear"], async () => null, {
       workspaceDir,
       runConnect: async (args) => {
         expect(args).toEqual(["linear"]);
@@ -118,5 +141,22 @@ GITHUB_REPO = "acme/api"
 
     expect(result).toBe(0);
     expect(observedKey).toBe("shell-key");
+  });
+
+  test("falls back to repository-local connect without a workspace", async () => {
+    rmSync(join(workspaceDir, "workspace.toml"));
+    const calls: string[][] = [];
+
+    const result = await runWorkerConnectCommand([], async () => "acme/local", {
+      findProjectEnv: () => null,
+      runConnect: async (args, detectRepo) => {
+        calls.push(args);
+        expect(await detectRepo()).toBe("acme/local");
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(calls).toEqual([["github"]]);
   });
 });

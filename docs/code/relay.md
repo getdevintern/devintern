@@ -4,7 +4,7 @@ description: "Connect the worker to the DevIntern relay for instant PR and task 
 section: "Server Automation"
 order: 3
 sidebarHidden: true
-dateModified: 2026-09-02
+dateModified: 2026-09-03
 ---
 
 # Relay (Instant Events)
@@ -88,26 +88,24 @@ devintern worker
 
 The worker detects the pairing and starts the relay connection automatically alongside its normal polling. `worker init` stores workspace pairing under the workspace home; standalone `worker connect` stores single-repo pairing in `.devintern-code/relay.json`.
 
-For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in `.devintern-code/.env` first (same vars as `TASK_TRACKER=…`), then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
+For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` first (or `.devintern-code/.env` when connecting without a workspace), then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
 
 ## Commands
 
 | Command                                             | Description                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| `devintern worker connect`                          | Verify and pair this repository through the GitHub App (auto-detected)   |
+| `devintern worker connect`                          | Verify every unpaired workspace repository (or the current repo without a workspace) |
 | `devintern worker connect github --repo owner/name` | Verify and pair a specific repository through the GitHub App             |
 | `devintern worker connect linear`                   | Self-register a Linear webhook for Issue events                          |
 | `devintern worker connect asana`                    | Self-register an Asana webhook for task events                           |
 | `devintern worker connect trello`                   | Self-register a Trello webhook for card events                           |
 | `devintern worker connect azure-devops`             | Self-register work item service hooks                                    |
 | `devintern worker connect jira`                     | Print the one-time Jira admin webhook setup with your private ingest URL |
-| `devintern worker connect status`                   | Show registrations, buffered events, and per-source freshness            |
-| `devintern workspace connect`                       | Verify every unpaired GitHub repository in the fleet workspace           |
-| `devintern workspace connect status`                | Show relay status and workspace repositories still awaiting verification |
+| `devintern worker connect status`                   | Show relay status and workspace repositories still awaiting verification |
 
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
 
-Workspace connect uses the same verified GitHub App flow as `worker connect`, storing the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file.
+With a workspace, `worker connect` stores the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file. Pass `--repo owner/name` to pair only one repository.
 
 ## Environment variables
 
@@ -121,7 +119,7 @@ Workspace connect uses the same verified GitHub App flow as `worker connect`, st
 
 ### Per `worker connect` target
 
-These are the same credentials you already use for that tracker. Set them in `.devintern-code/.env` before running the matching connect command. GitHub connect only needs a detectable git remote (or `--repo`); Jira connect mints the ingest URL and prints admin setup steps (no Jira API call from the CLI).
+These are the same credentials you already use for that tracker. Set them in the workspace `.env`, or the nearest project `.devintern-code/.env` when no workspace exists. GitHub connect uses the repositories in `workspace.toml`, `--repo owner/name`, or the current repository when no workspace exists. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
 
 | Target         | Required env vars                                               | Notes                                                           |
 | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |

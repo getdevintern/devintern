@@ -123,6 +123,9 @@ describe.concurrent("CLI Argument Handling", () => {
     const result = await runCLI(["worker", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: devintern worker");
+    expect(result.stdout).toContain("scaffold");
+    expect(result.stdout).toContain("add-repo");
+    expect(result.stdout).toContain("connect");
     expect(result.stdout).toContain("--workspace <path>");
     expect(result.stdout).toContain("workspace.toml");
     expect(result.stdout).not.toContain("--listen");
@@ -134,6 +137,24 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).not.toContain("Environment variables:");
     expect(result.stdout).not.toContain("WORKER_TASK_QUERY");
     expect(result.stdout).not.toContain("WORKER_POLL_INTERVAL");
+  });
+
+  test("should show help for non-interactive worker setup commands", async () => {
+    const scaffold = await runCLI(["worker", "scaffold", "--help"]);
+    expect(scaffold.exitCode).toBe(0);
+    expect(scaffold.stdout).toContain("Usage: devintern worker scaffold");
+
+    const addRepo = await runCLI(["worker", "add-repo", "--help"]);
+    expect(addRepo.exitCode).toBe(0);
+    expect(addRepo.stdout).toContain("Usage: devintern worker add-repo");
+  });
+
+  test("should reject the removed top-level workspace namespace", async () => {
+    const result = await runCLI(["workspace"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Unknown command: workspace");
+    expect(result.stderr).toContain("devintern worker --help");
+    expect(result.stdout).not.toContain("Processing");
   });
 
   test("should reject removed worker flags", async () => {

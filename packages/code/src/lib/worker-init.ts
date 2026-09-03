@@ -38,7 +38,7 @@ import {
   supportsPolling,
   trackersSupportingPolling,
 } from "./tracker-capabilities";
-import { ensureWorkspaceAndImport, writeWorkspaceDefaults } from "./workspace/init";
+import { ensureWorkspaceAndAddRepo, writeWorkspaceDefaults } from "./workspace/init";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
@@ -387,7 +387,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const bootstrap =
       deps.bootstrapWorkspace ??
       (async (opts) => {
-        const result = await ensureWorkspaceAndImport(opts.cwd, opts.log);
+        const result = await ensureWorkspaceAndAddRepo(opts.cwd, opts.log);
         if (!result.ok) {
           return { error: result.error };
         }
