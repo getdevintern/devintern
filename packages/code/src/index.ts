@@ -613,18 +613,11 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
   (async () => {
-    // `devintern worker connect ...` — pair the configured fleet (or an
-    // explicitly selected repo) with the Mode 2 relay.
+    // `devintern worker connect ...` — pair the configured fleet with the
+    // Mode 2 relay.
     if (process.argv[3] === "connect") {
       const { runWorkerConnectCommand } = await import("./lib/worker-connect");
-      const exitCode = await runWorkerConnectCommand(process.argv.slice(4), async () => {
-        try {
-          const detected = await new PRManager().detectRepository();
-          return detected.platform === "github" ? detected.repository : null;
-        } catch {
-          return null;
-        }
-      });
+      const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
       process.exit(exitCode);
     }
 
@@ -758,7 +751,7 @@ if (process.argv[2] === "init") {
         verbose = true;
       } else if (arg === "--help" || arg === "-h") {
         console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
-        console.log("       devintern worker connect [target] [--repo owner/name]");
+        console.log("       devintern worker connect [target] [--workspace <path>]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");

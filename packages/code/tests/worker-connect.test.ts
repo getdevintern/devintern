@@ -69,39 +69,29 @@ GITHUB_REPO = "acme/api"
       },
       workspaceDir,
     );
-    const calls: string[][] = [];
+    const calls: Array<{ target: string; repo?: string }> = [];
 
-    const result = await runWorkerConnectCommand([], async () => null, {
+    const result = await runWorkerConnectCommand([], {
       workspaceDir,
-      runConnect: async (args) => {
-        calls.push(args);
-        return args.includes("acme/web") ? 1 : 0;
+      runConnect: async (target, deps) => {
+        calls.push({ target, repo: deps?.repo });
+        return deps?.repo === "acme/web" ? 1 : 0;
       },
     });
 
     expect(result).toBe(1);
-    expect(calls).toEqual([["github", "--repo", "acme/web"]]);
+    expect(calls).toEqual([{ target: "github", repo: "acme/web" }]);
     expect(logs.join("\n")).toContain("acme/api is already verified");
     expect(errors.join("\n")).toContain("1 workspace repository pairing(s) failed");
   });
 
-  test("an explicit repo bypasses fleet-wide connect", async () => {
-    const calls: string[][] = [];
+  test("rejects repository selection because workspace.toml owns the fleet", async () => {
+    const result = await runWorkerConnectCommand(["github", "--repo", "acme/web"], {
+      workspaceDir,
+    });
 
-    const result = await runWorkerConnectCommand(
-      ["github", "--repo", "acme/web"],
-      async () => null,
-      {
-        workspaceDir,
-        runConnect: async (args) => {
-          calls.push(args);
-          return 0;
-        },
-      },
-    );
-
-    expect(result).toBe(0);
-    expect(calls).toEqual([["github", "--repo", "acme/web"]]);
+    expect(result).toBe(1);
+    expect(errors.join("\n")).toContain("Unknown option: --repo");
   });
 
   test("status reports workspace repos without verified pairing", async () => {
@@ -117,9 +107,12 @@ GITHUB_REPO = "acme/api"
       workspaceDir,
     );
 
-    const result = await runWorkerConnectCommand(["status"], async () => null, {
+    const result = await runWorkerConnectCommand(["status"], {
       workspaceDir,
-      runConnect: async () => 0,
+      runConnect: async (target) => {
+        expect(target).toBe("status");
+        return 0;
+      },
     });
 
     expect(result).toBe(0);
@@ -130,10 +123,10 @@ GITHUB_REPO = "acme/api"
     process.env.LINEAR_API_KEY = "shell-key";
     let observedKey: string | undefined;
 
-    const result = await runWorkerConnectCommand(["linear"], async () => null, {
+    const result = await runWorkerConnectCommand(["linear"], {
       workspaceDir,
-      runConnect: async (args) => {
-        expect(args).toEqual(["linear"]);
+      runConnect: async (target) => {
+        expect(target).toBe("linear");
         observedKey = process.env.LINEAR_API_KEY;
         return 0;
       },
@@ -143,20 +136,15 @@ GITHUB_REPO = "acme/api"
     expect(observedKey).toBe("shell-key");
   });
 
-  test("falls back to repository-local connect without a workspace", async () => {
+  test("requires a workspace instead of writing repository-local relay state", async () => {
     rmSync(join(workspaceDir, "workspace.toml"));
-    const calls: string[][] = [];
 
-    const result = await runWorkerConnectCommand([], async () => "acme/local", {
-      findProjectEnv: () => null,
-      runConnect: async (args, detectRepo) => {
-        calls.push(args);
-        expect(await detectRepo()).toBe("acme/local");
-        return 0;
-      },
+    const result = await runWorkerConnectCommand([], {
+      workspaceDir,
     });
 
-    expect(result).toBe(0);
-    expect(calls).toEqual([["github"]]);
+    expect(result).toBe(1);
+    expect(errors.join("\n")).toContain("No workspace found");
+    expect(errors.join("\n")).toContain("devintern worker init");
   });
 });

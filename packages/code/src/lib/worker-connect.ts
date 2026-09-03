@@ -1,11 +1,10 @@
-/** Workspace-aware `devintern worker connect` orchestration. */
+/** Workspace-only `devintern worker connect` orchestration. */
 
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
-import { findEnvFile } from "@devintern/utils";
 
-import { hasGitHubRelayRegistration, loadRelayState, runWorkerConnect } from "./relay-connect";
-import type { RelayConnectDeps } from "./relay-connect";
+import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
+import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
@@ -15,9 +14,9 @@ const TRACKER_TARGETS = new Set(["linear", "asana", "trello", "azure-devops", "j
 
 const WORKER_CONNECT_HELP = `Usage: devintern worker connect [target] [options]
 
-Connect the worker to the DevIntern relay. With a workspace, GitHub connect
-verifies every unpaired repository and stores shared relay state under the
-workspace home. Without a workspace, it connects the current repository.
+Connect the workspace worker to the DevIntern relay. GitHub connect verifies
+every unpaired repository and stores shared relay state under the workspace
+home.
 
 Targets:
   github (default)   Verify unpaired GitHub repositories through the App
@@ -29,49 +28,56 @@ Targets:
   status              Show relay status and unverified workspace repositories
 
 Options:
-  --repo <owner/name>  Connect only this GitHub repository
   --workspace <path>   Use this workspace.toml
   -h, --help           Display this help message
 
-Tracker targets read credentials from the workspace .env, or the nearest
-project .env without a workspace. Explicit shell variables take precedence.`;
+Tracker targets read credentials from the workspace .env. Explicit shell
+variables take precedence.`;
 
 export interface WorkerConnectCommandDeps {
   workspaceDir?: string;
   workspacePath?: string;
   getAccessToken?: () => Promise<string>;
-  runConnect?: typeof runWorkerConnect;
-  findProjectEnv?: () => string | null;
+  runConnect?: typeof connectRelayTarget;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
 }
 
 interface ParsedConnectArgs {
   target: string;
-  repo?: string;
   workspacePath?: string;
   help: boolean;
+  error?: string;
 }
 
 function parseConnectArgs(args: string[]): ParsedConnectArgs {
   let target = "github";
-  let repo: string | undefined;
   let workspacePath: string | undefined;
   let help = false;
+  let targetSet = false;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") {
       help = true;
-    } else if (arg === "--repo" && args[index + 1]) {
-      repo = args[++index];
-    } else if (arg === "--workspace" && args[index + 1]) {
-      workspacePath = args[++index];
+    } else if (arg === "--workspace") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        return { target, workspacePath, help, error: "--workspace requires a value." };
+      }
+      workspacePath = value;
+      index++;
+    } else if (arg?.startsWith("-")) {
+      return { target, workspacePath, help, error: `Unknown option: ${arg}` };
     } else if (arg && !arg.startsWith("-")) {
+      if (targetSet) {
+        return { target, workspacePath, help, error: `Unexpected argument: ${arg}` };
+      }
       target = arg.toLowerCase();
+      targetSet = true;
     }
   }
-  return { target, repo, workspacePath, help };
+  return { target, workspacePath, help };
 }
 
 /** GitHub slugs represented by the workspace, deduplicated in config order. */
@@ -94,16 +100,19 @@ export function unverifiedWorkspaceRelayRepos(
   return workspaceRelayRepos(config).filter((repo) => !hasGitHubRelayRegistration(state, repo));
 }
 
-/** Run the public, workspace-aware `devintern worker connect` command. */
+/** Run the public, workspace-only `devintern worker connect` command. */
 export async function runWorkerConnectCommand(
   args: string[],
-  detectRepo: () => Promise<string | null>,
   deps: WorkerConnectCommandDeps = {},
 ): Promise<number> {
   const parsed = parseConnectArgs(args);
   if (parsed.help) {
     console.log(WORKER_CONNECT_HELP);
     return 0;
+  }
+  if (parsed.error) {
+    console.error(`❌ ${parsed.error}`);
+    return 1;
   }
   if (
     parsed.target !== "github" &&
@@ -116,14 +125,7 @@ export async function runWorkerConnectCommand(
     );
     return 1;
   }
-
-  for (const option of ["--repo", "--workspace"]) {
-    const optionIndex = args.indexOf(option);
-    if (optionIndex !== -1 && (!args[optionIndex + 1] || args[optionIndex + 1]?.startsWith("-"))) {
-      console.error(`❌ ${option} requires a value.`);
-      return 1;
-    }
-  }
+  const target = parsed.target as RelayConnectTarget;
 
   const selectedWorkspacePath = deps.workspacePath ?? parsed.workspacePath;
   const workspaceDir =
@@ -132,30 +134,11 @@ export async function runWorkerConnectCommand(
   const configPath = selectedWorkspacePath
     ? resolve(selectedWorkspacePath)
     : workspaceConfigPath(workspaceDir);
-  const runConnect = deps.runConnect ?? runWorkerConnect;
+  const runConnect = deps.runConnect ?? connectRelayTarget;
 
   if (!existsSync(configPath)) {
-    if (selectedWorkspacePath || deps.workspaceDir) {
-      console.error(`❌ No workspace found at ${configPath}.`);
-      return 1;
-    }
-    const findProjectEnvironment =
-      deps.findProjectEnv ?? (() => findEnvFile({ configDirName: ".devintern-code" }));
-    const projectEnvPath = findProjectEnvironment();
-    if (projectEnvPath) {
-      for (const [key, value] of Object.entries(parseEnvFile(projectEnvPath))) {
-        if (process.env[key] === undefined) process.env[key] = value;
-      }
-    }
-    const standaloneArgs =
-      parsed.target === "github" && parsed.repo
-        ? [parsed.target, "--repo", parsed.repo]
-        : [parsed.target];
-    return runConnect(standaloneArgs, detectRepo, {
-      relayUrl: deps.relayUrl,
-      fetchImpl: deps.fetchImpl,
-      getAccessToken: deps.getAccessToken,
-    });
+    console.error(`❌ No workspace found at ${configPath}. Run \`devintern worker init\` first.`);
+    return 1;
   }
 
   let config: WorkspaceConfig;
@@ -171,7 +154,7 @@ export async function runWorkerConnectCommand(
   }
 
   let accessTokenPromise: Promise<string> | undefined;
-  const connectDeps: RelayConnectDeps = {
+  const connectDeps: WorkspaceRelayConnectDeps = {
     workingDir: workspaceDir,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
@@ -180,8 +163,8 @@ export async function runWorkerConnectCommand(
       : undefined,
   };
 
-  if (parsed.target === "status") {
-    const result = await runConnect(["status"], detectRepo, connectDeps);
+  if (target === "status") {
+    const result = await runConnect("status", connectDeps);
     if (result !== 0) return result;
 
     const missing = unverifiedWorkspaceRelayRepos(config, workspaceDir);
@@ -194,12 +177,8 @@ export async function runWorkerConnectCommand(
     return 0;
   }
 
-  if (parsed.target !== "github") {
-    return runConnect([parsed.target], detectRepo, connectDeps);
-  }
-
-  if (parsed.repo) {
-    return runConnect(["github", "--repo", parsed.repo], detectRepo, connectDeps);
+  if (target !== "github") {
+    return runConnect(target, connectDeps);
   }
 
   const repos = workspaceRelayRepos(config);
@@ -215,11 +194,7 @@ export async function runWorkerConnectCommand(
       console.log(`✅ ${repo} is already verified; skipping.`);
       continue;
     }
-    const result = await runConnect(
-      ["github", "--repo", repo],
-      () => Promise.resolve(repo),
-      connectDeps,
-    );
+    const result = await runConnect("github", { ...connectDeps, repo });
     if (result !== 0) failures++;
   }
 

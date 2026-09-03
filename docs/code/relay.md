@@ -40,7 +40,7 @@ GitHub repository registration is completed through the DevIntern AI GitHub App.
 
 The App's private key never reaches the worker: it fetches referenced PRs/comments and performs GitHub writes with its local `GITHUB_TOKEN`, so customer-owned `GITHUB_APP_ID` credentials are ignored in this relay-backed mode.
 
-GitHub connections created before verified pairing was introduced must run `devintern worker connect github --repo owner/name` once again from any managed repository. The CLI recognizes repositories listed in the fleet workspace and saves the verified connection where the worker reads it; no workspace-directory navigation is required. Old local confirmation markers are not treated as completed setup, while an existing live relay route remains usable during the upgrade.
+GitHub connections created before verified pairing was introduced must run `devintern worker connect github` once again. The command verifies every unpaired GitHub repository listed in the fleet workspace. Old local confirmation markers are not treated as completed setup, while an existing live relay route remains usable during the upgrade.
 
 `LICENSE_KEY` is still required for the local unattended license gate when you run `devintern worker` (same as polling mode without the relay). It is not the credential the relay data plane accepts.
 
@@ -76,36 +76,35 @@ Mosh cannot forward TCP — use `ssh` for the tunnel, or the session-copy path a
 devintern login
 
 # Automation license for the worker daemon
-# Set LICENSE_KEY in .devintern-code/.env (from https://devintern.com/account)
+# Set LICENSE_KEY in the workspace .env (from https://devintern.com/account)
 
 # Pair the workspace repositories for central App delivery
 devintern worker connect
 
-# Open the printed GitHub App URL and authorize the requested repository.
-# The command waits for verification, then you can run the worker:
+# Open each printed GitHub App URL and authorize the requested repository.
+# The command waits for every verification, then you can run the worker:
 devintern worker
 ```
 
-The worker detects the pairing and starts the relay connection automatically alongside its normal polling. `worker init` stores workspace pairing under the workspace home; standalone `worker connect` stores single-repo pairing in `.devintern-code/relay.json`.
+The worker detects the workspace pairing and starts the relay connection automatically alongside its normal polling. Both `worker init` and `worker connect` store relay state under the workspace home.
 
-For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` first (or `.devintern-code/.env` when connecting without a workspace), then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
+For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` first, then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
 
 ## Commands
 
-| Command                                             | Description                                                              |
-| --------------------------------------------------- | ------------------------------------------------------------------------ |
-| `devintern worker connect`                          | Verify every unpaired workspace repository (or the current repo without a workspace) |
-| `devintern worker connect github --repo owner/name` | Verify and pair a specific repository through the GitHub App             |
-| `devintern worker connect linear`                   | Self-register a Linear webhook for Issue events                          |
-| `devintern worker connect asana`                    | Self-register an Asana webhook for task events                           |
-| `devintern worker connect trello`                   | Self-register a Trello webhook for card events                           |
-| `devintern worker connect azure-devops`             | Self-register work item service hooks                                    |
-| `devintern worker connect jira`                     | Print the one-time Jira admin webhook setup with your private ingest URL |
-| `devintern worker connect status`                   | Show relay status and workspace repositories still awaiting verification |
+| Command                                 | Description                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `devintern worker connect`              | Verify every unpaired GitHub repository in the workspace                  |
+| `devintern worker connect linear`       | Self-register a Linear webhook for Issue events                           |
+| `devintern worker connect asana`        | Self-register an Asana webhook for task events                            |
+| `devintern worker connect trello`       | Self-register a Trello webhook for card events                            |
+| `devintern worker connect azure-devops` | Self-register work item service hooks                                     |
+| `devintern worker connect jira`         | Print the one-time Jira admin webhook setup with your private ingest URL  |
+| `devintern worker connect status`       | Show relay status and workspace repositories still awaiting verification |
 
 Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
 
-With a workspace, `worker connect` stores the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file. Pass `--repo owner/name` to pair only one repository.
+`worker connect` stores the shared pairing under the workspace home. It skips repositories whose immutable GitHub repository IDs are already verified, continues through the remaining repositories if one pairing fails, and reads tracker credentials from the workspace `.env`. Explicit shell environment variables retain precedence over that file.
 
 ## Environment variables
 
@@ -119,11 +118,11 @@ With a workspace, `worker connect` stores the shared pairing under the workspace
 
 ### Per `worker connect` target
 
-These are the same credentials you already use for that tracker. Set them in the workspace `.env`, or the nearest project `.devintern-code/.env` when no workspace exists. GitHub connect uses the repositories in `workspace.toml`, `--repo owner/name`, or the current repository when no workspace exists. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
+These are the same credentials you already use for that tracker. Set them in the workspace `.env`. GitHub connect uses every unpaired GitHub repository in `workspace.toml`. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
 
 | Target         | Required env vars                                               | Notes                                                           |
 | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
-| `github`       | (none beyond login + `LICENSE_KEY` for the worker)              | Repo from git remote, or `--repo owner/name`                    |
+| `github`       | (none beyond login + `LICENSE_KEY` for the worker)              | Repositories come from `workspace.toml`                         |
 | `linear`       | `LINEAR_API_KEY`                                                | Creates the Linear webhook pointing at your relay ingest URL    |
 | `asana`        | `ASANA_API_TOKEN`, `ASANA_DEFAULT_PROJECT_GID`                  | Webhook scoped to that project; Asana handshakes with the relay |
 | `trello`       | `TRELLO_API_KEY`, `TRELLO_API_TOKEN`, `TRELLO_DEFAULT_BOARD_ID` | Webhook scoped to that board                                    |

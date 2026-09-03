@@ -1,14 +1,13 @@
 /**
- * `devintern worker connect` — pair this project's worker with the Mode 2
- * control plane (relay).
+ * Workspace relay pairing primitives.
  *
  * Connect is the interactive step: the CLI authenticates with the signed-in
  * Supabase session, the control plane confirms automation entitlement, and
  * (for GitHub / tracker sources) registers the callback. Pairing metadata and
- * the minted relay token persist in `.devintern-code/relay.json` (gitignored
- * with the rest of that directory). The worker then long-polls with that
- * durable relay token; `LICENSE_KEY` remains the local unattended license
- * gate for `devintern worker`.
+ * the minted relay token persist under the workspace's `.devintern-code`
+ * directory. The worker then long-polls with that durable relay token;
+ * `LICENSE_KEY` remains the local unattended license gate for
+ * `devintern worker`.
  */
 
 import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devintern/auth";
@@ -16,9 +15,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { saveGitHubAppRecord } from "./github-app-setup";
-import { loadWorkspaceConfig } from "./workspace/config";
-import { gitHubSlugFromRemote } from "./workspace/env";
-import { hasWorkspace, resolveWorkspaceDir, workspaceConfigPath } from "./workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -139,9 +135,9 @@ function authSessionPath(workingDir: string): string {
 }
 
 /**
- * Load persisted connect state, or null when this project is not connected.
+ * Load persisted connect state, or null when this workspace is not connected.
  *
- * @param workingDir - Project root (defaults to cwd)
+ * @param workingDir - Workspace root (defaults to cwd for low-level callers)
  */
 export function loadRelayState(workingDir: string = process.cwd()): RelayConnectState | null {
   const path = relayStatePath(workingDir);
@@ -173,7 +169,7 @@ interface ConnectResponse {
 }
 
 export interface RelayConnectDeps {
-  /** Absolute project root (defaults to cwd). */
+  /** Absolute workspace root (defaults to cwd for low-level callers). */
   workingDir?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
@@ -185,32 +181,30 @@ export interface RelayConnectDeps {
   onGitHubInstallUrl?: (url: string) => void;
 }
 
-/**
- * Resolve where a repo's relay state belongs.
- *
- * `worker connect github` is intentionally run from a source checkout. When
- * that repository is managed by the default fleet workspace, persist into
- * the workspace the daemon reads instead of leaving a second repo-local
- * relay.json behind.
- */
-export function resolveRelayConnectWorkingDir(
-  repo: string,
-  currentDir: string = process.cwd(),
-  workspaceDir: string = resolveWorkspaceDir(),
-): string {
-  if (!hasWorkspace(workspaceDir)) return currentDir;
-  try {
-    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-    const normalizedRepo = repo.toLowerCase();
-    const isManaged = config.repos.some(
-      (configuredRepo) =>
-        gitHubSlugFromRemote(configuredRepo.remote)?.toLowerCase() === normalizedRepo,
-    );
-    return isManaged ? workspaceDir : currentDir;
-  } catch {
-    return currentDir;
-  }
+export type RelayConnectTarget =
+  | "github"
+  | "linear"
+  | "asana"
+  | "trello"
+  | "azure-devops"
+  | "jira"
+  | "status";
+
+export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
+  workingDir: string;
+  /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
+  repo?: string;
 }
+
+const RELAY_CONNECT_TARGETS = new Set<RelayConnectTarget>([
+  "github",
+  "linear",
+  "asana",
+  "trello",
+  "azure-devops",
+  "jira",
+  "status",
+]);
 
 async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> {
   if (deps.getAccessToken) {
@@ -457,88 +451,30 @@ function generateWebhookSecret(): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-const CONNECT_HELP = `Usage: devintern worker connect [target] [options]
-
-Pair this project's worker with the DevIntern relay (Mode 2): source webhooks
-reach DevIntern's ingest, are stripped to reference envelopes (never code,
-comments, or credentials), and your worker picks them up instantly instead of
-waiting for the next poll.
-
-Sign in first (\`devintern login\`). Connect verifies your session and
-automation entitlement, then mints a durable relay token for worker polling.
-LICENSE_KEY is still required for the local unattended license gate when you
-run \`devintern worker\`.
-
-Targets:
-  github (default)   Register this repo for central DevIntern App delivery
-  linear             Self-register a Linear webhook (uses LINEAR_API_KEY)
-  asana              Self-register an Asana webhook (uses ASANA_API_TOKEN and
-                     ASANA_DEFAULT_PROJECT_GID)
-  trello             Self-register a Trello webhook (uses TRELLO_API_KEY,
-                     TRELLO_API_TOKEN, TRELLO_DEFAULT_BOARD_ID)
-  azure-devops       Self-register work item service hooks (uses
-                     AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, AZURE_DEVOPS_PROJECT)
-  jira               Print manual admin webhook setup with your ingest URL
-  status             Show relay registrations and event freshness
-
-Options:
-  --repo <owner/name>  GitHub repo to register (default: auto-detected)
-  -h, --help           Display this help message
-
-Environment variables:
-  LICENSE_KEY              Required for unattended \`devintern worker\` runs
-  WORKER_RELAY_URL         Relay base URL (default: ${DEFAULT_RELAY_URL})
-  LINEAR_API_KEY           Required for \`connect linear\`
-  ASANA_API_TOKEN          Required for \`connect asana\`
-  ASANA_DEFAULT_PROJECT_GID  Required for \`connect asana\`
-  TRELLO_API_KEY           Required for \`connect trello\`
-  TRELLO_API_TOKEN         Required for \`connect trello\`
-  TRELLO_DEFAULT_BOARD_ID  Required for \`connect trello\`
-  AZURE_DEVOPS_ORG         Required for \`connect azure-devops\`
-  AZURE_DEVOPS_PAT         Required for \`connect azure-devops\`
-  AZURE_DEVOPS_PROJECT     Required for \`connect azure-devops\``;
-
 function formatTimestamp(epochMs: number | null): string {
   return epochMs === null ? "never" : new Date(epochMs).toLocaleString();
 }
 
 /**
- * CLI flow for `devintern worker connect ...`.
+ * Connect one relay target using workspace-scoped state.
  *
- * @param args - Argv after "connect"
- * @param detectRepo - Returns the current repo's `owner/name` slug (GitHub only)
+ * @param target - Relay source to connect
  * @param deps - Optional injectables for tests
  * @returns Process exit code
  */
-export async function runWorkerConnect(
-  args: string[],
-  detectRepo: () => Promise<string | null>,
-  deps: RelayConnectDeps = {},
+export async function connectRelayTarget(
+  target: string,
+  deps: WorkspaceRelayConnectDeps,
 ): Promise<number> {
-  let target = "github";
-  let repoFlag: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--help" || arg === "-h") {
-      console.log(CONNECT_HELP);
-      return 0;
-    } else if (arg === "--repo" && args[i + 1]) {
-      repoFlag = args[i + 1];
-      i++;
-    } else if (arg && !arg.startsWith("-")) {
-      target = arg;
-    }
+  if (!RELAY_CONNECT_TARGETS.has(target as RelayConnectTarget)) {
+    console.error(
+      `❌ Unsupported connect target '${target}'. ` +
+        "Available: github, linear, asana, trello, azure-devops, jira, status.",
+    );
+    return 1;
   }
-
-  const repo = target === "github" ? (repoFlag ?? (await detectRepo())) : undefined;
-  const workingDir =
-    deps.workingDir ??
-    (repo
-      ? resolveRelayConnectWorkingDir(repo)
-      : target === "status" && hasWorkspace()
-        ? resolveWorkspaceDir()
-        : process.cwd());
+  const repo = target === "github" ? deps.repo : undefined;
+  const workingDir = deps.workingDir;
   const resolvedDeps: RelayConnectDeps = { ...deps, workingDir };
 
   let accessToken: string;
@@ -704,19 +640,8 @@ export async function runWorkerConnect(
     }
   }
 
-  if (target !== "github") {
-    console.error(
-      `❌ Unsupported connect target '${target}'. ` +
-        "Available: github, linear, asana, trello, azure-devops, jira, status.",
-    );
-    return 1;
-  }
-
   if (!repo) {
-    console.error(
-      "❌ Could not detect a GitHub repository. Pass one explicitly:\n" +
-        "   devintern worker connect github --repo owner/name",
-    );
+    console.error("❌ GitHub relay connection requires a workspace repository.");
     return 1;
   }
 
@@ -748,7 +673,7 @@ export async function runWorkerConnect(
       workingDir,
     );
     console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
-    console.log("   Run the worker as usual: devintern worker [--query ...]");
+    console.log("   Run the worker as usual: devintern worker");
     return 0;
   } catch (error) {
     console.error(`❌ Relay connect failed: ${(error as Error).message}`);

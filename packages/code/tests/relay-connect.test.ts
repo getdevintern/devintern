@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  connectRelayTarget,
   connectGitHubRepo,
   ensureRelayToken,
   fetchRelayStatus,
@@ -11,8 +12,6 @@ import {
   hasGitHubRelayRouting,
   loadRelayState,
   registerRelaySource,
-  resolveRelayConnectWorkingDir,
-  runWorkerConnect,
   saveRelayState,
 } from "../src/lib/relay-connect";
 import type { RelayConnectState } from "../src/lib/relay-connect";
@@ -78,27 +77,6 @@ describe("relay-connect auth", () => {
     expect(hasGitHubRelayRouting(state)).toBe(true);
     expect(hasGitHubRelayRouting(state, "ACME/WIDGETS")).toBe(true);
     expect(hasGitHubRelayRouting(state, "acme/other")).toBe(false);
-  });
-
-  test("repo connect state follows a matching fleet workspace", () => {
-    const workspaceDir = join(dir, "workspace");
-    const repoDir = join(dir, "checkout");
-    mkdirSync(workspaceDir, { recursive: true });
-    mkdirSync(repoDir, { recursive: true });
-    writeFileSync(
-      join(workspaceDir, "workspace.toml"),
-      `
-[defaults]
-tracker = "markdown"
-
-[[repos]]
-name = "widgets"
-remote = "https://github.com/acme/widgets.git"
-`,
-    );
-
-    expect(resolveRelayConnectWorkingDir("ACME/WIDGETS", repoDir, workspaceDir)).toBe(workspaceDir);
-    expect(resolveRelayConnectWorkingDir("acme/other", repoDir, workspaceDir)).toBe(repoDir);
   });
 
   test("ensureRelayToken mints with the Supabase session and stores drt_ token", async () => {
@@ -382,8 +360,9 @@ remote = "https://github.com/acme/widgets.git"
     expect(calls[0].auth).toBe("Bearer drt_status");
   });
 
-  test("runWorkerConnect requires a signed-in session", async () => {
-    const code = await runWorkerConnect(["github", "--repo", "acme/web"], async () => "acme/web", {
+  test("connectRelayTarget requires a signed-in session", async () => {
+    const code = await connectRelayTarget("github", {
+      repo: "acme/web",
       workingDir: dir,
       getAccessToken: async () => {
         throw new Error("Not authenticated. Run `devintern login` first.");
@@ -392,7 +371,7 @@ remote = "https://github.com/acme/widgets.git"
     expect(code).toBe(1);
   });
 
-  test("runWorkerConnect github path mints a token and registers the repo", async () => {
+  test("connectRelayTarget github path mints a token and registers the repo", async () => {
     const fetchImpl = mockFetch((url, body) => {
       if (url.includes("/v1/github/pairings/")) {
         return new Response(
@@ -431,7 +410,8 @@ remote = "https://github.com/acme/widgets.git"
       );
     });
 
-    const code = await runWorkerConnect(["github", "--repo", "acme/web"], async () => null, {
+    const code = await connectRelayTarget("github", {
+      repo: "acme/web",
       workingDir: dir,
       relayUrl: RELAY_URL,
       fetchImpl,

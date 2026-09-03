@@ -126,6 +126,7 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).toContain("scaffold");
     expect(result.stdout).toContain("add-repo");
     expect(result.stdout).toContain("connect");
+    expect(result.stdout).not.toContain("--repo");
     expect(result.stdout).toContain("--workspace <path>");
     expect(result.stdout).toContain("workspace.toml");
     expect(result.stdout).not.toContain("--listen");
@@ -147,6 +148,15 @@ describe.concurrent("CLI Argument Handling", () => {
     const addRepo = await runCLI(["worker", "add-repo", "--help"]);
     expect(addRepo.exitCode).toBe(0);
     expect(addRepo.stdout).toContain("Usage: devintern worker add-repo");
+  });
+
+  test("should show workspace-only worker connect help", async () => {
+    const result = await runCLI(["worker", "connect", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: devintern worker connect");
+    expect(result.stdout).toContain("--workspace <path>");
+    expect(result.stdout).not.toContain("--repo");
+    expect(result.stdout).not.toContain("current repository");
   });
 
   test("should reject the removed top-level workspace namespace", async () => {
