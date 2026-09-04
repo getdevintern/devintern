@@ -36,9 +36,11 @@ constrained modes).
 5. **If you set `supportsStructuredOutput`, add the harness's exact envelope
    schema to [`src/structured-envelope.ts`](src/structured-envelope.ts)** —
    the reply field(s) its JSON mode emits plus any usage/cost fields.
-   Harnesses without an entry yield no reply and no stats (callers fall back
-   to legacy raw-stdout extraction); a missing entry must never be papered
-   over with generic field-name sniffing.
+   Verify the shape against upstream (the CLI's repo source when it is open
+   source, its official docs otherwise) and link the repo/file in the module
+   header. Harnesses without an entry yield no reply and no stats (callers
+   fall back to legacy raw-stdout extraction); a missing entry must never be
+   papered over with generic field-name sniffing.
 
 6. **Add an alias in [`HARNESS_ALIASES`](src/registry.ts)** if users may type a
    different id than the canonical name (a bare binary name such as `agy`).
@@ -128,29 +130,34 @@ open-question detectors) working exactly as before.
   registers an **exact schema per harness** (keyed by `AgentHarness.name`):
   [`extractHarnessStructuredReply`](src/structured-envelope.ts) recovers the
   model's final reply — and the token usage / cost the envelope reports —
-  without any cross-harness field-name sniffing:
+  without any cross-harness field-name sniffing. For open-source CLIs the
+  shape is verified against the linked upstream source; closed-source CLIs
+  (claude-code, cursor, antigravity) follow their official docs:
 
-  | Harness | Reply lives in | Usage / cost fields |
-  | --- | --- | --- |
-  | claude-code | envelope `result` (string or object) | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens`, `usage.cache_creation_input_tokens`; `total_cost_usd` |
-  | codex | last `item.completed` with `item.type:"agent_message"` → `item.text` | `turn.completed.usage.{input_tokens, cached_input_tokens, output_tokens, total_tokens}` |
-  | opencode | `type:"text"` events → `part.text` | `step_finish.part.tokens.{input, output, reasoning, cache.read, cache.write}`; `part.cost` |
-  | qwen | last `type:"result"` array entry → `result` | entry `usage` (Claude-style `*_tokens` fields) |
-  | kimi | last `{role:"assistant"}` message → `content` (string or text blocks) | — |
-  | cline, kilo-code | `type:"say", say:"text"` records → `text` | — |
-  | pi | `message_end` → assistant `message.content` text blocks | event `usage.{input, output, cacheRead, cacheWrite}` |
-  | grok | envelope `text` (may embed the payload after narration prose — recovered via balanced-span parsing) | `usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, total_tokens}`; `total_cost_usd` |
-  | cursor, deepseek | envelope `result` (best-effort) | — |
-  | goose, antigravity | envelope `response` | — |
+  | Harness | Reply lives in | Usage / cost fields | Verified against (upstream) |
+  | --- | --- | --- | --- |
+  | claude-code | envelope `result` (string or object) | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens`, `usage.cache_creation_input_tokens`; `total_cost_usd` | closed source — [headless docs](https://docs.claude.com/en/docs/claude-code/headless) |
+  | codex | last `item.completed` with `item.type:"agent_message"` → `item.text` | `turn.completed.usage.{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` (no `total_tokens` upstream) | [openai/codex `exec_events.rs`](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs) |
+  | opencode | `type:"text"` events → `part.text` | `step_finish.part.tokens.{input, output, reasoning, cache.read, cache.write}` (no `tokens.total`); `part.cost` | [sst/opencode `run.ts`](https://github.com/sst/opencode/blob/main/packages/opencode/src/cli/cmd/run.ts) |
+  | qwen | last `type:"result"` array entry → `result` | entry `usage` (Claude-style `*_tokens` + optional `total_tokens`) | [QwenLM/qwen-code `JsonOutputAdapter.ts`](https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/nonInteractive/io/JsonOutputAdapter.ts) |
+  | kimi | last `{role:"assistant"}` message → `content` (string when a single text part, else `[{type:"text"\|"think", ...}]` blocks) | — | [MoonshotAI/kimi-cli `visualize.py`](https://github.com/MoonshotAI/kimi-cli/blob/main/src/kimi_cli/ui/print/visualize.py) |
+  | cline | final `run_result` record → `text` (streaming also arrives as `agent_event` → `content_end` `text`) | `usage.{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`; `usage.totalCost` | [cline/cline `run-agent.ts`](https://github.com/cline/cline/blob/main/apps/cli/src/runtime/run-agent.ts) |
+  | kilo-code | opencode events (the CLI is an opencode fork) → `part.text` | same as opencode | [Kilo-Org/kilocode `run.ts`](https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/cli/cmd/run.ts) |
+  | pi | `message_end` → assistant `message.content` text blocks | `message_update.usage` / `message_end.message.usage` `{input, output, cacheRead, cacheWrite, reasoning?, totalTokens}`; `usage.cost.total` | [earendil-works/pi-mono `json-event.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/modes/json-event.ts) |
+  | grok | envelope `text` (may embed the payload after narration prose — recovered via balanced-span parsing) | `usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, total_tokens}`; `total_cost_usd` | [xai-org/grok-build `headless.rs`](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs) |
+  | deepseek | envelope `result` | `usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}`; `total_cost_usd` | [esengine/DeepSeek-Reasonix `run_output.go`](https://github.com/esengine/DeepSeek-Reasonix/blob/main/internal/cli/run_output.go) |
+  | goose | last assistant entry of `messages[]` → `content` text blocks (the document is `{messages, metadata}`; no `response` field) | `metadata.{input_tokens, output_tokens, cache_read_input_tokens, cache_write_input_tokens, total_tokens}`; `metadata.cost_usd` | [block/goose `session/mod.rs`](https://github.com/block/goose/blob/main/crates/goose-cli/src/session/mod.rs) |
+  | cursor | envelope `result` (best-effort) | — | closed source — CLI documents a "single result object" without pinning the field |
+  | antigravity | envelope `response` | — | closed source — Google's agy CLI |
 
   Unknown harness names and values that match no schema return `{}` — callers
   must treat that as "envelope not understood" and fall back to their legacy
   extraction path. When adjusting a schema, verify the shape against the
-  upstream CLI docs — or the upstream source when the CLI is open source
-  (grok: `xai-org/grok-build`) — and note the fields in the module header.
-  Reply text can embed the JSON payload after narration prose, so
-  `parseReplyText` also recovers fenced ```json blocks and balanced
-  `{...}` spans before falling back to the raw text.
+  upstream CLI docs — or the upstream source when the CLI is open source —
+  and note the fields (with the repo/file link) in the module header. Reply
+  text can embed the JSON payload after narration prose, so `parseReplyText`
+  also recovers fenced ```json blocks and balanced `{...}` spans before
+  falling back to the raw text.
 
 - **Detectors & streaming.** Usage-limit and max-turns detectors keep
   scanning the raw streams (JSON event lines can still match

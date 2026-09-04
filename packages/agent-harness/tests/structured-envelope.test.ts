@@ -28,7 +28,14 @@ const CODEX_EVENTS = [
   { type: "item.completed", item: { id: "item_2", type: "agent_message", text: '{"ok":true}' } },
   {
     type: "turn.completed",
-    usage: { input_tokens: 24763, cached_input_tokens: 1024, output_tokens: 122, total_tokens: 24885 },
+    // Upstream Usage (openai/codex exec_events.rs): no total_tokens field.
+    usage: {
+      input_tokens: 24763,
+      cached_input_tokens: 1024,
+      cache_write_input_tokens: 512,
+      output_tokens: 122,
+      reasoning_output_tokens: 61,
+    },
   },
 ];
 
@@ -43,7 +50,7 @@ const OPENCODE_EVENTS = [
       type: "step-finish",
       reason: "stop",
       cost: 0.014087,
-      tokens: { total: 11168, input: 2, output: 34, reasoning: 0, cache: { write: 11132, read: 0 } },
+      tokens: { input: 2, output: 34, reasoning: 0, cache: { write: 11132, read: 0 } },
     },
   },
 ];
@@ -124,7 +131,8 @@ describe("extractHarnessStructuredReply", () => {
       inputTokens: 24763,
       outputTokens: 122,
       cacheReadTokens: 1024,
-      totalTokens: 24885,
+      cacheCreationTokens: 512,
+      reasoningTokens: 61,
     });
   });
 
@@ -146,7 +154,19 @@ describe("extractHarnessStructuredReply", () => {
       reasoningTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 11132,
-      totalTokens: 11168,
+    });
+    expect(extracted.costUsd).toBe(0.014087);
+  });
+
+  test("kilo-code shares the opencode event schema (the CLI is an opencode fork)", () => {
+    const extracted = extractHarnessStructuredReply("kilo-code", OPENCODE_EVENTS);
+    expect(extracted.reply).toEqual({ done: 1 });
+    expect(extracted.usage).toEqual({
+      inputTokens: 2,
+      outputTokens: 34,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 11132,
     });
     expect(extracted.costUsd).toBe(0.014087);
   });
@@ -180,22 +200,51 @@ describe("extractHarnessStructuredReply", () => {
     expect(extracted.reply).toEqual({ subtasks: [] });
   });
 
-  test("cline say events: assistant text records carry the reply", () => {
+  test("cline NDJSON: run_result carries the reply and camelCase usage", () => {
     const extracted = extractHarnessStructuredReply("cline", [
-      { type: "say", say: "api_req_started", text: "request meta" },
-      { type: "say", say: "text", text: '{"summary": "S", "description": "D"}' },
+      {
+        ts: "2026-09-03T00:00:00Z",
+        type: "agent_event",
+        event: { type: "content_end", contentType: "text", text: "draft" },
+      },
+      {
+        ts: "2026-09-03T00:00:01Z",
+        type: "run_result",
+        finishReason: "end_turn",
+        iterations: 2,
+        durationMs: 4200,
+        text: '{"summary": "S", "description": "D"}',
+        usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 7, totalCost: 0.01 },
+      },
     ]);
     expect(extracted.reply).toEqual({ summary: "S", description: "D" });
+    expect(extracted.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 7,
+    });
+    expect(extracted.costUsd).toBe(0.01);
   });
 
-  test("pi events: message_end content is the reply, event usage carries tokens", () => {
+  test("pi events: message_end content is the reply, usage from message.usage", () => {
     const extracted = extractHarnessStructuredReply("pi", [
       { type: "session", version: 3, id: "s1" },
       { type: "message_update", usage: { input: 10, output: 2, cacheRead: 5, cacheWrite: 1 } },
       {
         type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: '{"ok":2}' }] },
-        usage: { input: 10, output: 9, cacheRead: 5, cacheWrite: 1 },
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: '{"ok":2}' }],
+          usage: {
+            input: 10,
+            output: 9,
+            cacheRead: 5,
+            cacheWrite: 1,
+            totalTokens: 25,
+            cost: { total: 0.002 },
+          },
+        },
       },
     ]);
     expect(extracted.reply).toEqual({ ok: 2 });
@@ -204,14 +253,76 @@ describe("extractHarnessStructuredReply", () => {
       outputTokens: 9,
       cacheReadTokens: 5,
       cacheCreationTokens: 1,
+      totalTokens: 25,
     });
+    expect(extracted.costUsd).toBe(0.002);
+  });
+
+  test("goose document: last assistant message is the reply, metadata carries usage", () => {
+    const extracted = extractHarnessStructuredReply("goose", {
+      messages: [
+        {
+          id: null,
+          role: "user",
+          created: 1756000000000,
+          content: [{ type: "text", text: "hi" }],
+          metadata: {},
+        },
+        {
+          role: "assistant",
+          created: 1756000001000,
+          content: [{ type: "text", text: '{"summary": "S", "description": "D"}' }],
+          metadata: {},
+        },
+      ],
+      metadata: {
+        total_tokens: 1234,
+        input_tokens: 1000,
+        output_tokens: 234,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        cost_usd: 0.0042,
+        status: "completed",
+      },
+    });
+    expect(extracted.reply).toEqual({ summary: "S", description: "D" });
+    expect(extracted.usage).toEqual({
+      inputTokens: 1000,
+      outputTokens: 234,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 1234,
+    });
+    expect(extracted.costUsd).toBe(0.0042);
+  });
+
+  test("deepseek result envelope: reply plus Claude-style usage and cost", () => {
+    const extracted = extractHarnessStructuredReply("deepseek", {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: '{"a":1}',
+      usage: {
+        input_tokens: 12,
+        output_tokens: 3,
+        cache_read_input_tokens: 4,
+        cache_creation_input_tokens: 2,
+      },
+      total_cost_usd: 0.003,
+    });
+    expect(extracted.reply).toEqual({ a: 1 });
+    expect(extracted.usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheReadTokens: 4,
+      cacheCreationTokens: 2,
+    });
+    expect(extracted.costUsd).toBe(0.003);
   });
 
   test.each([
     ["cursor", { result: '{"a":1}' }],
     ["grok", { text: '{"a":1}' }],
-    ["deepseek", { result: '{"a":1}' }],
-    ["goose", { response: '{"a":1}' }],
     ["antigravity", { response: '{"a":1}' }],
   ])("%s single-result envelope reply field", (harnessName, envelope) => {
     const extracted = extractHarnessStructuredReply(harnessName, envelope);
@@ -290,9 +401,14 @@ describe("extractHarnessEventText", () => {
   test("returns reply text for schema-matching event lines", () => {
     expect(extractHarnessEventText("codex", CODEX_EVENTS[1])).toBe("draft");
     expect(extractHarnessEventText("opencode", OPENCODE_EVENTS[1])).toBe("partial");
-    expect(extractHarnessEventText("cline", { type: "say", say: "text", text: "hello" })).toBe(
-      "hello",
-    );
+    expect(
+      extractHarnessEventText("cline", {
+        ts: "2026-09-03T00:00:00Z",
+        type: "agent_event",
+        event: { type: "content_end", contentType: "text", text: "hello" },
+      }),
+    ).toBe("hello");
+    expect(extractHarnessEventText("cline", { type: "run_result", text: "final" })).toBe("final");
     expect(extractHarnessEventText("grok", { text: "reply" })).toBe("reply");
     expect(extractHarnessEventText("claude-code", CLAUDE_ENVELOPE)).toBe(
       '{"summary": "S", "description": "D"}',
@@ -302,6 +418,13 @@ describe("extractHarnessEventText", () => {
   test("returns undefined for non-text events and unknown harnesses", () => {
     expect(extractHarnessEventText("codex", CODEX_EVENTS[0])).toBeUndefined();
     expect(extractHarnessEventText("codex", CODEX_EVENTS[3])).toBeUndefined();
+    expect(
+      extractHarnessEventText("cline", {
+        ts: "2026-09-03T00:00:00Z",
+        type: "agent_event",
+        event: { type: "content_end", contentType: "tool" },
+      }),
+    ).toBeUndefined();
     expect(extractHarnessEventText("stub", { result: "text" })).toBeUndefined();
   });
 });

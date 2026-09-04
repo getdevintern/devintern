@@ -15,33 +15,68 @@
  * guessing fields. **Adding a new structured-output harness therefore
  * requires adding its schema below** (see the readme checklist).
  *
- * Field names below follow each CLI's documented JSON mode:
+ * Field names below follow each CLI's documented JSON mode. Open-source CLIs
+ * are **verified against upstream source** (repo + file linked); closed-source
+ * CLIs (claude-code, cursor, antigravity) are taken from their official docs.
  *
  * - **claude-code** — `--output-format json`: single
  *   `{type:"result", result, usage:{input_tokens, cache_creation_input_tokens,
- *   cache_read_input_tokens, output_tokens}, total_cost_usd}` envelope.
- * - **codex** — `--json`: JSONL thread/turn/item events; the reply is the
- *   last `item.completed` whose `item.type` is `agent_message`, usage rides
- *   on `turn.completed` (`input_tokens`, `cached_input_tokens`,
- *   `output_tokens`, `total_tokens`).
- * - **opencode** — `--format json`: JSONL events; reply text on
+ *   cache_read_input_tokens, output_tokens}, total_cost_usd}` envelope
+ *   (closed source; docs.claude.com/en/docs/claude-code/headless).
+ * - **codex** — `--json`: JSONL thread/turn/item events
+ *   (github.com/openai/codex, `codex-rs/exec/src/exec_events.rs`); the reply
+ *   is the last `item.completed` whose `item.type` is `agent_message`
+ *   (`item.text`), usage rides on `turn.completed`
+ *   (`usage.{input_tokens, cached_input_tokens, cache_write_input_tokens,
+ *   output_tokens, reasoning_output_tokens}` — there is **no** `total_tokens`
+ *   field upstream).
+ * - **opencode** — `--format json`: JSONL events (github.com/sst/opencode,
+ *   `packages/opencode/src/cli/cmd/run.ts`); reply text on
  *   `{type:"text", part:{text}}`, usage/cost on `step_finish`
- *   (`part.tokens.input/output/reasoning/cache.read/cache.write`,
- *   `part.cost`).
+ *   (`part.cost`, `part.tokens.{input, output, reasoning, cache.read,
+ *   cache.write}` — there is **no** `tokens.total` upstream). Every event
+ *   carries `timestamp` + `sessionID`; the banner goes to stderr in JSON
+ *   mode, so stdout is pure JSONL.
  * - **qwen** — `--output-format json`: JSON array of messages whose final
- *   entry is a Claude-style `{type:"result", result, usage}` summary.
- * - **kimi** — `--output-format stream-json`: JSONL chat messages
- *   (`{role:"assistant", content}` — string or `[{type:"text", text}]`
- *   blocks).
- * - **cline** — `--json`: JSONL conversation messages; assistant text rides
- *   on `{type:"say", say:"text", text}` records (kilo-code's CLI follows the
- *   same shape — best-effort until verified upstream).
- * - **pi** — `--mode json`: JSONL session events; the reply is the assistant
- *   `message` content of `message_end`, usage on the event-level `usage`
- *   (`input`, `output`, `cacheRead`, `cacheWrite`).
- * - **cursor / deepseek** — single result object carrying the reply text in
- *   `result` (best-effort; these CLIs document "single result object"
- *   without pinning the field).
+ *   entry is a Claude-style `{type:"result", result, usage}` summary
+ *   (github.com/QwenLM/qwen-code,
+ *   `packages/cli/src/nonInteractive/io/JsonOutputAdapter.ts`; `usage` also
+ *   carries an optional `total_tokens`).
+ * - **kimi** — `--output-format stream-json` (with `--print`): JSONL chat
+ *   messages `{role:"assistant", content}` — `content` is a plain string when
+ *   the message holds a single text part, otherwise `[{type:"text"|"think",
+ *   ...}]` blocks (github.com/MoonshotAI/kimi-cli,
+ *   `src/kimi_cli/ui/print/visualize.py`, `packages/kosong/src/kosong/message.py`).
+ * - **cline** — `--json`: NDJSON records whose final
+ *   `{ts, type:"run_result", finishReason, iterations, usage, durationMs,
+ *   text, model}` carries the reply (`text`) and aggregated camelCase usage
+ *   (`usage.{inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?,
+ *   totalCost?}`) (github.com/cline/cline,
+ *   `apps/cli/src/runtime/run-agent.ts` + `sdk/packages/shared/src/agents/
+ *   types.ts` `LegacyAgentUsage`). Streaming text also arrives as
+ *   `{ts, type:"agent_event", event:{type:"content_end", contentType:"text",
+ *   text}}` — the `say`-record shape exists only in the VS Code extension.
+ * - **kilo-code** — `kilo run --format json`: opencode-style JSONL events —
+ *   the CLI is an opencode fork with the same `emit()` implementation
+ *   (github.com/Kilo-Org/kilocode, `packages/opencode/src/cli/cmd/run.ts`),
+ *   so it shares opencode's schema below.
+ * - **pi** — `--mode json` (pairs with `-p`): JSONL session events (first
+ *   line is a `{type:"session"}` header); the reply is the assistant
+ *   `message` of `message_end` (`message.content` text blocks), usage is
+ *   camelCase `{input, output, cacheRead, cacheWrite, reasoning?,
+ *   totalTokens, cost}` — event-level on `message_update` and nested at
+ *   `message.usage` on `message_end` (github.com/earendil-works/pi-mono —
+ *   moved from badlogic/pi-mono, `packages/coding-agent/src/modes/
+ *   json-event.ts`, `packages/ai/src/types.ts`).
+ * - **cursor** — single result object carrying the reply text in `result`
+ *   (closed source; Cursor CLI documents "single result object" without
+ *   pinning the field).
+ * - **deepseek (reasonix)** — `--output-format json`: a single
+ *   `{type:"result", subtype, is_error, duration_ms, num_turns, result,
+ *   usage:{input_tokens, output_tokens, cache_read_input_tokens,
+ *   cache_creation_input_tokens, estimated?}, total_cost?, total_cost_usd?}`
+ *   object on stdout (github.com/esengine/DeepSeek-Reasonix,
+ *   `internal/cli/run_output.go` `runResult`).
  * - **grok** — `--output-format json`: one object carrying the reply text in
  *   `text`, a Claude-style `usage` (plus `reasoning_tokens`/`total_tokens`),
  *   and `total_cost_usd` when the bill is complete. Verified against the
@@ -51,8 +86,14 @@
  *   usage snake_case) and frozen for external-tool compatibility. The reply
  *   text may embed the JSON payload after narration prose — see
  *   {@link parseReplyText}.
- * - **goose / antigravity** — single result envelope carrying the reply text
- *   in `response`.
+ * - **goose** — `goose run --output-format json`: one pretty-printed
+ *   `{messages:[...], metadata:{total_tokens, input_tokens?, output_tokens?,
+ *   cache_read_input_tokens?, cache_write_input_tokens?, cost_usd?, status}}`
+ *   document; the reply is the last assistant message's `content` text
+ *   blocks (github.com/block/goose, `crates/goose-cli/src/session/mod.rs`
+ *   `JsonOutput` — there is **no** `response` field upstream).
+ * - **antigravity** — single result envelope carrying the reply text in
+ *   `response` (closed source; Google's agy CLI).
  */
 
 /**
@@ -278,7 +319,7 @@ const CLAUDE_CODE_ENVELOPE: HarnessEnvelopeSchema = {
   stats: (value) => (isRecord(value) ? claudeStyleStats(value) : undefined),
 };
 
-/** Codex `--json`: thread/turn/item JSONL events. */
+/** Codex `--json`: thread/turn/item JSONL events (openai/codex exec_events.rs). */
 const CODEX_EVENTS: HarnessEnvelopeSchema = {
   replyText(value) {
     if (!isRecord(value) || value.type !== "item.completed") {
@@ -303,13 +344,14 @@ const CODEX_EVENTS: HarnessEnvelopeSchema = {
         inputTokens: asNumber(usage.input_tokens),
         outputTokens: asNumber(usage.output_tokens),
         cacheReadTokens: asNumber(usage.cached_input_tokens),
-        totalTokens: asNumber(usage.total_tokens),
+        cacheCreationTokens: asNumber(usage.cache_write_input_tokens),
+        reasoningTokens: asNumber(usage.reasoning_output_tokens),
       }),
     };
   },
 };
 
-/** opencode `--format json`: step/text part events. */
+/** opencode `--format json` (and the kilo-code fork): step/text part events. */
 const OPENCODE_EVENTS: HarnessEnvelopeSchema = {
   replyText(value) {
     if (!isRecord(value) || value.type !== "text") {
@@ -339,7 +381,6 @@ const OPENCODE_EVENTS: HarnessEnvelopeSchema = {
         reasoningTokens: asNumber(tokens.reasoning),
         cacheReadTokens: cache ? asNumber(cache.read) : undefined,
         cacheCreationTokens: cache ? asNumber(cache.write) : undefined,
-        totalTokens: asNumber(tokens.total),
       }),
       ...(costUsd === undefined ? {} : { costUsd }),
     };
@@ -369,21 +410,55 @@ const KIMI_MESSAGES: HarnessEnvelopeSchema = {
   replyText: messageReplyText,
 };
 
-/** Cline `--json` (and kilo-code): `{type:"say", say:"text", text}` records. */
-const CLINE_SAY_EVENTS: HarnessEnvelopeSchema = {
+/**
+ * Cline `--json` (apps/cli `run-agent.ts`): NDJSON records ending in
+ * `{type:"run_result", text, usage}` — camelCase usage per upstream
+ * `LegacyAgentUsage`. Streaming assistant text also arrives nested as
+ * `{type:"agent_event", event:{type:"content_end", contentType:"text", text}}`.
+ */
+const CLINE_EVENTS: HarnessEnvelopeSchema = {
   replyText(value) {
-    if (!isRecord(value) || value.type !== "say") {
+    if (!isRecord(value)) {
       return undefined;
     }
-    // Assistant text records pin `say:"text"`; older builds omit the field.
-    if (value.say !== undefined && value.say !== "text") {
+    if (value.type === "run_result") {
+      return asText(value.text);
+    }
+    if (value.type === "agent_event") {
+      const event = value.event;
+      if (isRecord(event) && event.type === "content_end" && event.contentType === "text") {
+        return asText(event.text);
+      }
+    }
+    return undefined;
+  },
+  stats(value) {
+    if (!isRecord(value) || value.type !== "run_result") {
       return undefined;
     }
-    return asText(value.text);
+    const usage = value.usage;
+    if (!isRecord(usage)) {
+      return undefined;
+    }
+    const costUsd = asNumber(usage.totalCost);
+    return {
+      usage: usageOf({
+        inputTokens: asNumber(usage.inputTokens),
+        outputTokens: asNumber(usage.outputTokens),
+        cacheReadTokens: asNumber(usage.cacheReadTokens),
+        cacheCreationTokens: asNumber(usage.cacheWriteTokens),
+      }),
+      ...(costUsd === undefined ? {} : { costUsd }),
+    };
   },
 };
 
-/** Pi `--mode json`: session events with message content + usage. */
+/**
+ * Pi `--mode json` (earendil-works/pi-mono): session events. The reply is
+ * the `message_end` assistant message; usage is camelCase and rides
+ * event-level on `message_update` and at `message.usage` on `message_end`
+ * (the last reported value wins, so the final message's usage stands).
+ */
 const PI_EVENTS: HarnessEnvelopeSchema = {
   replyText(value) {
     if (!isRecord(value) || value.type !== "message_end") {
@@ -395,17 +470,26 @@ const PI_EVENTS: HarnessEnvelopeSchema = {
     if (!isRecord(value)) {
       return undefined;
     }
-    const usage = value.usage;
+    let usage: unknown;
+    if (value.type === "message_update") {
+      usage = value.usage;
+    } else if (value.type === "message_end") {
+      usage = isRecord(value.message) ? value.message.usage : undefined;
+    }
     if (!isRecord(usage)) {
       return undefined;
     }
+    const cost = isRecord(usage.cost) ? asNumber(usage.cost.total) : undefined;
     return {
       usage: usageOf({
         inputTokens: asNumber(usage.input),
         outputTokens: asNumber(usage.output),
         cacheReadTokens: asNumber(usage.cacheRead),
         cacheCreationTokens: asNumber(usage.cacheWrite),
+        reasoningTokens: asNumber(usage.reasoning),
+        totalTokens: asNumber(usage.totalTokens),
       }),
+      ...(cost === undefined ? {} : { costUsd: cost }),
     };
   },
 };
@@ -422,6 +506,56 @@ const GROK_ENVELOPE: HarnessEnvelopeSchema = {
 };
 
 /**
+ * DeepSeek Reasonix `--output-format json`
+ * (esengine/DeepSeek-Reasonix `run_output.go` `runResult`): single result
+ * envelope with the reply in `result`, Claude-style snake_case usage, and
+ * `total_cost_usd` (compat alias of `total_cost`).
+ */
+const DEEPSEEK_ENVELOPE: HarnessEnvelopeSchema = {
+  ...resultEnvelope("result"),
+  stats: (value) => (isRecord(value) ? claudeStyleStats(value) : undefined),
+};
+
+/**
+ * Goose `--output-format json` (block/goose `session/mod.rs`): one
+ * pretty-printed `{messages, metadata}` document — there is no `response`
+ * field. The reply is the last assistant message's `content` text blocks;
+ * usage/cost live in `metadata` (snake_case; optional fields are omitted
+ * when `None`, `total_tokens`/`status` always serialize).
+ */
+const GOOSE_DOCUMENT: HarnessEnvelopeSchema = {
+  replyText(value) {
+    if (!isRecord(value) || !Array.isArray(value.messages)) {
+      return undefined;
+    }
+    for (let index = value.messages.length - 1; index >= 0; index -= 1) {
+      const text = messageReplyText(value.messages[index]);
+      if (text !== undefined) {
+        return text;
+      }
+    }
+    return undefined;
+  },
+  stats(value) {
+    if (!isRecord(value) || !isRecord(value.metadata)) {
+      return undefined;
+    }
+    const metadata = value.metadata;
+    const costUsd = asNumber(metadata.cost_usd);
+    return {
+      usage: usageOf({
+        inputTokens: asNumber(metadata.input_tokens),
+        outputTokens: asNumber(metadata.output_tokens),
+        cacheReadTokens: asNumber(metadata.cache_read_input_tokens),
+        cacheCreationTokens: asNumber(metadata.cache_write_input_tokens),
+        totalTokens: asNumber(metadata.total_tokens),
+      }),
+      ...(costUsd === undefined ? {} : { costUsd }),
+    };
+  },
+};
+
+/**
  * Exact envelope schemas for the built-in structured-output harnesses, keyed
  * by `AgentHarness.name`. Harnesses without an entry here yield `{}` from
  * {@link extractHarnessStructuredReply} — add the schema when adding the
@@ -433,13 +567,13 @@ const ENVELOPE_SCHEMAS: Record<string, HarnessEnvelopeSchema> = {
   opencode: OPENCODE_EVENTS,
   qwen: QWEN_MESSAGES,
   kimi: KIMI_MESSAGES,
-  cline: CLINE_SAY_EVENTS,
-  "kilo-code": CLINE_SAY_EVENTS,
+  cline: CLINE_EVENTS,
+  "kilo-code": OPENCODE_EVENTS,
   pi: PI_EVENTS,
   cursor: resultEnvelope("result"),
   grok: GROK_ENVELOPE,
-  deepseek: resultEnvelope("result"),
-  goose: resultEnvelope("response"),
+  deepseek: DEEPSEEK_ENVELOPE,
+  goose: GOOSE_DOCUMENT,
   antigravity: resultEnvelope("response"),
 };
 

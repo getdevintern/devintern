@@ -18,7 +18,11 @@ export class ClineHarness implements AgentHarness {
   readonly defaultPath = "cline";
   /** No native plan/read-only enforcement documented for headless `cline task`. */
   readonly supportedModes = [] as const;
-  /** `--json` emits newline-delimited JSON message objects instead of styled text. */
+  /**
+   * `--json` emits NDJSON records ending in a final `run_result` record that
+   * carries the reply text and aggregated usage (verified against upstream
+   * `apps/cli/src/runtime/run-agent.ts`).
+   */
   readonly supportsStructuredOutput = true;
 
   /**

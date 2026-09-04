@@ -18,7 +18,10 @@ export class KiloCodeHarness implements AgentHarness {
   readonly defaultPath = "kilo";
   /** No native plan/read-only enforcement documented for headless `kilo run`. */
   readonly supportedModes = [] as const;
-  /** `--format json` streams raw JSON events (one object per line) to stdout. */
+  /**
+   * `--format json` streams opencode-style JSONL events (one object per
+   * line) to stdout — the CLI is an opencode fork with the same emitter.
+   */
   readonly supportsStructuredOutput = true;
 
   /**
