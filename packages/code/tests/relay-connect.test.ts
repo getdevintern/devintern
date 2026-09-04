@@ -338,6 +338,91 @@ describe("relay-connect auth", () => {
     expect(state.relayToken).toBe("drt_src_1");
   });
 
+  test("registerRelaySource passes and persists a team-scoped registration", async () => {
+    const fetchImpl = mockFetch((_url, body) => {
+      const request = body as { action: string; source?: string; team?: string };
+      if (request.action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_team",
+          }),
+          { status: 200 },
+        );
+      }
+      expect(request).toMatchObject({
+        action: "register-source",
+        source: "jira",
+        team: "platform",
+      });
+      return new Response(
+        JSON.stringify({
+          customerId: "user_1",
+          licenseSource: "solo-automation",
+          ingestUrl: `${RELAY_URL}/ingest/jira/team-token`,
+          registrations: [
+            {
+              kind: "source",
+              key: "jira",
+              team: "platform",
+              createdAt: 1,
+              lastEventAt: null,
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const result = await registerRelaySource({
+      source: "jira",
+      team: "platform",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+
+    expect(result.state.registrations[0]?.team).toBe("platform");
+    expect(loadRelayState(dir)?.registrations[0]?.team).toBe("platform");
+  });
+
+  test("team registration fails cleanly against a legacy control plane", async () => {
+    const fetchImpl = mockFetch((_url, body) => {
+      if ((body as { action: string }).action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_team",
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          customerId: "user_1",
+          licenseSource: "solo-automation",
+          ingestUrl: `${RELAY_URL}/ingest/jira/legacy-token`,
+          registrations: [{ kind: "source", key: "jira", createdAt: 1, lastEventAt: null }],
+        }),
+        { status: 200 },
+      );
+    });
+
+    expect(
+      registerRelaySource({
+        source: "jira",
+        team: "platform",
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl,
+      }),
+    ).rejects.toThrow("upgrade the relay control plane");
+  });
+
   test("fetchRelayStatus authenticates with the relay token, not the session", async () => {
     const fetchImpl = mockFetch((url) => {
       expect(url).toContain("/v1/status");
@@ -345,19 +430,29 @@ describe("relay-connect auth", () => {
         JSON.stringify({
           customerId: "user_1",
           licenseSource: "solo-automation",
-          buffered: 0,
-          registrations: [],
+          buffered: 2,
+          registrations: [
+            {
+              kind: "source",
+              key: "jira",
+              team: "platform",
+              buffered: 2,
+              createdAt: 1,
+              lastEventAt: null,
+            },
+          ],
         }),
         { status: 200 },
       );
     });
 
-    await fetchRelayStatus({
+    const status = await fetchRelayStatus({
       relayToken: "drt_status",
       relayUrl: RELAY_URL,
       fetchImpl,
     });
     expect(calls[0].auth).toBe("Bearer drt_status");
+    expect(status.registrations[0]).toMatchObject({ team: "platform", buffered: 2 });
   });
 
   test("connectRelayTarget requires a signed-in session", async () => {

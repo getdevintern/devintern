@@ -30,8 +30,12 @@ export const RELAY_BOT_LOGIN = "devintern-ai";
 export interface RelayRegistration {
   kind: "repo" | "source";
   key: string;
+  /** Stable workspace team slug for team-scoped tracker registrations. */
+  team?: string;
   createdAt: number;
   lastEventAt: number | null;
+  /** Envelopes currently buffered for this registration, when reported by status. */
+  buffered?: number;
 }
 
 export interface VerifiedGitHubRelayRepository {
@@ -194,6 +198,8 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   workingDir: string;
   /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
   repo?: string;
+  /** Stable workspace team slug for tracker registration. */
+  team?: string;
   /** Explicit tracker credentials for a selected workspace team. */
   env?: Record<string, string | undefined>;
 }
@@ -412,6 +418,7 @@ export async function connectGitHubRepo(options: {
  */
 export async function registerRelaySource(options: {
   source: string;
+  team?: string;
   accessToken: string;
   secret?: string;
   workingDir?: string;
@@ -432,6 +439,7 @@ export async function registerRelaySource(options: {
     {
       action: "register-source",
       source: options.source,
+      team: options.team,
       secret: options.secret,
     },
     deps,
@@ -442,6 +450,22 @@ export async function registerRelaySource(options: {
   }
 
   const data = (await response.json()) as ConnectResponse & { ingestUrl: string };
+  if (options.team) {
+    const registration = data.registrations.find(
+      (candidate) =>
+        candidate.kind === "source" &&
+        (candidate.team === options.team || candidate.key === `${options.source}:${options.team}`),
+    );
+    if (!registration) {
+      throw new Error(
+        "relay does not support team-scoped tracker registrations; " +
+          "upgrade the relay control plane before using this CLI",
+      );
+    }
+    // Accept the transitional compound-key representation while always
+    // persisting an explicit team dimension for current state readers.
+    registration.team = options.team;
+  }
   const state = mergeConnectState(workingDir, relayUrl, data, relayToken);
   return { ingestUrl: data.ingestUrl, state };
 }
@@ -491,6 +515,7 @@ export async function connectRelayTarget(
   const connectOpts = {
     accessToken,
     workingDir,
+    team: deps.team,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
   };
@@ -506,8 +531,10 @@ export async function connectRelayTarget(
         console.log("   No registrations yet. Run: devintern worker connect");
       }
       for (const reg of status.registrations) {
+        const team = reg.team ? ` (team: ${reg.team})` : "";
+        const buffered = reg.buffered === undefined ? "" : `, buffered: ${reg.buffered}`;
         console.log(
-          `   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`,
+          `   - ${reg.kind}:${reg.key}${team} (last event: ${formatTimestamp(reg.lastEventAt)}${buffered})`,
         );
       }
       return 0;

@@ -33,8 +33,7 @@ Options:
   -h, --help           Display this help message
 
 Tracker targets use the selected team's env_file/inline env over the workspace
-.env. A target used by multiple teams is polling-only until relay registrations
-carry team identity.`;
+.env. Team-scoped registrations let multiple teams use the same tracker.`;
 
 export interface WorkerConnectCommandDeps {
   workspaceDir?: string;
@@ -182,10 +181,10 @@ export async function runWorkerConnectCommand(
     const matchingTeams = config.teams.filter(
       (team) => team.tracker.toLowerCase() === target.toLowerCase(),
     );
-    if (matchingTeams.length > 1) {
+    if (matchingTeams.length > 1 && !parsed.team) {
       console.error(
         `❌ ${matchingTeams.length} teams use ${target} (${matchingTeams.map((team) => team.name).join(", ")}). ` +
-          "The relay identifies tracker type but not team registration, so this source remains polling-only.",
+          "Select one with --team <name>.",
       );
       return 1;
     }
@@ -201,6 +200,7 @@ export async function runWorkerConnectCommand(
       return 1;
     }
     if (selectedTeam) {
+      connectDeps.team = selectedTeam.name;
       connectDeps.env = { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) };
       console.log(`🔗 Connecting ${target} for team '${selectedTeam.name}'.`);
     }
