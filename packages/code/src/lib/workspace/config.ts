@@ -25,6 +25,8 @@ export interface WorkspaceSettings {
   dashboard: boolean;
   /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
   dashboardPort?: number;
+  /** Automatically ask the agent to repair failing CI on its own open PRs. */
+  ciFailureFix: boolean;
   /**
    * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
    * they are detected; `scheduled` queues them during polling and resolves
@@ -134,6 +136,7 @@ export interface WorkspaceConfig {
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
+export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 
 /** Repo names double as directory names; keep them filesystem-safe. */
@@ -303,6 +306,9 @@ export function parseWorkspaceConfig(
       message: "[workspace].dashboard_port must be an integer between 1 and 65535.",
     },
   );
+  const ciFailureFix =
+    readOptionalBoolean(workspaceTable, "ci_failure_fix", "[workspace]", errors) ??
+    DEFAULT_CI_FAILURE_FIX;
 
   const conflictResolutionRaw = readString(
     workspaceTable,
@@ -557,7 +563,14 @@ export function parseWorkspaceConfig(
   }
 
   return {
-    workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
+    workspace: {
+      worktreesTtlDays,
+      dashboard,
+      dashboardPort,
+      ciFailureFix,
+      conflictResolution,
+      conflictSchedule,
+    },
     worker: { schedule: schedule.config },
     defaults,
     teams,

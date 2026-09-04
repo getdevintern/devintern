@@ -6,6 +6,7 @@ import { formatRunOrigin } from "@/lib/run-origin";
 test.each([
   ["task", "Tracker task"],
   ["pr_mention", "PR mention"],
+  ["ci_fix", "CI fix"],
   ["conflict_resolution", "Conflict resolution"],
   ["scheduled", "Scheduled automation"],
   ["estimate", "Estimate run"],

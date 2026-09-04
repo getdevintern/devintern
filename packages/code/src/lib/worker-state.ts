@@ -50,6 +50,13 @@ export interface AgentPr {
   updatedAt: number;
 }
 
+/** Consecutive CI-fix bookkeeping for one agent-created PR. */
+export interface CiFixState {
+  consecutiveFailures: number;
+  /** Head SHA where the worker exhausted its budget and escalated. */
+  escalatedSha?: string;
+}
+
 /**
  * Parse an `owner/repo` slug and PR number from a GitHub PR URL.
  *
@@ -147,6 +154,17 @@ export class WorkerState {
         comment_id INTEGER NOT NULL,
         addressed_at INTEGER NOT NULL,
         PRIMARY KEY (repo, comment_type, comment_id)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ci_fix_state (
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        escalated_sha TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (repo, pr_number)
       )
     `);
   }
@@ -322,6 +340,35 @@ export class WorkerState {
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ? WHERE repo = ? AND pr_number = ?`,
       [Date.now(), repo, prNumber],
+    );
+  }
+
+  /** Read CI autofix retry state, defaulting to a fresh budget. */
+  getCiFixState(repo: string, prNumber: number): CiFixState {
+    const row = this.db
+      .query(
+        `SELECT consecutive_failures, escalated_sha FROM ci_fix_state
+         WHERE repo = ? AND pr_number = ?`,
+      )
+      .get(repo, prNumber) as Record<string, unknown> | null;
+    return row
+      ? {
+          consecutiveFailures: row.consecutive_failures as number,
+          escalatedSha: (row.escalated_sha as string | null) ?? undefined,
+        }
+      : { consecutiveFailures: 0 };
+  }
+
+  /** Persist CI autofix retry state. */
+  setCiFixState(repo: string, prNumber: number, state: CiFixState): void {
+    this.db.run(
+      `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, escalated_sha, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(repo, pr_number) DO UPDATE SET
+         consecutive_failures = excluded.consecutive_failures,
+         escalated_sha = excluded.escalated_sha,
+         updated_at = excluded.updated_at`,
+      [repo, prNumber, state.consecutiveFailures, state.escalatedSha ?? null, Date.now()],
     );
   }
 

@@ -1072,6 +1072,7 @@ export async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetCiFix,
     coalescePrFeedbackRuns,
     createFleetResolveConflicts,
     createFleetMentionHandler,
@@ -1212,6 +1213,76 @@ export async function buildFleetEventAcquirers(options: {
       verbose,
     });
     acquirers.push(reviewAcquirer);
+
+    // CI failure repair uses the same durable agent-PR registry, repo
+    // worktree, per-PR lock, and process-level run coordinator as reviews.
+    const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
+    const fixPr = createFleetCiFix(eventDeps);
+    const ciWatcher = new CiFailureWatcherAcquirer({
+      intervalSeconds,
+      enabled: () => config.workspace.ciFailureFix,
+      workerState: state.workerState,
+      queue: state.queue,
+      github: {
+        fetchPr: async (repo, n, etag) => {
+          try {
+            return await gh.conditionalGet(
+              `/repos/${repo}/pulls/${n}`,
+              ownerOf(repo),
+              nameOf(repo),
+              etag,
+            );
+          } catch (error) {
+            if (isGitHubNotFound(error)) {
+              return { data: null, notModified: false, gone: true };
+            }
+            throw error;
+          }
+        },
+        fetchCheckRuns: (repo, sha, etag) =>
+          gh.getCheckRuns(ownerOf(repo), nameOf(repo), sha, etag),
+        fetchCommitStatus: (repo, sha, etag) =>
+          gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+        fetchFailingJobLogs: async (repo, sha) => {
+          const owner = ownerOf(repo);
+          const name = nameOf(repo);
+          const runs = await gh.getWorkflowRunsForSha(owner, name, sha).catch(() => []);
+          const chunks: string[] = [];
+          for (const run of runs.slice(0, 3)) {
+            const jobs = await gh.getWorkflowRunJobs(owner, name, run.id).catch(() => []);
+            for (const job of jobs
+              .filter(
+                (candidate) =>
+                  candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
+              )
+              .slice(0, 5)) {
+              const log = await gh.getJobLogs(owner, name, job.id).catch(() => null);
+              if (log) chunks.push(`## Job: ${job.name}\n${log}`);
+            }
+          }
+          return chunks.length > 0 ? chunks.join("\n\n") : null;
+        },
+        fetchCheckRunDetails: async (repo, checkRunId) => {
+          const annotations = await gh
+            .getCheckRunAnnotations(ownerOf(repo), nameOf(repo), checkRunId)
+            .catch(() => []);
+          return annotations.length > 0
+            ? annotations
+                .map(
+                  (annotation) =>
+                    `${annotation.path ? `${annotation.path}: ` : ""}${annotation.message}`,
+                )
+                .join("\n")
+            : null;
+        },
+        postComment: (repo, n, body) =>
+          gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
+      },
+      fixPr,
+      verbose,
+    });
+    acquirers.push(ciWatcher);
+    intervalUpdaters.push((seconds) => ciWatcher.updateInterval(seconds));
 
     // Tier 2: one mention sweep per GitHub repo (cursor sources are already
     // namespaced by slug). The permission gate runs in the fleet handler.

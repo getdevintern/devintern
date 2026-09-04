@@ -19,6 +19,7 @@ const WINDOWS = ["7d", "30d", "90d", "all"] as const;
 const RUN_ORIGINS: RunOrigin[] = [
   "task",
   "pr_mention",
+  "ci_fix",
   "conflict_resolution",
   "scheduled",
   "estimate",

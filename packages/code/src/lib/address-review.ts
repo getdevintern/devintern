@@ -12,13 +12,15 @@ import {
   reapTree,
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
+import { readFileSync } from "fs";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
 import { beginRun, endRun, recordRunStage } from "./run-recorder";
-import { formatReviewPrompt } from "./review-formatter";
+import { formatCiFixPrompt, formatReviewPrompt } from "./review-formatter";
+import type { CiFailureFeedback } from "./review-formatter";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "./mention-sweep-acquirer";
@@ -33,6 +35,16 @@ export interface AddressReviewOptions {
   noPush?: boolean;
   noReply?: boolean;
   verbose?: boolean;
+  /** Internal worker mode: fix the failures described in this JSON file. */
+  ciFeedbackPath?: string;
+}
+
+function readCiFeedbackFile(filePath: string): CiFailureFeedback {
+  const parsed = JSON.parse(readFileSync(filePath, "utf8")) as CiFailureFeedback;
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.failures)) {
+    throw new Error(`Invalid CI feedback file: ${filePath}`);
+  }
+  return parsed;
 }
 
 interface ParsedPRUrl {
@@ -409,209 +421,249 @@ export async function addressReview(
     throw new Error(`PR is ${pr.state}, not open. Cannot address review.`);
   }
 
-  // Get latest actionable review (changes_requested, or commented when no
-  // changes_requested reviews exist — the commented pick is mention-gated
-  // after the comments below are fetched).
-  console.log("\n🔎 Looking for actionable review feedback...");
-  const review = await getLatestFeedbackReview(githubClient, owner, repo, prNumber);
+  const ciFeedback = options.ciFeedbackPath
+    ? readCiFeedbackFile(options.ciFeedbackPath)
+    : undefined;
+  let processedComments: ProcessedReviewComment[] = [];
+  let processedConversationComments: ProcessedConversationComment[] = [];
+  let prompt: string;
+  let commitSummary: string;
 
-  if (!review) {
-    console.log("✅ No pending changes_requested or commented reviews found.");
-    return;
-  }
-
-  console.log(`   Found ${review.state.toLowerCase()} review from @${review.reviewer}`);
-
-  // Fetch ALL review comments for the PR (not just from this review)
-  console.log("\n📥 Fetching review comments...");
-  const rawComments = await githubClient.getPullRequestReviewComments(owner, repo, prNumber);
-
-  // Resolve the bot identity once: it decides whether a commented review run
-  // triggers at all and whether a stray inline comment is an explicit ask.
-  // Aliases (GITHUB_BOT_ALIASES) extend the resolvable identity — e.g. the
-  // relay App's login, whose private key is not available locally.
-  const botName = await githubClient.getBotUsername(owner, repo);
-  const botNames = botMentionCandidates(botName);
-
-  // Local dedupe: which comments this worker already addressed. GitHub
-  // reactions are visual feedback only and carry no gating meaning.
-  const workerState = new WorkerState();
-
-  const addressedCommentIds = new Set(
-    rawComments
-      .filter((comment) => workerState.isCommentAddressed(repoSlug, "review", comment.id))
-      .map((comment) => comment.id),
-  );
-
-  // Scope comments to this run: the chosen review's own threads plus explicit
-  // @mentions of the bot. Feedback that was never asked for (a stray comment
-  // from another review) stays unactioned until its author mentions the bot
-  // or submits their own actionable review.
-  const reviewThreadRootIds = new Set(
-    rawComments.filter((c) => c.pull_request_review_id === review.reviewId).map((c) => c.id),
-  );
-  const rootIdOf = (comment: (typeof rawComments)[number]): number | undefined => {
-    let current: (typeof rawComments)[number] | undefined = comment;
-    const visited = new Set<number>();
-    while (current?.in_reply_to_id !== undefined && !visited.has(current.id)) {
-      visited.add(current.id);
-      current = rawComments.find((c) => c.id === current?.in_reply_to_id);
+  if (ciFeedback) {
+    if (ciFeedback.failures.length === 0) {
+      throw new Error("CI feedback contains no failing checks.");
     }
-    return current?.id;
-  };
-
-  const unaddressedComments = rawComments.filter((c) => !addressedCommentIds.has(c.id));
-  const processedComments: ProcessedReviewComment[] = unaddressedComments
-    .filter((c) => {
-      const rootId = rootIdOf(c);
-      if (rootId !== undefined && reviewThreadRootIds.has(rootId)) {
-        return true;
-      }
-      return mentionsAnyBot(c.body, botNames);
-    })
-    .map((c) => ({
-      id: c.id,
-      path: c.path,
-      line: c.line ?? c.original_line,
-      side: c.side,
-      diffHunk: c.diff_hunk,
-      body: c.body,
-      reviewer: c.user.login,
-      isReply: c.in_reply_to_id !== undefined,
-    }));
-
-  const totalComments = rawComments.length;
-  const alreadyAddressed = totalComments - unaddressedComments.length;
-  const outOfScope = unaddressedComments.length - processedComments.length;
-
-  console.log(`   Found ${totalComments} comment(s)`);
-  if (alreadyAddressed > 0) {
-    console.log(`   ${alreadyAddressed} already addressed (skipping)`);
-  }
-  if (outOfScope > 0) {
     console.log(
-      `   ${outOfScope} unaddressed but out of scope for this run ` +
-        "(different review thread and no bot @mention — not actioned)",
+      `\n🤖 CI failure mode: fixing ${ciFeedback.failures.length} failing check(s) ` +
+        `(${ciFeedback.failures.map((failure) => failure.name).join(", ")})`,
     );
-  }
-  console.log(`   ${processedComments.length} remaining to address`);
+    beginRun({
+      origin: "ci_fix",
+      repo: repoSlug,
+      prNumber,
+      prUrl,
+      branch: pr.head.ref,
+      harness: resolveHarness({ warnDeprecated: false }).harness.name,
+    });
+    recordRunStage("change_request", {
+      status: "succeeded",
+      summary: `fixing ${ciFeedback.failures.length} failing check(s) on ${pr.head.ref}`,
+      detail: { failures: ciFeedback.failures, hasLogs: Boolean(ciFeedback.logs) },
+    });
+    prompt = formatCiFixPrompt({
+      ...ciFeedback,
+      repository: ciFeedback.repository || repoSlug,
+      prTitle: pr.title,
+      branch: pr.head.ref,
+    });
+    commitSummary = "Fix CI failures";
+  } else {
+    // Get latest actionable review (changes_requested, or commented when no
+    // changes_requested reviews exist — the commented pick is mention-gated
+    // after the comments below are fetched).
+    console.log("\n🔎 Looking for actionable review feedback...");
+    const review = await getLatestFeedbackReview(githubClient, owner, repo, prNumber);
 
-  // Fetch conversation comments (issue comments)
-  console.log("\n💬 Fetching conversation comments...");
-  const rawIssueComments = await githubClient.getIssueComments(owner, repo, prNumber);
+    if (!review) {
+      console.log("✅ No pending changes_requested or commented reviews found.");
+      return;
+    }
 
-  // Filter to only include comments from the reviewer, created after the review
-  const reviewSubmittedAt = new Date(review.submittedAt);
-  const reviewerIssueComments = rawIssueComments.filter(
-    (c) => c.user.login === review.reviewer && new Date(c.created_at) >= reviewSubmittedAt,
-  );
+    console.log(`   Found ${review.state.toLowerCase()} review from @${review.reviewer}`);
 
-  // Check which issue comments were already addressed (local dedupe)
-  const addressedIssueCommentIds = new Set(
-    reviewerIssueComments
-      .filter((comment) => workerState.isCommentAddressed(repoSlug, "conversation", comment.id))
-      .map((comment) => comment.id),
-  );
-  workerState.close();
+    // Fetch ALL review comments for the PR (not just from this review)
+    console.log("\n📥 Fetching review comments...");
+    const rawComments = await githubClient.getPullRequestReviewComments(owner, repo, prNumber);
 
-  const processedConversationComments: ProcessedConversationComment[] = reviewerIssueComments
-    .filter((c) => !addressedIssueCommentIds.has(c.id))
-    .map((c) => ({
-      id: c.id,
-      body: c.body,
-      author: c.user.login,
-      createdAt: c.created_at,
-    }));
+    // Resolve the bot identity once: it decides whether a commented review run
+    // triggers at all and whether a stray inline comment is an explicit ask.
+    // Aliases (GITHUB_BOT_ALIASES) extend the resolvable identity — e.g. the
+    // relay App's login, whose private key is not available locally.
+    const botName = await githubClient.getBotUsername(owner, repo);
+    const botNames = botMentionCandidates(botName);
 
-  const totalIssueComments = reviewerIssueComments.length;
-  const alreadyAddressedIssue = totalIssueComments - processedConversationComments.length;
+    // Local dedupe: which comments this worker already addressed. GitHub
+    // reactions are visual feedback only and carry no gating meaning.
+    const workerState = new WorkerState();
 
-  console.log(`   Found ${totalIssueComments} conversation comment(s) from reviewer`);
-  if (alreadyAddressedIssue > 0) {
-    console.log(`   ${alreadyAddressedIssue} already addressed (skipping)`);
-  }
-  console.log(`   ${processedConversationComments.length} remaining to address`);
-
-  // A commented review is informational by nature: only act on it when a bot
-  // identity is explicitly mentioned — in the review body itself or in one of
-  // the comments beneath it. changes_requested reviews are always addressed.
-  // Fails closed when no bot identity is configured at all.
-  if (review.state === "COMMENTED") {
-    const mentionSources = [
-      review.body,
-      ...processedComments.map((c) => c.body),
-      ...processedConversationComments.map((c) => c.body),
-    ];
-    const matchedBot = botNames.find((name) =>
-      mentionSources.some((body) => mentionsBot(body, name)),
+    const addressedCommentIds = new Set(
+      rawComments
+        .filter((comment) => workerState.isCommentAddressed(repoSlug, "review", comment.id))
+        .map((comment) => comment.id),
     );
-    if (!matchedBot) {
-      if (botNames.length === 0) {
+
+    // Scope comments to this run: the chosen review's own threads plus explicit
+    // @mentions of the bot. Feedback that was never asked for (a stray comment
+    // from another review) stays unactioned until its author mentions the bot
+    // or submits their own actionable review.
+    const reviewThreadRootIds = new Set(
+      rawComments.filter((c) => c.pull_request_review_id === review.reviewId).map((c) => c.id),
+    );
+    const rootIdOf = (comment: (typeof rawComments)[number]): number | undefined => {
+      let current: (typeof rawComments)[number] | undefined = comment;
+      const visited = new Set<number>();
+      while (current?.in_reply_to_id !== undefined && !visited.has(current.id)) {
+        visited.add(current.id);
+        current = rawComments.find((c) => c.id === current?.in_reply_to_id);
+      }
+      return current?.id;
+    };
+
+    const unaddressedComments = rawComments.filter((c) => !addressedCommentIds.has(c.id));
+    processedComments = unaddressedComments
+      .filter((c) => {
+        const rootId = rootIdOf(c);
+        if (rootId !== undefined && reviewThreadRootIds.has(rootId)) {
+          return true;
+        }
+        return mentionsAnyBot(c.body, botNames);
+      })
+      .map((c) => ({
+        id: c.id,
+        path: c.path,
+        line: c.line ?? c.original_line,
+        side: c.side,
+        diffHunk: c.diff_hunk,
+        body: c.body,
+        reviewer: c.user.login,
+        isReply: c.in_reply_to_id !== undefined,
+      }));
+
+    const totalComments = rawComments.length;
+    const alreadyAddressed = totalComments - unaddressedComments.length;
+    const outOfScope = unaddressedComments.length - processedComments.length;
+
+    console.log(`   Found ${totalComments} comment(s)`);
+    if (alreadyAddressed > 0) {
+      console.log(`   ${alreadyAddressed} already addressed (skipping)`);
+    }
+    if (outOfScope > 0) {
+      console.log(
+        `   ${outOfScope} unaddressed but out of scope for this run ` +
+          "(different review thread and no bot @mention — not actioned)",
+      );
+    }
+    console.log(`   ${processedComments.length} remaining to address`);
+
+    // Fetch conversation comments (issue comments)
+    console.log("\n💬 Fetching conversation comments...");
+    const rawIssueComments = await githubClient.getIssueComments(owner, repo, prNumber);
+
+    // Filter to only include comments from the reviewer, created after the review
+    const reviewSubmittedAt = new Date(review.submittedAt);
+    const reviewerIssueComments = rawIssueComments.filter(
+      (c) => c.user.login === review.reviewer && new Date(c.created_at) >= reviewSubmittedAt,
+    );
+
+    // Check which issue comments were already addressed (local dedupe)
+    const addressedIssueCommentIds = new Set(
+      reviewerIssueComments
+        .filter((comment) => workerState.isCommentAddressed(repoSlug, "conversation", comment.id))
+        .map((comment) => comment.id),
+    );
+    workerState.close();
+
+    processedConversationComments = reviewerIssueComments
+      .filter((c) => !addressedIssueCommentIds.has(c.id))
+      .map((c) => ({
+        id: c.id,
+        body: c.body,
+        author: c.user.login,
+        createdAt: c.created_at,
+      }));
+
+    const totalIssueComments = reviewerIssueComments.length;
+    const alreadyAddressedIssue = totalIssueComments - processedConversationComments.length;
+
+    console.log(`   Found ${totalIssueComments} conversation comment(s) from reviewer`);
+    if (alreadyAddressedIssue > 0) {
+      console.log(`   ${alreadyAddressedIssue} already addressed (skipping)`);
+    }
+    console.log(`   ${processedConversationComments.length} remaining to address`);
+
+    // A commented review is informational by nature: only act on it when a bot
+    // identity is explicitly mentioned — in the review body itself or in one of
+    // the comments beneath it. changes_requested reviews are always addressed.
+    // Fails closed when no bot identity is configured at all.
+    if (review.state === "COMMENTED") {
+      const mentionSources = [
+        review.body,
+        ...processedComments.map((c) => c.body),
+        ...processedConversationComments.map((c) => c.body),
+      ];
+      const matchedBot = botNames.find((name) =>
+        mentionSources.some((body) => mentionsBot(body, name)),
+      );
+      if (!matchedBot) {
+        if (botNames.length === 0) {
+          console.log(
+            "\n⏭️  Latest review is commented, but no bot identity is configured to verify @mentions — skipping.",
+          );
+          console.log(
+            "   Configure a GitHub App or set GITHUB_BOT_ALIASES (e.g. the relay App's login).",
+          );
+        } else {
+          const names = botNames.map((name) => `@${name}`).join(" or ");
+          console.log(
+            `\n⏭️  Latest review is commented and nothing in it mentions ${names} — skipping.`,
+          );
+        }
         console.log(
-          "\n⏭️  Latest review is commented, but no bot identity is configured to verify @mentions — skipping.",
+          "   Commented reviews are addressed only when they mention the bot; changes_requested reviews are always addressed.",
         );
+        console.log(`   View PR: ${prUrl}`);
+        return;
+      }
+      if (verbose && botNames.length > 0) {
         console.log(
-          "   Configure a GitHub App or set GITHUB_BOT_ALIASES (e.g. the relay App's login).",
-        );
-      } else {
-        const names = botNames.map((name) => `@${name}`).join(" or ");
-        console.log(
-          `\n⏭️  Latest review is commented and nothing in it mentions ${names} — skipping.`,
+          `   💬 Bot mention detected (${botNames.map((name) => `@${name}`).join(", ")}); addressing.`,
         );
       }
-      console.log(
-        "   Commented reviews are addressed only when they mention the bot; changes_requested reviews are always addressed.",
-      );
+    }
+
+    // If no comments remaining (neither review nor conversation), we're done
+    if (processedComments.length === 0 && processedConversationComments.length === 0) {
+      console.log("\n✅ All review and conversation comments have been addressed already.");
       console.log(`   View PR: ${prUrl}`);
       return;
     }
-    if (verbose && botNames.length > 0) {
-      console.log(
-        `   💬 Bot mention detected (${botNames.map((name) => `@${name}`).join(", ")}); addressing.`,
-      );
-    }
-  }
 
-  // If no comments remaining (neither review nor conversation), we're done
-  if (processedComments.length === 0 && processedConversationComments.length === 0) {
-    console.log("\n✅ All review and conversation comments have been addressed already.");
-    console.log(`   View PR: ${prUrl}`);
-    return;
-  }
-
-  // Build feedback object
-  const feedback: ProcessedReviewFeedback = {
-    prNumber,
-    prTitle: pr.title,
-    repository: `${owner}/${repo}`,
-    branch: pr.head.ref,
-    reviewer: review.reviewer,
-    reviewState: review.state.toLowerCase() as ProcessedReviewFeedback["reviewState"],
-    reviewBody: review.body,
-    comments: processedComments,
-    conversationComments:
-      processedConversationComments.length > 0 ? processedConversationComments : undefined,
-  };
-
-  // Run record: begun only once there is actual feedback to handle, so
-  // no-op invocations (nothing unaddressed) do not create run rows.
-  beginRun({
-    origin: "pr_mention",
-    repo: `${owner}/${repo}`,
-    prNumber,
-    prUrl,
-    branch: pr.head.ref,
-    harness: resolveHarness({ warnDeprecated: false }).harness.name,
-  });
-  recordRunStage("change_request", {
-    status: "succeeded",
-    summary: `addressing ${processedComments.length} review comment(s) and ${processedConversationComments.length} conversation comment(s) from @${review.reviewer}`,
-    detail: {
+    // Build feedback object
+    const feedback: ProcessedReviewFeedback = {
+      prNumber,
+      prTitle: pr.title,
+      repository: `${owner}/${repo}`,
+      branch: pr.head.ref,
       reviewer: review.reviewer,
-      reviewComments: processedComments.length,
-      conversationComments: processedConversationComments.length,
-    },
-  });
+      reviewState: review.state.toLowerCase() as ProcessedReviewFeedback["reviewState"],
+      reviewBody: review.body,
+      comments: processedComments,
+      conversationComments:
+        processedConversationComments.length > 0 ? processedConversationComments : undefined,
+    };
+
+    // Run record: begun only once there is actual feedback to handle, so
+    // no-op invocations (nothing unaddressed) do not create run rows.
+    beginRun({
+      origin: "pr_mention",
+      repo: `${owner}/${repo}`,
+      prNumber,
+      prUrl,
+      branch: pr.head.ref,
+      harness: resolveHarness({ warnDeprecated: false }).harness.name,
+    });
+    recordRunStage("change_request", {
+      status: "succeeded",
+      summary: `addressing ${processedComments.length} review comment(s) and ${processedConversationComments.length} conversation comment(s) from @${review.reviewer}`,
+      detail: {
+        reviewer: review.reviewer,
+        reviewComments: processedComments.length,
+        conversationComments: processedConversationComments.length,
+      },
+    });
+    prompt = formatReviewPrompt(feedback);
+    commitSummary = `Address review feedback from ${feedback.reviewer}`;
+  }
 
   // Prepare the review worktree
   console.log(`\n🌿 Preparing review worktree for branch: ${pr.head.ref}`);
@@ -633,9 +685,6 @@ export async function addressReview(
 
   const workDir = worktreeResult.path!;
   console.log(`✅ Worktree ready at: ${workDir}`);
-
-  // Format prompt for Agent
-  const prompt = formatReviewPrompt(feedback);
 
   // Set git config for bot author if available (so Agent's commits are attributed to bot)
   let originalGitName: string | null = null;
@@ -706,6 +755,10 @@ export async function addressReview(
     if (!hasUncommitted && !hasUnpushed) {
       console.log("\n⚠️  No changes were made by @devintern/code");
       console.log(`   View PR: ${prUrl}`);
+      if (ciFeedback) {
+        throw new Error("CI fix agent made no changes");
+      }
+      endRun("succeeded", "agent made no changes");
       return;
     }
 
@@ -762,11 +815,11 @@ export async function addressReview(
 
       while (commitAttempt <= hookRetries && !commitSuccess) {
         commitAttempt++;
-        const commitResult = await Utils.commitChanges(
-          `PR-${prNumber}`,
-          `Address review feedback from ${feedback.reviewer}`,
-          { verbose, author: gitAuthor, cwd: workDir },
-        );
+        const commitResult = await Utils.commitChanges(`PR-${prNumber}`, commitSummary, {
+          verbose,
+          author: gitAuthor,
+          cwd: workDir,
+        });
 
         if (commitResult.success) {
           console.log("✅ Changes committed successfully");
@@ -880,7 +933,7 @@ export async function addressReview(
     }
 
     // Mark comments as addressed if requested (only if push succeeded)
-    if (!noReply && !noPush) {
+    if (!ciFeedback && !noReply && !noPush) {
       console.log("\n💬 Marking comments as addressed...");
 
       await markCommentsAddressed(
@@ -890,11 +943,15 @@ export async function addressReview(
         processedComments,
         processedConversationComments,
       );
-    } else if (noReply) {
+    } else if (!ciFeedback && noReply) {
       console.log("\n⏭️  Skipping marking comments (--no-reply flag)");
     }
 
-    console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
+    console.log(
+      ciFeedback
+        ? `\n✅ Successfully pushed a CI fix for PR #${prNumber}`
+        : `\n✅ Successfully addressed review for PR #${prNumber}`,
+    );
     console.log(`   View PR: ${prUrl}`);
     endRun("succeeded");
     return;

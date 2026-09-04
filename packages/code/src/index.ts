@@ -904,6 +904,7 @@ if (process.argv[2] === "init") {
     let noPush = false;
     let noReply = false;
     let verbose = false;
+    let ciFeedbackPath: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
@@ -912,6 +913,15 @@ if (process.argv[2] === "init") {
         noReply = true;
       } else if (args[i] === "-v" || args[i] === "--verbose") {
         verbose = true;
+      } else if (args[i] === "--ci-feedback") {
+        const feedbackPath = args[i + 1];
+        if (!feedbackPath || feedbackPath.startsWith("-")) {
+          console.error("Error: --ci-feedback requires a file path");
+          process.exitCode = 1;
+          return;
+        }
+        ciFeedbackPath = feedbackPath;
+        i++;
       } else if (args[i] === "--help" || args[i] === "-h") {
         console.log("Usage: devintern address-review <pr-url> [options]");
         console.log("");
@@ -948,7 +958,7 @@ if (process.argv[2] === "init") {
     // Import and run address-review
     const { addressReview } = await import("./lib/address-review");
     try {
-      await addressReview(prUrl, { noPush, noReply, verbose });
+      await addressReview(prUrl, { noPush, noReply, verbose, ciFeedbackPath });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op

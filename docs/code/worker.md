@@ -229,6 +229,7 @@ The daemon itself takes almost no flags. Durable settings live in `workspace.tom
 [workspace]
 dashboard = true          # false disables the embedded dashboard
 dashboard_port = 4400     # optional; default 4400
+ci_failure_fix = false    # opt in to automatic CI repair on agent PRs
 
 [defaults]
 task_query = "status=todo"
@@ -276,6 +277,16 @@ In scheduled mode the poller still detects every conflict on the first tick it a
 The setting applies to the whole workspace and live-reloads with `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
+
+## CI failures on the agent's PRs
+
+Set `[workspace].ci_failure_fix = true` to watch checks on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.
+
+The watch is continuous while the worker and PR remain open, not just when the PR is created. It runs once at worker startup and then every `[defaults].poll_interval` seconds, survives restarts through the workspace database, and stops when the PR closes, its repository leaves the workspace, or the setting is disabled. Only PRs recorded in the local `agent_prs` registry are watched; similarly named PRs created elsewhere are not discovered automatically.
+
+Only completed `failure` and `timed_out` checks trigger repair. The worker waits while any check is pending before declaring CI green, deduplicates successful repair runs by head SHA and check ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Job logs are reduced to an error-focused excerpt; check annotations are the fallback when logs are unavailable.
+
+Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Checks: Read**, **Actions: Read**, and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled.
 
 ## Mention the bot on any PR
 

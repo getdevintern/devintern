@@ -77,6 +77,42 @@ export interface FileContent {
   sha: string;
 }
 
+export interface CheckRunSummary {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  details_url?: string;
+}
+
+export interface CombinedStatus {
+  state: "error" | "failure" | "pending" | "success";
+  total_count: number;
+  statuses: Array<{
+    id: number;
+    state: string;
+    context?: string;
+    target_url?: string | null;
+  }>;
+}
+
+export interface ActionJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+}
+
+export interface WorkflowRunSummary {
+  id: number;
+  conclusion: string | null;
+}
+
+export interface CheckAnnotation {
+  path?: string;
+  message: string;
+}
+
 /**
  * Whether an error thrown by a GitHub API client call is an HTTP 404
  * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
@@ -670,6 +706,97 @@ export class GitHubReviewsClient {
       owner,
       repo,
       { reviewers },
+    );
+  }
+
+  /** Fetch check runs for a commit, conditionally by ETag. */
+  async getCheckRuns(
+    owner: string,
+    repo: string,
+    sha: string,
+    etag?: string,
+  ): Promise<{ data: CheckRunSummary[] | null; etag?: string; notModified: boolean }> {
+    const result = await this.conditionalGet<{
+      check_runs: CheckRunSummary[];
+    }>(`/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=100`, owner, repo, etag);
+    return {
+      data: result.data?.check_runs ?? null,
+      etag: result.etag,
+      notModified: result.notModified,
+    };
+  }
+
+  /** Fetch classic commit statuses for a commit, conditionally by ETag. */
+  async getCombinedStatus(
+    owner: string,
+    repo: string,
+    sha: string,
+    etag?: string,
+  ): Promise<{ data: CombinedStatus | null; etag?: string; notModified: boolean }> {
+    return this.conditionalGet<CombinedStatus>(
+      `/repos/${owner}/${repo}/commits/${sha}/status`,
+      owner,
+      repo,
+      etag,
+    );
+  }
+
+  /** List workflow runs for a specific head SHA. */
+  async getWorkflowRunsForSha(
+    owner: string,
+    repo: string,
+    sha: string,
+  ): Promise<WorkflowRunSummary[]> {
+    const data = await this.apiRequest<{ workflow_runs: WorkflowRunSummary[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${sha}&per_page=20`,
+      owner,
+      repo,
+    );
+    return data.workflow_runs;
+  }
+
+  /** List the jobs in one Actions workflow run. */
+  async getWorkflowRunJobs(owner: string, repo: string, runId: number): Promise<ActionJob[]> {
+    const data = await this.apiRequest<{ jobs: ActionJob[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+      owner,
+      repo,
+    );
+    return data.jobs;
+  }
+
+  /** Download a workflow job's plain-text log using its job ID. */
+  async getJobLogs(owner: string, repo: string, jobId: number): Promise<string | null> {
+    const token = await this.getToken(owner, repo).catch(() => null);
+    if (!token) return null;
+    const response = await Utils.fetchWithRetry(
+      `${this.baseUrl}/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`,
+      {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "devintern",
+        },
+      },
+    );
+    return response.ok ? response.text() : null;
+  }
+
+  /** Fetch annotations exposed by one check run. */
+  async getCheckRunAnnotations(
+    owner: string,
+    repo: string,
+    checkRunId: number,
+  ): Promise<CheckAnnotation[]> {
+    return this.apiRequest<CheckAnnotation[]>(
+      "GET",
+      `/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=100`,
+      owner,
+      repo,
     );
   }
 

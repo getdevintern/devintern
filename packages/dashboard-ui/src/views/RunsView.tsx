@@ -35,6 +35,7 @@ const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "all",
   "task",
   "pr_mention",
+  "ci_fix",
   "conflict_resolution",
   "scheduled",
   "estimate",

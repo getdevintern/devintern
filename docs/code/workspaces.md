@@ -263,7 +263,7 @@ WantedBy=multi-user.target
 
 With GitHub credentials in the workspace `.env`, the fleet worker also reacts to PR activity across every GitHub repo in the workspace:
 
-- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
+- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. With `[workspace].ci_failure_fix = true`, it also repairs failing CI. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
 - **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. GitHub envelopes carry the repository and route directly. Tracker events re-run the applicable defaults/team query and then use the same fixed mapping or routing rules as polling. A tracker type used by several teams stays polling-only because current relay envelopes do not identify the team registration; the worker fails closed instead of guessing. Events for repositories not in the workspace are ignored.
 
