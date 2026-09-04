@@ -273,8 +273,9 @@ export function AnalyticsSettings({
               Share anonymous usage data
             </Label>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              Helps us understand which features are used. Never includes prompts, ticket text,
-              project paths, or credentials. You can turn this off anytime.
+              Helps us understand which features are used, and reports errors so they can be fixed.
+              Never includes prompts, ticket text, project paths, or credentials. You can turn this
+              off anytime.
             </p>
           </div>
           <Switch

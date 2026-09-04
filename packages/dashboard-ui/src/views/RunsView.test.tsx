@@ -90,6 +90,98 @@ test("task key renders in the work column with a tracker link when available", (
   expect(html).toContain('href="https://acme.atlassian.net/browse/DEV-7"');
 });
 
+test("scheduled and manual runs display the automation id instead of the occurrence date string", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        run({
+          origin: "scheduled",
+          taskKey: "2026-09-01t09-30-00-000z",
+          automationId: "nightly-tidy",
+        }),
+        run({
+          origin: "manual",
+          taskKey: "2026-09-01t10-00-00-000z",
+          automationId: "nightly-tidy",
+        }),
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("nightly-tidy");
+  expect(html).not.toContain("2026-09-01t09-30-00-000z");
+  expect(html).not.toContain("2026-09-01t10-00-00-000z");
+});
+
+test("legacy scheduled runs without an automation id fall back to the occurrence task key", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [run({ origin: "scheduled", taskKey: "2026-08-30t03-00-00-000z" })],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("2026-08-30t03-00-00-000z");
+});
+
+test("pr mentions and conflict resolutions link the affected PR in the work column", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        run({
+          origin: "pr_mention",
+          taskKey: undefined,
+          repo: "acme/widgets",
+          prNumber: 42,
+          prUrl: "https://github.com/acme/widgets/pull/42",
+        }),
+        run({
+          origin: "conflict_resolution",
+          taskKey: undefined,
+          repo: "acme/widgets",
+          prNumber: 43,
+        }),
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("PR #42");
+  expect(html).toContain('href="https://github.com/acme/widgets/pull/42"');
+  expect(html).toContain("PR #43");
+  expect(html).toContain('href="https://github.com/acme/widgets/pull/43"');
+});
+
+test("an in-progress task run shows no PR link or text before a PR exists", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [run({ status: "in_progress", finishedAt: undefined })],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).not.toContain("PR #");
+  expect(html).not.toContain("<a ");
+});
+
+test("the PR link appears in the result column once the run actually created one", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        run({
+          status: "succeeded",
+          prNumber: 9,
+          prUrl: "https://github.com/acme/widgets/pull/9",
+        }),
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain('href="https://github.com/acme/widgets/pull/9"');
+});
+
 test("filter select trigger shows the filter name and the current selection", () => {
   type StatusFilter = "all" | "in_progress" | "failed";
   const STATUS_OPTIONS: readonly StatusFilter[] = ["all", "in_progress", "failed"];

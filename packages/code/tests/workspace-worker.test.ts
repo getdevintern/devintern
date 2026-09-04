@@ -328,6 +328,26 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(result).toBe(true);
     expect(repoManager.calls).toContain("worktree:backend:T-C2");
   });
+
+  test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async () => true,
+        repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      },
+      { repo: "frontend", extraArgs: ["--force"] },
+    );
+    const result = await executor(
+      "T-RETRY",
+      toRoutableTask({ key: "T-RETRY", labels: [], components: [] }),
+    );
+    expect(result).toBe(true);
+    expect(repoManager.calls).toContain("worktree:frontend:T-RETRY");
+  });
 });
 
 describe("fleetTaskArgs", () => {
@@ -348,7 +368,7 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
-  test("starts tracker relay without GitHub polling credentials", async () => {
+  test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
     const workspaceDir = join(
       tmpdir(),
       `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -358,14 +378,20 @@ describe("buildFleetEventAcquirers", () => {
     const repoManager = new FakeRepoManager(workspaceDir);
     const savedToken = process.env.GITHUB_TOKEN;
     const savedAppId = process.env.GITHUB_APP_ID;
+    const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+    const savedAuthMode = process.env.DEVINTERN_GITHUB_AUTH_MODE;
+    const savedAliases = process.env.GITHUB_BOT_ALIASES;
     delete process.env.GITHUB_TOKEN;
-    delete process.env.GITHUB_APP_ID;
+    process.env.GITHUB_APP_ID = "123456";
+    process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/custom-app.pem";
     saveRelayState(
       {
         relayUrl: "https://relay.test",
         customerId: "customer-1",
         connectedAt: new Date(0).toISOString(),
-        registrations: [],
+        registrations: [
+          { kind: "repo", key: "acme/backend", createdAt: Date.now(), lastEventAt: null },
+        ],
         relayToken: "drt_test",
       },
       workspaceDir,
@@ -382,11 +408,19 @@ describe("buildFleetEventAcquirers", () => {
         intervalSeconds: 60,
       });
       expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["relay"]);
+      expect(process.env.DEVINTERN_GITHUB_AUTH_MODE).toBe("token-only");
+      expect(process.env.GITHUB_BOT_ALIASES?.split(",")).toContain("devintern-ai");
     } finally {
       if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = savedToken;
       if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
       else process.env.GITHUB_APP_ID = savedAppId;
+      if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
+      if (savedAuthMode === undefined) delete process.env.DEVINTERN_GITHUB_AUTH_MODE;
+      else process.env.DEVINTERN_GITHUB_AUTH_MODE = savedAuthMode;
+      if (savedAliases === undefined) delete process.env.GITHUB_BOT_ALIASES;
+      else process.env.GITHUB_BOT_ALIASES = savedAliases;
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }

@@ -26,6 +26,8 @@ describe("RunStore", () => {
       origin: "task",
       taskKey: "PROJ-1",
       tracker: "jira",
+      team: "platform",
+      repo: "api",
       harness: "claude-code",
     });
 
@@ -33,6 +35,8 @@ describe("RunStore", () => {
     expect(run?.origin).toBe("task");
     expect(run?.taskKey).toBe("PROJ-1");
     expect(run?.tracker).toBe("jira");
+    expect(run?.team).toBe("platform");
+    expect(run?.repo).toBe("api");
     expect(run?.status).toBe("in_progress");
     expect(run?.finishedAt).toBeUndefined();
   });
@@ -132,6 +136,16 @@ describe("RunStore", () => {
     expect(run?.repo).toBe("acme/widgets");
     expect(run?.prNumber).toBe(7);
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
+  });
+
+  test("createRun persists the PR URL of PR-affected origins", () => {
+    const id = store.createRun({
+      origin: "conflict_resolution",
+      repo: "acme/widgets",
+      prNumber: 42,
+      prUrl: "https://github.com/acme/widgets/pull/42",
+    });
+    expect(store.getRun(id)?.prUrl).toBe("https://github.com/acme/widgets/pull/42");
   });
 
   test("createRun persists the derived ticket URL and setRunTicket snapshots the description", () => {

@@ -13,7 +13,7 @@ const RELAY_URL = "http://relay.test";
 interface HandlerLog {
   addressed: [string, number][];
   comments: [string, number, number][];
-  tasks: string[];
+  tasks: Array<[string, string]>;
 }
 
 function envelope(overrides: Partial<RelayEnvelope>): RelayEnvelope {
@@ -100,8 +100,8 @@ describe("RelayAcquirer", () => {
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
         },
-        evaluateTask: async (taskKey) => {
-          log.tasks.push(taskKey);
+        evaluateTask: async (taskKey, trackerSource) => {
+          log.tasks.push([taskKey, trackerSource]);
         },
       },
     });
@@ -149,7 +149,7 @@ describe("RelayAcquirer", () => {
 
     expect(log.addressed).toEqual([["acme/webapp", 5]]);
     expect(log.comments).toEqual([["acme/webapp", 6, 99]]);
-    expect(log.tasks).toEqual(["PROJ-7"]);
+    expect(log.tasks).toEqual([["PROJ-7", "jira"]]);
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("3");
     expect(requests[0]).toContain("cursor=0");
     expect(authHeaders[0]).toBe("Bearer drt_test_token");
@@ -179,6 +179,39 @@ describe("RelayAcquirer", () => {
     await waitFor(() => requests.length >= 1);
     await acquirer.stop();
     expect(requests[0]).toContain("cursor=41");
+  });
+
+  test("reports successful polls for fallback suppression", async () => {
+    let successes = 0;
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (successes === 0) {
+        return new Response(JSON.stringify({ events: [], cursor: 0 }), { status: 200 });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof fetch;
+    const acquirer = new RelayAcquirer({
+      relayUrl: RELAY_URL,
+      relayToken: "drt_test_token",
+      workerState,
+      queue,
+      fetchImpl,
+      isAgentPr: () => false,
+      handlers: {
+        addressPr: async () => false,
+        handlePrComment: async () => {},
+        evaluateTask: async () => {},
+      },
+      onPollSuccess: () => {
+        successes++;
+      },
+    });
+
+    acquirer.start();
+    await waitFor(() => successes === 1);
+    await acquirer.stop();
+    expect(successes).toBe(1);
   });
 
   test("errors back off and the loop recovers", async () => {
@@ -237,11 +270,11 @@ describe("RelayAcquirer", () => {
       handlers: {
         addressPr: async () => false,
         handlePrComment: async () => {},
-        evaluateTask: async (taskKey) => {
+        evaluateTask: async (taskKey, trackerSource) => {
           if (taskKey === "BOOM-1") {
             throw new Error("handler exploded");
           }
-          log.tasks.push(taskKey);
+          log.tasks.push([taskKey, trackerSource]);
         },
       },
     });
@@ -250,7 +283,7 @@ describe("RelayAcquirer", () => {
     await waitFor(() => log.tasks.length === 1);
     await acquirer.stop();
 
-    expect(log.tasks).toEqual(["OK-2"]);
+    expect(log.tasks).toEqual([["OK-2", "jira"]]);
     // The failing envelope is marked processed — no retry loop.
     expect(queue.hasProcessed("relay", "jira:boom")).toBe(true);
   });

@@ -79,6 +79,12 @@ export class RepoManager {
         }
         console.log(`🔄 [config] updated origin for repo ${repo.name}`);
       }
+      const worktreeConfig = await Utils.enableWorktreeConfig(clonePath);
+      if (!worktreeConfig.success) {
+        throw new Error(
+          `Failed to configure worktrees for repo "${repo.name}": ${worktreeConfig.error}`,
+        );
+      }
       return clonePath;
     }
 
@@ -100,6 +106,13 @@ export class RepoManager {
     );
     if (!refspec.success) {
       throw new Error(`Failed to set fetch refspec for repo "${repo.name}": ${refspec.error}`);
+    }
+
+    const worktreeConfig = await Utils.enableWorktreeConfig(clonePath);
+    if (!worktreeConfig.success) {
+      throw new Error(
+        `Failed to configure worktrees for repo "${repo.name}": ${worktreeConfig.error}`,
+      );
     }
 
     await this.fetch(repo.name);

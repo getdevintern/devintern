@@ -4,6 +4,7 @@ sidebarLabel: "Asana Integration"
 description: "Fetch Asana tasks, move project sections, implement with your coding agent, and post results back as comments."
 section: "Code"
 order: 5
+sidebarHidden: true
 dateModified: 2026-07-23
 tags: ["asana", "devintern/code", "integration"]
 ---

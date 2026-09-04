@@ -4,6 +4,7 @@ sidebarLabel: "GitLab Integration"
 description: "Fetch GitLab issues (cloud or self-hosted), track status labels, implement with your coding agent, and post results back."
 section: "Code"
 order: 6
+sidebarHidden: true
 dateModified: 2026-08-24
 tags: ["gitlab", "gitlab-self-hosted", "devintern/code", "integration"]
 ---
@@ -109,9 +110,9 @@ GitLab issues have no estimation field, so `--estimate` runs in comment-only mod
 
 ## Token scopes for Cloud vs. self-hosted
 
-| Scope | Needed for |
-| ----- | ---------- |
-| `api` | Full read/write access (recommended) |
+| Scope      | Needed for                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| `api`      | Full read/write access (recommended)                                                       |
 | `read_api` | Read-only setups (fetching issues works; posting comments and label transitions will fail) |
 
 Self-hosted tokens only exist on their own instance — a gitlab.com token cannot authenticate against your on-premises GitLab and vice versa.

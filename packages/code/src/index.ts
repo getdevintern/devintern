@@ -39,12 +39,12 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
+import { initSentryOnce } from "./lib/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
   captureError,
   findEnvFile,
   flushErrorTracking,
-  initErrorTracking,
   maybeOfferCliUpdate,
   resolveConfigDir,
 } from "@devintern/utils";
@@ -469,7 +469,7 @@ function loadEnvironment(envFile?: string): string | null {
   const loaded = loadEnvironmentInner(envFile);
   // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
   // loading has had its chance to populate it.
-  initSentryOnce();
+  initSentryOnce(`code@${VERSION}`);
   return loaded;
 }
 
@@ -583,15 +583,8 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
 }
 
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
-let sentryInitialized = false;
-function initSentryOnce(): void {
-  if (sentryInitialized) return;
-  sentryInitialized = true;
-  initErrorTracking({
-    release: `code@${VERSION}`,
-    environment: process.env.NODE_ENV ?? "production",
-  });
-}
+// Shared entry-point init (worker/webhook standalone reuse this too); call sites
+// pass the release so standalone entries stay attributed to the CLI version.
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
@@ -619,20 +612,34 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
   (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    // `devintern worker connect ...` — pair this repo with the Mode 2 relay.
+    // `devintern worker connect ...` — pair the configured fleet with the
+    // Mode 2 relay.
     if (process.argv[3] === "connect") {
-      const { runWorkerConnect } = await import("./lib/relay-connect");
-      const exitCode = await runWorkerConnect(process.argv.slice(4), async () => {
-        try {
-          const detected = await new PRManager().detectRepository();
-          return detected.platform === "github" ? detected.repository : null;
-        } catch {
-          return null;
-        }
-      });
+      const { runWorkerConnectCommand } = await import("./lib/worker-connect");
+      const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
       process.exit(exitCode);
+    }
+
+    if (process.argv[3] === "scaffold") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker scaffold");
+        console.log("");
+        console.log("Create ~/.devintern/workspace.toml and the shared .env without the wizard.");
+        process.exit(0);
+      }
+      const { runWorkerScaffold } = await import("./lib/workspace/init");
+      process.exit(runWorkerScaffold());
+    }
+
+    if (process.argv[3] === "add-repo") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker add-repo");
+        console.log("");
+        console.log("Add the current Git repository to the worker workspace.");
+        process.exit(0);
+      }
+      const { runWorkerAddRepo } = await import("./lib/workspace/init");
+      process.exit(await runWorkerAddRepo(process.cwd()));
     }
 
     // `devintern worker run-now` — ask a running workspace worker for one
@@ -672,11 +679,18 @@ if (process.argv[2] === "init") {
     const args = process.argv.slice(3);
 
     if (args[0] === "init") {
+      if (args.some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker init");
+        console.log("");
+        console.log("Interactively configure unattended automation and a native user service.");
+        process.exit(0);
+      }
+      loadedEnvPath = loadEnvironment();
       const { runWorkerInit } = await import("./lib/worker-init");
       const { isInteractive } = await import("./lib/init-wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: `devintern workspace init` + `workspace import`,");
+        console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
         console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
         process.exit(1);
       }
@@ -735,13 +749,13 @@ if (process.argv[2] === "init") {
       } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
       } else if (arg === "--help" || arg === "-h") {
-        console.log("Usage: devintern worker [init|run-now] [options]");
-        console.log("       devintern worker connect [github|status] [--repo owner/name]");
+        console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
+        console.log("       devintern worker connect [target] [--workspace <path>]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
-        console.log("events arrive in seconds without webhook setup; see connect --help.");
+        console.log("`worker connect` pairs workspace repos with the DevIntern relay (Mode 2)");
+        console.log("so events arrive in seconds without webhook setup; see connect --help.");
         console.log("");
         console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
         console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
@@ -751,6 +765,9 @@ if (process.argv[2] === "init") {
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
         console.log("                      query (live dry run), and license check");
+        console.log("  scaffold            Create workspace.toml and the shared .env only");
+        console.log("  add-repo            Add the current repository to the worker workspace");
+        console.log("  connect             Pair workspace repos or its tracker with the relay");
         console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
@@ -759,8 +776,14 @@ if (process.argv[2] === "init") {
         console.log("  -v, --verbose       Verbose logging");
         console.log("  -h, --help          Display this help message");
         process.exit(0);
+      } else if (!arg.startsWith("-")) {
+        console.error(`❌ Unknown worker command: ${arg}`);
+        console.error("   Run `devintern worker --help` for available commands.");
+        process.exit(1);
       }
     }
+
+    loadedEnvPath = loadEnvironment();
 
     const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
       await import("./lib/workspace/paths");
@@ -802,30 +825,10 @@ if (process.argv[2] === "init") {
     return;
   })();
 } else if (process.argv[2] === "workspace") {
-  // Workspace management: scaffold or grow the multi-repo fleet config.
-  // No license gate here - enforcement lives on the worker's workspace mode.
-  (async () => {
-    const sub = process.argv[3];
-    if (sub === "init") {
-      const { runWorkspaceInit } = await import("./lib/workspace/init");
-      process.exit(runWorkspaceInit());
-    }
-    if (sub === "import") {
-      const { runWorkspaceImport } = await import("./lib/workspace/init");
-      process.exit(await runWorkspaceImport(process.cwd()));
-    }
-    console.log("Usage: devintern workspace <command>");
-    console.log("");
-    console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
-    console.log("The fleet worker serves every repo listed there; see `devintern worker --help`.");
-    console.log("");
-    console.log("Commands:");
-    console.log("  init      Create the workspace config and shared .env");
-    console.log("  import    Add the current repo to the workspace (run inside the repo);");
-    console.log("            merges its .devintern-code/.env into the workspace .env and");
-    console.log("            keeps conflicting values repo-local in [repos.env]");
-    process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
-  })();
+  console.error("❌ Unknown command: workspace");
+  console.error("   Workspace setup and management live under `devintern worker`.");
+  console.error("   Run `devintern worker --help` for available commands.");
+  process.exit(1);
 } else if (process.argv[2] === "dashboard") {
   // Local observability dashboard, standalone: reads the worker's SQLite
   // read-only, so it works whether or not the worker is running.
@@ -956,10 +959,15 @@ if (process.argv[2] === "init") {
       if (exitIfWorkerUsageLimit(error)) {
         return;
       }
+      const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
-      endRun("failed", (error as Error).message);
-      console.error(`❌ Error: ${(error as Error).message}`);
+      endRun("failed", message);
+      captureError(error, { command: "address-review", prUrl });
+      console.error(`❌ Error: ${message}`);
+      // This is a handled exception, so the process-level fatal handlers do
+      // not run. Flush explicitly before the subprocess reports failure.
+      await flushErrorTracking();
       process.exit(1);
     }
   })();
@@ -1046,6 +1054,11 @@ if (process.argv[2] === "init") {
         return;
       }
       console.error(`❌ Error: ${(error as Error).message}`);
+      // Thrown (unexpected) resolution errors are user actions that failed —
+      // reported like address-review; `failed`/`deferred` outcomes above are
+      // expected results and stay unreported.
+      captureError(error, { command: "resolve-conflicts", prUrl });
+      await flushErrorTracking();
       process.exitCode = 1;
     }
   })();
@@ -1493,6 +1506,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
       taskKey: workflowKey,
       tracker: trackerName,
+      team: process.env.DEVINTERN_WORKSPACE_TEAM,
+      repo: process.env.DEVINTERN_WORKSPACE_REPO,
       // The harness that will implement this run (resolved at startup).
       harness: resolvedAgent.harness.name,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
@@ -2028,6 +2043,13 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // A failed task run interrupted a user action — report it with the task
+    // context so Sentry shows which pipeline stage is failing for users.
+    captureError(error, {
+      taskKey,
+      tracker: process.env.TASK_TRACKER || "jira",
+      stage: "process-task",
+    });
 
     // Leave feedback on the ticket so a failed run never ends silently with
     // the task stranded in "In Progress" and no PR.
@@ -2043,6 +2065,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (totalTasks > 1) {
       throw error;
     }
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -2053,7 +2076,7 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
-    initSentryOnce();
+    initSentryOnce(`code@${VERSION}`);
 
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
@@ -2262,6 +2285,8 @@ async function main(): Promise<void> {
             origin: "estimate",
             taskKey,
             tracker: activeTrackerType,
+            // Every origin records the harness that executed it.
+            harness: resolvedAgent.harness.name,
             ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
           });
 
@@ -2351,6 +2376,12 @@ async function main(): Promise<void> {
             error: (error as Error).message,
           });
           console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
+          // A failed estimation is a user action that did not complete.
+          captureError(error, {
+            taskKey,
+            tracker: process.env.TASK_TRACKER || "jira",
+            stage: "estimate",
+          });
           await finishTaskRun("failed", (error as Error).message);
         }
       }
@@ -2375,6 +2406,7 @@ async function main(): Promise<void> {
       }
       await flushAnalytics();
       if (estimationResults.failed > 0) {
+        await flushErrorTracking();
         process.exit(1);
       }
       return;
@@ -2453,6 +2485,9 @@ async function main(): Promise<void> {
           lockManager.release();
         }
         await flushAnalytics();
+        // Task failures were already captured in processSingleTask; make sure
+        // those events are sent before this exit.
+        await flushErrorTracking();
         process.exit(1);
       }
     }
@@ -2468,11 +2503,15 @@ async function main(): Promise<void> {
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // Setup/query failures that reach here were not captured by the per-task
+    // handlers (lock, tracker query, license, ...).
+    captureError(error, { stage: "main" });
     // Release lock before exiting on error
     if (lockManager) {
       lockManager.release();
     }
     await flushAnalytics();
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -3850,9 +3889,17 @@ async function runAgentHarness(
                 }
               } else {
                 console.log(`⚠️  PR creation failed: ${prResult.message}`);
+                // The run "succeeds" without a PR — a silent user-visible
+                // degradation worth tracking. prResult.message can quote API
+                // errors; captureError redacts token-like substrings.
+                captureError(new Error(prResult.message || "PR creation failed"), {
+                  taskKey,
+                  stage: "create-pr",
+                });
               }
             } catch (prError) {
               console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
+              captureError(prError, { taskKey, stage: "create-pr" });
             }
           };
           // --- End shared helpers ---
@@ -4227,6 +4274,9 @@ async function runAgentHarness(
                 console.log(
                   'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
                 );
+                // Agent output exists but was never committed — track the
+                // degradation; captureError redacts credential-like text.
+                captureError(commitError, { taskKey, stage: "commit" });
                 resolve(); // Still resolve since Agent succeeded
               });
           } else {
@@ -4282,6 +4332,8 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   if (lockManager) {
     lockManager.release();
   }
+  // Bounded; pending crash/handled-error events get a chance to send.
+  await flushErrorTracking();
   process.exit(exitCode);
 }
 

@@ -1,9 +1,9 @@
 /**
- * `devintern workspace init` / `devintern workspace import`.
+ * `devintern worker scaffold` / `devintern worker add-repo`.
  *
- * `init` scaffolds a commented `~/.devintern/workspace.toml` plus a shared
- * `.env`. `import` runs inside an existing single-repo checkout and migrates
- * it into the workspace: origin remote becomes a `[[repos]]` entry, the
+ * `scaffold` writes a commented `~/.devintern/workspace.toml` plus a shared
+ * `.env`. `add-repo` runs inside an existing checkout and adds it to the
+ * workspace: the origin remote becomes a `[[repos]]` entry, the
  * repo's `.devintern-code/.env` keys merge into the workspace `.env`, and
  * conflicting values are demoted to that repo's inline `[repos.env]` instead
  * of silently overwriting anything (never guess). New entries are appended
@@ -32,16 +32,16 @@ dashboard = true
 # When automatic merge-conflict resolution runs on the agent's PRs.
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window
-# to cut AI token spend. Requires exactly one schedule below, and a worker
-# changes apply to the running worker. "disabled" turns it off entirely — conflicts
+# to cut AI token spend. Exactly one schedule is required; changes apply to the
+# running worker. "disabled" turns it off entirely — conflicts
 # stay for manual resolution (devintern resolve-conflicts <pr-url>).
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"
 
 [defaults]
-# Tracker the fleet query runs against: jira, linear, github, azure-devops,
-# asana, trello, or markdown.
+# Tracker the fleet query runs against: jira, linear, github, gitlab,
+# azure-devops, asana, trello, or markdown.
 tracker = "jira"
 # Task-selection query in the tracker's query language.
 # task_query = "sprint in openSprints() AND labels = devintern"
@@ -53,23 +53,47 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 default_branch = "main"
 
-# Add repos with \`devintern workspace import\` (run inside each repo), or by
+# Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
-# 
+# ----
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
-# 
+# ----
 # [[routing.rules]]
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 
+# Multi-team mode replaces the single defaults query with one source per
+# team. A fixed repo sends every task from that team to one repository.
+# Omit repo when a team spans repositories, then add team-scoped routing
+# rules for project/component/label selection.
+# ----
+# [[teams]]
+# name = "platform"
+# tracker = "jira"
+# task_query = "project = PLAT AND labels = devintern"
+# repo = "backend"
+# env_file = "env/platform.env"
+# ----
+# [[teams]]
+# name = "growth"
+# tracker = "linear"
+# task_query = "{\"team\":{\"key\":{\"eq\":\"GROW\"}}}"
+#   [teams.env]
+#   LINEAR_API_KEY = "lin_api_..."
+# ----
+# [[routing.rules]]
+# team = "growth"
+# repo = "web"
+# labels = ["frontend"]
+
 # Recurring work is hot-reloaded: edits apply to the running worker without a
 # restart. Each occurrence runs the prompt through the normal task pipeline as
 # a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
-# 
+# ----
 # [[automations]]
 # id = "weekday-maintenance"
 # enabled = true
@@ -78,13 +102,14 @@ default_branch = "main"
 # repo = "backend"            # required in a multi-repo workspace
 `;
 
-const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN and/or
-# GitHub App (GITHUB_APP_ID + private key), agent settings.
+const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
+# and agent settings. The hosted relay uses the central DevIntern AI App.
+# Advanced no-relay installs may add GITHUB_APP_ID + a private key here.
 # Per-repo overrides go in [repos.env] in workspace.toml.
 `;
 
-/** Values that should never migrate into the shared workspace env. */
-const ENV_IMPORT_SKIP = new Set(["WEBHOOK_QUEUE_DB"]);
+/** Values that should never be copied into the shared workspace env. */
+const ENV_SHARED_SKIP = new Set(["WEBHOOK_QUEUE_DB"]);
 
 function tomlString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -150,7 +175,7 @@ export type WorkspaceLogFn = (message: string) => void;
 
 /**
  * Create `workspace.toml` + `.env` when missing. Does not refuse an existing
- * workspace (unlike the CLI `workspace init`).
+ * workspace (unlike the CLI `worker scaffold`).
  */
 export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
   workspaceDir: string;
@@ -181,48 +206,48 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
  *
  * @returns Process exit code (0 on success).
  */
-export function runWorkspaceInit(): number {
+export function runWorkerScaffold(): number {
   const { created, configPath } = ensureWorkspaceScaffold();
   if (!created) {
     console.error(`❌ ${configPath} already exists; refusing to overwrite.`);
-    console.error("   Edit it directly, or run `devintern workspace import` inside a repo.");
+    console.error("   Edit it directly, or run `devintern worker add-repo` inside a repo.");
     return 1;
   }
 
   console.log("");
   console.log("Next steps:");
   console.log("  1. Put shared credentials in the workspace .env");
-  console.log("  2. Run `devintern workspace import` inside each repo to migrate it");
-  console.log("  3. Add [[routing.rules]] so tasks route to the right repo");
+  console.log("  2. Run `devintern worker add-repo` inside each repo");
+  console.log("  3. Set each team repo or add [[routing.rules]] for multi-repo routing");
   console.log("  4. Start the fleet: devintern worker");
   return 0;
 }
 
-export interface WorkspaceImportOptions {
+export interface WorkerAddRepoOptions {
   log?: WorkspaceLogFn;
   error?: WorkspaceLogFn;
 }
 
 /**
- * Migrate the repo at `cwd` into the workspace.
+ * Add the repo at `cwd` to the workspace.
  *
  * Idempotent: a repo already present (matched by remote URL) leaves the
  * config untouched; env merging still runs but only ever adds missing keys.
  *
- * @param cwd - Repository checkout to import.
+ * @param cwd - Repository checkout to add.
  * @param options - Optional log/error sinks (defaults to console).
  * @returns Process exit code (0 on success).
  */
-export async function runWorkspaceImport(
+export async function runWorkerAddRepo(
   cwd: string,
-  options: WorkspaceImportOptions = {},
+  options: WorkerAddRepoOptions = {},
 ): Promise<number> {
   const log = options.log ?? console.log;
   const error = options.error ?? console.error;
   const workspaceDir = resolveWorkspaceDir();
   const configPath = workspaceConfigPath(workspaceDir);
   if (!existsSync(configPath)) {
-    error(`❌ No workspace found at ${configPath}. Run \`devintern workspace init\` first.`);
+    error(`❌ No workspace found at ${configPath}. Run \`devintern worker scaffold\` first.`);
     return 1;
   }
 
@@ -298,7 +323,7 @@ export async function runWorkspaceImport(
   writeFileSync(configPath, updated);
   loadWorkspaceConfig(configPath);
 
-  log(`✅ Imported ${remote} as "${name}"`);
+  log(`✅ Added ${remote} as "${name}"`);
   if (defaultBranch) {
     log(`   default_branch: ${defaultBranch}`);
   }
@@ -312,7 +337,7 @@ export async function runWorkspaceImport(
     log(`   Seeded routing rule: project = ${projectKey}`);
   } else if (isFirstRepo) {
     log(
-      "   1-repo workspace: every ready task runs here. Add routing rules when you import another repo.",
+      "   1-repo workspace: every ready task runs here. Add routing rules when you add another repo.",
     );
   } else {
     log("   Add a [[routing.rules]] entry so tasks route to this repo.");
@@ -322,13 +347,13 @@ export async function runWorkspaceImport(
 }
 
 /**
- * Create the workspace if needed and import `cwd` into it.
+ * Create the workspace if needed and add `cwd` to it.
  *
- * @param cwd - Repository checkout to import
+ * @param cwd - Repository checkout to add
  * @param log - Status messages
  * @param error - Failure messages
  */
-export async function ensureWorkspaceAndImport(
+export async function ensureWorkspaceAndAddRepo(
   cwd: string,
   log: WorkspaceLogFn = console.log,
   error: WorkspaceLogFn = console.error,
@@ -346,19 +371,19 @@ export async function ensureWorkspaceAndImport(
         ok: false,
         error:
           "A workspace already exists and does not contain this repo. " +
-          "Use `devintern workspace import` to add it without replacing workspace defaults.",
+          "Use `devintern worker add-repo` to add it without replacing workspace defaults.",
       };
     }
   }
-  const code = await runWorkspaceImport(cwd, { log, error });
+  const code = await runWorkerAddRepo(cwd, { log, error });
   if (code !== 0) {
-    return { ok: false, error: "Could not import this repo into the workspace." };
+    return { ok: false, error: "Could not add this repo to the workspace." };
   }
   return { ok: true, workspaceDir, created };
 }
 
 function readRepoEnv(cwd: string): Record<string, string> {
-  // Same traversal as tracker setup: `worker init` / `workspace import` from a
+  // Same traversal as tracker setup: `worker init` / `worker add-repo` from a
   // package subdirectory must still find the repo-root `.devintern-code/.env`.
   const projectRoot = findProjectRoot({ startDir: cwd });
   return parseEnvFile(join(projectRoot, ".devintern-code", ".env"));
@@ -382,7 +407,7 @@ function mergeEnv(
 
   const additions: string[] = [];
   for (const [key, value] of Object.entries(repoEnv)) {
-    if (ENV_IMPORT_SKIP.has(key)) {
+    if (ENV_SHARED_SKIP.has(key)) {
       continue;
     }
     if (!(key in workspaceEnv)) {

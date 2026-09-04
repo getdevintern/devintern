@@ -41,6 +41,58 @@ export interface FleetEventDeps {
   coordinator?: RunCoordinator;
 }
 
+type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult>;
+
+/**
+ * Serialize feedback handling per PR and collapse events received while a run
+ * is active into one follow-up reconciliation. Relay, review polling, and
+ * mention sweeping can all observe the same GitHub action; the follow-up run
+ * re-fetches feedback after the active run has persisted its addressed marks.
+ *
+ * A `false` outcome from any run wins (a run did not complete cleanly);
+ * otherwise the last outcome is reported, so a follow-up run that succeeded
+ * clears an earlier `"deferred"`.
+ */
+export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
+  const active = new Map<
+    string,
+    { rerunRequested: boolean; promise: Promise<TaskExecutionResult> }
+  >();
+
+  return async (slug, prNumber) => {
+    const key = `${slug.toLowerCase()}#${prNumber}`;
+    const existing = active.get(key);
+    if (existing) {
+      existing.rerunRequested = true;
+      return existing.promise;
+    }
+
+    const state = {
+      rerunRequested: false,
+      promise: Promise.resolve(false as TaskExecutionResult),
+    };
+    state.promise = (async () => {
+      try {
+        let ok: TaskExecutionResult = true;
+        do {
+          state.rerunRequested = false;
+          const outcome = await addressPr(slug, prNumber);
+          if (outcome === false || ok === false) {
+            ok = false;
+          } else {
+            ok = outcome;
+          }
+        } while (state.rerunRequested);
+        return ok;
+      } finally {
+        active.delete(key);
+      }
+    })();
+    active.set(key, state);
+    return state.promise;
+  };
+}
+
 /**
  * Resolve which workspace repo a GitHub `owner/repo` slug belongs to.
  *
@@ -70,9 +122,7 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
  *
  * @returns Handler resolving false when the slug maps to no workspace repo.
  */
-export function createFleetAddressPr(
-  deps: FleetEventDeps,
-): (slug: string, prNumber: number) => Promise<TaskExecutionResult> {
+export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
 
@@ -133,8 +183,9 @@ export function createFleetResolveConflicts(
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
+  sharedAddressPr?: AddressPr,
 ): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
-  const addressPr = createFleetAddressPr(deps);
+  const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
@@ -160,16 +211,18 @@ export function createFleetMentionHandler(
 }
 
 /**
- * Build the relay task evaluator: re-run the fleet query (detect-then-
- * evaluate, same as polling), and execute the task through the shared fleet
- * executor when it is ready.
+ * Build one source's relay task evaluator: re-run that source's query
+ * (detect-then-evaluate, same as polling), and execute the task through the
+ * source's fleet executor when it is ready.
+ *
+ * @returns Whether the task matched this source's query.
  */
 export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
-}): (taskKey: string) => Promise<void> {
+}): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
     const rawQuery = options.query;
     const query = typeof rawQuery === "function" ? rawQuery() : rawQuery;
@@ -177,7 +230,7 @@ export function createFleetTaskEvaluator(options: {
       if (options.verbose) {
         console.log(`   [fleet] task ${taskKey} changed but task_query is not configured.`);
       }
-      return;
+      return false;
     }
     const { tasks } = await options.searchTasks(query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
@@ -185,7 +238,7 @@ export function createFleetTaskEvaluator(options: {
       if (options.verbose) {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
-      return;
+      return false;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(
@@ -196,5 +249,49 @@ export function createFleetTaskEvaluator(options: {
         components: task.components ?? [],
       }),
     );
+    return true;
+  };
+}
+
+/** One team's (or the defaults source's) relay evaluate step. */
+export interface FleetRelayTaskSource {
+  /** Human-readable scope for logs (team name). */
+  label?: string;
+  /** Tracker source emitted by relay envelopes (jira, linear, ...). */
+  tracker: string;
+  evaluate: (taskKey: string) => Promise<boolean>;
+}
+
+/**
+ * Dispatch a relayed `task.changed` across every configured tracker source:
+ * The relay currently identifies tracker type, not an individual team
+ * registration. A tracker type mapped to exactly one workspace source is
+ * safe to dispatch. Multiple teams using that same tracker remain polling-
+ * only for instant events, avoiding first-match routing when task keys
+ * overlap across boards or tracker accounts.
+ */
+export function createFleetRelayTaskDispatcher(options: {
+  sources: FleetRelayTaskSource[];
+  verbose?: boolean;
+}): (taskKey: string, tracker?: string) => Promise<void> {
+  return async (taskKey, tracker) => {
+    const normalized = tracker?.trim().toLowerCase();
+    const candidates = normalized
+      ? options.sources.filter((source) => source.tracker.toLowerCase() === normalized)
+      : options.sources;
+    if (candidates.length > 1) {
+      console.warn(
+        `⚠️  [fleet] relay task ${taskKey} from ${tracker ?? "an unknown tracker"} maps to ` +
+          `${candidates.length} team sources; ignoring the envelope and relying on polling.`,
+      );
+      return;
+    }
+    const source = candidates[0];
+    if (source && (await source.evaluate(taskKey))) {
+      return;
+    }
+    if (options.verbose) {
+      console.log(`   [fleet] relay task ${taskKey} matches no tracker source; ignoring.`);
+    }
   };
 }

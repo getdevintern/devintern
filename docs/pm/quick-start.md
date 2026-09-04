@@ -2,9 +2,9 @@
 title: "@devintern/pm Quick Start"
 sidebarLabel: "Quick Start"
 description: "Install @devintern/pm and create your first AI-drafted ticket in your tracker."
-section: "PM"
-order: 1
-dateModified: 2026-08-17
+section: "Create Tasks"
+order: 0
+dateModified: 2026-09-01
 tags: ["devintern/pm", "quick start", "jira", "linear", "cli"]
 ---
 
@@ -51,6 +51,8 @@ In a terminal, this starts an interactive setup wizard that:
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Writes your answers to `.devintern-pm/.env` and updates your `.gitignore` to exclude `.devintern-pm/.env` (to prevent leaking secrets)
+
+If you need to create credentials manually, use the setup guide for your tracker: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md).
 
 For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write the configuration template instead. The non-interactive path also migrates matching values from `.devintern-code/.env` if present:
 

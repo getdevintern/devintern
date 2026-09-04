@@ -12,6 +12,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } fro
 import { dirname, join, resolve } from "path";
 
 import { findConfigDir } from "@devintern/utils";
+import { configureSqliteConnection } from "./sqlite";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -172,7 +173,7 @@ export class WebhookQueue {
 
     if (config.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
@@ -181,6 +182,7 @@ export class WebhookQueue {
     this.migrateLegacyDb(dbPath, config.legacyDbPath);
 
     this.db = new Database(dbPath);
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 

@@ -1,5 +1,32 @@
 # @devintern/code Changelog
 
+## [2.8.0] - 2026-09-02
+
+Relay-first worker release: central-App GitHub auth with verified pairing, serialized review feedback, and a more trustworthy dashboard run list.
+
+### Changed
+
+- **Relay-backed workspaces use the central DevIntern AI App**: `worker init` registers every GitHub repository already present in `workspace.toml`, `worker connect github` verifies the hosted App installation and repository with the relay before enabling event routing, and `GITHUB_TOKEN` remains the only local GitHub API credential. Customer-owned `GITHUB_APP_ID` + private-key authentication remains available as the advanced no-relay/air-gapped path and for `devintern webhook serve`
+- **Worker commands own the complete unattended workflow**: `devintern worker scaffold` creates workspace configuration without the wizard, `worker add-repo` adds the current checkout, and workspace-aware `worker connect` verifies every unpaired GitHub repository through the central App while continuing across per-repository failures. Tracker targets use workspace or selected-team credential layers, and `worker connect status` identifies repositories still awaiting verified pairing
+- **Multi-team workspaces isolate tracker boards and route them deliberately**: `[[teams]]` creates one client, query, cursor, dedupe scope, and credential environment per team. `team.repo` provides a fixed tracker-to-repository mapping; teams spanning repositories omit it and use team-scoped routing rules. Same-tracker teams remain fully supported by polling but fail closed for tracker relay events until relay registrations carry team identity—no first-match guessing
+- **Dashboard run list shows accurate PR links and meaningful run identifiers**: PR-affected runs (mentions, conflict resolutions) persist the PR web URL at run start, so the work column links the tracker task, automation id, or the affected PR itself — and shows no PR link until the PR actually exists; the result column links its outcome to the right PR. Every run origin records the harness that executed it (estimation runs included), and pre-automation-id runs fall back to their occurrence identifier
+
+### Fixed
+
+- **Pre-push hook failures are no longer mislabeled as branch divergence**: rejection markers printed by a repository's tests stay part of the hook diagnostics instead of impersonating Git's own remote rejection, so review-feedback runs enter the automatic hook-fix path and preserve the real failing-test output; genuine non-fast-forward pushes are still deferred for branch reconciliation
+- **Fleet worktrees remain usable after Git hook isolation**: enabling per-worktree Git config for isolated review hooks now moves a bare clone's `core.bare=true` into its main-worktree config instead of letting linked task and review worktrees inherit it. Existing workspace clones with the unsafe layout are repaired automatically on worker startup, preventing checkout, reset, clean, and conflict-resolution failures with `this operation must be run in a work tree`
+- **Relay and polling no longer launch overlapping review runs**: a healthy relay is now the primary source for review feedback and mentions, with polling retained as a 30-minute safety sweep and automatically restored after relay silence. PR lifecycle and conflict reconciliation continue at the configured poll cadence. Feedback events from relay, review polling, and mention polling are serialized per PR and collapse into one post-run recheck, so the same GitHub action cannot start concurrent agents before its local addressed marker is persisted
+- **Relay setup follows the workspace source of truth**: `devintern worker connect github` saves verified connections into the fleet workspace and walks every unpaired GitHub repository from `workspace.toml`. Relay-backed workers also preserve central-App routing for live pre-verification repo registrations, inject the `devintern-ai` mention alias, and force local GitHub reads/writes through `GITHUB_TOKEN`, so upgrading no longer makes `@devintern-ai` review feedback silently skip or resurrect a removed customer-owned App identity
+
+## [2.7.1] - 2026-09-01
+
+Patch release: verified relay GitHub pairing (requires the deployed relay) and resolve-conflicts push reliability through PR pre-push hooks.
+
+### Fixed
+
+- **Relay GitHub pairing is verified through the GitHub App**: `devintern worker connect` prints a short-lived App installation URL and waits while the relay verifies that the signed-in GitHub user can access the requested repository through that installation — routing now uses GitHub's immutable installation and repository IDs instead of the user-supplied `owner/name` slug, and an installation already associated with another DevIntern account cannot be claimed. Connections created before verified pairing must run `devintern worker connect github --repo owner/name` once again; normal polling continues while GitHub instant events are unpaired
+- **resolve-conflicts lands its pushes through PR pre-push hooks**: review-worktree dependency installs (e.g. lefthook postinstall) rewrote the shared `.git/hooks` with scripts hardcoding the ephemeral worktree's `node_modules` path, so pushes failed once the worktree was removed — conflicts were resolved locally but never landed. The resolver now isolates worktree hooks via per-worktree `core.hooksPath` (seeded with copies of the shared hooks), hands pre-push hook failures to the agent and retries the push with a bound attempt count, folding leftover changes into the merge commit; branch races still defer without burning agent runs
+
 ## [2.7.0] - 2026-09-01
 
 Worker control release: quiet hours, scheduled story-point estimation, config hot reload, dashboard retries and logs, configurable conflict resolution, PR labels — plus review-trigger and dashboard robustness fixes.

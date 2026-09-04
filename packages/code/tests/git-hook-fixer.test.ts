@@ -200,6 +200,48 @@ describe("verifyPushHookFix", () => {
     expect(result.hookError).toContain("pre-push hook declined (intentional test failure)");
   });
 
+  test("pushCurrentBranch does not mistake simulated rejection text from a hook for divergence", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      [
+        "#!/bin/sh",
+        "echo '! [rejected] feature/dev-74 -> feature/dev-74 (non-fast-forward)' >&2",
+        "echo 'Updates were rejected because the tip of your current branch is behind' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(hookPath, 0o755);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Failed to push branch");
+    expect(result.message).not.toContain("branch diverged");
+    expect(result.hookError).toContain("non-fast-forward");
+    expect(result.hookError).toContain("Updates were rejected");
+  });
+
+  test("pushCurrentBranch still identifies a real non-fast-forward rejection", async () => {
+    const competingRepoDir = join(testDir, "competing-repo");
+    git(testDir, `clone ${remoteDir} ${competingRepoDir}`);
+    git(competingRepoDir, "config user.email 'other@test.com'");
+    git(competingRepoDir, "config user.name 'Other User'");
+    git(competingRepoDir, "checkout feature/dev-74");
+    git(competingRepoDir, "commit --allow-empty -m 'remote commit'");
+    git(competingRepoDir, "push origin feature/dev-74");
+    git(repoDir, "commit --allow-empty -m 'local commit'");
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("branch diverged");
+    expect(result.hookError).toBeUndefined();
+  });
+
   test("remoteTrackingRefMatchesHead is false after a local-only commit", async () => {
     expect(await Utils.remoteTrackingRefMatchesHead("feature/dev-74", { cwd: repoDir })).toBe(true);
 

@@ -3,6 +3,7 @@ title: "Markdown File Tasks"
 description: "Use local markdown files as task input for @devintern/code, no task tracker required"
 section: "Code"
 order: 6
+sidebarHidden: true
 dateModified: 2026-07-03
 ---
 

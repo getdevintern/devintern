@@ -29,9 +29,9 @@ import { RunStore } from "../run-recorder";
 import { RetryStateStore } from "../retry-state";
 import { ScheduledRetryStore } from "../run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
-import { findRepo, loadWorkspaceConfig } from "./config";
-import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, parseEnvFile } from "./env";
+import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
+import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
+import { buildRepoEnv, buildTeamEnv, buildTeamTaskEnv, parseEnvFile } from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -40,7 +40,7 @@ import {
   worktreesDir,
   workspaceRunNowPath,
 } from "./paths";
-import { routeTask, toRoutableTask } from "./router";
+import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { WorkspaceConfigReloader } from "./config-reload";
 import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
@@ -83,7 +83,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       runStore.listRuns({ status: "in_progress", origin: "task", limit: 1 }).length > 0;
 
     let tracker: TaskTrackerClient | undefined;
-    if (hasTaskOrphans) {
+    if (hasTaskOrphans && (config.teams?.length ?? 0) === 0) {
       try {
         const { TaskTrackerManager } = await import("../task-tracker-manager");
         tracker = new TaskTrackerManager().getClient();
@@ -94,6 +94,11 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           }`,
         );
       }
+    } else if (hasTaskOrphans) {
+      console.warn(
+        "⚠️  [fleet] orphaned multi-team task runs cannot be mapped safely from task key alone; " +
+          "runs will be reaped without tracker status recovery.",
+      );
     }
 
     // Fleet tasks run in per-repo worktrees, so their status names come from
@@ -106,7 +111,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       workspaceDir,
     ];
     const settings = loadProjectSettingsFrom(settingsDirs);
-    const trackerType = config.defaults.tracker;
+    const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
     await recoverOrphanedTaskRuns({
@@ -174,6 +179,8 @@ export interface WorkspaceTaskAcquirerDeps {
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   query: string | (() => string | undefined);
   intervalSeconds: number;
+  /** Team source for multi-team workspaces; omitted in single-defaults mode. */
+  team?: TeamConfig;
   /** Working-window gate (quiet hours); optional so tests can skip it. */
   gate?: PickupGate;
   verbose?: boolean;
@@ -361,8 +368,17 @@ export interface FleetEventReloadHooks {
  * changes again — the same policy as failing tasks.
  */
 export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): TaskPollingAcquirer {
-  const { config, workerState, queue, detector, searchTasks, query, intervalSeconds, verbose } =
-    deps;
+  const {
+    config,
+    workerState,
+    queue,
+    detector,
+    searchTasks,
+    query,
+    intervalSeconds,
+    team,
+    verbose,
+  } = deps;
   const execute = createFleetTaskExecutor(deps);
 
   // The acquirer's executeTask only receives the task key; remember each
@@ -376,7 +392,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     );
 
   return new TaskPollingAcquirer({
-    trackerType: config.defaults.tracker,
+    trackerType: team ? `${team.tracker}:${team.name}` : config.defaults.tracker,
     query,
     intervalSeconds,
     detector,
@@ -406,7 +422,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
-  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock"
+  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock" | "team"
 > & { coordinator?: RunCoordinator };
 
 /**
@@ -425,7 +441,7 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-  options: { extraArgs?: string[] | (() => string[]) } = {},
+  options: { extraArgs?: string[] | (() => string[]); repo?: string } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
@@ -440,7 +456,15 @@ export function createFleetTaskExecutor(
       typeof configuredArgs === "function"
         ? configuredArgs()
         : (configuredArgs ?? fleetTaskArgs(config));
-    const decision = routeTask(routable, config);
+    const team = deps.team ? (findTeam(config, deps.team.name) ?? deps.team) : undefined;
+    const rules = team?.repo ? [] : effectiveRoutingRules(config, team?.name);
+    const onlyRepo = team?.repo ?? (config.repos.length === 1 ? config.repos[0]!.name : undefined);
+    const decision = options.repo
+      ? { kind: "routed" as const, repo: options.repo, matchedRules: [] }
+      : team
+        ? routeTaskWithRules(routable, rules, onlyRepo)
+        : routeTask(routable, config);
+    const scope = team ? `[fleet:${team.name}]` : "[fleet]";
 
     if (decision.kind !== "routed") {
       const candidates = decision.kind === "ambiguous" ? decision.candidates : [];
@@ -448,12 +472,13 @@ export function createFleetTaskExecutor(
         taskKey,
         reason: decision.kind,
         candidates,
+        team: team?.name,
         taskUpdated: undefined,
       });
       console.warn(
         decision.kind === "ambiguous"
-          ? `⚠️  [fleet] ${taskKey} matches rules for multiple repos (${candidates.join(", ")}); skipping - fix the routing rules. Recorded in routing skips.`
-          : `⚠️  [fleet] ${taskKey} matches no routing rule; skipping. Recorded in routing skips.`,
+          ? `⚠️  ${scope} ${taskKey} matches rules for multiple repos (${candidates.join(", ")}); skipping - fix the routing rules. Recorded in routing skips.`
+          : `⚠️  ${scope} ${taskKey} matches no routing rule; skipping. Recorded in routing skips.`,
       );
       // Handled: dedupe keeps it out until the task is updated again.
       return true;
@@ -462,7 +487,7 @@ export function createFleetTaskExecutor(
     const repo = findRepo(config, decision.repo);
     if (!repo) {
       // Config validation makes this unreachable; guard anyway.
-      console.error(`❌ [fleet] routed ${taskKey} to unknown repo "${decision.repo}"`);
+      console.error(`❌ ${scope} routed ${taskKey} to unknown repo "${decision.repo}"`);
       return false;
     }
 
@@ -470,7 +495,7 @@ export function createFleetTaskExecutor(
     const lockResult = lock.acquire();
     if (!lockResult.success) {
       console.warn(
-        `⚠️  [fleet] repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
+        `⚠️  ${scope} repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
       );
       return "deferred";
     }
@@ -479,13 +504,15 @@ export function createFleetTaskExecutor(
       await repoManager.ensureBareClone(repo);
       await repoManager.fetch(repo.name);
       const worktree = await repoManager.createTaskWorktree(repo, taskKey);
-      console.log(`🏗️  [fleet] ${taskKey} → ${repo.name} (${worktree})`);
+      console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
 
       const invoke = () =>
         runTask(taskKey, extraArgs, {
           cwd: worktree,
           env: {
-            ...buildRepoEnv(repo, workspaceDir),
+            ...(team
+              ? buildTeamTaskEnv(repo, team, workspaceDir)
+              : buildRepoEnv(repo, workspaceDir)),
             [RUN_ORIGIN_ENV]: "worker",
           },
         });
@@ -494,12 +521,12 @@ export function createFleetTaskExecutor(
       if (ok === true) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
       } else {
-        console.warn(`⚠️  [fleet] keeping worktree for debugging: ${worktree}`);
+        console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
       }
       return ok;
     } catch (error) {
       console.error(
-        `❌ [fleet] ${taskKey} failed in repo "${repo.name}": ${(error as Error).message}`,
+        `❌ ${scope} ${taskKey} failed in repo "${repo.name}": ${(error as Error).message}`,
       );
       return false;
     } finally {
@@ -565,6 +592,16 @@ export interface RunWorkspaceWorkerOptions {
   verbose?: boolean;
   /** CLI release attached to anonymous worker startup analytics. */
   cliVersion?: string;
+}
+
+/** One tracker source served by the workspace worker. */
+export interface FleetSourceRuntime {
+  tracker: string;
+  /** Initial team identity; live query/repo changes resolve by name from config. */
+  team?: TeamConfig;
+  query: () => string | undefined;
+  searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
+  detector: ChangeDetector;
 }
 
 function formatClockTime(at: number): string {
@@ -637,17 +674,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.repos.length === 0) {
     console.error(
       `❌ No repos configured in ${configPath}.\n` +
-        "   Add [[repos]] entries (or run `devintern workspace import` inside an existing repo).",
+        "   Add [[repos]] entries (or run `devintern worker add-repo` inside an existing repo).",
     );
     process.exit(1);
   }
 
-  // The parent process needs tracker credentials to run the fleet query;
-  // fleet config wins over whatever repo .env the shell happened to load.
+  // Shared workspace values serve GitHub/review consumers and the legacy
+  // single-defaults tracker. Team clients use explicit composed env maps.
   for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
     process.env[key] = value;
   }
-  process.env.TASK_TRACKER = config.defaults.tracker;
+  const multiTeam = config.teams.length > 0;
+  if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
 
@@ -662,7 +700,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (!initialQuery && config.automations.length === 0 && config.estimations.length === 0) {
+  if (
+    !multiTeam &&
+    !initialQuery &&
+    config.automations.length === 0 &&
+    config.estimations.length === 0
+  ) {
     if (retryQueue.hasPending()) {
       console.warn(
         "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
@@ -730,12 +773,19 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   acquirers.push(
     new RetryQueueAcquirer({
       store: retryQueue,
-      execute: createFleetTaskExecutor(
-        { config, workspaceDir, skips: state.skips, repoManager },
-        // `--force` bypasses the incomplete-attempt retry gate, exactly like
-        // the manual `devintern <TASK> --force` the dashboard action mirrors.
-        { extraArgs: () => ["--force", ...fleetTaskArgs(config)] },
-      ),
+      execute: (taskKey, routable, retry) =>
+        createFleetTaskExecutor(
+          {
+            config,
+            workspaceDir,
+            skips: state.skips,
+            repoManager,
+            ...(retry.team ? { team: findTeam(config, retry.team) } : {}),
+          },
+          // The persisted repo/team make retries deterministic even when
+          // task keys overlap or the original route depended on labels.
+          { extraArgs: () => ["--force", ...fleetTaskArgs(config)], repo: retry.repo },
+        )(taskKey, routable),
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
     }),
@@ -780,23 +830,65 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   });
   acquirers.push(estimationAcquirer);
 
-  // The tracker type is startup-only, but task_query itself is live. Keep a
-  // dormant poller when the detector prerequisites are available so adding
-  // a query needs no restart. The tracker client itself remains lazy, which
-  // preserves automation-only workspaces without tracker credentials.
-  const { TaskTrackerManager } = await import("../task-tracker-manager");
+  // Tracker identities and credentials are startup-only. Queries and fixed
+  // team repo mappings stay live through lookups against the shared config.
+  const { TaskTrackerManager, createTrackerClient, trackerRequiredEnv } =
+    await import("../task-tracker-manager");
   const { createChangeDetector } = await import("../change-detector");
-  const trackerManager = new TaskTrackerManager();
-  const searchTasks = (q: string) => trackerManager.getClient().searchTasks(q);
-  const detector = createChangeDetector(config.defaults.tracker, searchTasks);
-  if (initialQuery && !detector) {
-    console.error(
-      `❌ Could not initialize the ${config.defaults.tracker} change detector. ` +
-        "Check the tracker's required variables in the workspace .env.",
-    );
-    process.exit(1);
+  const sources: FleetSourceRuntime[] = [];
+
+  if (multiTeam) {
+    for (const team of config.teams) {
+      const env = buildTeamEnv(team, workspaceDir);
+      const missing = trackerRequiredEnv(team.tracker).filter((key) => !env[key]);
+      if (missing.length > 0) {
+        throw new Error(
+          `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
+            "Add them to the workspace .env or the team's env_file.",
+        );
+      }
+      const client = createTrackerClient(team.tracker, env);
+      const searchTasks = (query: string) => client.searchTasks(query);
+      const detector = createChangeDetector(team.tracker, searchTasks, {
+        env,
+        source: `${team.tracker}:${team.name}`,
+      });
+      if (!detector) {
+        throw new Error(
+          `Could not initialize the ${team.tracker} detector for team "${team.name}".`,
+        );
+      }
+      sources.push({
+        tracker: team.tracker,
+        team,
+        query: () => findTeam(config, team.name)?.taskQuery,
+        searchTasks,
+        detector,
+      });
+    }
+  } else {
+    // Keep the legacy client lazy so automations-only workspaces do not need
+    // tracker credentials until a task query is enabled.
+    const trackerManager = new TaskTrackerManager();
+    const searchTasks = (query: string) => trackerManager.getClient().searchTasks(query);
+    const detector = createChangeDetector(config.defaults.tracker, searchTasks);
+    if (initialQuery && !detector) {
+      throw new Error(
+        `Could not initialize the ${config.defaults.tracker} change detector. ` +
+          "Check the tracker's required variables in the workspace .env.",
+      );
+    }
+    if (detector) {
+      sources.push({
+        tracker: config.defaults.tracker,
+        query: () => config.defaults.taskQuery,
+        searchTasks,
+        detector,
+      });
+    }
   }
-  if (detector) {
+
+  for (const source of sources) {
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -804,32 +896,33 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       queue: state.queue,
       skips: state.skips,
       repoManager,
-      detector,
-      searchTasks,
-      query: () => config.defaults.taskQuery,
+      detector: source.detector,
+      searchTasks: source.searchTasks,
+      query: source.query,
       intervalSeconds,
       gate: pickupGate,
+      team: source.team,
       verbose: options.verbose,
       coordinator,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);
-    acquirers.push(
-      ...(await buildFleetEventAcquirers({
-        config,
-        workspaceDir,
-        state,
-        repoManager,
-        searchTasks,
-        query: () => config.defaults.taskQuery,
-        intervalSeconds,
-        verbose: options.verbose,
-        intervalUpdaters,
-        reloadHooksOut: eventReloadHooks,
-        coordinator,
-      })),
-    );
   }
+
+  acquirers.push(
+    ...(await buildFleetEventAcquirers({
+      config,
+      workspaceDir,
+      state,
+      repoManager,
+      sources,
+      intervalSeconds,
+      verbose: options.verbose,
+      intervalUpdaters,
+      reloadHooksOut: eventReloadHooks,
+      coordinator,
+    })),
+  );
 
   /**
    * Apply a freshly validated config to consumers that snapshot values:
@@ -852,10 +945,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     eventReloadHooks.hooks?.reconcileConflictResolution();
   };
 
-  // Live reload: watch workspace.toml and apply validated edits in place.
-  // Routing rules, repos, automations, worker_task_args, and poll_interval
-  // take effect without a restart; malformed edits keep the last-good
-  // config. SIGHUP forces a manual reload as a fallback.
+  const teamRuntimeShape = (value: WorkspaceConfig) =>
+    value.teams.map(({ name, tracker, envFile, env }) => ({ name, tracker, envFile, env }));
+
+  // Live reload keeps queries, fixed team destinations, routing, repos,
+  // automations, worker_task_args, and cadence live. Team identities and
+  // credentials require rebuilding clients/detectors and therefore restart.
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
@@ -865,7 +960,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       if (next.defaults.tracker !== current.defaults.tracker) {
         throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
       }
-      if (next.defaults.taskQuery && !detector) {
+      if (JSON.stringify(teamRuntimeShape(next)) !== JSON.stringify(teamRuntimeShape(current))) {
+        throw new Error(
+          "Team names, trackers, env_file, and inline env are startup-only; restart the worker to change them.",
+        );
+      }
+      if (!multiTeam && next.defaults.taskQuery && sources.length === 0) {
         throw new Error(
           `task_query cannot be enabled live because the ${current.defaults.tracker} change detector ` +
             "could not be initialized; fix its required workspace .env settings and restart the worker.",
@@ -906,7 +1006,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
   }
 
-  console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s))`);
+  const teamsLabel = multiTeam ? `, ${config.teams.length} team(s)` : "";
+  const analyticsTracker = multiTeam
+    ? [...new Set(config.teams.map((team) => team.tracker))].sort().join(",")
+    : config.defaults.tracker;
+  console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
   console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
@@ -921,7 +1025,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",
-          tracker: config.defaults.tracker,
+          tracker: analyticsTracker,
           acquirerNames,
           configDir: workspaceDir,
         });
@@ -947,8 +1051,11 @@ export async function buildFleetEventAcquirers(options: {
   workspaceDir: string;
   state: ReturnType<typeof openWorkspaceState>;
   repoManager: RepoManagerLike;
-  searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  query: string | (() => string | undefined);
+  /** Team/default tracker runtimes used to evaluate relay task envelopes. */
+  sources?: FleetSourceRuntime[];
+  /** Legacy single-source injectables retained for focused tests. */
+  searchTasks?: (query: string) => Promise<{ tasks: FleetTask[] }>;
+  query?: string | (() => string | undefined);
   intervalSeconds: number;
   verbose?: boolean;
   /** Collectors of cadence changes, applied on live config reloads. */
@@ -958,20 +1065,77 @@ export async function buildFleetEventAcquirers(options: {
   /** Process-level agent-run gate; only set when scheduled estimation exists. */
   coordinator?: RunCoordinator;
 }): Promise<import("../../worker").Acquirer[]> {
-  const { config, workspaceDir, state, repoManager, searchTasks, query, intervalSeconds, verbose } =
-    options;
+  const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
+  const taskSources: Array<Pick<FleetSourceRuntime, "tracker" | "team" | "query" | "searchTasks">> =
+    options.sources ??
+    (options.searchTasks
+      ? [
+          {
+            tracker: config.defaults.tracker,
+            query: () => {
+              const query = options.query;
+              return typeof query === "function" ? query() : query;
+            },
+            searchTasks: options.searchTasks,
+          },
+        ]
+      : []);
   const intervalUpdaters = options.intervalUpdaters ?? [];
   const acquirers: import("../../worker").Acquirer[] = [];
 
   const {
     createFleetAddressPr,
+    coalescePrFeedbackRuns,
     createFleetResolveConflicts,
     createFleetMentionHandler,
+    createFleetRelayTaskDispatcher,
     createFleetTaskEvaluator,
     fleetGitHubSlugs,
   } = await import("./fleet-events");
 
-  const hasGitHubCreds = Boolean(process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID);
+  const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
+    await import("../relay-connect");
+  const relayState = loadRelayState(workspaceDir);
+  const relayToken = relayState?.relayToken;
+  const relayUrl =
+    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+  // Accept a live legacy repo registration at runtime as well as the newer
+  // verified-id marker. The latter remains required when establishing a new
+  // pairing, but upgrading must not disable an already-delivering relay.
+  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
+  const relayEnabled = Boolean(relayToken && relayUrl);
+  let relayLastSuccessAt = 0;
+  const relayHealthGraceMs = Math.max(90, intervalSeconds * 2) * 1000;
+  const shouldPollFeedback = () =>
+    !relayEnabled ||
+    relayLastSuccessAt === 0 ||
+    Date.now() - relayLastSuccessAt >= relayHealthGraceMs;
+
+  // Hosted workspaces use the central App only for event delivery. All
+  // follow-up GitHub reads/writes stay local and authenticate with the user's
+  // GITHUB_TOKEN. Without a relay, preserve the customer-owned App-first path
+  // for air-gapped/direct installations (with PAT fallback).
+  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../github-reviews");
+  process.env[GITHUB_AUTH_MODE_ENV] = usesHostedApp ? "token-only" : "app-first";
+
+  if (usesHostedApp) {
+    const aliasNames = new Set(
+      (process.env.GITHUB_BOT_ALIASES ?? "")
+        .split(",")
+        .map((alias) => alias.trim())
+        .filter(Boolean),
+    );
+    aliasNames.add(RELAY_BOT_LOGIN);
+    process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
+  }
+
+  const hasCustomAppCredentials = Boolean(
+    process.env.GITHUB_APP_ID &&
+    (process.env.GITHUB_APP_PRIVATE_KEY_PATH || process.env.GITHUB_APP_PRIVATE_KEY_BASE64),
+  );
+  const hasGitHubCreds = usesHostedApp
+    ? Boolean(process.env.GITHUB_TOKEN)
+    : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
   let github: import("../github-reviews").GitHubReviewsClient | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
@@ -982,8 +1146,7 @@ export async function buildFleetEventAcquirers(options: {
   // Built whenever credentials exist — even with zero GitHub repos today —
   // so a repo added to the config at runtime gets full event coverage.
   if (hasGitHubCreds) {
-    const { GitHubReviewsClient } = await import("../github-reviews");
-    github = new GitHubReviewsClient({ preferAppAuth: true });
+    github = new GitHubReviewsClient({ authMode: usesHostedApp ? "token-only" : "app-first" });
     const gh = github;
     const ownerOf = (slug: string) => slug.split("/")[0] as string;
     const nameOf = (slug: string) => slug.split("/")[1] as string;
@@ -997,10 +1160,10 @@ export async function buildFleetEventAcquirers(options: {
       verbose,
       coordinator: options.coordinator,
     };
-    const fleetAddressPr = createFleetAddressPr(eventDeps);
+    const fleetAddressPr = coalescePrFeedbackRuns(createFleetAddressPr(eventDeps));
     addressPr = fleetAddressPr;
     const resolveConflicts = createFleetResolveConflicts(eventDeps);
-    const fleetHandleMention = createFleetMentionHandler(eventDeps);
+    const fleetHandleMention = createFleetMentionHandler(eventDeps, fleetAddressPr);
     handleMention = fleetHandleMention;
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
@@ -1010,6 +1173,7 @@ export async function buildFleetEventAcquirers(options: {
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,
+      shouldPollFeedback,
       workerState: state.workerState,
       queue: state.queue,
       github: {
@@ -1074,6 +1238,7 @@ export async function buildFleetEventAcquirers(options: {
       return new MentionSweepAcquirer({
         repo: slug,
         intervalSeconds,
+        shouldPollFeedback,
         workerState: state.workerState,
         queue: state.queue,
         github: {
@@ -1171,50 +1336,47 @@ export async function buildFleetEventAcquirers(options: {
     console.log(
       hasGitHubCreds
         ? "   [fleet] no GitHub repos configured yet; mention sweeps attach on config changes."
-        : "   [fleet] GITHUB_TOKEN/GITHUB_APP_ID not set; review/mention acquirers disabled.",
+        : usesHostedApp
+          ? "   [fleet] GITHUB_TOKEN not set; central-App events can arrive, but GitHub review/mention handling is disabled."
+          : "   [fleet] GITHUB_TOKEN or complete custom GitHub App credentials not set; review/mention acquirers disabled.",
     );
   }
 
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.
-  const { loadRelayState, RELAY_BOT_LOGIN } = await import("../relay-connect");
-  const relayState = loadRelayState(workspaceDir);
   if (relayState || process.env.WORKER_RELAY_URL) {
-    const relayToken = relayState?.relayToken;
-    const relayUrl =
-      process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
     if (!relayToken) {
       console.warn(
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
-      // Relay-managed PRs are associated with the DevIntern AI App identity,
-      // whose private key never leaves DevIntern infrastructure. Register its
-      // login as a mention alias so the local mention gates (including the
-      // address-review subprocess, which inherits this env) match
-      // `@devintern-ai` without needing the key.
-      const aliasNames = new Set(
-        (process.env.GITHUB_BOT_ALIASES ?? "")
-          .split(",")
-          .map((alias) => alias.trim())
-          .filter(Boolean),
-      );
-      if (!aliasNames.has(RELAY_BOT_LOGIN)) {
-        aliasNames.add(RELAY_BOT_LOGIN);
-        process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
-      }
-
       const { RelayAcquirer } = await import("../relay-acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
-      const execute = createFleetTaskExecutor({
-        config,
-        workspaceDir,
-        skips: state.skips,
-        repoManager,
-        coordinator: options.coordinator,
+      const relayTaskSources = taskSources.map((source) => {
+        const execute = createFleetTaskExecutor({
+          config,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          team: source.team,
+          coordinator: options.coordinator,
+        });
+        return {
+          tracker: source.tracker,
+          label: source.team?.name,
+          evaluate: createFleetTaskEvaluator({
+            query: source.query,
+            searchTasks: source.searchTasks,
+            execute,
+            verbose,
+          }),
+        };
       });
-      const evaluateTask = createFleetTaskEvaluator({ query, searchTasks, execute, verbose });
+      const evaluateTask = createFleetRelayTaskDispatcher({
+        sources: relayTaskSources,
+        verbose,
+      });
 
       acquirers.push(
         new RelayAcquirer({
@@ -1230,7 +1392,7 @@ export async function buildFleetEventAcquirers(options: {
               // No GitHub credentials → review envelopes cannot be acted on.
               console.warn(
                 `⚠️  [relay] review feedback on ${repo}#${prNumber} cannot be addressed: ` +
-                  "GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace.",
+                  "GITHUB_TOKEN is not set in this relay-backed workspace.",
               );
               return false;
             },
@@ -1239,7 +1401,7 @@ export async function buildFleetEventAcquirers(options: {
                 if (verbose) {
                   console.log(
                     `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
-                      "(GITHUB_TOKEN/GITHUB_APP_ID is not set in this workspace).",
+                      "(GITHUB_TOKEN is not set in this relay-backed workspace).",
                   );
                 }
                 return;
@@ -1259,6 +1421,9 @@ export async function buildFleetEventAcquirers(options: {
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,
+          },
+          onPollSuccess: () => {
+            relayLastSuccessAt = Date.now();
           },
           verbose,
         }),

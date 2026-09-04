@@ -21,7 +21,11 @@ import type { RoutableTask } from "./router";
 export interface RetryQueueAcquirerOptions {
   store: ScheduledRetryStore;
   /** Fleet executor slice (same shape `createFleetTaskExecutor` returns). */
-  execute: (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult>;
+  execute: (
+    taskKey: string,
+    routable: RoutableTask,
+    retry: ScheduledRetry,
+  ) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
   verbose?: boolean;
 }
@@ -87,6 +91,7 @@ export class RetryQueueAcquirer implements Acquirer {
       const result = await execute(
         retry.taskKey,
         toRoutableTask({ key: retry.taskKey, labels: [], components: [] }),
+        retry,
       );
       if (result === true) {
         store.finish(retry.id, "done");

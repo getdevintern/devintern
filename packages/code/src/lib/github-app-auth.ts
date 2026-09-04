@@ -32,7 +32,7 @@ interface InstallationCache {
  * 1. Generate a JWT signed with the App's private key
  * 2. Exchange the JWT for an installation access token for a specific repository
  *
- * Each organization should create their own GitHub App with these permissions:
+ * Advanced no-relay installations can create their own GitHub App with these permissions:
  * - Repository permissions:
  *   - Contents: Read (to check branches)
  *   - Pull requests: Read and write (to create PRs)
@@ -175,7 +175,7 @@ export class GitHubAppAuth {
       if (response.status === 404) {
         throw new Error(
           `GitHub App is not installed on repository ${owner}/${repo}. ` +
-            `Please install the App at: https://github.com/apps/YOUR_APP_NAME/installations/new`,
+            "Install the customer-owned App on that repository and try again.",
         );
       }
       const error = (await response.json().catch(() => ({ message: "Unknown error" }))) as any;

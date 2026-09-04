@@ -54,26 +54,36 @@ function AutomationRow({
       onClick={() => lastRun && onOpenRun(lastRun.id)}
       className={lastRun ? "cursor-pointer" : undefined}
     >
-      <TableCell className="px-4 py-2.5 font-medium">
+      <TableCell className="max-w-72 px-4 py-2.5 font-medium">
         <div className="flex flex-col gap-0.5">
-          <span>{automation.id}</span>
-          <span className="max-w-md truncate text-xs font-normal text-muted-foreground">
+          <span className="truncate" title={automation.id}>
+            {automation.id}
+          </span>
+          <span
+            className="truncate text-xs font-normal text-muted-foreground"
+            title={automation.prompt}
+          >
             {automation.prompt.split("\n")[0]}
           </span>
         </div>
       </TableCell>
-      <TableCell className="px-4 py-2.5">
+      <TableCell className="max-w-28 truncate px-4 py-2.5" title={automation.schedule}>
         {automation.schedule ? (
           <code className="font-mono text-xs">{automation.schedule}</code>
         ) : (
           <span className="text-muted-foreground">–</span>
         )}
       </TableCell>
-      <TableCell className="px-4 py-2.5 text-muted-foreground">{automation.repo ?? "–"}</TableCell>
+      <TableCell
+        className="max-w-32 truncate px-4 py-2.5 text-muted-foreground"
+        title={automation.repo}
+      >
+        {automation.repo ?? "–"}
+      </TableCell>
       <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
         {automation.nextDueAt ? formatTime(automation.nextDueAt) : "–"}
       </TableCell>
-      <TableCell className="px-4 py-2.5">
+      <TableCell className="min-w-0 px-4 py-2.5">
         {lastRun ? (
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={lastRun.status} />
@@ -107,6 +117,52 @@ function AutomationRow({
         )}
       </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * The automations table itself. Long ids, prompts, cron expressions, and repo
+ * names are capped and truncated in place so the table fits its container at
+ * desktop widths instead of pushing the "Run now" action off screen; the
+ * last-run cell wraps its badge/origin/time/result cluster when width gets
+ * tight, and the shared table's own `overflow-x-auto` keeps narrower windows
+ * scrolling within the card rather than widening the page.
+ */
+export function AutomationsTable({
+  automations,
+  busyId,
+  onRunNow,
+  onOpenRun,
+}: {
+  automations: AutomationSchedule[];
+  busyId: string | null;
+  onRunNow: (automation: AutomationSchedule) => void;
+  onOpenRun: (id: number) => void;
+}) {
+  return (
+    <Table className="text-sm">
+      <TableHeader>
+        <TableRow>
+          <TableHead className="px-4">Automation</TableHead>
+          <TableHead className="px-4">Schedule</TableHead>
+          <TableHead className="px-4">Repo</TableHead>
+          <TableHead className="px-4">Next run</TableHead>
+          <TableHead className="px-4">Last run</TableHead>
+          <TableHead className="px-4 text-right">Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {automations.map((automation) => (
+          <AutomationRow
+            key={automation.id}
+            automation={automation}
+            busyId={busyId}
+            onRunNow={onRunNow}
+            onOpenRun={onOpenRun}
+          />
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -160,29 +216,12 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
 
       {data && data.automations.length > 0 ? (
         <Card className="py-0">
-          <Table className="text-sm">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="px-4">Automation</TableHead>
-                <TableHead className="px-4">Schedule</TableHead>
-                <TableHead className="px-4">Repo</TableHead>
-                <TableHead className="px-4">Next run</TableHead>
-                <TableHead className="px-4">Last run</TableHead>
-                <TableHead className="px-4 text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.automations.map((automation) => (
-                <AutomationRow
-                  key={automation.id}
-                  automation={automation}
-                  busyId={busyId}
-                  onRunNow={(target) => void handleRunNow(target)}
-                  onOpenRun={onOpenRun}
-                />
-              ))}
-            </TableBody>
-          </Table>
+          <AutomationsTable
+            automations={data.automations}
+            busyId={busyId}
+            onRunNow={(target) => void handleRunNow(target)}
+            onOpenRun={onOpenRun}
+          />
         </Card>
       ) : null}
 

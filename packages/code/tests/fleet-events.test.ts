@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
+  coalescePrFeedbackRuns,
   createFleetAddressPr,
   createFleetMentionHandler,
   createFleetResolveConflicts,
@@ -177,6 +178,28 @@ describe("fleet event handlers", () => {
     const addressPr = createFleetAddressPr(deps());
     expect(await addressPr("acme/unknown", 7)).toBe(false);
     expect(reviews).toHaveLength(0);
+  });
+
+  test("coalesces overlapping feedback events into one follow-up reconciliation", async () => {
+    let releaseFirst!: () => void;
+    const firstRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const addressPr = coalescePrFeedbackRuns(async () => {
+      calls++;
+      if (calls === 1) await firstRun;
+      return true;
+    });
+
+    const relay = addressPr("acme/backend", 42);
+    const reviewPoll = addressPr("ACME/backend", 42);
+    const mentionPoll = addressPr("acme/backend", 42);
+    expect(calls).toBe(1);
+
+    releaseFirst();
+    expect(await Promise.all([relay, reviewPoll, mentionPoll])).toEqual([true, true, true]);
+    expect(calls).toBe(2);
   });
 
   test("base sync uses the fleet repo worktree and forwards expected SHAs", async () => {

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import path from "path";
 
-import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
 import {
   generateWebhookSecret,
@@ -11,6 +11,7 @@ import {
   renderSystemdUnit,
   runWorkerInit,
   upsertEnvVars,
+  workspaceGitHubRepos,
 } from "../src/lib/worker-init";
 
 describe("upsertEnvVars", () => {
@@ -83,6 +84,29 @@ describe("generateWebhookSecret", () => {
     expect(a).toMatch(/^[0-9a-f]{64}$/);
     expect(generateWebhookSecret()).not.toBe(a);
   });
+});
+
+test("workspaceGitHubRepos registers every GitHub repo once", () => {
+  const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "https://github.com/acme/web.git"
+
+[[repos]]
+name = "mirror"
+remote = "https://git.example.com/acme/api.git"
+[repos.env]
+GITHUB_REPO = "acme/api"
+`);
+
+  expect(workspaceGitHubRepos(config)).toEqual(["acme/api", "acme/web"]);
 });
 
 describe("runWorkerInit", () => {
@@ -195,6 +219,10 @@ describe("runWorkerInit", () => {
   });
 
   describe("GitHub App step", () => {
+    const relayDeps = {
+      getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+      connectRelay: async () => true,
+    };
     const savedAppEnv = {
       appId: process.env.GITHUB_APP_ID,
       keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
@@ -223,97 +251,56 @@ describe("runWorkerInit", () => {
       expect(loadGitHubAppRecord(workspaceDir)).toBeNull();
     });
 
-    test("explains the trade-off and persists the pairing when accepted", async () => {
-      const setups: Array<{ repo: string }> = [];
+    test("an unverified repository points to the relay pairing command", async () => {
       const result = await runWorkerInit(
-        deps(["status=todo", "n", "", ""], {
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
           detectGithubRepo: async () => "acme/web",
-          setupGitHubApp: async ({ repo }) => {
-            setups.push({ repo });
-            saveGitHubAppRecord({ repo, enabled: true }, workspaceDir);
-            return true;
-          },
         }),
       );
       expect(result.ok).toBe(true);
       const all = logs.join("\n");
-      expect(all).toContain("review polling and replies work on PRs this worker created");
-      expect(all).toContain("@devintern-ai mentions on any PR");
-      expect(setups).toEqual([{ repo: "acme/web" }]);
-      expect(all).toContain("GitHub App events enabled");
-      const record = loadGitHubAppRecord(workspaceDir);
-      expect(record?.repo).toBe("acme/web");
-      expect(record?.enabled).toBe(true);
-    });
-
-    test("default connect flow records the pairing and prints the install URL", async () => {
-      const result = await runWorkerInit(
-        deps(["status=todo", "n", "", ""], {
-          detectGithubRepo: async () => "acme/web",
-        }),
-      );
-      expect(result.ok).toBe(true);
-      expect(logs.join("\n")).toContain("https://github.com/apps/devintern-ai");
-      const record = loadGitHubAppRecord(workspaceDir);
-      expect(record?.repo).toBe("acme/web");
-      expect(record?.enabled).toBe(true);
-    });
-
-    test("declining records disabled state and reminds after setup", async () => {
-      const result = await runWorkerInit(
-        deps(["status=todo", "n", "n"], {
-          detectGithubRepo: async () => "acme/web",
-        }),
-      );
-      expect(result.ok).toBe(true);
-      expect(logs.join("\n")).toContain("GitHub App events stay off for acme/web");
-      const record = loadGitHubAppRecord(workspaceDir);
-      expect(record?.repo).toBe("acme/web");
-      expect(record?.enabled).toBe(false);
-      const all = logs.join("\n");
+      expect(all).toContain("No verified GitHub App pairing was recorded");
+      expect(all).toContain("devintern worker connect github");
       expect(all).toContain("GitHub App events are not enabled:");
-      expect(all).toContain("https://github.com/apps/devintern-ai");
-      expect(all).toContain("re-run `devintern worker init`");
+      expect(loadGitHubAppRecord(workspaceDir)).toBeNull();
     });
 
-    test("detects an existing connection and keeps it unless asked to reconfigure", async () => {
+    test("does not trust a legacy press-Enter marker without verified GitHub ids", async () => {
+      saveGitHubAppRecord({ repo: "acme/web", enabled: true }, workspaceDir);
+      const result = await runWorkerInit(
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("No verified GitHub App pairing was recorded");
+    });
+
+    test("recognizes a verified relay pairing without another confirmation prompt", async () => {
       saveGitHubAppRecord(
-        { repo: "acme/web", enabled: true, connectedAt: "2026-08-01T00:00:00.000Z" },
+        {
+          repo: "acme/web",
+          enabled: true,
+          connectedAt: "2026-08-01T00:00:00.000Z",
+          installationId: 7001,
+          repositoryId: 9001,
+        },
         workspaceDir,
       );
-      let setups = 0;
       const result = await runWorkerInit(
-        deps(["status=todo", "n", "n"], {
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
           detectGithubRepo: async () => "acme/web",
-          setupGitHubApp: async () => {
-            setups++;
-            return true;
-          },
         }),
       );
       expect(result.ok).toBe(true);
-      expect(setups).toBe(0);
-      expect(logs.join("\n")).toContain("GitHub App already connected to acme/web");
+      expect(logs.join("\n")).toContain("GitHub App already verified for acme/web");
       expect(logs.join("\n")).not.toContain("GitHub App events are not enabled:");
     });
 
-    test("reconfigure replaces a pairing for a different repo", async () => {
-      saveGitHubAppRecord({ repo: "old/other", enabled: true }, workspaceDir);
-      const result = await runWorkerInit(
-        deps(["status=todo", "n", "y"], {
-          detectGithubRepo: async () => "acme/web",
-          setupGitHubApp: async ({ repo }) => {
-            saveGitHubAppRecord({ repo, enabled: true }, workspaceDir);
-            return true;
-          },
-        }),
-      );
-      expect(result.ok).toBe(true);
-      expect(logs.join("\n")).toContain("Existing pairing is for old/other");
-      expect(loadGitHubAppRecord(workspaceDir)?.repo).toBe("acme/web");
-    });
-
-    test("environment credentials count as an existing connection", async () => {
+    test("custom App credentials are recognized only on the no-relay path", async () => {
       process.env.GITHUB_APP_ID = "123456";
       process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/key.pem";
       const result = await runWorkerInit(
@@ -322,21 +309,10 @@ describe("runWorkerInit", () => {
         }),
       );
       expect(result.ok).toBe(true);
-      expect(logs.join("\n")).toContain("GitHub App credentials found in the environment");
-    });
-
-    test("a failed install attempt warns but does not abort setup", async () => {
-      const result = await runWorkerInit(
-        deps(["status=todo", "n", ""], {
-          detectGithubRepo: async () => "acme/web",
-          setupGitHubApp: async () => {
-            throw new Error("network down");
-          },
-        }),
+      expect(logs.join("\n")).toContain("advanced no-relay mode");
+      expect(logs.join("\n")).toContain(
+        "Customer-owned GitHub App credentials found in the environment",
       );
-      expect(result.ok).toBe(true);
-      expect(logs.join("\n")).toContain("GitHub App setup failed: network down");
-      expect(loadGitHubAppRecord(workspaceDir)?.enabled).toBe(false);
     });
   });
 

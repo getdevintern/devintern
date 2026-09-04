@@ -1,9 +1,10 @@
 ---
 title: "Worker Daemon"
+sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
-section: "Server Automation"
-order: 0
-dateModified: 2026-08-27
+section: "Automation"
+order: 1
+dateModified: 2026-09-03
 ---
 
 # Worker Daemon
@@ -21,14 +22,16 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup, offers the DevIntern [GitHub App](#mention-the-bot-on-any-pr) when this repo has a GitHub remote, and can generate a native user service for Linux or macOS. Polling is always on. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
-The GitHub App step explains what changes: review polling on PRs the worker created itself works with just your `GITHUB_TOKEN`, while `@mention` handling on any other PR needs App auth. Accepting opens <https://github.com/apps/devintern-ai>; once you confirm the install, the pairing is recorded in `.devintern-code/github-app.json` inside the workspace home. Skipping records that App events are disabled, and the wizard's closing summary reminds you how to enable them later. Re-running `worker init` detects an existing connection (pairing record or `GITHUB_APP_ID` credentials in the environment) and only re-runs setup if you ask it to.
+In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
+
+If the relay is intentionally unavailable, the wizard does not offer the hosted App. Polling and the worker's own PRs still work with `GITHUB_TOKEN`; air-gapped mention handling uses the advanced customer-owned App setup in [GitHub authentication](./configuration.md#advanced-customer-owned-github-app).
 
 Or configure by hand and start directly:
 
 ```bash
-# After a workspace exists (worker init, or workspace init + import)
+# After a workspace exists (`worker init`, or `worker scaffold` + `worker add-repo`)
 devintern worker
 
 # Advanced: run the repo-local GitHub webhook listener separately
@@ -82,7 +85,7 @@ Because the occurrence is just a markdown task, you can reproduce or rerun any o
 devintern ~/.devintern/automations/dependency-health/2026-08-24T09-00-00-000Z.md
 ```
 
-You usually don't have to: the [dashboard](./dashboard.md#running-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
+You usually don't have to: the [dashboard](./dashboard.md#run-an-automation-now) has a **Run now** action per automation that executes the prompt immediately through this same pipeline and records the attempt with the `manual` origin, so new or edited configurations can be validated in seconds instead of waiting for the next schedule window.
 
 ### Writing good prompts
 
@@ -105,15 +108,15 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 
 ### Troubleshooting
 
-| Symptom                                              | Likely cause                                                                                                                                                                                                                                |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately).                                                   |
-| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                                                                                 |
-| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                                                                       |
-| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                                                                        |
-| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                                                                          |
-| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                                                                      |
-| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home — check those files (or `journalctl --user -u devintern-worker`) and see [where the logs come from](./dashboard.md#where-the-logs-come-from). |
+| Symptom                                              | Likely cause                                                                                                                                                                              |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No occurrences fire after editing the TOML           | Check the worker log: the reload logs validation errors naming the offending entry, and changing a schedule resets its cursor (the next run is the next scheduled time, not immediately). |
+| `occurrence skipped: previous run is active`         | The previous occurrence still runs (or its lease is stale). Long prompts may simply need a longer schedule.                                                                               |
+| `occurrence skipped: repository is busy`             | Another task holds the repo run lock; the next occurrence will retry.                                                                                                                     |
+| Scheduled runs missing from the dashboard            | Filter the run list by origin `scheduled`; check the worker has an automation license (startup log).                                                                                      |
+| Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                        |
+| A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
+| The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
 
 ## Scheduled story-point estimation
 
@@ -289,7 +292,7 @@ Guardrails apply before the agent acts:
 - The worker never force-pushes; if a human pushed to the branch meanwhile, the push is rejected instead of overwriting.
 - Mentions posted before the worker first started are not dug up.
 
-Mention matching requires a resolvable bot identity, so this team/automation feature needs GitHub App auth (`GITHUB_APP_ID` plus a private key — the same requirement as webhook mention handling). A personal `GITHUB_TOKEN` is enough for review polling on the agent's own PRs, but not for `@mentions` on other people's PRs. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/). When this repo has a GitHub remote, `worker init` offers to install and connect the App as part of setup (see [Quick Start](#quick-start)); no separate manual configuration is required.
+In the standard setup, pair the workspace with the relay and install the central DevIntern AI App. The worker recognizes `@devintern-ai` and uses your local `GITHUB_TOKEN` to fetch the comment, enforce the permission gate, and perform changes. No `GITHUB_APP_ID` or private key is stored locally. Without the relay, configure a customer-owned App for mention identity; see [GitHub authentication](./configuration.md#advanced-customer-owned-github-app).
 
 ## How events are handled
 
@@ -301,7 +304,7 @@ Mention matching requires a resolvable bot identity, so this team/automation fea
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Polling stays on as the fallback, so relay downtime only affects latency. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Multi-team polling uses isolated clients and cursors; use `worker connect <tracker> --team <name>` when one team owns that tracker type. Multiple teams using the same tracker type remain polling-only until relay envelopes carry team registration identity. While relay long-polls are healthy, review and mention acquisition yields to relay and runs only a 30-minute safety sweep; PR lifecycle and conflict reconciliation continue at the normal polling interval. If relay delivery stops, normal feedback polling resumes after a short grace period. Events from different acquisition paths for the same PR are serialized and collapsed into one follow-up check, so fallback coverage cannot start overlapping agent runs. Run `worker connect` after adding repositories or to add or rotate tracker registrations.
 
 ## Seeing what the worker did
 

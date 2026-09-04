@@ -635,7 +635,7 @@ export async function handleRetryRun(
   // Concurrent retries: another dashboard retry for this task, or a live run
   // for the task (the worker records one as soon as it picks the ticket up).
   if (data.retryMode === "schedule") {
-    if (data.getScheduledRetryStore().hasActive(taskKey)) {
+    if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
       return conflict(`a retry of ${taskKey} is already scheduled or running`);
     }
   } else if (data.hasInflightRetry(taskKey)) {
@@ -643,7 +643,12 @@ export async function handleRetryRun(
   }
   const activeRun = data
     .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
-    .runs.find((candidate) => candidate.status === "in_progress" && candidate.id !== run.id);
+    .runs.find(
+      (candidate) =>
+        candidate.status === "in_progress" &&
+        candidate.id !== run.id &&
+        candidate.team === run.team,
+    );
   if (activeRun) {
     return conflict(
       `${taskKey} already has a run in progress (run ${activeRun.id}); wait for it to finish`,
@@ -652,7 +657,13 @@ export async function handleRetryRun(
 
   if (data.retryMode === "schedule") {
     const store = data.getScheduledRetryStore();
-    const scheduled = store.schedule({ taskKey, runId: id, actor: actorLabel });
+    const scheduled = store.schedule({
+      taskKey,
+      runId: id,
+      team: run.team,
+      repo: run.repo,
+      actor: actorLabel,
+    });
     if (!scheduled.scheduled) {
       return conflict(`a retry of ${taskKey} is already scheduled or running`);
     }

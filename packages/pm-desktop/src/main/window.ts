@@ -4,6 +4,7 @@
 
 import { join } from "node:path";
 import { BrowserWindow, app, nativeImage, shell } from "electron";
+import { captureErrorOnce } from "./error-tracking.ts";
 import { APP_DISPLAY_NAME, formatAppWindowTitle } from "../shared/about.ts";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
@@ -52,6 +53,24 @@ export function createWindow(): BrowserWindow {
   window.on("page-title-updated", (event) => {
     event.preventDefault();
     window.setTitle(title);
+  });
+
+  // A renderer process that dies takes its JS with it — no in-renderer handler
+  // could report this, so main watches for it here. Normal window closes come
+  // through as "clean-exit" and are not failures.
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (details.reason === "clean-exit") return;
+    void captureErrorOnce(new Error(`Renderer process gone: ${details.reason}`), {
+      operation: "render-process-gone",
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+
+  // Preload failures break the whole `window.pm` bridge; report with the
+  // script path so broken packaging is diagnosable.
+  window.webContents.on("preload-error", (_event, preloadPath, error) => {
+    void captureErrorOnce(error, { operation: "preload-error", preloadPath });
   });
 
   // Unpackaged macOS still shows the Electron dock icon unless we override.

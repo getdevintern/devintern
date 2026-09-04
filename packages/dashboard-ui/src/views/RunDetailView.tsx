@@ -12,6 +12,7 @@ import { Markdown } from "@/lib/markdown";
 import { triggerRunRetry, usePoll } from "@/lib/api";
 import type { RetryAuditEntry, RunDetailResponse, RunStageRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
+import { runWorkLink } from "@/lib/run-work";
 import { parseStageDetail } from "@/lib/stage-detail";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 
@@ -264,19 +265,9 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
             <CardHeader>
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-semibold">
-                  <TicketKey
-                    label={
-                      // Automation runs carry only the markdown occurrence
-                      // stem as task key; the automation id is the meaningful
-                      // label there.
-                      data.run.automationId && data.run.origin !== "estimate"
-                        ? data.run.automationId
-                        : (data.run.taskKey ??
-                          data.run.automationId ??
-                          (data.run.prNumber ? `PR #${data.run.prNumber}` : `Run ${data.run.id}`))
-                    }
-                    href={data.run.ticketUrl}
-                  />
+                  {/* Same label rule as the runs list; PR-affected runs link
+                      the PR they operate on. */}
+                  <TicketKey {...runWorkLink(data.run)} />
                 </h2>
                 <StatusBadge status={data.run.status} />
                 {data.retry.eligible && !confirming ? (

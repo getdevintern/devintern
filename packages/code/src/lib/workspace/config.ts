@@ -57,6 +57,28 @@ export interface WorkspaceDefaults {
   pollIntervalSeconds: number;
 }
 
+/**
+ * One team's tracker source from a `[[teams]]` entry.
+ *
+ * Teams let one fleet worker poll several boards/trackers (even several
+ * boards of the same tracker type), each with its own credentials, query,
+ * and cursor. Omitting `[[teams]]` keeps the single `[defaults]` behavior.
+ */
+export interface TeamConfig {
+  /** Unique team name; namespaces cursors, dedupe, and skips (`jira:platform`). */
+  name: string;
+  /** Tracker driving this team's query (must support polling). */
+  tracker: string;
+  /** Tracker query the worker polls with for this team. */
+  taskQuery?: string;
+  /** Fixed destination repo. Omit when this team routes across several repos. */
+  repo?: string;
+  /** Optional env file with this team's credentials, relative to the workspace directory. */
+  envFile?: string;
+  /** Inline env overrides (highest precedence within the team). */
+  env: Record<string, string>;
+}
+
 /** One managed repository from a `[[repos]]` entry. */
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
@@ -77,6 +99,8 @@ export interface RepoConfig {
 export interface RoutingRule {
   /** Name of the repo tasks matching this rule route to. */
   repo: string;
+  /** Restrict the rule to tasks acquired by this team (multi-team workspaces). */
+  team?: string;
   /** Tracker project key (e.g. Jira key prefix, Linear team key). */
   project?: string;
   /** Task must carry at least one of these components. */
@@ -99,6 +123,8 @@ export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   worker: WorkerSettings;
   defaults: WorkspaceDefaults;
+  /** Team tracker sources; empty means the single `[defaults]` fleet query. */
+  teams: TeamConfig[];
   repos: RepoConfig[];
   routing: RoutingRule[];
   automations: AutomationConfig[];
@@ -312,6 +338,46 @@ export function parseWorkspaceConfig(
 
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
+
+  const teams: TeamConfig[] = [];
+  const teamNames = new Set<string>();
+  for (const [index, table] of asTableArray(document.teams, "[[teams]]", errors).entries()) {
+    const label = `[[teams]][${index}]`;
+    const name = readString(table, "name", label, errors);
+    if (!name) {
+      errors.push(`${label}.name is required.`);
+    } else if (!REPO_NAME_PATTERN.test(name)) {
+      errors.push(
+        `${label}.name "${name}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (teamNames.has(name.toLowerCase())) {
+      errors.push(`Duplicate team name "${name}". Team names must be unique.`);
+    } else {
+      teamNames.add(name.toLowerCase());
+    }
+    const teamTracker = readString(table, "tracker", label, errors);
+    if (teamTracker && !supportsPolling(teamTracker)) {
+      errors.push(
+        `${label}.tracker "${teamTracker}" does not support polling. ` +
+          `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+      );
+    }
+    teams.push({
+      name: name ?? "",
+      tracker: teamTracker ?? "",
+      taskQuery: readString(table, "task_query", label, errors),
+      repo: readString(table, "repo", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
+  // brings its own (a [defaults].tracker alongside teams is still honored
+  // for any team that omits one).
+  if (!tracker && teams.length === 0) {
+    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+  }
   if (tracker && !supportsPolling(tracker)) {
     errors.push(
       `[defaults].tracker "${tracker}" does not support polling. ` +
@@ -338,8 +404,24 @@ export function parseWorkspaceConfig(
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
   };
-  if (!tracker) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+
+  for (const team of teams) {
+    if (!team.tracker) {
+      team.tracker = defaults.tracker;
+    }
+    if (!team.tracker && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a tracker: set its own tracker or [defaults].tracker.`,
+      );
+    }
+    if (!team.taskQuery) {
+      team.taskQuery = defaults.taskQuery;
+    }
+    if (!team.taskQuery && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a task_query: set its own or [defaults].task_query.`,
+      );
+    }
   }
 
   const repos: RepoConfig[] = [];
@@ -378,6 +460,14 @@ export function parseWorkspaceConfig(
     });
   }
 
+  for (const team of teams) {
+    if (team.repo && !repoNames.has(team.repo)) {
+      errors.push(
+        `[[teams]] "${team.name}".repo "${team.repo}" does not match any [[repos]] name.`,
+      );
+    }
+  }
+
   const routingTable = asTable(document.routing, "[routing]", errors);
   const routing: RoutingRule[] = [];
   for (const [index, table] of asTableArray(
@@ -394,8 +484,17 @@ export function parseWorkspaceConfig(
     if (!repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
+    const team = readString(table, "team", label, errors);
+    if (team && !teamNames.has(team.toLowerCase())) {
+      errors.push(
+        teamNames.size > 0
+          ? `${label}.team "${team}" does not match any [[teams]] name.`
+          : `${label}.team "${team}" is set but no [[teams]] are configured.`,
+      );
+    }
     const rule: RoutingRule = {
       repo,
+      team,
       project: readString(table, "project", label, errors),
       components: readStringList(table, "components", label, errors),
       labels: readStringList(table, "labels", label, errors),
@@ -404,6 +503,25 @@ export function parseWorkspaceConfig(
       errors.push(`${label} must set at least one criterion (project, components, or labels).`);
     }
     routing.push(rule);
+  }
+
+  for (const team of teams) {
+    if (team.repo && routing.some((rule) => rule.team?.toLowerCase() === team.name.toLowerCase())) {
+      errors.push(
+        `[[teams]] "${team.name}" sets repo and cannot also have team-scoped routing rules. ` +
+          "Remove repo when the team spans multiple repositories.",
+      );
+    }
+    if (
+      !team.repo &&
+      repos.length > 1 &&
+      !routing.some((rule) => !rule.team || rule.team.toLowerCase() === team.name.toLowerCase())
+    ) {
+      errors.push(
+        `[[teams]] "${team.name}" spans a multi-repo workspace but has no applicable routing rules. ` +
+          "Set repo for a fixed destination or add [[routing.rules]].",
+      );
+    }
   }
 
   const automationResult = parseAutomationEntries(document.automations, {
@@ -420,7 +538,11 @@ export function parseWorkspaceConfig(
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
   // with estimate support can serve them; fail the job at startup otherwise.
-  if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
+  if (estimationResult.estimations.length > 0 && !tracker) {
+    errors.push(
+      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace.",
+    );
+  } else if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
     for (const estimation of estimationResult.estimations) {
       errors.push(
         `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
@@ -438,6 +560,7 @@ export function parseWorkspaceConfig(
     workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
     worker: { schedule: schedule.config },
     defaults,
+    teams,
     repos,
     routing,
     automations: automationResult.automations,
@@ -459,7 +582,7 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
   } catch (error) {
     throw new Error(
       `Cannot read workspace config at ${path}: ${error instanceof Error ? error.message : String(error)}\n` +
-        "Run `devintern workspace init` to create one.",
+        "Run `devintern worker scaffold` to create one.",
     );
   }
   return parseWorkspaceConfig(text, path);
@@ -472,4 +595,13 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
  */
 export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | undefined {
   return config.repos.find((repo) => repo.name === name);
+}
+
+/**
+ * Look up a team by name.
+ *
+ * @returns The matching {@link TeamConfig}, or undefined.
+ */
+export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
+  return config.teams.find((team) => team.name === name);
 }

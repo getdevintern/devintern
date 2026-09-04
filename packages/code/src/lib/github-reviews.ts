@@ -12,12 +12,37 @@ export interface ReviewsClientConfig {
   token?: string;
   appAuth?: GitHubAppAuth;
   /**
+   * Authentication policy for GitHub API calls.
+   *
+   * - `token-only`: hosted-relay workspaces. The central App receives events,
+   *   while the local `GITHUB_TOKEN` fetches and mutates GitHub data.
+   * - `app-first`: direct/self-hosted webhook installations, where the
+   *   customer-owned App identity is needed for mention matching.
+   * - `token-first`: interactive/default CLI behavior, preserving App auth as
+   *   a backwards-compatible fallback when no token is configured.
+   */
+  authMode?: GitHubAuthMode;
+  /**
    * Prefer GitHub App auth over a personal access token when both are
    * available. Used by the webhook server so the bot identity resolves
    * (`slug[bot]`), which is required for @mention matching and bot-attributed
    * commits. Default behavior (CLI) keeps the token taking precedence.
    */
   preferAppAuth?: boolean;
+}
+
+export type GitHubAuthMode = "token-only" | "token-first" | "app-first";
+
+/** Internal subprocess override set by relay-backed workspace workers. */
+export const GITHUB_AUTH_MODE_ENV = "DEVINTERN_GITHUB_AUTH_MODE";
+
+/** Resolve the internal auth-mode override, falling back to the caller's mode. */
+export function resolveGitHubAuthMode(fallback: GitHubAuthMode): GitHubAuthMode {
+  const configured = process.env[GITHUB_AUTH_MODE_ENV];
+  if (configured === "token-only" || configured === "token-first" || configured === "app-first") {
+    return configured;
+  }
+  return fallback;
 }
 
 export interface PullRequestInfo {
@@ -80,7 +105,15 @@ export class GitHubReviewsClient {
    * @param config - Optional PAT or GitHub App auth (falls back to env)
    */
   constructor(config: ReviewsClientConfig = {}) {
-    if (config.preferAppAuth) {
+    const authMode =
+      config.authMode ?? resolveGitHubAuthMode(config.preferAppAuth ? "app-first" : "token-first");
+
+    if (authMode === "token-only") {
+      this.token = config.token || process.env.GITHUB_TOKEN;
+      return;
+    }
+
+    if (authMode === "app-first") {
       // App-first: use GitHub App auth when available, falling back to a token
       // only if no App credentials are configured. The two are kept mutually
       // exclusive so getToken() routes through the App.

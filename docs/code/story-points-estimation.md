@@ -3,6 +3,7 @@ title: "Story Points Estimation"
 description: "Schedule unattended AI story-point estimation via [[estimations]] in workspace.toml, or run one-shot --estimate"
 section: "Server Automation"
 order: 6
+sidebarHidden: true
 dateModified: 2026-08-27
 ---
 
