@@ -26,6 +26,8 @@ export type RelayEventType = "pr.review_submitted" | "pr.comment_created" | "tas
 export interface RelayEnvelope {
   seq: number;
   source: string;
+  /** Stable team slug for team-scoped tracker deliveries. Absent on legacy envelopes and PRs. */
+  team?: string;
   eventType: RelayEventType;
   repo?: string;
   ref: { pr?: number; commentId?: number; task?: string };
@@ -43,7 +45,7 @@ export interface RelayHandlers {
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
   /** Tracker task changed → re-evaluate the matching team/default source. */
-  evaluateTask(taskKey: string, trackerSource: string): Promise<void>;
+  evaluateTask(taskKey: string, trackerSource: string, team?: string): Promise<void>;
 }
 
 export interface RelayAcquirerOptions {
@@ -161,7 +163,9 @@ export class RelayAcquirer implements Acquirer {
   }
 
   private async dispatch(envelope: RelayEnvelope): Promise<void> {
-    const externalId = `${envelope.source}:${envelope.deliveryId}`;
+    const externalId = [envelope.source, envelope.team, envelope.deliveryId]
+      .filter((part): part is string => Boolean(part))
+      .join(":");
     if (this.options.queue.hasProcessed(SOURCE, externalId)) {
       return;
     }
@@ -206,7 +210,7 @@ export class RelayAcquirer implements Acquirer {
         }
         case "task.changed": {
           if (envelope.ref.task) {
-            await handlers.evaluateTask(envelope.ref.task, envelope.source);
+            await handlers.evaluateTask(envelope.ref.task, envelope.source, envelope.team);
           }
           return;
         }

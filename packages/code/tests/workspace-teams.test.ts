@@ -479,6 +479,44 @@ describe("relay task evaluation across teams", () => {
     expect(ran).toEqual([]);
   });
 
+  test("team-tagged envelopes route overlapping keys only to the exact team", async () => {
+    const ran: string[] = [];
+    const overlapping: FleetTask[] = [{ key: "PROJ-123", updated: "u1", labels: ["docs"] }];
+    const dispatch = createFleetRelayTaskDispatcher({
+      sources: [
+        {
+          tracker: "jira",
+          label: "platform",
+          evaluate: evaluatorFor(findTeam(CONFIG, "platform"), overlapping, ran),
+        },
+        {
+          tracker: "jira",
+          label: "growth",
+          evaluate: evaluatorFor(findTeam(CONFIG, "growth"), overlapping, ran),
+        },
+      ],
+    });
+
+    await dispatch("PROJ-123", "jira", "growth");
+    expect(ran).toEqual(["growth:PROJ-123"]);
+  });
+
+  test("unknown or removed relay teams are skipped safely", async () => {
+    const ran: string[] = [];
+    const dispatch = createFleetRelayTaskDispatcher({
+      sources: [
+        {
+          tracker: "jira",
+          label: "platform",
+          evaluate: evaluatorFor(findTeam(CONFIG, "platform"), [], ran),
+        },
+      ],
+    });
+
+    await dispatch("PROJ-123", "jira", "removed");
+    expect(ran).toEqual([]);
+  });
+
   test("tasks matching no source are ignored", async () => {
     const ran: string[] = [];
     const dispatch = createFleetRelayTaskDispatcher({

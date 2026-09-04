@@ -247,22 +247,35 @@ export interface FleetRelayTaskSource {
 }
 
 /**
- * Dispatch a relayed `task.changed` across every configured tracker source:
- * The relay currently identifies tracker type, not an individual team
- * registration. A tracker type mapped to exactly one workspace source is
- * safe to dispatch. Multiple teams using that same tracker remain polling-
- * only for instant events, avoiding first-match routing when task keys
- * overlap across boards or tracker accounts.
+ * Dispatch a relayed `task.changed` to its exact team when one is present.
+ * Legacy team-less envelopes retain source-only routing, but only when that
+ * tracker maps unambiguously to one configured source.
  */
 export function createFleetRelayTaskDispatcher(options: {
   sources: FleetRelayTaskSource[];
   verbose?: boolean;
-}): (taskKey: string, tracker?: string) => Promise<void> {
-  return async (taskKey, tracker) => {
+}): (taskKey: string, tracker?: string, team?: string) => Promise<void> {
+  return async (taskKey, tracker, team) => {
     const normalized = tracker?.trim().toLowerCase();
-    const candidates = normalized
+    let candidates = normalized
       ? options.sources.filter((source) => source.tracker.toLowerCase() === normalized)
       : options.sources;
+    if (team !== undefined) {
+      candidates = candidates.filter((source) => source.label === team);
+      const source = candidates[0];
+      if (candidates.length === 1 && source) {
+        if (await source.evaluate(taskKey)) return;
+        if (options.verbose) {
+          console.log(`   [fleet] relay task ${taskKey} does not match team '${team}'; ignoring.`);
+        }
+        return;
+      }
+      console.warn(
+        `⚠️  [fleet] relay task ${taskKey} targets unknown or removed team '${team}'` +
+          `${tracker ? ` for ${tracker}` : ""}; ignoring the envelope.`,
+      );
+      return;
+    }
     if (candidates.length > 1) {
       console.warn(
         `⚠️  [fleet] relay task ${taskKey} from ${tracker ?? "an unknown tracker"} maps to ` +

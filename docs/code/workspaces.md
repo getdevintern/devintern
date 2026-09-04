@@ -160,11 +160,15 @@ Team routing follows these rules:
 
 Credentials layer as workspace `.env` < team `env_file` < inline `[teams.env]` for tracker clients. Task subprocesses retain repository settings and then apply the acquiring team's credential layers, with `TASK_TRACKER` pinned to that team's tracker so comments and transitions go back to the correct board. Team cursor keys use `tracker:team` (for example `jira:platform`), so separate boards of the same tracker never share polling cursors or dedupe records.
 
+The shared `.env` can also namespace credentials as `<TRACKER>_<TEAM>_<SETTING>`. For example, `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, and `JIRA_PLATFORM_API_TOKEN` are projected onto Jira's normal variables only for team `platform`. Team names are uppercased and punctuation becomes `_`; team `env_file` and inline values still win.
+
 `[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations still use `[defaults].tracker`; configure it explicitly when using `[[estimations]]`.
 
 Team `task_query` and `repo` changes live-reload along with routing rules. Team names, tracker types, `env_file`, and inline credentials are startup-only because changing them requires rebuilding tracker clients and detectors; restart the worker after changing those fields.
 
-Tracker relay envelopes currently identify the tracker type, not an individual team registration. Instant tracker relay is therefore enabled only when one workspace team uses that tracker type. If two teams use Jira (or any same tracker), polling remains fully isolated and supported, but `worker connect jira` refuses the ambiguous relay registration and task envelopes for that tracker fail closed to polling. GitHub repository relay remains unaffected.
+Tracker relay registrations and `task.changed` envelopes carry the stable team name. Connect same-tracker boards separately with `devintern worker connect jira --team platform` and `devintern worker connect jira --team growth`; each tracker/team pair gets its own idempotent ingest URL and dispatches only to that exact team, even if task keys overlap. Unknown or removed teams are safely skipped and acknowledged. Legacy team-less buffered envelopes still use source-only routing when the tracker has one unambiguous source. GitHub repository relay is unchanged.
+
+Deploy the team-aware relay control plane before the matching CLI release. A new CLI against an old relay fails team-scoped registration with an actionable upgrade message; old CLI team-less registrations remain supported by the new control plane.
 
 ### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
 

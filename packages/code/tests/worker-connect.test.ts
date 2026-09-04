@@ -174,7 +174,7 @@ remote = "git@github.com:acme/web.git"
     expect(logs.join("\n")).toContain("team 'growth'");
   });
 
-  test("same-tracker teams remain polling-only because relay lacks team identity", async () => {
+  test("same-tracker teams connect separately with explicit team identity", async () => {
     writeFileSync(
       join(workspaceDir, "workspace.toml"),
       `[[teams]]
@@ -198,18 +198,46 @@ name = "web"
 remote = "git@github.com:acme/web.git"
 `,
     );
-    let called = false;
+    let observedTeam: string | undefined;
     const result = await runWorkerConnectCommand(["linear", "--team", "growth"], {
       workspaceDir,
-      runConnect: async () => {
-        called = true;
+      runConnect: async (_target, deps) => {
+        observedTeam = deps.team;
         return 0;
       },
     });
 
+    expect(result).toBe(0);
+    expect(observedTeam).toBe("growth");
+  });
+
+  test("same-tracker connect requires an explicit team", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "api"
+
+[[teams]]
+name = "growth"
+tracker = "jira"
+task_query = "project = GROW"
+repo = "web"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`,
+    );
+    const result = await runWorkerConnectCommand(["jira"], { workspaceDir });
     expect(result).toBe(1);
-    expect(called).toBe(false);
-    expect(errors.join("\n")).toContain("polling-only");
+    expect(errors.join("\n")).toContain("Select one with --team <name>");
   });
 
   test("requires a workspace instead of writing repository-local relay state", async () => {
