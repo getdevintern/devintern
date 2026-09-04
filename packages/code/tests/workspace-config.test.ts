@@ -545,6 +545,166 @@ repo = "missing"
   });
 });
 
+describe("parseWorkspaceConfig [[teams]]", () => {
+  test("a team can map every task directly to one repo", () => {
+    const config = parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "api"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`);
+    expect(config.defaults.tracker).toBe("");
+    expect(config.teams).toEqual([
+      {
+        name: "platform",
+        tracker: "jira",
+        taskQuery: "project = PLAT",
+        repo: "api",
+        envFile: undefined,
+        env: {},
+      },
+    ]);
+  });
+
+  test("a team spanning several repos uses team-scoped routing", () => {
+    const config = parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "gitlab"
+task_query = "labels=devintern"
+
+[[repos]]
+name = "api"
+remote = "git@gitlab.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@gitlab.com:acme/web.git"
+
+[[routing.rules]]
+team = "platform"
+repo = "api"
+labels = ["backend"]
+
+[[routing.rules]]
+team = "platform"
+repo = "web"
+labels = ["frontend"]
+`);
+    expect(config.teams[0]?.tracker).toBe("gitlab");
+    expect(config.teams[0]?.repo).toBeUndefined();
+    expect(config.routing.map((rule) => rule.repo)).toEqual(["api", "web"]);
+  });
+
+  test("rejects unknown fixed repos and fixed-plus-rules ambiguity", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "missing"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+`),
+    ).toThrow(/repo "missing" does not match any \[\[repos\]\] name/);
+
+    expect(() =>
+      parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "api"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[routing.rules]]
+team = "platform"
+repo = "web"
+labels = ["frontend"]
+`),
+    ).toThrow(/sets repo and cannot also have team-scoped routing rules/);
+  });
+
+  test("requires routing for an unfixed team in a multi-repo workspace", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`),
+    ).toThrow(/has no applicable routing rules/);
+  });
+
+  test("team names are unique case-insensitively", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[teams]]
+name = "Platform"
+tracker = "jira"
+task_query = "project = PLAT"
+
+[[teams]]
+name = "platform"
+tracker = "linear"
+task_query = "{}"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+`),
+    ).toThrow(/Duplicate team name/);
+  });
+
+  test("scheduled estimations require an explicit defaults tracker", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[estimations]]
+id = "groom"
+enabled = true
+query = "project = PLAT"
+interval = "1d"
+`),
+    ).toThrow(/\[\[estimations\]\] uses \[defaults\]\.tracker/);
+  });
+});
+
 describe("parseWorkspaceConfig [worker.schedule] (quiet hours)", () => {
   test("parses working windows into config.worker.schedule", () => {
     const config = parseWorkspaceConfig(`

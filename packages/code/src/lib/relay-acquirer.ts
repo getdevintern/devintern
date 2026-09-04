@@ -42,8 +42,8 @@ export interface RelayHandlers {
   addressPr(repo: string, prNumber: number): Promise<boolean>;
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
-  /** Tracker task changed → re-evaluate the user's query and run if ready. */
-  evaluateTask(taskKey: string): Promise<void>;
+  /** Tracker task changed → re-evaluate the matching team/default source. */
+  evaluateTask(taskKey: string, trackerSource: string): Promise<void>;
 }
 
 export interface RelayAcquirerOptions {
@@ -206,7 +206,7 @@ export class RelayAcquirer implements Acquirer {
         }
         case "task.changed": {
           if (envelope.ref.task) {
-            await handlers.evaluateTask(envelope.ref.task);
+            await handlers.evaluateTask(envelope.ref.task, envelope.source);
           }
           return;
         }

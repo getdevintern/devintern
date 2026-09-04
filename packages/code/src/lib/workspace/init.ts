@@ -32,16 +32,16 @@ dashboard = true
 # When automatic merge-conflict resolution runs on the agent's PRs.
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window
-# to cut AI token spend. Requires exactly one schedule below, and a worker
-# changes apply to the running worker. "disabled" turns it off entirely — conflicts
+# to cut AI token spend. Exactly one schedule is required; changes apply to the
+# running worker. "disabled" turns it off entirely — conflicts
 # stay for manual resolution (devintern resolve-conflicts <pr-url>).
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"
 
 [defaults]
-# Tracker the fleet query runs against: jira, linear, github, azure-devops,
-# asana, trello, or markdown.
+# Tracker the fleet query runs against: jira, linear, github, gitlab,
+# azure-devops, asana, trello, or markdown.
 tracker = "jira"
 # Task-selection query in the tracker's query language.
 # task_query = "sprint in openSprints() AND labels = devintern"
@@ -55,21 +55,45 @@ default_branch = "main"
 
 # Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
-# 
+# ----
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
-# 
+# ----
 # [[routing.rules]]
 # repo = "backend"
 # project = "BACK"            # task key prefix (BACK-123)
 # labels = ["backend"]        # any-of; AND-ed with the other criteria
 
+# Multi-team mode replaces the single defaults query with one source per
+# team. A fixed repo sends every task from that team to one repository.
+# Omit repo when a team spans repositories, then add team-scoped routing
+# rules for project/component/label selection.
+# ----
+# [[teams]]
+# name = "platform"
+# tracker = "jira"
+# task_query = "project = PLAT AND labels = devintern"
+# repo = "backend"
+# env_file = "env/platform.env"
+# ----
+# [[teams]]
+# name = "growth"
+# tracker = "linear"
+# task_query = "{\"team\":{\"key\":{\"eq\":\"GROW\"}}}"
+#   [teams.env]
+#   LINEAR_API_KEY = "lin_api_..."
+# ----
+# [[routing.rules]]
+# team = "growth"
+# repo = "web"
+# labels = ["frontend"]
+
 # Recurring work is hot-reloaded: edits apply to the running worker without a
 # restart. Each occurrence runs the prompt through the normal task pipeline as
 # a local markdown task.
 # Cron uses the worker host timezone; interval values support m, h, and d.
-# 
+# ----
 # [[automations]]
 # id = "weekday-maintenance"
 # enabled = true
@@ -194,7 +218,7 @@ export function runWorkerScaffold(): number {
   console.log("Next steps:");
   console.log("  1. Put shared credentials in the workspace .env");
   console.log("  2. Run `devintern worker add-repo` inside each repo");
-  console.log("  3. Add [[routing.rules]] so tasks route to the right repo");
+  console.log("  3. Set each team repo or add [[routing.rules]] for multi-repo routing");
   console.log("  4. Start the fleet: devintern worker");
   return 0;
 }

@@ -1494,6 +1494,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
       taskKey: workflowKey,
       tracker: trackerName,
+      team: process.env.DEVINTERN_WORKSPACE_TEAM,
+      repo: process.env.DEVINTERN_WORKSPACE_REPO,
       // The harness that will implement this run (resolved at startup).
       harness: resolvedAgent.harness.name,
       ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),

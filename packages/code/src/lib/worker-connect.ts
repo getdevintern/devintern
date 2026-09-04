@@ -7,7 +7,7 @@ import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "
 import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
-import { gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
+import { buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./workspace/paths";
 
 const TRACKER_TARGETS = new Set(["linear", "asana", "trello", "azure-devops", "jira"]);
@@ -29,10 +29,12 @@ Targets:
 
 Options:
   --workspace <path>   Use this workspace.toml
+  --team <name>        Use one team's tracker credentials
   -h, --help           Display this help message
 
-Tracker targets read credentials from the workspace .env. Explicit shell
-variables take precedence.`;
+Tracker targets use the selected team's env_file/inline env over the workspace
+.env. A target used by multiple teams is polling-only until relay registrations
+carry team identity.`;
 
 export interface WorkerConnectCommandDeps {
   workspaceDir?: string;
@@ -46,6 +48,7 @@ export interface WorkerConnectCommandDeps {
 interface ParsedConnectArgs {
   target: string;
   workspacePath?: string;
+  team?: string;
   help: boolean;
   error?: string;
 }
@@ -54,6 +57,7 @@ function parseConnectArgs(args: string[]): ParsedConnectArgs {
   let target = "github";
   let workspacePath: string | undefined;
   let help = false;
+  let team: string | undefined;
   let targetSet = false;
 
   for (let index = 0; index < args.length; index++) {
@@ -63,21 +67,28 @@ function parseConnectArgs(args: string[]): ParsedConnectArgs {
     } else if (arg === "--workspace") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, help, error: "--workspace requires a value." };
+        return { target, workspacePath, team, help, error: "--workspace requires a value." };
       }
       workspacePath = value;
       index++;
+    } else if (arg === "--team") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        return { target, workspacePath, team, help, error: "--team requires a value." };
+      }
+      team = value;
+      index++;
     } else if (arg?.startsWith("-")) {
-      return { target, workspacePath, help, error: `Unknown option: ${arg}` };
+      return { target, workspacePath, team, help, error: `Unknown option: ${arg}` };
     } else if (arg && !arg.startsWith("-")) {
       if (targetSet) {
-        return { target, workspacePath, help, error: `Unexpected argument: ${arg}` };
+        return { target, workspacePath, team, help, error: `Unexpected argument: ${arg}` };
       }
       target = arg.toLowerCase();
       targetSet = true;
     }
   }
-  return { target, workspacePath, help };
+  return { target, workspacePath, team, help };
 }
 
 /** GitHub slugs represented by the workspace, deduplicated in config order. */
@@ -126,6 +137,10 @@ export async function runWorkerConnectCommand(
     return 1;
   }
   const target = parsed.target as RelayConnectTarget;
+  if (parsed.team && (target === "github" || target === "status")) {
+    console.error("❌ --team is only valid for tracker connect targets.");
+    return 1;
+  }
 
   const selectedWorkspacePath = deps.workspacePath ?? parsed.workspacePath;
   const workspaceDir =
@@ -162,6 +177,34 @@ export async function runWorkerConnectCommand(
       ? () => (accessTokenPromise ??= deps.getAccessToken!())
       : undefined,
   };
+
+  if (target !== "github" && target !== "status") {
+    const matchingTeams = config.teams.filter(
+      (team) => team.tracker.toLowerCase() === target.toLowerCase(),
+    );
+    if (matchingTeams.length > 1) {
+      console.error(
+        `❌ ${matchingTeams.length} teams use ${target} (${matchingTeams.map((team) => team.name).join(", ")}). ` +
+          "The relay identifies tracker type but not team registration, so this source remains polling-only.",
+      );
+      return 1;
+    }
+    const selectedTeam = parsed.team
+      ? config.teams.find((team) => team.name === parsed.team)
+      : matchingTeams[0];
+    if (parsed.team && !selectedTeam) {
+      console.error(`❌ Unknown workspace team '${parsed.team}'.`);
+      return 1;
+    }
+    if (selectedTeam && selectedTeam.tracker.toLowerCase() !== target.toLowerCase()) {
+      console.error(`❌ Team '${selectedTeam.name}' uses ${selectedTeam.tracker}, not ${target}.`);
+      return 1;
+    }
+    if (selectedTeam) {
+      connectDeps.env = { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) };
+      console.log(`🔗 Connecting ${target} for team '${selectedTeam.name}'.`);
+    }
+  }
 
   if (target === "status") {
     const result = await runConnect("status", connectDeps);

@@ -328,6 +328,26 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(result).toBe(true);
     expect(repoManager.calls).toContain("worktree:backend:T-C2");
   });
+
+  test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async () => true,
+        repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      },
+      { repo: "frontend", extraArgs: ["--force"] },
+    );
+    const result = await executor(
+      "T-RETRY",
+      toRoutableTask({ key: "T-RETRY", labels: [], components: [] }),
+    );
+    expect(result).toBe(true);
+    expect(repoManager.calls).toContain("worktree:frontend:T-RETRY");
+  });
 });
 
 describe("fleetTaskArgs", () => {

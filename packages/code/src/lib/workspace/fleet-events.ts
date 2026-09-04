@@ -195,16 +195,18 @@ export function createFleetMentionHandler(
 }
 
 /**
- * Build the relay task evaluator: re-run the fleet query (detect-then-
- * evaluate, same as polling), and execute the task through the shared fleet
- * executor when it is ready.
+ * Build one source's relay task evaluator: re-run that source's query
+ * (detect-then-evaluate, same as polling), and execute the task through the
+ * source's fleet executor when it is ready.
+ *
+ * @returns Whether the task matched this source's query.
  */
 export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
   verbose?: boolean;
-}): (taskKey: string) => Promise<void> {
+}): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
     const rawQuery = options.query;
     const query = typeof rawQuery === "function" ? rawQuery() : rawQuery;
@@ -212,7 +214,7 @@ export function createFleetTaskEvaluator(options: {
       if (options.verbose) {
         console.log(`   [fleet] task ${taskKey} changed but task_query is not configured.`);
       }
-      return;
+      return false;
     }
     const { tasks } = await options.searchTasks(query);
     const task = tasks.find((candidate) => candidate.key === taskKey);
@@ -220,7 +222,7 @@ export function createFleetTaskEvaluator(options: {
       if (options.verbose) {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
-      return;
+      return false;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(
@@ -231,5 +233,49 @@ export function createFleetTaskEvaluator(options: {
         components: task.components ?? [],
       }),
     );
+    return true;
+  };
+}
+
+/** One team's (or the defaults source's) relay evaluate step. */
+export interface FleetRelayTaskSource {
+  /** Human-readable scope for logs (team name). */
+  label?: string;
+  /** Tracker source emitted by relay envelopes (jira, linear, ...). */
+  tracker: string;
+  evaluate: (taskKey: string) => Promise<boolean>;
+}
+
+/**
+ * Dispatch a relayed `task.changed` across every configured tracker source:
+ * The relay currently identifies tracker type, not an individual team
+ * registration. A tracker type mapped to exactly one workspace source is
+ * safe to dispatch. Multiple teams using that same tracker remain polling-
+ * only for instant events, avoiding first-match routing when task keys
+ * overlap across boards or tracker accounts.
+ */
+export function createFleetRelayTaskDispatcher(options: {
+  sources: FleetRelayTaskSource[];
+  verbose?: boolean;
+}): (taskKey: string, tracker?: string) => Promise<void> {
+  return async (taskKey, tracker) => {
+    const normalized = tracker?.trim().toLowerCase();
+    const candidates = normalized
+      ? options.sources.filter((source) => source.tracker.toLowerCase() === normalized)
+      : options.sources;
+    if (candidates.length > 1) {
+      console.warn(
+        `⚠️  [fleet] relay task ${taskKey} from ${tracker ?? "an unknown tracker"} maps to ` +
+          `${candidates.length} team sources; ignoring the envelope and relying on polling.`,
+      );
+      return;
+    }
+    const source = candidates[0];
+    if (source && (await source.evaluate(taskKey))) {
+      return;
+    }
+    if (options.verbose) {
+      console.log(`   [fleet] relay task ${taskKey} matches no tracker source; ignoring.`);
+    }
   };
 }

@@ -552,4 +552,30 @@ describe("ScheduledRetryStore", () => {
     expect(store.schedule({ taskKey: "PROJ-1", actor: "b@x.com" }).scheduled).toBe(true);
     store.close();
   });
+
+  test("keeps duplicate task keys isolated by team and preserves retry routing", () => {
+    const store = new ScheduledRetryStore(dbPath);
+    expect(
+      store.schedule({
+        taskKey: "PLAT-1",
+        team: "platform",
+        repo: "api",
+        actor: "a@x.com",
+      }).scheduled,
+    ).toBe(true);
+    expect(
+      store.schedule({
+        taskKey: "PLAT-1",
+        team: "growth",
+        repo: "web",
+        actor: "b@x.com",
+      }).scheduled,
+    ).toBe(true);
+
+    const first = store.claimNext();
+    const second = store.claimNext();
+    expect([first?.team, second?.team].sort()).toEqual(["growth", "platform"]);
+    expect([first?.repo, second?.repo].sort()).toEqual(["api", "web"]);
+    store.close();
+  });
 });

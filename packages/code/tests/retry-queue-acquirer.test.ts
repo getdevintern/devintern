@@ -55,6 +55,27 @@ describe("RetryQueueAcquirer", () => {
     expect(store.hasPending()).toBe(false);
   });
 
+  test("passes persisted team and repo context to the executor", async () => {
+    store.schedule({
+      taskKey: "PROJ-1",
+      team: "platform",
+      repo: "api",
+      actor: "a@x.com",
+    });
+    const contexts: Array<{ team?: string; repo?: string }> = [];
+    const acquirer = new RetryQueueAcquirer({
+      store,
+      execute: async (_taskKey, _routable, retry) => {
+        contexts.push({ team: retry.team, repo: retry.repo });
+        return true;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(contexts).toEqual([{ team: "platform", repo: "api" }]);
+  });
+
   test("marks failed rows with a message when the pipeline fails", async () => {
     store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
 
