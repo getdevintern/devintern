@@ -9,7 +9,7 @@ import {
   renderEnvFile,
   scaffoldProject,
 } from "../src/lib/init-scaffold";
-import { isInteractive, runInitWizard } from "../src/lib/init-wizard";
+import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init-wizard";
 
 let tempDir: string;
 
@@ -37,6 +37,15 @@ function promptQueue(answers: string[]) {
 
 const silentLog = () => {};
 
+/** Default deps for wizard tests: no session on disk, deterministic agents. */
+function testDeps(overrides: Record<string, unknown> = {}) {
+  return {
+    getUser: () => Promise.resolve(null),
+    listInstalledAgents: () => [{ name: "claude-code", displayName: "Claude Code" }],
+    ...overrides,
+  };
+}
+
 describe("isInteractive", () => {
   test("true only for a TTY without escape flags", () => {
     expect(isInteractive(["bun", "cli", "init"], { isTTY: true })).toBe(true);
@@ -59,6 +68,10 @@ describe("buildEnvExample", () => {
     expect(template).toContain("https://linear.app/settings/account/security");
     expect(template).toContain("https://app.asana.com/0/my-apps");
     expect(template).toContain("# MARKDOWN_TASKS_DIR=");
+    // GitLab section: instance URL defaults to cloud, project path allows subgroups
+    expect(template).toContain("# GITLAB_TOKEN=");
+    expect(template).toContain("# GITLAB_PROJECT=group/sub/repo");
+    expect(template).toContain("# GITLAB_BASE_URL=https://gitlab.example.com");
     // Agent + PR integration tail is preserved
     expect(template).toContain("AGENT_HARNESS=claude-code");
     expect(template).toContain("BITBUCKET_TOKEN");
@@ -77,6 +90,18 @@ describe("renderEnvFile", () => {
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("# JIRA_DEFAULT_PROJECT_KEY=");
     expect(env).toContain("AGENT_HARNESS=claude-code");
+  });
+
+  test("renders GitLab env with base URL default written out", () => {
+    const env = renderEnvFile("gitlab", {
+      GITLAB_TOKEN: "glpat-secret",
+      GITLAB_PROJECT: "acme/team/webapp",
+    });
+    expect(env).toContain("TASK_TRACKER=gitlab");
+    expect(env).toContain("GITLAB_TOKEN=glpat-secret");
+    expect(env).toContain("GITLAB_PROJECT=acme/team/webapp");
+    // Skipped optional is commented so users can find it later
+    expect(env).toContain("# GITLAB_BASE_URL=https://gitlab.example.com");
   });
 
   test("writes extra values (PR token) under a dedicated section", () => {
@@ -109,21 +134,44 @@ describe("scaffoldProject", () => {
       "OVERWRITTEN",
     );
   });
+
+  test("scaffolds at the repository root when run from a subdirectory", () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+
+    expect(scaffoldProject({ cwd: subDir })).toBe(true);
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
+  });
+
+  test("completes an existing config dir that has no .env, keeping other files", () => {
+    const configDir = join(tempDir, ".devintern-code");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "settings.json"), '{"custom":true}', "utf8");
+
+    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
+    expect(readFileSync(join(configDir, ".env"), "utf8")).toContain("TASK_TRACKER=jira");
+    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe('{"custom":true}');
+  });
 });
 
 describe("runInitWizard", () => {
   test("jira happy path: prompts, validates, writes real .env", async () => {
     const probeCalls: Array<{ trackerId: string; env: Record<string, string> }> = [];
     const { prompt } = promptQueue([
-      "1", // jira
+      "jira", // markdown now leads the menu, so pick Jira by id
       "https://acme.atlassian.net",
       "dev@acme.com",
       "secret-token",
       "PROJ", // default project key
       "", // skip GITHUB_TOKEN PR step
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: (trackerId, env) => {
         probeCalls.push({ trackerId, env });
@@ -153,13 +201,44 @@ describe("runInitWizard", () => {
       "lin_api_123",
       "", // skip team key
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
 
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
+  });
+
+  test("writes config at the repository root when run from a subdirectory", async () => {
+    mkdirSync(join(tempDir, ".git"), { recursive: true });
+    const subDir = join(tempDir, "packages", "app");
+    mkdirSync(subDir, { recursive: true });
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: subDir,
+      log: silentLog,
+    });
+
+    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
   });
 
   test("failed probe: retry then success", async () => {
@@ -170,9 +249,11 @@ describe("runInitWizard", () => {
       "", // skip team key
       "r", // retry after failure
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: () => {
         attempts++;
@@ -196,9 +277,11 @@ describe("runInitWizard", () => {
       "lin_right",
       "", // skip team key again
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: (_, env) => {
         seenKeys.push(env.LINEAR_API_KEY);
@@ -223,9 +306,11 @@ describe("runInitWizard", () => {
       "", // skip project gid
       "s", // skip validation
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: () => Promise.reject(new Error("network unreachable")),
       cwd: tempDir,
@@ -255,8 +340,10 @@ describe("runInitWizard", () => {
     const { prompt, asked } = promptQueue([
       "y", // accept reuse
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: (_, env) => {
         probeEnvs.push({ ...env });
@@ -287,8 +374,15 @@ describe("runInitWizard", () => {
       "markdown",
       "", // accept default tasks dir
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
 
     expect(asked.some((q) => q.includes("Enter a number"))).toBe(true);
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
@@ -304,9 +398,11 @@ describe("runInitWizard", () => {
       "trello-token",
       "", // skip board id
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: (_, env) => {
         probeEnvs.push({ ...env });
@@ -323,15 +419,43 @@ describe("runInitWizard", () => {
     expect(env).toContain("TRELLO_API_TOKEN=trello-token");
   });
 
+  test("tracker menu leads with the zero-account markdown option", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "markdown",
+      "", // accept ./tasks default
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain(
+      "1. Markdown files (markdown) — local .md task files, no account needed",
+    );
+    expect(output).toContain("2. JIRA (jira)");
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("TASK_TRACKER=markdown");
+  });
+
   test("markdown tracker: no probe, defaults tasks dir", async () => {
     let probed = false;
     const { prompt } = promptQueue([
       "markdown",
       "", // accept ./tasks default
       "", // skip PR token
+      "n", // decline sign-in offer
     ]);
 
     await runInitWizard({
+      ...testDeps(),
       prompt,
       probe: () => {
         probed = true;
@@ -353,9 +477,16 @@ describe("runInitWizard", () => {
       "ghp_token",
       "acme/widgets",
       "", // skip status labels
+      "n", // decline sign-in offer
     ]);
 
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
 
     expect(remaining).toHaveLength(0);
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
@@ -369,9 +500,16 @@ describe("runInitWizard", () => {
       "lin_api_123",
       "", // skip team key
       "ghp_pr_token",
+      "n", // decline sign-in offer
     ]);
 
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
 
     const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     expect(env).toContain("GITHUB_TOKEN=ghp_pr_token");
@@ -381,6 +519,250 @@ describe("runInitWizard", () => {
     scaffoldProject({ cwd: tempDir });
     const { prompt, asked } = promptQueue([]);
     await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    expect(asked).toHaveLength(0);
+  });
+
+  test("keeps guiding when the config folder exists but .env is missing", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("TASK_TRACKER=linear");
+    expect(env).toContain("LINEAR_API_KEY=lin_api_123");
+  });
+
+  test("post-setup: offers sign-in and reports success", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "y", // accept sign-in offer
+    ]);
+    let signInCalled = false;
+
+    await runInitWizard({
+      ...testDeps({
+        signIn: () => {
+          signInCalled = true;
+          return Promise.resolve({ id: "u1", email: "dev@acme.com" });
+        },
+      }),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(signInCalled).toBe(true);
+    expect(logs.join("\n")).toContain("Signed in as dev@acme.com");
+  });
+
+  test("post-setup: declining sign-in skips it without error", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n", // decline sign-in
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(logs.join("\n")).not.toContain("Signed in as");
+  });
+
+  test("post-setup: already signed in is reported without prompting", async () => {
+    const logs: string[] = [];
+    const { prompt, asked } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+    ]);
+
+    await runInitWizard({
+      ...testDeps({ getUser: () => Promise.resolve({ id: "u1", email: "dev@acme.com" }) }),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(asked.some((q) => q.includes("Sign in"))).toBe(false);
+    expect(logs.join("\n")).toContain("✅ Signed in as dev@acme.com");
+  });
+
+  test("post-setup: warns when no agent CLI is installed", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n",
+    ]);
+
+    await runInitWizard({
+      ...testDeps({ listInstalledAgents: () => [] }),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(logs.join("\n")).toContain("No AI agent CLI found");
+  });
+
+  test("post-setup: readiness checklist reflects the freshly written config", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "linear",
+      "lin_api_123",
+      "", // skip team key
+      "", // skip PR token
+      "n",
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("📋 Readiness:");
+    expect(output).toContain("✅ Task tracker — Linear");
+    expect(output).not.toContain("❌ Task tracker");
+  });
+});
+
+describe("runInitUpgrade", () => {
+  /** Scaffold an existing linear config to upgrade from. */
+  function seedExistingConfig(extra = ""): void {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      [
+        "# @devintern/code Environment Configuration",
+        "TASK_TRACKER=linear",
+        "LINEAR_API_KEY=lin_old_key",
+        "# LINEAR_DEFAULT_TEAM_KEY=",
+        "CUSTOM_VAR=keep-me",
+        extra,
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  test("update credentials: Enter keeps current values, new values replace", async () => {
+    seedExistingConfig();
+    const { prompt } = promptQueue([
+      "1", // update credentials
+      "", // keep LINEAR_API_KEY
+      "ENG", // set team key (was skipped)
+      "ghp_new_pr", // PR token (none stored yet)
+    ]);
+    let probed: Record<string, string> | undefined;
+    await runInitUpgrade({
+      prompt,
+      probe: (_, env) => {
+        probed = env;
+        return Promise.resolve();
+      },
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("LINEAR_API_KEY=lin_old_key");
+    expect(env).toContain("LINEAR_DEFAULT_TEAM_KEY=ENG");
+    expect(env).toContain("CUSTOM_VAR=keep-me");
+    expect(env).toContain("GITHUB_TOKEN=ghp_new_pr");
+    // Probe validated with the merged values (stored + new)
+    expect(probed?.LINEAR_API_KEY).toBe("lin_old_key");
+  });
+
+  test("update credentials: rotated key replaces the stored one", async () => {
+    seedExistingConfig();
+    const { prompt } = promptQueue([
+      "1",
+      "lin_rotated", // new API key
+      "", // skip team key
+      "ghp_rotated",
+    ]);
+    await runInitUpgrade({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("LINEAR_API_KEY=lin_rotated");
+    expect(env).toContain("ghp_rotated");
+    expect(env).not.toContain("lin_old_key");
+  });
+
+  test("switch tracker: writes TASK_TRACKER and carries the GitHub token over", async () => {
+    seedExistingConfig("GITHUB_TOKEN=ghp_shared\n");
+    const { prompt } = promptQueue([
+      "2", // switch
+      "jira", // target tracker
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "jira-token",
+      "PROJ", // default project key
+    ]);
+    await runInitUpgrade({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toMatch(/TASK_TRACKER=jira/);
+    expect(env).not.toMatch(/TASK_TRACKER=linear/);
+    expect(env).toContain("JIRA_API_TOKEN=jira-token");
+    expect(env).toContain("GITHUB_TOKEN=ghp_shared");
+    expect(env).toContain("LINEAR_API_KEY=lin_old_key");
+  });
+
+  test("exit option leaves the file untouched", async () => {
+    seedExistingConfig();
+    const before = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const { prompt } = promptQueue(["3"]);
+    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).toBe(before);
+  });
+
+  test("missing .env falls back to scaffold guidance without prompting", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    const { prompt, asked } = promptQueue([]);
+    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
     expect(asked).toHaveLength(0);
   });
 });

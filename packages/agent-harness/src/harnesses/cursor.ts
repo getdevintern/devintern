@@ -31,12 +31,20 @@ export class CursorHarness implements AgentHarness {
   // unambiguous name — other CLIs (e.g. Grok) also install as `agent`.
   readonly defaultPath = "cursor-agent";
   readonly supportedModes = ["plan", "readonly"] as const;
+  /** `--output-format json` emits one result object on completion (requires `-p`). */
+  readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by commander; without this
+   * marker a prompt starting with `-` (e.g. markdown frontmatter) fails with a
+   * usage error. Verified `cursor-agent -p -- "<prompt>"` parses correctly.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build Cursor `agent` CLI flags for non-interactive (`-p`) execution.
    *
    * @param options - Supports `mode`, `skipPermissions` (`--force`, `--trust`,
-   *   `--approve-mcps`), and `model`.
+   *   `--approve-mcps`), `model`, and `structuredOutput`.
    * @returns Args excluding the prompt (runner supplies it positionally).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -56,6 +64,10 @@ export class CursorHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--output-format", "json");
     }
 
     // Cursor does not currently support --max-turns.

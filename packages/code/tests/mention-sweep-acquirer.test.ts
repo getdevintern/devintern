@@ -5,6 +5,8 @@ import { tmpdir } from "os";
 
 import {
   MentionSweepAcquirer,
+  botMentionAliases,
+  botMentionCandidates,
   extractPrNumber,
   mentionsBot,
 } from "../src/lib/mention-sweep-acquirer";
@@ -28,6 +30,86 @@ describe("mentionsBot", () => {
   test("does not match other mentions or empty bodies", () => {
     expect(mentionsBot("@someoneelse fix this", "devintern[bot]")).toBe(false);
     expect(mentionsBot(null, "devintern[bot]")).toBe(false);
+  });
+});
+
+describe("bot mention aliases", () => {
+  const ALIAS_ENV = "GITHUB_BOT_ALIASES";
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env[ALIAS_ENV];
+  });
+
+  afterEach(() => {
+    if (saved === undefined) {
+      delete process.env[ALIAS_ENV];
+    } else {
+      process.env[ALIAS_ENV] = saved;
+    }
+  });
+
+  test("parses a comma-separated list and ignores blanks", () => {
+    process.env[ALIAS_ENV] = "devintern-ai, devintern-internal [bot] ,,";
+    expect(botMentionAliases()).toEqual(["devintern-ai", "devintern-internal [bot]"]);
+  });
+
+  test("returns empty without the env var", () => {
+    delete process.env[ALIAS_ENV];
+    expect(botMentionAliases()).toEqual([]);
+  });
+
+  test("candidates dedupe the resolved login with aliases", () => {
+    process.env[ALIAS_ENV] = "devintern-ai,devintern[bot]";
+    expect(botMentionCandidates("devintern[bot]")).toEqual(["devintern[bot]", "devintern-ai"]);
+    expect(botMentionCandidates(null)).toEqual(["devintern-ai", "devintern[bot]"]);
+  });
+
+  test("aliases make the sweep work without resolvable App auth", async () => {
+    process.env[ALIAS_ENV] = "devintern-ai";
+    const dbPath = join(
+      tmpdir(),
+      `ms-alias-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+    );
+    const workerState = new WorkerState(dbPath);
+    const queue = new WebhookQueue({ dbPath });
+    const handled: Array<{ id: number; prNumber: number }> = [];
+    const acquirer = new MentionSweepAcquirer({
+      repo: "acme/widgets",
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        fetchIssueCommentsSince: async () => [
+          {
+            id: 7,
+            body: "@devintern-ai relying on local envs is fragile",
+            user: { login: "reviewer", type: "User" },
+            created_at: new Date(Date.now() + 60_000).toISOString(),
+            html_url: "https://github.com/acme/widgets/pull/5#issuecomment-7",
+            issue_url: "https://api.github.com/repos/acme/widgets/issues/5",
+          },
+        ],
+        fetchReviewCommentsSince: async () => [],
+        getBotUsername: async () => null, // no App credentials locally
+        getPr: async (prNumber) => ({ number: prNumber, state: "open" }),
+        postComment: async () => {},
+      },
+      handleMention: async (c, prNumber) => {
+        handled.push({ id: c.id, prNumber });
+      },
+    });
+
+    try {
+      await acquirer.tick();
+      expect(handled).toEqual([{ id: 7, prNumber: 5 }]);
+    } finally {
+      workerState.close();
+      queue.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        rmSync(`${dbPath}${suffix}`, { force: true });
+      }
+    }
   });
 });
 
@@ -99,12 +181,16 @@ describe("MentionSweepAcquirer", () => {
     reviewComments?: SweptComment[];
     botName?: string | null;
     pr?: Partial<SweptPrInfo>;
+    shouldPollFeedback?: () => boolean;
+    feedbackFallbackIntervalSeconds?: number;
   }) {
     const handled: Array<{ id: number; prNumber: number }> = [];
     const posted: string[] = [];
     const acquirer = new MentionSweepAcquirer({
       repo: "acme/widgets",
       intervalSeconds: 60,
+      shouldPollFeedback: options.shouldPollFeedback,
+      feedbackFallbackIntervalSeconds: options.feedbackFallbackIntervalSeconds,
       workerState,
       queue,
       github: {
@@ -133,6 +219,27 @@ describe("MentionSweepAcquirer", () => {
     const { acquirer, handled } = makeAcquirer({ issueComments: [comment({})] });
 
     await acquirer.tick();
+    await acquirer.tick();
+    expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
+  });
+
+  test("healthy relay suppresses mention polling between safety sweeps", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      shouldPollFeedback: () => false,
+    });
+
+    await acquirer.tick();
+    expect(handled).toEqual([]);
+  });
+
+  test("periodic fallback still sweeps mentions while relay is healthy", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      shouldPollFeedback: () => false,
+      feedbackFallbackIntervalSeconds: 0,
+    });
+
     await acquirer.tick();
     expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
   });

@@ -12,6 +12,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } fro
 import { dirname, join, resolve } from "path";
 
 import { findConfigDir } from "@devintern/utils";
+import { configureSqliteConnection } from "./sqlite";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -49,7 +50,27 @@ export const LEGACY_DB_PATH = "/tmp/devintern-webhooks/queue.db";
 /** How long processed-event ids are retained for dedupe (90 days). */
 const PROCESSED_EVENTS_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
-const DEFAULT_MAX_RETRIES = 3;
+export const DEFAULT_MAX_RETRIES = 3;
+
+export type BaseSyncEventStatus = "pending" | "completed" | "failed";
+
+export interface BaseSyncEvent {
+  externalId: string;
+  repo: string;
+  prNumber: number;
+  baseSha: string;
+  headSha: string;
+  headObservedAt: number;
+  attempts: number;
+  status: BaseSyncEventStatus;
+  lastError?: string;
+  /**
+   * Last meaningful change (creation, head movement, attempt outcome) —
+   * deliberately NOT bumped by no-op observations, so it anchors retry
+   * backoff.
+   */
+  updatedAt: number;
+}
 
 /**
  * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
@@ -152,7 +173,7 @@ export class WebhookQueue {
 
     if (config.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
@@ -161,6 +182,7 @@ export class WebhookQueue {
     this.migrateLegacyDb(dbPath, config.legacyDbPath);
 
     this.db = new Database(dbPath);
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 
@@ -230,6 +252,25 @@ export class WebhookQueue {
       )
     `);
 
+    // Durable base-branch advancement events. This is deliberately separate
+    // from webhook_events: eligibility is discovered by polling, deferrals do
+    // not consume attempts, and the deterministic id is also the eventual
+    // processed_events key.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS base_sync_events (
+        external_id TEXT PRIMARY KEY,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        base_sha TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        head_observed_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
     if (this.verbose) {
       console.log("[WebhookQueue] Database initialized");
     }
@@ -276,6 +317,57 @@ export class WebhookQueue {
     return Number.isFinite(ms) ? ms : null;
   }
 
+  /** Every persisted per-harness rate-limit window, keyed by harness name. */
+  getAllRateLimits(): Record<string, number> {
+    const rows = this.db
+      .query(`SELECT key, value FROM webhook_meta WHERE key LIKE 'rate_limit:%'`)
+      .all() as { key: string; value: string }[];
+    const result: Record<string, number> = {};
+    for (const row of rows) {
+      const ms = Number(row.value);
+      if (Number.isFinite(ms)) {
+        result[row.key.slice("rate_limit:".length)] = ms;
+      }
+    }
+    return result;
+  }
+
+  /** Meta key for the failover chain's active harness. */
+  private activeHarnessKey(): string {
+    return "failover:active_harness";
+  }
+
+  /**
+   * Persist the failover chain's active harness so a worker restart resumes
+   * on it instead of snapping back to the primary mid-window.
+   *
+   * @param harness - Canonical harness name (e.g. `codex`)
+   */
+  setActiveHarness(harness: string): void {
+    this.db.run(
+      `INSERT INTO webhook_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [this.activeHarnessKey(), harness],
+    );
+  }
+
+  /** Forget the persisted active harness (e.g. when the chain changed). */
+  clearActiveHarness(): void {
+    this.db.run(`DELETE FROM webhook_meta WHERE key = ?`, [this.activeHarnessKey()]);
+  }
+
+  /**
+   * Read the persisted active harness of the failover chain.
+   *
+   * @returns Canonical harness name, or `null` when none was persisted.
+   */
+  getActiveHarness(): string | null {
+    const row = this.db
+      .query(`SELECT value FROM webhook_meta WHERE key = ?`)
+      .get(this.activeHarnessKey()) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
   /**
    * Check whether a provider-issued event id was already handled.
    *
@@ -303,16 +395,172 @@ export class WebhookQueue {
     );
   }
 
+  /** Release a provisional processed marker when work was deferred before execution. */
+  unmarkProcessed(source: string, externalId: string): void {
+    this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+      source,
+      externalId,
+    ]);
+  }
+
+  /** Configured retry ceiling, shared by webhook and base-sync work. */
+  getMaxRetries(): number {
+    return this.maxRetries;
+  }
+
   /**
-   * Delete processed-event ids older than the retention window.
+   * Create or observe a deterministic base-sync event. Head changes reset only
+   * its quiet timer; a new base atomically supersedes older pending work for
+   * the same PR.
+   */
+  observeBaseSyncEvent(input: {
+    externalId: string;
+    repo: string;
+    prNumber: number;
+    baseSha: string;
+    headSha: string;
+    now?: number;
+  }): BaseSyncEvent {
+    const now = input.now ?? Date.now();
+    return this.db.transaction(() => {
+      this.db.run(
+        `DELETE FROM base_sync_events
+         WHERE repo = ? AND pr_number = ? AND status = 'pending' AND external_id <> ?`,
+        [input.repo, input.prNumber, input.externalId],
+      );
+      this.db.run(
+        `INSERT INTO base_sync_events
+           (external_id, repo, pr_number, base_sha, head_sha, head_observed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(external_id) DO UPDATE SET
+           head_sha = excluded.head_sha,
+           head_observed_at = CASE
+             WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.head_observed_at
+             ELSE base_sync_events.head_observed_at
+           END,
+           -- updated_at anchors retry backoff, so only meaningful changes
+           -- (a new head) may move it; routine polls must not.
+           updated_at = CASE
+             WHEN base_sync_events.head_sha <> excluded.head_sha THEN excluded.updated_at
+             ELSE base_sync_events.updated_at
+           END`,
+        [input.externalId, input.repo, input.prNumber, input.baseSha, input.headSha, now, now],
+      );
+      return this.getBaseSyncEvent(input.externalId)!;
+    })();
+  }
+
+  /** Load durable retry and head-stability state for a base-sync event. */
+  getBaseSyncEvent(externalId: string): BaseSyncEvent | null {
+    const row = this.db
+      .query(`SELECT * FROM base_sync_events WHERE external_id = ?`)
+      .get(externalId) as Record<string, unknown> | null;
+    if (!row) return null;
+    return {
+      externalId: row.external_id as string,
+      repo: row.repo as string,
+      prNumber: row.pr_number as number,
+      baseSha: row.base_sha as string,
+      headSha: row.head_sha as string,
+      headObservedAt: row.head_observed_at as number,
+      attempts: row.attempts as number,
+      status: row.status as BaseSyncEventStatus,
+      lastError: (row.last_error as string | null) ?? undefined,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  /** Consume one real execution attempt. Eligibility deferrals never call this. */
+  beginBaseSyncAttempt(externalId: string, now: number = Date.now()): number {
+    this.db.run(
+      `UPDATE base_sync_events SET attempts = attempts + 1, updated_at = ? WHERE external_id = ?`,
+      [now, externalId],
+    );
+    return this.getBaseSyncEvent(externalId)?.attempts ?? 0;
+  }
+
+  /**
+   * Undo a tentative attempt when the resolver detects concurrent branch
+   * movement. `updated_at` is deliberately left alone: defers are benign, and
+   * moving the retry-backoff anchor here would stall real retries.
+   */
+  deferBaseSyncAttempt(externalId: string): void {
+    this.db.run(
+      `UPDATE base_sync_events
+       SET attempts = MAX(0, attempts - 1) WHERE external_id = ?`,
+      [externalId],
+    );
+  }
+
+  /** Persist a retryable failure, or terminally exhaust the event. */
+  failBaseSyncEvent(externalId: string, error: string, now: number = Date.now()): boolean {
+    const event = this.getBaseSyncEvent(externalId);
+    if (!event) return false;
+    const exhausted = event.attempts >= this.maxRetries;
+    this.db.run(
+      `UPDATE base_sync_events SET status = ?, last_error = ?, updated_at = ? WHERE external_id = ?`,
+      [exhausted ? "failed" : "pending", error, now, externalId],
+    );
+    return exhausted;
+  }
+
+  /** Mark a success/safe skip terminal and publish the canonical dedupe key. */
+  completeBaseSyncEvent(source: string, externalId: string): void {
+    this.db.transaction(() => {
+      this.db.run(
+        `UPDATE base_sync_events SET status = 'completed', updated_at = ? WHERE external_id = ?`,
+        [Date.now(), externalId],
+      );
+      this.markProcessed(source, externalId);
+    })();
+  }
+
+  /** Mark an exhausted event processed so restarts cannot revive it. */
+  exhaustBaseSyncEvent(source: string, externalId: string, error: string): void {
+    this.db.transaction(() => {
+      this.db.run(
+        `UPDATE base_sync_events SET status = 'failed', last_error = ?, updated_at = ? WHERE external_id = ?`,
+        [error, Date.now(), externalId],
+      );
+      this.markProcessed(source, externalId);
+    })();
+  }
+
+  /** Explicit operator retry for an exhausted base-SHA event. */
+  resetBaseSyncEvent(source: string, externalId: string): void {
+    this.db.transaction(() => {
+      this.db.run(
+        `UPDATE base_sync_events
+         SET status = 'pending', attempts = 0, last_error = NULL,
+             head_observed_at = ?, updated_at = ?
+         WHERE external_id = ?`,
+        [Date.now(), Date.now(), externalId],
+      );
+      this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+        source,
+        externalId,
+      ]);
+    })();
+  }
+
+  /**
+   * Delete expired processed ids and their terminal base-sync event rows.
+   * Pending base-sync work is retained regardless of age.
    *
    * @param maxAgeMs - Maximum age before deletion (default 90 days)
    * @returns Number of rows deleted
    */
   cleanupProcessedEvents(maxAgeMs = PROCESSED_EVENTS_MAX_AGE_MS): number {
     const cutoff = Date.now() - maxAgeMs;
-    const result = this.db.run(`DELETE FROM processed_events WHERE processed_at < ?`, [cutoff]);
-    return result.changes;
+    return this.db.transaction(() => {
+      const result = this.db.run(`DELETE FROM processed_events WHERE processed_at < ?`, [cutoff]);
+      this.db.run(
+        `DELETE FROM base_sync_events
+         WHERE status IN ('completed', 'failed') AND updated_at < ?`,
+        [cutoff],
+      );
+      return result.changes;
+    })();
   }
 
   /** Generate a unique event id (`timestamp-random`). */

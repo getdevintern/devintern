@@ -30,7 +30,7 @@ import {
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
-  isIncompleteImplementationCommentText,
+  isAutomationFailureCommentText,
 } from "../shared/markdown-comment-formatter";
 import type {
   ClarityAssessmentLike,
@@ -100,7 +100,7 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
         status: "",
         reporter: "Unknown",
         created: "",
-        updated: "",
+        updated: item.changedDate || "",
         labels: [],
         components: [],
         fixVersions: [],
@@ -331,7 +331,7 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
       const comments = await this.fetchRawComments(taskKey);
-      return comments.some((c) => isIncompleteImplementationCommentText(c.text || ""));
+      return comments.some((c) => isAutomationFailureCommentText(c.text || ""));
     } catch (error) {
       console.warn(`Failed to check for duplicate comments: ${error}`);
       return false;

@@ -3,6 +3,7 @@ title: "Slack Integration"
 description: "Try the alpha @devintern/pm integration for creating tracker tasks from Slack"
 section: "PM"
 order: 12
+sidebarHidden: true
 dateModified: 2026-08-12
 tags: ["slack", "devintern/pm", "integration", "chat", "bot"]
 ---

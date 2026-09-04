@@ -67,6 +67,21 @@ export interface AgentRunOptions {
    * be injected into the prompt automatically).
    */
   imagePaths?: readonly string[];
+  /**
+   * Request machine-readable structured (JSON) output from the agent CLI
+   * instead of styled transcript text. Opt-in: the plain-text default keeps
+   * transcript-based detectors (usage limit, max turns) working unchanged.
+   *
+   * Requires harness support (`AgentHarness.supportsStructuredOutput`);
+   * runners fail closed with {@link UnsupportedStructuredOutputError}
+   * otherwise instead of silently falling back to text. When supported, the
+   * harness emits the CLI's JSON flag (e.g. Claude Code `--output-format
+   * json`, Codex `--json`, Cline `--json`) and the run result carries the
+   * parsed payload in {@link AgentRunResult.structured}; raw `stdout` /
+   * `stderr` are still returned as today, and streaming callbacks keep
+   * receiving the raw chunks.
+   */
+  structuredOutput?: boolean;
   /** Called with each stdout chunk as the agent runs (for live output streaming). */
   onStdout?: (chunk: string) => void;
   /** Called with each stderr chunk as the agent runs (for live status updates). */
@@ -79,6 +94,31 @@ export interface AgentRunResult {
   exitCode: number;
   /** True when CLI output indicates the agent hit a max-turns limit. */
   maxTurnsReached: boolean;
+  /**
+   * Parsed structured output when {@link AgentRunOptions.structuredOutput}
+   * was requested; absent otherwise (existing callers are unaffected).
+   */
+  structured?: StructuredOutputResult;
+}
+
+/**
+ * Outcome of parsing structured (JSON) agent output requested via
+ * {@link AgentRunOptions.structuredOutput}.
+ */
+export interface StructuredOutputResult {
+  /** True when a JSON payload was recovered from the agent's stdout. */
+  ok: boolean;
+  /**
+   * Parsed payload. A single JSON document (object or array) is returned
+   * as-is; NDJSON event streams are returned as an array of parsed objects.
+   */
+  value?: unknown;
+  /**
+   * Human-readable reason when `ok` is false (empty output, no JSON found,
+   * malformed or truncated payload). `stdout`/`stderr` remain available for
+   * caller-side diagnostics.
+   */
+  error?: string;
 }
 
 /**
@@ -103,6 +143,16 @@ export interface AgentHarness {
    * turn-limit error.
    */
   readonly supportsMaxTurns?: boolean;
+  /**
+   * Whether this harness's CLI can emit machine-readable structured (JSON)
+   * output when {@link AgentRunOptions.structuredOutput} is requested
+   * (e.g. Claude Code `--output-format json`, Codex `--json`, Cline
+   * `--json`). Omitted / false means unsupported: runners fail closed with
+   * {@link UnsupportedStructuredOutputError} rather than silently returning
+   * plain text. Supporting harnesses emit the appropriate flag in
+   * {@link buildArgs}.
+   */
+  readonly supportsStructuredOutput?: boolean;
   /**
    * Whether this harness's constrained modes still allow unrestricted
    * network and MCP tool use (web search, web fetch, MCP servers).
@@ -130,6 +180,15 @@ export interface AgentHarness {
    * Use this when the CLI expects the prompt as a flag value.
    */
   readonly promptFlag?: string;
+  /**
+   * End-of-options marker (e.g. `--`) that this CLI honors before positional
+   * arguments. When set and a positional prompt starts with `-`,
+   * {@link buildPromptArgs} emits the marker before the prompt so flag-like
+   * prompt text (markdown frontmatter, bullet lists) is not parsed as CLI
+   * flags. Only set this when the CLI reliably treats everything after the
+   * marker as positional.
+   */
+  readonly endOfOptionsMarker?: string;
   /**
    * How image attachments from {@link AgentRunOptions.imagePaths} are delivered.
    *

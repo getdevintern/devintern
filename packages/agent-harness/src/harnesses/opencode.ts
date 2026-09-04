@@ -34,16 +34,29 @@ export class OpencodeHarness implements AgentHarness {
   readonly displayName = "Opencode";
   readonly defaultPath = "opencode";
   readonly supportedModes = ["plan", "readonly"] as const;
+  /** `--format json` streams raw JSON events (one object per line) to stdout. */
+  readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by yargs; without this marker a
+   * prompt starting with `-` (e.g. markdown frontmatter) fails with a usage
+   * error. Verified `opencode run -- "<prompt>"` executes normally.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build `opencode run` flags for non-interactive execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`, and `workingDir`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`,
+   *   `structuredOutput`, and `workingDir`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
     assertModeSupported(this, options.mode);
-    const args: string[] = ["run"];
+    // OpenCode can keep `run` alive after an unrecoverable provider error while
+    // writing the only diagnostic to its private log file. Mirror ERROR-level
+    // logs to stderr so headless callers can detect the failure and terminate
+    // the stuck process instead of waiting for their outer timeout.
+    const args: string[] = ["run", "--print-logs", "--log-level", "ERROR"];
 
     if (isConstrainedMode(options.mode)) {
       args.push("--agent", "plan");
@@ -58,6 +71,10 @@ export class OpencodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--format", "json");
     }
 
     // Opencode does not currently support --max-turns.

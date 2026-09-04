@@ -13,9 +13,16 @@
  */
 
 import { Database } from "bun:sqlite";
+import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
-export type RunOrigin = "task" | "pr_mention";
+export type RunOrigin =
+  | "task"
+  | "pr_mention"
+  | "conflict_resolution"
+  | "scheduled"
+  | "estimate"
+  | "manual";
 
 export type RunStatus =
   | "in_progress"
@@ -46,11 +53,25 @@ export interface RunMeta {
   origin: RunOrigin;
   taskKey?: string; // null for pr_mention runs
   tracker?: string;
+  /** Workspace team that acquired this task, when multi-team mode is active. */
+  team?: string;
   harness?: string;
   branch?: string;
   repo?: string;
   prNumber?: number;
+  /** Web URL of the PR this run references (known at start for PR-affected origins). */
+  prUrl?: string;
+  automationId?: string;
+  /** Tracker-assigned key of the originating ticket (same as `taskKey`). */
+  ticketKey?: string;
+  /** Web URL of the originating ticket (derived from tracker config + key). */
+  ticketUrl?: string;
+  /** Explicit attempt for non-task durable events. */
+  attempt?: number;
 }
+
+/** Cap persisted ticket descriptions so a huge ticket cannot bloat the DB. */
+const MAX_DESCRIPTION_LENGTH = 20_000;
 
 export interface RunRecord extends RunMeta {
   id: number;
@@ -61,6 +82,8 @@ export interface RunRecord extends RunMeta {
   outcomeReason?: string;
   startedAt: number;
   finishedAt?: number;
+  /** Markdown snapshot of the ticket description captured at run start. */
+  taskDescription?: string;
 }
 
 export interface RunStageRecord {
@@ -80,6 +103,7 @@ export interface RunFilter {
   taskKey?: string;
   status?: RunStatus;
   origin?: RunOrigin;
+  automationId?: string;
 }
 
 export interface RunStatsWeek {
@@ -152,15 +176,14 @@ export class RunStore {
   constructor(dbPath: string = resolveQueueDbPath(), options: { readonly?: boolean } = {}) {
     if (options.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue / worker state may hold connections to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 
@@ -172,6 +195,7 @@ export class RunStore {
         origin TEXT NOT NULL,
         task_key TEXT,
         tracker TEXT,
+        team TEXT,
         harness TEXT,
         branch TEXT,
         repo TEXT,
@@ -181,7 +205,11 @@ export class RunStore {
         outcome_reason TEXT,
         started_at INTEGER NOT NULL,
         finished_at INTEGER,
-        attempt INTEGER
+        attempt INTEGER,
+        automation_id TEXT,
+        ticket_key TEXT,
+        ticket_url TEXT,
+        task_description TEXT
       )
     `);
 
@@ -190,6 +218,22 @@ export class RunStore {
     if (!columns.some((c) => c.name === "attempt")) {
       this.db.run("ALTER TABLE runs ADD COLUMN attempt INTEGER");
     }
+    if (!columns.some((c) => c.name === "team")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN team TEXT");
+    }
+    if (!columns.some((c) => c.name === "automation_id")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN automation_id TEXT");
+    }
+    if (!columns.some((c) => c.name === "ticket_key")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN ticket_key TEXT");
+    }
+    if (!columns.some((c) => c.name === "ticket_url")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN ticket_url TEXT");
+    }
+    if (!columns.some((c) => c.name === "task_description")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN task_description TEXT");
+    }
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_runs_task_key ON runs(task_key)
@@ -219,18 +263,24 @@ export class RunStore {
    * @returns The new run id
    */
   createRun(meta: RunMeta): number {
-    const attempt = meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null;
+    const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
-      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+      `INSERT INTO runs (origin, task_key, tracker, team, harness, branch, repo, pr_number, pr_url,
+       automation_id, ticket_key, ticket_url, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
         meta.tracker ?? null,
+        meta.team ?? null,
         meta.harness ?? null,
         meta.branch ?? null,
         meta.repo ?? null,
         meta.prNumber ?? null,
+        meta.prUrl ?? null,
+        meta.automationId ?? null,
+        meta.ticketKey ?? null,
+        meta.ticketUrl ?? null,
         Date.now(),
         attempt,
       ],
@@ -294,6 +344,47 @@ export class RunStore {
   }
 
   /**
+   * Attach the working branch to a run.
+   *
+   * The branch is recorded once the pipeline has created (or resumed) it,
+   * because the actual branch name can gain an attempt suffix. Fields already
+   * set are never clobbered (`COALESCE`), so pr_mention runs that recorded
+   * their branch at start keep it.
+   *
+   * @param runId - Run id
+   * @param branch - Git branch the run operates on
+   */
+  setRunBranch(runId: number, branch: string): void {
+    this.db.run(`UPDATE runs SET branch = COALESCE(branch, ?) WHERE id = ?`, [branch, runId]);
+  }
+
+  /**
+   * Attach the originating tracker ticket to a run.
+   *
+   * Fields already set are never clobbered (`COALESCE`), so a late snapshot
+   * cannot erase metadata recorded at run start.
+   *
+   * @param runId - Run id
+   * @param ticket - Ticket key, web URL, and/or markdown description
+   */
+  setRunTicket(runId: number, ticket: { key?: string; url?: string; description?: string }): void {
+    const description = ticket.description?.trim() ? ticket.description : null;
+    this.db.run(
+      `UPDATE runs SET
+         ticket_key = COALESCE(?, ticket_key),
+         ticket_url = COALESCE(?, ticket_url),
+         task_description = COALESCE(?, task_description)
+       WHERE id = ?`,
+      [
+        ticket.key ?? null,
+        ticket.url ?? null,
+        description?.slice(0, MAX_DESCRIPTION_LENGTH) ?? null,
+        runId,
+      ],
+    );
+  }
+
+  /**
    * Mark a run terminal and record an `outcome` stage row.
    *
    * @param runId - Run id
@@ -308,6 +399,27 @@ export class RunStore {
       runId,
     ]);
     this.addStage(runId, "outcome", status, reason);
+  }
+
+  /**
+   * Fail every `in_progress` run left over from a previous worker process.
+   *
+   * Only one worker owns a queue database, so any run still `in_progress`
+   * when a worker starts was abandoned by a crashed or killed predecessor.
+   * A late `finishRun` from an outlived subprocess still wins afterwards —
+   * it overwrites the row unconditionally.
+   *
+   * @returns Number of reaped runs
+   */
+  reapOrphanedRuns(): number {
+    const result = this.db.run(
+      `UPDATE runs SET status = 'failed',
+         outcome_reason = 'orphaned: worker exited before the run finished',
+         finished_at = ?
+       WHERE status = 'in_progress'`,
+      [Date.now()],
+    );
+    return result.changes;
   }
 
   /**
@@ -342,6 +454,10 @@ export class RunStore {
       clauses.push("origin = ?");
       params.push(filter.origin);
     }
+    if (filter.automationId) {
+      clauses.push("automation_id = ?");
+      params.push(filter.automationId);
+    }
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 
@@ -358,6 +474,38 @@ export class RunStore {
       .query(`SELECT * FROM runs ${where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as Record<string, unknown>[];
     return rows.map((row) => this.rowToRun(row));
+  }
+
+  /**
+   * Latest run per task key, using the same ordering as {@link listRuns}
+   * (started_at DESC, id DESC). One query for all keys instead of one per key.
+   *
+   * @param taskKeys - Task keys to look up; duplicates are ignored
+   */
+  latestRunByTaskKey(taskKeys: string[]): Map<string, RunRecord> {
+    const map = new Map<string, RunRecord>();
+    const keys = [...new Set(taskKeys)];
+    if (keys.length === 0) {
+      return map;
+    }
+    const placeholders = keys.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT * FROM (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY task_key ORDER BY started_at DESC, id DESC
+           ) AS rn
+           FROM runs WHERE task_key IN (${placeholders})
+         ) WHERE rn = 1`,
+      )
+      .all(...keys) as Record<string, unknown>[];
+    for (const row of rows) {
+      const run = this.rowToRun(row);
+      if (run.taskKey) {
+        map.set(run.taskKey, run);
+      }
+    }
+    return map;
   }
 
   /**
@@ -408,7 +556,14 @@ export class RunStore {
       escalated: 0,
       abandoned: 0,
     };
-    const byOrigin: Record<RunOrigin, number> = { task: 0, pr_mention: 0 };
+    const byOrigin: Record<RunOrigin, number> = {
+      task: 0,
+      pr_mention: 0,
+      conflict_resolution: 0,
+      scheduled: 0,
+      estimate: 0,
+      manual: 0,
+    };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
@@ -418,7 +573,7 @@ export class RunStore {
 
     for (const row of rows) {
       byStatus[row.status] += 1;
-      byOrigin[row.origin] += 1;
+      byOrigin[row.origin] = (byOrigin[row.origin] ?? 0) + 1;
 
       const week = weekStartIso(row.started_at);
       weekCounts.set(week, (weekCounts.get(week) ?? 0) + 1);
@@ -492,6 +647,7 @@ export class RunStore {
       origin: row.origin as RunOrigin,
       taskKey: (row.task_key as string | null) ?? undefined,
       tracker: (row.tracker as string | null) ?? undefined,
+      team: (row.team as string | null) ?? undefined,
       harness: (row.harness as string | null) ?? undefined,
       branch: (row.branch as string | null) ?? undefined,
       repo: (row.repo as string | null) ?? undefined,
@@ -502,6 +658,10 @@ export class RunStore {
       startedAt: row.started_at as number,
       finishedAt: (row.finished_at as number | null) ?? undefined,
       attempt: (row.attempt as number | null) ?? undefined,
+      automationId: (row.automation_id as string | null) ?? undefined,
+      ticketKey: (row.ticket_key as string | null) ?? undefined,
+      ticketUrl: (row.ticket_url as string | null) ?? undefined,
+      taskDescription: (row.task_description as string | null) ?? undefined,
     };
   }
 
@@ -576,6 +736,47 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Attach the working branch to the current run (no-op when no run is active).
+ * Called once the pipeline has created or resumed the feature branch, since
+ * the actual branch name can gain an attempt suffix that is unknowable at
+ * `beginRun` time.
+ *
+ * @param branch - Git branch the run operates on
+ */
+export function recordRunBranch(branch: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunBranch(currentRunId, branch);
+  } catch (error) {
+    warnOnce("branch", error);
+  }
+}
+
+/**
+ * Attach the originating tracker ticket to the current run (no-op when no run
+ * is active). Used to snapshot the ticket's description once task details are
+ * formatted, preserving what was asked even if the ticket changes later.
+ *
+ * @param ticket - Ticket key, web URL, and/or markdown description
+ */
+export function recordRunTicket(ticket: {
+  key?: string;
+  url?: string;
+  description?: string;
+}): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunTicket(currentRunId, ticket);
+  } catch (error) {
+    warnOnce("ticket", error);
   }
 }
 

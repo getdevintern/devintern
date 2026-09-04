@@ -94,6 +94,14 @@ export class CodexHarness implements AgentHarness {
   readonly supportedModes = ["plan", "readonly"] as const;
   /** Codex `exec` accepts images via `-i` after the prompt. */
   readonly imageInput = "native" as const;
+  /** `--json` prints stdout as newline-delimited JSON events (thread/turn/item). */
+  readonly supportsStructuredOutput = true;
+  /**
+   * The prompt is a positional argument parsed by clap; without this marker a
+   * prompt starting with `-` (e.g. markdown frontmatter) fails with a usage
+   * error. Verified `codex exec -- "<prompt>"` executes normally.
+   */
+  readonly endOfOptionsMarker = "--";
 
   /**
    * Build trailing `-i` flags for native image attachment.
@@ -115,7 +123,8 @@ export class CodexHarness implements AgentHarness {
   /**
    * Build `codex exec` flags for non-interactive execution.
    *
-   * @param options - Supports `mode`, `skipPermissions` (sandbox + approval), and `model`.
+   * @param options - Supports `mode`, `skipPermissions` (sandbox + approval),
+   *   `model`, and `structuredOutput` (`--json`).
    * @returns Args starting with `exec`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -141,6 +150,10 @@ export class CodexHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--json");
     }
 
     // Codex does not currently support --max-turns in exec mode.

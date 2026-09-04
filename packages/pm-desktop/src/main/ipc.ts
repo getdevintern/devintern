@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from "electron";
+import { BrowserWindow, app, clipboard, dialog, globalShortcut, ipcMain, shell } from "electron";
 import { MAX_ATTACHMENTS, attachmentExtensionError } from "@getdevintern/pm/attachments";
 import { EngineError } from "@getdevintern/pm/engine";
 import type { EngineCallEvents } from "@getdevintern/pm/engine";
@@ -17,7 +17,7 @@ import {
   probePmConnection,
   writePmProjectConfig,
 } from "@getdevintern/pm/init";
-import { IPC_CHANNELS } from "../shared/ipc-contract.ts";
+import { parseRendererErrorReport, IPC_CHANNELS } from "../shared/ipc-contract.ts";
 import type {
   ConnectGitHubRepoRequest,
   CreateTaskRequest,
@@ -26,6 +26,7 @@ import type {
   GenerateStoryRequest,
   InitializeProjectRequest,
   IpcResult,
+  QuickCaptureConfig,
   SubtaskDraft,
   SubtaskOutcome,
   UpdateProjectTrackerRequest,
@@ -54,6 +55,11 @@ import { listProjectBindings } from "./project-bindings.ts";
 import { persistTrackerCredentials, readProjectEnv } from "./project-env.ts";
 import { removeConnectedProject } from "./remove-connected-project.ts";
 import {
+  getQuickCaptureStatus,
+  initQuickCapture,
+  setQuickCaptureSettings,
+} from "./quick-capture.ts";
+import {
   beginAgentRequest,
   detectGitRepository,
   endAgentRequest,
@@ -62,11 +68,13 @@ import {
   requireSession,
   switchContext,
   switchHarness,
+  switchModel,
   switchProjectKey,
   switchTracker,
   updateProjectFromRemote,
 } from "./session.ts";
 import { listRecentProjectDirs, recordRecentProjectDir } from "./recent-projects.ts";
+import { captureErrorOnce } from "./error-tracking.ts";
 import { readSettings, updateSettings } from "./settings.ts";
 import { validateRequiredTools } from "./validate-tools.ts";
 
@@ -105,6 +113,13 @@ function toIpcError(error: unknown): { code: string; message: string; detail?: s
   return { code: "error", message: String(error) };
 }
 
+/**
+ * Error codes the handlers raise on purpose for user mistakes (bad input,
+ * missing auth, duplicate flow). They surface in the UI as guidance — not
+ * bugs — so they are not reported to error tracking.
+ */
+const USER_ERROR_CODES = new Set(["invalid_input", "auth_required", "in_progress"]);
+
 /** Wrap a handler so failures come back as a typed envelope, never a rejection. */
 function handle<A extends unknown[], T>(
   channel: string,
@@ -114,7 +129,15 @@ function handle<A extends unknown[], T>(
     try {
       return { ok: true, value: await handler(event, ...(args as A)) };
     } catch (error) {
-      return { ok: false, error: toIpcError(error) };
+      const envelope = toIpcError(error);
+      // Handled IPC failures used to be invisible: the envelope converted
+      // them away silently. Report real failures (engine/tracker/git errors)
+      // with the channel; user mistakes stay unreported. Deduped so a
+      // failing operation retried by the UI does not flood Sentry.
+      if (!USER_ERROR_CODES.has(envelope.code)) {
+        void captureErrorOnce(error, { operation: `ipc:${channel}` });
+      }
+      return { ok: false, error: envelope };
     }
   });
 }
@@ -140,7 +163,20 @@ async function withAgentRequest<T>(requestId: string, run: () => Promise<T>): Pr
   }
 }
 
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers(options?: {
+  /** Window factory for Quick Capture when no live window exists yet. */
+  createWindow?: () => BrowserWindow;
+}): void {
+  // Quick Capture ports: the global shortcut may fire while no window exists
+  // (macOS background, closed window), so main owns creation + focus.
+  initQuickCapture({
+    globalShortcut,
+    readClipboardText: () => clipboard.readText(),
+    getWindow: () => BrowserWindow.getAllWindows().find((window) => !window.isDestroyed()),
+    createWindow: options?.createWindow,
+    activateApp: () => app.focus({ steal: true }),
+  });
+
   handle(IPC_CHANNELS.chooseProjectDir, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     // Electron 43+ opens Downloads when defaultPath is omitted; seed from
@@ -624,6 +660,27 @@ export function registerIpcHandlers(): void {
     return null;
   });
 
+  // Renderer → main error forwarding (window error/unhandledrejection/React
+  // boundary). Malformed reports are dropped silently: reporting must not
+  // feed back into reporting. Actual capture respects the telemetry toggle
+  // and SENTRY_DISABLED=1 via the shared tracking state.
+  handle(IPC_CHANNELS.reportRendererError, async (_event, report: unknown) => {
+    const parsed = parseRendererErrorReport(report);
+    if (!parsed) {
+      return null;
+    }
+    const error = new Error(parsed.message);
+    if (parsed.stack) {
+      error.stack = parsed.stack;
+    }
+    await captureErrorOnce(error, {
+      operation: "renderer",
+      kind: parsed.kind,
+      ...(parsed.componentStack ? { componentStack: parsed.componentStack } : {}),
+    });
+    return null;
+  });
+
   handle(IPC_CHANNELS.switchTracker, async (_event, trackerId: string) => {
     // Works even when the current tracker failed to load, so the user can
     // switch to another fully configured tracker without re-running setup.
@@ -636,6 +693,10 @@ export function registerIpcHandlers(): void {
 
   handle(IPC_CHANNELS.switchHarness, async (_event, harnessName: string) => {
     return switchHarness(harnessName);
+  });
+
+  handle(IPC_CHANNELS.switchModel, async (_event, model: string) => {
+    return switchModel(model);
   });
 
   handle(IPC_CHANNELS.updateProjectFromRemote, async () => {
@@ -653,6 +714,20 @@ export function registerIpcHandlers(): void {
   handle(IPC_CHANNELS.snoozeUpdate, async () => snoozeUpdate());
 
   handle(IPC_CHANNELS.dismissUpdateError, async () => dismissUpdateError());
+
+  handle(IPC_CHANNELS.getQuickCaptureStatus, async () => {
+    return getQuickCaptureStatus();
+  });
+
+  handle(IPC_CHANNELS.setQuickCaptureSettings, async (_event, config: QuickCaptureConfig) => {
+    if (!config || typeof config !== "object") {
+      throw Object.assign(new Error("Invalid Quick Capture settings."), { code: "invalid_input" });
+    }
+    if (typeof config.enabled !== "boolean") {
+      throw Object.assign(new Error("Invalid Quick Capture settings."), { code: "invalid_input" });
+    }
+    return setQuickCaptureSettings(config);
+  });
 
   // Push status changes to all renderer windows (progress, available, errors).
   subscribeUpdateStatus((status) => {

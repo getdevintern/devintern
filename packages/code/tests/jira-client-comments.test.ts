@@ -412,6 +412,48 @@ describe("JiraClient Comment Filtering", () => {
     });
   });
 
+  describe("postComment markdown conversion", () => {
+    test("converts markdown body to ADF instead of posting raw text", async () => {
+      let capturedBody: any;
+      jiraClient.jiraApiCall = async (_method: string, _url: string, body?: any) => {
+        capturedBody = body;
+        return {};
+      };
+
+      await jiraClient.postComment("TEST-1", {
+        format: "markdown",
+        body:
+          "🤖 **Automated implementation did not complete** — no pull request was created.\n\n" +
+          "**Reason:** Opencode timed out after 60 minutes\n\n" +
+          "Partial work may exist on the `feature/dev-84` branch.",
+      });
+
+      const doc = capturedBody?.body;
+      expect(doc?.type).toBe("doc");
+      const json = JSON.stringify(doc);
+      expect(json).not.toContain("**Automated implementation did not complete**");
+      expect(json).toContain("Automated implementation did not complete");
+
+      const strongMarks = JSON.stringify(doc).includes('"strong"');
+      expect(strongMarks).toBe(true);
+    });
+
+    test("posts plain format bodies as plain text", async () => {
+      let capturedBody: any;
+      jiraClient.jiraApiCall = async (_method: string, _url: string, body?: any) => {
+        capturedBody = body;
+        return {};
+      };
+
+      await jiraClient.postComment("TEST-1", {
+        format: "plain",
+        body: "Plain update",
+      });
+
+      expect(capturedBody?.body?.content?.[0]?.content?.[0]?.text).toBe("Plain update");
+    });
+  });
+
   describe("getComments integration", () => {
     test("filters @devintern/code automation comments from API response", async () => {
       jiraClient.jiraApiCall = async () => ({

@@ -57,6 +57,9 @@ export type AsanaProjectConfig = BaseProjectConfig;
 /** GitHub Issues-specific project configuration (currently uses the common base). */
 export type GitHubProjectConfig = BaseProjectConfig;
 
+/** GitLab-specific project configuration (currently uses the common base). */
+export type GitLabProjectConfig = BaseProjectConfig;
+
 /** Markdown-specific project configuration (currently uses the common base). */
 export type MarkdownProjectConfig = BaseProjectConfig;
 
@@ -67,6 +70,12 @@ export interface TrackerSection<T = BaseProjectConfig> {
   projects?: {
     [projectKey: string]: T;
   };
+}
+
+/** Anonymous usage analytics preferences. */
+export interface AnalyticsSettings {
+  /** Set to false to disable anonymous usage analytics for this project. */
+  enabled?: boolean;
 }
 
 /**
@@ -80,6 +89,9 @@ export interface TrackerSection<T = BaseProjectConfig> {
  * honored for JIRA when no `jira` section exists.
  */
 export interface ProjectSettings {
+  /** Anonymous usage analytics preferences. */
+  analytics?: AnalyticsSettings;
+
   /**
    * Legacy project configurations (backward compatible).
    *
@@ -102,6 +114,8 @@ export interface ProjectSettings {
   asana?: TrackerSection<AsanaProjectConfig>;
   /** GitHub Issues-specific project configurations */
   github?: TrackerSection<GitHubProjectConfig>;
+  /** GitLab-specific project configurations */
+  gitlab?: TrackerSection<GitLabProjectConfig>;
   /** Markdown-specific project configurations */
   markdown?: TrackerSection<MarkdownProjectConfig>;
 }

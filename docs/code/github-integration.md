@@ -1,14 +1,17 @@
 ---
 title: "GitHub Integration"
-description: "Deploy the @devintern/code webhook server for automated PR review handling"
+description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern webhook serve`)"
 section: "Server Automation"
 order: 4
-dateModified: 2026-08-17
+sidebarHidden: true
+dateModified: 2026-09-01
 ---
 
 # GitHub Integration Guide
 
-This guide covers secure deployment options for the @devintern/code webhook server to automatically address PR review comments.
+Prefer the [worker](./worker.md) plus the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally. This page is the advanced path—`devintern webhook serve` with a customer-owned GitHub App—for air-gapped or self-hosted installs that operate their own public GitHub webhook.
+
+This guide covers secure deployment of that listener.
 
 ## Table of Contents
 
@@ -69,11 +72,11 @@ Inline review comments are processed _as a batch_ with their parent review — t
 
 ## Prerequisites
 
-1. **GitHub App** (`GITHUB_APP_ID` + private key) configured with webhook permissions — the team / unattended-automation credential, required for `@mention` matching and `slug[bot]` commit attribution. A personal `GITHUB_TOKEN` still lets the server call the API, but mention-gated triggers will not fire. See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
+1. **Customer-owned GitHub App** (`GITHUB_APP_ID` + private key) configured with webhook permissions. This is required only for this advanced no-relay path: it supplies the bot identity used by the mention gate and custom `slug[bot]` attribution. A personal `GITHUB_TOKEN` can call the API, but by itself it cannot identify the App bot for direct-webhook mentions. See [Configuration](./configuration.md#advanced-customer-owned-github-app).
 2. **Webhook Secret** - a random string for request verification
 3. **Agent Harness CLI** installed and configured
 4. **Git credentials** with push access to target repositories
-5. **Server-automation license** — the webhook server is unattended automation, so it requires a server-automation addon
+5. **Automation license** — the webhook server is unattended automation, so it requires a Supporter, Team, or Business key
 
 > **License required.** Like scheduled runs, the webhook listener runs unattended and fails the license check without an automation license (Supporter, Team, or Business). Set `LICENSE_KEY` in your `.devintern-code/.env` (or as an `Environment=` entry in the service) to a key from [devintern.com/account](https://devintern.com/account).
 
@@ -404,7 +407,7 @@ Add these permissions to your GitHub App:
 ```bash
 # Required
 export WEBHOOK_SECRET="your-webhook-secret"
-export LICENSE_KEY="your-server-automation-key"
+export LICENSE_KEY="your-automation-license-key"
 
 # GitHub authentication.
 # GitHub App auth is preferred — it resolves the bot identity (slug[bot]),
@@ -433,17 +436,17 @@ export WEBHOOK_DEBUG="true"       # Verbose request/processing logging
 
 ### Start the Server
 
-`devintern worker --listen` runs the webhook listener inside the worker daemon. The previous `devintern serve` command still works as a deprecated alias.
+`devintern webhook serve` runs the advanced repo-local webhook listener. Keep it separate from the workspace worker so webhook delivery and tracker automation can be operated independently.
 
 ```bash
 # Development
 bun run src/webhook-server.ts
 
 # Production (after build)
-devintern worker --listen --port 3000
+devintern webhook serve --port 3000
 
 # With PM2 (process manager)
-pm2 start "devintern worker --listen" --name devintern-webhooks
+pm2 start "devintern webhook serve" --name devintern-webhooks
 ```
 
 ### Systemd Service (Linux)
@@ -462,12 +465,12 @@ WorkingDirectory=/path/to/your/projects
 # devintern is a `#!/usr/bin/env bun` script — pin PATH so `bun` resolves
 # under systemd's minimal environment (check: dirname "$(which bun)").
 Environment=PATH=/home/your-user/.local/bin:/home/your-user/.local/share/mise/installs/bun/1.3.2/bin:/usr/local/bin:/usr/bin
-Environment=LICENSE_KEY=your-server-automation-key
+Environment=LICENSE_KEY=your-automation-license-key
 Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_TOKEN=ghp_...
 Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
-ExecStart=/usr/local/bin/devintern worker --listen --port 3000
+ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always
 RestartSec=10
 
@@ -530,14 +533,14 @@ curl https://webhooks.yourdomain.com/health
 | No webhook received        | Check GitHub App webhook URL and events                                                                             |
 | 530 from the public URL    | Tunnel up but DNS not routing — the CNAME is missing or points at an old tunnel; re-run `route dns --overwrite-dns` |
 | `Tunnel not found` in logs | Tunnel was deleted or credentials belong to another account; recreate with `cloudflared tunnel create`              |
-| License check failed       | Set `LICENSE_KEY` to a server-automation addon key                                                                  |
+| License check failed       | Set `LICENSE_KEY` to a Supporter, Team, or Business automation key                                                  |
 
 ### Debug Mode
 
 Run with verbose logging:
 
 ```bash
-WEBHOOK_DEBUG=true devintern worker --listen
+WEBHOOK_DEBUG=true devintern webhook serve
 ```
 
 ---
@@ -573,11 +576,11 @@ cloudflared tunnel route dns devintern-webhooks webhooks.yourdomain.com
 
 # 3. Set environment
 export WEBHOOK_SECRET=$(openssl rand -hex 32)
-export LICENSE_KEY="your-server-automation-key"
+export LICENSE_KEY="your-automation-license-key"
 export GITHUB_TOKEN="ghp_..."   # or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH
 
 # 4. Start server
-devintern worker --listen &
+devintern webhook serve &
 
 # 5. Start tunnel
 cloudflared tunnel run devintern-webhooks

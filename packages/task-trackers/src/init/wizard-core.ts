@@ -13,6 +13,7 @@ import {
   AsanaClient,
   AzureDevOpsClient,
   GitHubClient,
+  GitLabClient,
   JiraClient,
   LinearClient,
   TrelloClient,
@@ -74,6 +75,13 @@ export async function defaultProbe(trackerId: string, env: Record<string, string
       }).getRepositories();
       return;
     }
+    case "gitlab":
+      await new GitLabClient({
+        token: env.GITLAB_TOKEN ?? "",
+        projectPath: env.GITLAB_PROJECT ?? "",
+        baseUrl: env.GITLAB_BASE_URL,
+      }).getCurrentUser();
+      return;
     case "azure-devops":
       await new AzureDevOpsClient({
         organization: env.AZURE_DEVOPS_ORG ?? "",
@@ -109,6 +117,8 @@ export function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
 export interface TrackerChoice {
   id: string;
   displayName: string;
+  /** Optional trailing note on the menu line (e.g. "no account needed"). */
+  hint?: string;
 }
 
 /** Ask which tracker to use, accepting a menu number or a tracker id. */
@@ -120,7 +130,10 @@ export async function promptForTracker(
   const trackerIds = trackers.map((t) => t.id);
   log("\nWhich task tracker do you use?");
   trackers.forEach((tracker, index) => {
-    log(`   ${index + 1}. ${tracker.displayName} (${tracker.id})`);
+    log(
+      `   ${index + 1}. ${tracker.displayName} (${tracker.id})` +
+        (tracker.hint ? ` — ${tracker.hint}` : ""),
+    );
   });
 
   for (;;) {

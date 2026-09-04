@@ -9,10 +9,12 @@
 import type { ChildProcess } from "child_process";
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable, reapTree } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
+import { assertStructuredOutputSupported, parseStructuredOutput } from "../structured-output.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
 
 export interface NodeRunnerOptions extends AgentRunOptions {
@@ -44,9 +46,12 @@ function logAgent(message: string, options: NodeRunnerOptions): void {
  * @param executablePath - Resolved path to the agent executable.
  * @param prompt - Task prompt passed to the agent.
  * @param options - Node-specific run options (cwd, timeout, displayRealtime, etc.).
- * @returns Captured stdout, stderr, and process exit code.
+ * @returns Captured stdout, stderr, and process exit code, plus the parsed
+ *   structured payload when `options.structuredOutput` was requested.
  * @throws {Error} When the executable is not found (`ENOENT`) or the process times out.
  * @throws {UnsupportedAgentModeError} when `options.mode` is not supported.
+ * @throws {UnsupportedStructuredOutputError} when `options.structuredOutput`
+ *   is requested from a harness whose CLI cannot emit JSON.
  */
 export async function runAgentNode(
   harness: AgentHarness,
@@ -55,6 +60,7 @@ export async function runAgentNode(
   options: NodeRunnerOptions = {},
 ): Promise<AgentRunResult> {
   assertModeSupported(harness, options.mode);
+  assertStructuredOutputSupported(harness, options);
 
   // Wait out any in-progress CLI auto-update swap before spawning (see
   // resolveExecutablePathWithRetry), so a transient `spawn ENOENT` doesn't
@@ -107,6 +113,18 @@ export async function runAgentNode(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+
+    const stopOnUsageLimit = (): void => {
+      if (usageLimit?.limited) {
+        return;
+      }
+      const detected = detectUsageLimit(stdout, stderr);
+      if (detected.limited) {
+        usageLimit = detected;
+        reapTree(proc, "SIGTERM");
+      }
+    };
 
     const markOutput = (stream: "stdout" | "stderr", chunk: string): void => {
       if (!gotOutput && chunk.length > 0) {
@@ -138,6 +156,7 @@ export async function runAgentNode(
       proc.stdout.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stdout += chunk;
+        stopOnUsageLimit();
         markOutput("stdout", chunk);
         if (options.displayRealtime) {
           process.stdout.write(chunk);
@@ -149,6 +168,7 @@ export async function runAgentNode(
       proc.stderr.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stderr += chunk;
+        stopOnUsageLimit();
         markOutput("stderr", chunk);
         if (options.displayRealtime) {
           process.stderr.write(chunk);
@@ -174,13 +194,19 @@ export async function runAgentNode(
       clearTimeout(timeout);
       if (timedOut) {
         reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+      } else if (usageLimit?.limited) {
+        reject(new UsageLimitError(usageLimit.resetsAt));
       } else {
-        resolve({
+        const result: AgentRunResult = {
           stdout,
           stderr,
           exitCode: code ?? 1,
           maxTurnsReached: detectMaxTurnsReached(stdout, stderr, harness.supportsMaxTurns === true),
-        });
+        };
+        if (options.structuredOutput) {
+          result.structured = parseStructuredOutput(stdout);
+        }
+        resolve(result);
       }
     });
 

@@ -73,12 +73,147 @@ describe("detectUsageLimit", () => {
     expect(result.resetsAt).toBe("9am");
   });
 
+  test("detects Codex's usage-limit upgrade message and extracts its reset", () => {
+    const out =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 6:03 PM.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("6:03 PM");
+  });
+
+  test("detects Codex's ERROR:-prefixed usage-limit line from the CLI", () => {
+    const out =
+      "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:27 PM.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4:27 PM");
+    expect(result.matchedLine).toContain("You've hit your usage limit");
+  });
+
+  test("detects Codex named limits, workspace credits, and spend caps", () => {
+    const messages = [
+      "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 8:10 PM.",
+      "Your workspace is out of credits. Add credits to continue.",
+      "Your workspace is out of credits. Ask your workspace owner to add credits.",
+      "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+      "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+      "You hit your spend cap set in your workspace. Ask your workspace owner to increase the spend cap.",
+      "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+      "Quota exceeded. Check your plan and billing details.",
+      "To use Codex with your ChatGPT plan, upgrade to Plus at https://chatgpt.com/pricing.",
+      "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("detects current Codex plan copy including try-again-later and admin upsell", () => {
+    const messages = [
+      "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later.",
+      "You've hit your usage limit. To get more access now, send a request to your admin or try again later.",
+      "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+      "You've hit your usage limit. Try again later.",
+      "You've hit your usage limit. To continue using Codex, start a free trial of today, or try again at 6:03 PM.",
+      "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+
+    const withReset = detectUsageLimit(
+      "",
+      "You've hit your usage limit. To get more access now, send a request to your admin or try again at 4:27 PM.",
+    );
+    expect(withReset.limited).toBe(true);
+    expect(withReset.resetsAt).toBe("4:27 PM");
+  });
+
+  test("detects current Claude Code credit and allocation exhaustion messages", () => {
+    const messages = [
+      "You're out of usage credits",
+      "Your org is out of usage · add funds to continue",
+      "Your org is out of usage · contact your admin",
+      "Your seat type doesn't include usage credits",
+      "Your usage allocation has been disabled by your admin",
+      "Your group's usage limit is set to $0",
+      "You're out of extra usage",
+      "You've hit your Opus limit · resets in 3h 20m",
+      "You've reached your Fable 5 limit · resets at 9pm",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit(message, "").limited).toBe(true);
+    }
+  });
+
   test("detects on stderr", () => {
     expect(detectUsageLimit("", "Error: 429 Too Many Requests").limited).toBe(true);
   });
 
   test("detects an API error prefix on stderr", () => {
     expect(detectUsageLimit("", "API Error: 429 Too Many Requests").limited).toBe(true);
+  });
+
+  test("detects Qwen's bracketed headless 429 wrapper", () => {
+    expect(detectUsageLimit("", "[API Error: 429 status code (no body)]").limited).toBe(true);
+  });
+
+  test("detects Grok Build account and team rate-limit messages", () => {
+    const messages = [
+      "You’ve hit the rate limit for your plan. Upgrade your account or try again later.",
+      "You’ve hit your team’s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers",
+      "You’ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build",
+      "resource-exhausted: Too many requests for team abc. See https://console.x.ai/team/default/rate-limits.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("detects Grok Build's pretty-printed 402 usage-balance JSON", () => {
+    const out = [
+      "Internal error: {",
+      '  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",',
+      '  "http_status": 402',
+      "}",
+    ].join("\n");
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.matchedLine).toContain("usage balance exhausted");
+  });
+
+  test("detects Grok Build's Error-prefixed 402 reprint and compact JSON", () => {
+    const reprint = [
+      "Error: Internal error: {",
+      '  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",',
+      '  "http_status": 402',
+      "}",
+    ].join("\n");
+    const compact =
+      'Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}';
+
+    expect(detectUsageLimit("", reprint).limited).toBe(true);
+    expect(detectUsageLimit(compact, "").limited).toBe(true);
+  });
+
+  test("ignores Grok 402 phrases in source and prose", () => {
+    const transcript = [
+      'const message = "API error (status 402 Payment Required): Grok Build usage balance exhausted";',
+      '"Grok Build usage balance exhausted"',
+      "The docs mention Grok Build usage balance exhausted as a billing state.",
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
+  });
+
+  test("detects Goose credits exhaustion despite its successful exit", () => {
+    const out = "Error: Credits exhausted: Insufficient credits to complete this request";
+    expect(detectUsageLimit("", out).limited).toBe(true);
   });
 
   test("detects an HTTP 429 diagnostic on stdout", () => {
@@ -125,6 +260,16 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", source).limited).toBe(false);
   });
 
+  test("ignores Codex and Claude exhaustion phrases embedded in transcript prose", () => {
+    const transcript = [
+      "The fixture says Your workspace is out of credits. Add credits to continue.",
+      "Expected: You're out of usage credits; received: socket closed.",
+      'const message = "Your org is out of usage · contact your admin";',
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+  });
+
   test("ignores compact diff additions without whitespace after the marker", () => {
     const diff = '+throw new Error("Claude usage limit reached");';
 
@@ -135,6 +280,16 @@ describe("detectUsageLimit", () => {
     const source = "The test expects Too Many Requests but received a socket error.";
 
     expect(detectUsageLimit("", source).limited).toBe(false);
+  });
+
+  test("ignores TUI limit phrases embedded in source and prose", () => {
+    const transcript = [
+      'const message = "[API Error: 429 status code (no body)]";',
+      "The fixture expects Credits exhausted: Insufficient credits to complete this request.",
+      "A document quotes the Grok rate limit for your plan.",
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
   });
 
   test("ignores a test count containing 429", () => {
@@ -167,6 +322,50 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(out, "").limited).toBe(true);
   });
 
+  test("detects OpenCode Go's five-hour usage limit and reset hint", () => {
+    const out = "AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("detects OpenCode GoUsageLimitError and FreeUsageLimitError retry copy", () => {
+    const goLimit =
+      "5 hour usage limit reached. It will reset in 5 hours 23 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01K6XGM22R6FM8JVABE9XDQXGH/go";
+    const goLimitResult = detectUsageLimit("", goLimit);
+    expect(goLimitResult.limited).toBe(true);
+    expect(goLimitResult.resetsAt).toBe("5 hours 23 minutes");
+
+    const unnamed = detectUsageLimit(
+      "",
+      "Usage limit reached. It will reset in 15 minutes. To continue using this model now, enable usage from your available balance",
+    );
+    expect(unnamed.limited).toBe(true);
+    expect(unnamed.resetsAt).toBe("15 minutes");
+
+    expect(
+      detectUsageLimit(
+        "",
+        "Weekly usage limit reached. It will reset in 2 days. To continue using this model now, enable usage from your available balance",
+      ).limited,
+    ).toBe(true);
+    expect(detectUsageLimit("", "Free usage exceeded, subscribe to Go").limited).toBe(true);
+    expect(detectUsageLimit("", "Free usage exceeded").limited).toBe(true);
+    expect(
+      detectUsageLimit("", "Subscription quota exceeded. You can continue using free models.")
+        .limited,
+    ).toBe(true);
+  });
+
+  test("extracts a usage limit from OpenCode's printed structured log", () => {
+    const out =
+      'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=be653f66 message="stream error" providerID=opencode-go modelID=glm-5.3 error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+    expect(result.matchedLine).toBe(out);
+  });
+
   test("detects provider 'Rate limit reached' JSON error", () => {
     const out =
       'Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req"}}';
@@ -179,6 +378,54 @@ describe("detectUsageLimit", () => {
 
   test("detects quota exceeded", () => {
     expect(detectUsageLimit("Error: quota exceeded for this API key", "").limited).toBe(true);
+  });
+
+  test("detects Antigravity individual quota and its adjacent reset line", () => {
+    const out = [
+      "⚠ Individual quota reached. Please upgrade your subscription to increase your limits.",
+      "Resets in 143h57m55s.",
+    ].join("\n");
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("143h57m55s");
+  });
+
+  test("detects Antigravity RESOURCE_EXHAUSTED quota diagnostics", () => {
+    const out =
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Contact your administrator to enable overages. Resets in 167h39m40s.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("167h39m40s");
+  });
+
+  test("detects Kilo gateway insufficient-balance diagnostics", () => {
+    const messages = [
+      "Error: Insufficient balance. Please add credits to continue.",
+      '{"error":{"message":"Insufficient balance. Please add credits to continue.","code":402}}',
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+  });
+
+  test("does not borrow a non-adjacent reset from transcript content", () => {
+    const out = [
+      "⚠ Individual quota reached. Please upgrade your subscription to increase your limits.",
+      "The task inspected retry scheduling behavior.",
+      "Resets in 143h57m55s.",
+    ].join("\n");
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBeUndefined();
+  });
+
+  test("ignores balance language embedded in source and prose", () => {
+    const out = [
+      'const error = "Insufficient balance. Please add credits to continue.";',
+      "The docs explain that insufficient balance may require adding credits.",
+    ].join("\n");
+    expect(detectUsageLimit("", out).limited).toBe(false);
   });
 
   test("extracts a retry-after hint", () => {

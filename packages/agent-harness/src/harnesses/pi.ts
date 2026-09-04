@@ -1,7 +1,7 @@
 /**
  * Pi harness.
  *
- * CLI: pi -p <prompt>
+ * CLI: pi -p <prompt> [--model <model>]
  *
  * Uses `pi -p` for non-interactive (print) mode so the agent runs without
  * launching the interactive TUI.
@@ -19,27 +19,38 @@ export class PiHarness implements AgentHarness {
   readonly promptFlag = "-p";
   /** No native plan/read-only enforcement documented for headless `pi`. */
   readonly supportedModes = [] as const;
+  /** `--mode json` emits the session event stream as JSON lines. */
+  readonly supportsStructuredOutput = true;
 
   /**
    * Build `pi` CLI flags for non-interactive (`-p`) execution.
    *
-   * Pi's CLI does not currently expose model, turns, or permission flags.
+   * Supports `model` (`--model <pattern>`; accepts a model ID, `provider/id`,
+   * or `<id>:<thinking>`) and `structuredOutput` (`--mode json`, which pairs
+   * with the `-p` prompt flag: print mode with JSON event output). Pi's CLI
+   * does not currently expose turns or permission flags.
    *
-   * @param _options - Accepted for interface compatibility; currently unused.
-   * @returns Empty args; prompt is supplied via {@link promptFlag}.
+   * @param options - Accepted for interface compatibility; only `model` and
+   *   `structuredOutput` are used.
+   * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
-  buildArgs(_options: AgentRunOptions): string[] {
-    assertModeSupported(this, _options.mode);
+  buildArgs(options: AgentRunOptions): string[] {
+    assertModeSupported(this, options.mode);
     const args: string[] = [];
 
-    // Pi does not currently expose --model, --max-turns, or
+    if (options.model) {
+      args.push("--model", options.model);
+    }
+
+    if (options.structuredOutput) {
+      args.push("--mode", "json");
+    }
+
+    // Pi does not currently expose --max-turns or
     // --skip-permissions flags on its CLI in documented form.
     // If support is added in the future, uncomment the following:
-    // if (_options.model) {
-    //   args.push("--model", _options.model);
-    // }
-    // if (_options.maxTurns !== undefined) {
-    //   args.push("--max-turns", String(_options.maxTurns));
+    // if (options.maxTurns !== undefined) {
+    //   args.push("--max-turns", String(options.maxTurns));
     // }
 
     return args;

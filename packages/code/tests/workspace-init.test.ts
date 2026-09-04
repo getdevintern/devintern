@@ -5,14 +5,18 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import { runWorkspaceImport, runWorkspaceInit } from "../src/lib/workspace/init";
+import {
+  runWorkerAddRepo,
+  runWorkerScaffold,
+  upsertWorkspaceDefaults,
+} from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
 function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
 }
 
-describe("workspace init/import", () => {
+describe("worker scaffold/add-repo", () => {
   let rootDir: string;
   let workspaceDir: string;
   let repoDir: string;
@@ -61,8 +65,8 @@ describe("workspace init/import", () => {
     rmSync(rootDir, { recursive: true, force: true });
   });
 
-  test("init scaffolds a valid config and refuses to overwrite", () => {
-    expect(runWorkspaceInit()).toBe(0);
+  test("scaffold creates a valid config and refuses to overwrite", () => {
+    expect(runWorkerScaffold()).toBe(0);
     expect(existsSync(workspaceConfigPath())).toBe(true);
     expect(existsSync(workspaceEnvPath())).toBe(true);
 
@@ -70,12 +74,29 @@ describe("workspace init/import", () => {
     expect(config.defaults.tracker).toBe("jira");
     expect(config.repos).toEqual([]);
 
-    expect(runWorkspaceInit()).toBe(1); // second run refuses
+    expect(runWorkerScaffold()).toBe(1); // second run refuses
   });
 
-  test("import adds the repo, merges env, and seeds a routing rule", async () => {
-    runWorkspaceInit();
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+  test("scaffold has no bare # comment lines (Bun.TOML redefinition bug)", () => {
+    // Bun 1.3.2's TOML parser mis-attributes keys to the previous table when
+    // a "#"-only comment line precedes an [[array.of.tables]] header, failing
+    // with "Cannot redefine key". Keep whitespace after every "#" in templates.
+    expect(runWorkerScaffold()).toBe(0);
+    const text = readFileSync(workspaceConfigPath(), "utf8");
+    expect(text).not.toMatch(/^#$/m);
+
+    // Reproduce the parser bug's trigger: an uncommented table header after
+    // the scaffold's comment block.
+    const withAutomation =
+      text +
+      '\n[[automations]]\nid = "weekday-maintenance"\nenabled = true\n' +
+      'cron = "0 9 * * 1-5"\nprompt = "p"\nrepo = "backend"\n';
+    Bun.TOML.parse(withAutomation);
+  });
+
+  test("add-repo adds the repo, merges env, and seeds a routing rule", async () => {
+    runWorkerScaffold();
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.repos).toHaveLength(1);
@@ -91,41 +112,95 @@ describe("workspace init/import", () => {
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
   });
 
-  test("import is idempotent and demotes conflicting env values to [repos.env]", async () => {
-    runWorkspaceInit();
+  test("add-repo from a package subdirectory still merges the repo-root .env", async () => {
+    runWorkerScaffold();
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+
+    expect(await runWorkerAddRepo(nested)).toBe(0);
+
+    const env = readFileSync(workspaceEnvPath(), "utf8");
+    expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
+    expect(env).toContain("GITHUB_TOKEN=repo-token");
+  });
+
+  test("add-repo is idempotent and demotes conflicting env values to [repos.env]", async () => {
+    runWorkerScaffold();
     // Pre-seed a conflicting shared value.
     writeFileSync(workspaceEnvPath(), "GITHUB_TOKEN=shared-token\n");
 
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.repos[0].env).toEqual({ GITHUB_TOKEN: "repo-token" });
     // Shared value untouched.
     expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("GITHUB_TOKEN=shared-token");
 
-    // Second import: no duplicate entry, config identical.
+    // Second add: no duplicate entry, config identical. Missing workspace
+    // keys still merge (re-running worker init from a subdirectory).
+    const nested = join(repoDir, "packages", "code");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(repoDir, ".devintern-code", ".env"), "JIRA_EMAIL=dev@acme.test\n", {
+      flag: "a",
+    });
     const before = readFileSync(workspaceConfigPath(), "utf8");
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+    expect(await runWorkerAddRepo(nested)).toBe(0);
     expect(readFileSync(workspaceConfigPath(), "utf8")).toBe(before);
     expect(loadWorkspaceConfig(workspaceConfigPath()).repos).toHaveLength(1);
+    expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("JIRA_EMAIL=dev@acme.test");
   });
 
-  test("import preserves hand-written comments in the existing config", async () => {
-    runWorkspaceInit();
+  test("add-repo preserves hand-written comments in the existing config", async () => {
+    runWorkerScaffold();
     const configPath = workspaceConfigPath();
     const withComment = readFileSync(configPath, "utf8") + "\n# my custom note\n";
     writeFileSync(configPath, withComment);
 
-    await runWorkspaceImport(repoDir);
+    await runWorkerAddRepo(repoDir);
     expect(readFileSync(configPath, "utf8")).toContain("# my custom note");
   });
 
-  test("import fails cleanly without a workspace or origin remote", async () => {
-    expect(await runWorkspaceImport(repoDir)).toBe(1); // no workspace yet
+  test("upsertWorkspaceDefaults uncomments task_query and sets tracker", () => {
+    runWorkerScaffold();
+    const before = readFileSync(workspaceConfigPath(), "utf8");
+    const updated = upsertWorkspaceDefaults(before, {
+      tracker: "markdown",
+      taskQuery: "project = PROJ AND status = 'To Do'",
+    });
+    expect(updated).toContain('tracker = "markdown"');
+    expect(updated).not.toMatch(/^tracker = "jira"$/m);
+    expect(updated).toContain(`task_query = "project = PROJ AND status = 'To Do'"`);
+    expect(updated).not.toContain(
+      '# task_query = "sprint in openSprints() AND labels = devintern"',
+    );
+    expect(updated).toContain("# Days before a leftover");
+  });
 
-    runWorkspaceInit();
+  test("upsertWorkspaceDefaults only edits the defaults table", () => {
+    const updated = upsertWorkspaceDefaults(
+      `[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+  [repos.env]
+  tracker = "repo-specific"
+  task_query = "leave-me-alone"
+`,
+      { tracker: "linear", taskQuery: "status = Todo" },
+    );
+    expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
+    expect(updated).toContain('  tracker = "repo-specific"');
+    expect(updated).toContain('  task_query = "leave-me-alone"');
+  });
+
+  test("add-repo fails cleanly without a workspace or origin remote", async () => {
+    expect(await runWorkerAddRepo(repoDir)).toBe(1); // no workspace yet
+
+    runWorkerScaffold();
     const bareDir = join(rootDir, "no-remote");
     mkdirSync(bareDir, { recursive: true });
     git(bareDir, "init -b main");
-    expect(await runWorkspaceImport(bareDir)).toBe(1); // no origin remote
+    expect(await runWorkerAddRepo(bareDir)).toBe(1); // no origin remote
   });
 });

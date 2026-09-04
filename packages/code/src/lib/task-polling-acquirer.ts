@@ -4,10 +4,12 @@
  * Each tick:
  * 1. Detect — the tracker's change detector answers "did anything change
  *    since the persisted cursor?" (cheap, cursor-based).
- * 2. Evaluate — re-run the user's configured `--query` via the tracker's
+ * 2. Evaluate — re-run the user's configured query via the tracker's
  *    `searchTasks` to get the tasks that are actually ready.
  * 3. Dedupe — skip tasks already picked up at the same `updated` stamp
  *    (`processed_events`), so a task re-enters only when it changes again.
+ *    Skips are logged when nothing new is claimed. An empty stamp is sticky
+ *    (tracker search must return `updated`) and is warned on.
  * 4. Execute — run each ready task sequentially through the CLI pipeline.
  *
  * The cursor advances only after a tick completes; a crash mid-tick re-detects
@@ -17,39 +19,54 @@
 import { spawn } from "child_process";
 
 import type { ChangeDetector } from "./change-detector";
+import type { PickupGate } from "./schedule";
+import { TASK_POLL_LAST_DRAIN_KEY } from "./worker-state";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
+import { cliResultToTaskResult, runWithFailover } from "./worker-failover";
 
 export interface ReadyTask {
   key: string;
   updated?: string;
 }
 
+/** A deferred task was not attempted and must be evaluated again next tick. */
+export type TaskExecutionResult = boolean | "deferred";
+
+/** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
+export function processedTaskId(task: ReadyTask): string {
+  return `task:${task.key}:${task.updated?.trim() ?? ""}`;
+}
+
+function hasUpdateStamp(task: ReadyTask): boolean {
+  return Boolean(task.updated?.trim());
+}
+
 export interface TaskPollingAcquirerOptions {
   trackerType: string;
   /** The user's task-selection query (same language as `--query`). */
-  query: string;
+  query: string | (() => string | undefined);
   intervalSeconds: number;
   detector: ChangeDetector;
   workerState: WorkerState;
   queue: WebhookQueue;
   /** Evaluate step: run the user's query (injected for tests). */
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
-  /** Execute step: process one ready task; returns success (injected for tests). */
-  executeTask: (taskKey: string) => Promise<boolean>;
+  /** Execute step: process, fail, or defer one ready task (injected for tests). */
+  executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
+  /**
+   * Working-window gate (quiet hours). When closed, ticks start no new
+   * detection/evaluation/execution; an in-flight tick finishes naturally
+   * because execution is sequential. Manual overrides and startup catch-up
+   * are the gate's decisions surfaced as one-shot bypasses.
+   */
+  gate?: PickupGate;
   verbose?: boolean;
 }
 
-/**
- * Extra CLI args the worker passes to each task run.
- * `WORKER_TASK_ARGS` overrides (whitespace-separated); default `--create-pr`.
- */
+/** Default CLI flags the worker passes to each task run. */
 export function workerTaskArgs(): string[] {
-  const raw = process.env.WORKER_TASK_ARGS;
-  if (raw && raw.trim()) {
-    return raw.trim().split(/\s+/);
-  }
   return ["--create-pr"];
 }
 
@@ -61,27 +78,33 @@ export function workerTaskArgs(): string[] {
  * @param taskKey - Task key to process
  * @param extraArgs - CLI flags (default from {@link workerTaskArgs})
  * @param opts - Working directory and environment for the subprocess;
- *               workspace mode routes each task to its repo's worktree with
- *               per-repo env, single-repo mode inherits both
- * @returns true when the CLI exited 0
+ *               the workspace worker routes each task to its repo's worktree
+ *               with per-repo env; direct callers inherit both
+ * @returns true when the CLI exited 0, `"deferred"` when every harness in
+ *   the failover chain is usage-limited, false on any other failure
  */
-export function runTaskViaCli(
+export async function runTaskViaCli(
   taskKey: string,
   extraArgs: string[] = workerTaskArgs(),
   opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
-      stdio: "inherit",
-      cwd: opts.cwd,
-      env: opts.env ?? process.env,
-    });
-    child.on("close", (code) => resolve(code === 0));
-    child.on("error", (error) => {
-      console.error(`❌ Failed to spawn task run for ${taskKey}: ${error.message}`);
-      resolve(false);
-    });
-  });
+): Promise<TaskExecutionResult> {
+  const result = await runWithFailover(
+    (env) =>
+      new Promise<number>((resolve) => {
+        const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
+          stdio: "inherit",
+          cwd: opts.cwd,
+          env,
+        });
+        child.on("close", (code) => resolve(code ?? 1));
+        child.on("error", (error) => {
+          console.error(`❌ Failed to spawn task run for ${taskKey}: ${error.message}`);
+          resolve(1);
+        });
+      }),
+    opts.env ?? process.env,
+  );
+  return cliResultToTaskResult(result);
 }
 
 /**
@@ -92,6 +115,7 @@ export class TaskPollingAcquirer implements Acquirer {
   private options: TaskPollingAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  private readonly gateErrors = new Set<string>();
 
   constructor(options: TaskPollingAcquirerOptions) {
     this.options = options;
@@ -100,12 +124,33 @@ export class TaskPollingAcquirer implements Acquirer {
 
   /** Start polling: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
+    if (this.timer) return;
+    const query = this.resolveQuery();
     console.log(
       `🔎 Polling ${this.options.trackerType} every ${this.options.intervalSeconds}s ` +
-        `(query: ${this.options.query})`,
+        `(query: ${query ?? "disabled until task_query is configured"})`,
     );
-    await this.tick();
+    const lastDrainAt = this.readLastDrainAt();
+    if (this.options.gate?.shouldCatchUpOnStart(lastDrainAt)) {
+      // The laptop slept through the entire previous window; drain once now
+      // instead of waiting for the next one.
+      console.log(`🌙 [${this.name}] working window(s) elapsed while idle; running catch-up drain`);
+      await this.tick({ ignoreGate: true });
+    } else {
+      await this.tick();
+    }
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+  }
+
+  private readLastDrainAt(): number | null {
+    try {
+      const raw = this.options.workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY);
+      if (!raw) return null;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Stop polling (an in-flight tick finishes its current task). */
@@ -116,52 +161,163 @@ export class TaskPollingAcquirer implements Acquirer {
     }
   }
 
-  /** One detect → evaluate → dedupe → execute cycle. Skipped while busy. */
-  async tick(): Promise<void> {
+  /**
+   * Apply a new poll cadence without restarting (live workspace config
+   * reload). Re-arms the repeating timer with the new interval.
+   */
+  updateInterval(intervalSeconds: number): void {
+    this.options.intervalSeconds = intervalSeconds;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), intervalSeconds * 1000);
+  }
+
+  /**
+   * One detect → evaluate → dedupe → execute cycle. Skipped while busy, and
+   * skipped while the working-window gate is closed (unless overridden for a
+   * manual run or startup catch-up).
+   */
+  async tick(bypass: { ignoreGate?: boolean } = {}): Promise<void> {
     if (this.busy) {
       return;
     }
+    const query = this.resolveQuery();
+    if (!query) return;
+
+    const gate = this.options.gate;
+    if (!bypass.ignoreGate && gate) {
+      const manual = this.scheduleGuard(() => gate.consumeManualPickup(), false);
+      if (manual) {
+        console.log(`▶️  [${this.name}] manual run requested; draining now`);
+      } else if (!this.scheduleGuard(() => gate.pickupAllowed(), true)) {
+        // Outside the working window: no detection, no evaluation, no new
+        // tasks. Whatever is already running finishes before this check even
+        // happens, and no cursor moves while gated out.
+        return;
+      }
+    }
+
     this.busy = true;
 
-    const { detector, workerState, queue, query, searchTasks, executeTask, verbose } = this.options;
+    const { detector, workerState, queue, searchTasks, executeTask, verbose } = this.options;
     try {
       const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursor);
+      let tickDeferred = false;
 
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
-        if (verbose) {
-          console.log(`   [${this.name}] change detected; ${tasks.length} task(s) match query`);
-        }
+        const skipped: string[] = [];
+        const missingStamp: string[] = [];
+        let pickedUp = 0;
 
         for (const task of tasks) {
-          const externalId = `task:${task.key}:${task.updated ?? ""}`;
+          if (!hasUpdateStamp(task)) {
+            missingStamp.push(task.key);
+          }
+          const externalId = processedTaskId(task);
           if (queue.hasProcessed(detector.source, externalId)) {
+            skipped.push(task.key);
             continue;
           }
           // Mark before executing: a persistently failing task must not loop
           // every tick. It re-enters when the ticket is updated again (new
           // stamp), and the pipeline's own incomplete-attempt check guards
-          // the retry.
+          // the retry. An empty stamp is also sticky — tracker search must
+          // return `updated` or a later edit cannot retrigger this task.
           queue.markProcessed(detector.source, externalId);
 
+          pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
-          const ok = await executeTask(task.key);
-          console.log(
-            ok
-              ? `✅ [${this.name}] ${task.key} completed`
-              : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
-          );
+          const result = await executeTask(task.key);
+          if (result === "deferred") {
+            // The task never started. Release the provisional claim and retain
+            // the detector cursor so this same tracker change is evaluated on
+            // the next tick. Other tasks completed in this tick stay deduped.
+            queue.unmarkProcessed(detector.source, externalId);
+            tickDeferred = true;
+            console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+          } else {
+            console.log(
+              result
+                ? `✅ [${this.name}] ${task.key} completed`
+                : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+            );
+          }
         }
+
+        this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
+        // Remember that a drain ran so working-window catch-up can tell an
+        // elapsed-but-idle window apart from one that was already served.
+        this.scheduleGuard(
+          () => workerState.setMeta(TASK_POLL_LAST_DRAIN_KEY, String(Date.now())),
+          undefined,
+        );
       }
 
-      if (detection.nextCursor !== null && detection.nextCursor !== cursor) {
+      if (!tickDeferred && detection.nextCursor !== null && detection.nextCursor !== cursor) {
         workerState.setCursor(detector.source, detection.nextCursor);
       }
     } catch (error) {
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
       this.busy = false;
+    }
+  }
+
+  private resolveQuery(): string | undefined {
+    const raw = this.options.query;
+    return typeof raw === "function" ? raw() : raw;
+  }
+
+  /**
+   * Scheduling must never break polling: gate or bookkeeping failures are
+   * downgraded to a single warning per error identity.
+   */
+  private scheduleGuard<T>(operation: () => T, fallback: T): T {
+    try {
+      return operation();
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!this.gateErrors.has(message)) {
+        this.gateErrors.add(message);
+        console.warn(`⚠️  [${this.name}] schedule check failed: ${message}`);
+      }
+      return fallback;
+    }
+  }
+
+  /**
+   * Always-on skip/stamp diagnosis. Silent skips made "ticket matches query
+   * but was never picked up" undebuggable from the worker log.
+   */
+  private logEvaluate(
+    matched: number,
+    skipped: string[],
+    missingStamp: string[],
+    pickedUp: number,
+    verbose?: boolean,
+  ): void {
+    if (verbose) {
+      const skipNote = skipped.length > 0 ? ` (${skipped.length} already processed)` : "";
+      console.log(`   [${this.name}] change detected; ${matched} task(s) match query${skipNote}`);
+    }
+
+    // Always log when every match was skipped — that is the "why didn't it
+    // pick up KEY?" case. Mixed pickup/skip stays verbose-only to avoid noise.
+    if (skipped.length > 0 && (pickedUp === 0 || verbose)) {
+      console.log(
+        `⏭️  [${this.name}] skipping ${skipped.join(", ")} (already processed at this update)`,
+      );
+    }
+
+    if (missingStamp.length > 0) {
+      const names = missingStamp.join(", ");
+      const singular = missingStamp.length === 1;
+      console.warn(
+        `⚠️  [${this.name}] ${names} ${singular ? "has" : "have"} no update stamp from the tracker. ` +
+          `Editing ${singular ? "that ticket" : "those tickets"} will not retrigger polling until search returns \`updated\`.`,
+      );
     }
   }
 }

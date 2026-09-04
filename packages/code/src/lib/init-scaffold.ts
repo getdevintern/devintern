@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
+import { findProjectRoot } from "@devintern/utils";
 import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
 import type { EnvPromptStep } from "@devintern/task-trackers";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
@@ -17,6 +18,7 @@ export const TRACKER_DOCS: Record<string, string> = {
   jira: "https://devintern.com/docs/code/jira-integration",
   linear: "https://devintern.com/docs/code/linear-integration",
   github: "https://devintern.com/docs/code/github-issues-integration",
+  gitlab: "https://devintern.com/docs/code/gitlab-integration",
   "azure-devops": "https://devintern.com/docs/code/azure-devops-integration",
   asana: "https://devintern.com/docs/code/asana-integration",
   trello: "https://devintern.com/docs/code/trello-integration",
@@ -71,6 +73,31 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "GITHUB_REPO", label: "Target repository", example: "owner/repo" },
     {
       key: "GITHUB_STATUS_LABELS",
+      label: "Comma-separated status label names",
+      example: "todo,in progress,in review",
+      optional: true,
+    },
+  ],
+  gitlab: [
+    {
+      key: "GITLAB_BASE_URL",
+      label: "GitLab instance URL (press Enter for https://gitlab.com)",
+      example: "https://gitlab.example.com",
+      optional: true,
+      defaultValue: "https://gitlab.com",
+    },
+    {
+      key: "GITLAB_TOKEN",
+      label: "GitLab personal access token (scopes: api)",
+      link: (values) => {
+        const host = (values.GITLAB_BASE_URL || "https://gitlab.com").replace(/\/+$/, "");
+        const origin = /^https?:\/\//i.test(host) ? host : `https://${host}`;
+        return `${origin}/-/user_settings/personal_access_tokens?name=DevIntern&scopes=api`;
+      },
+    },
+    { key: "GITLAB_PROJECT", label: "Target project path", example: "group/sub/repo" },
+    {
+      key: "GITLAB_STATUS_LABELS",
       label: "Comma-separated status label names",
       example: "todo,in progress,in review",
       optional: true,
@@ -172,28 +199,27 @@ AGENT_HARNESS=claude-code
 # Optional: Enable verbose logging by default
 # VERBOSE=true
 
-# Optional: GitHub authentication (PRs, worker reviews, @mentions)
+# Optional: GitHub authentication (PRs and worker reviews)
 #
-# Personal / interactive (free CLI): GITHUB_TOKEN
-# Team / unattended automation: GitHub App (GITHUB_APP_ID + private key)
-# See https://devintern.com/pricing/
-# Complementary, not alternatives. Unattended runs also need LICENSE_KEY.
+# Normal CLI and workspace mode: GITHUB_TOKEN
+# Workspace @mentions use the central DevIntern AI App through the relay;
+# its App ID and private key never belong in this file.
+# Unattended runs also need LICENSE_KEY. See https://devintern.com/pricing/
 #
 #   GITHUB_TOKEN (personal access token)
 #     Personal / interactive CLI use, and required for TASK_TRACKER=github
 #     (Issues). App credentials cannot substitute.
-#     Enough for --create-pr and worker review polling on the agent's own PRs.
+#     Used for --create-pr and all local GitHub API work in relay-backed workspaces.
 #     Create at: https://github.com/settings/tokens
 #     Classic: 'repo' scope (or 'public_repo' for public repos only)
 #     Fine-grained: 'Pull requests: Read and write' + 'Contents: Read'
 #     (add 'Issues: Read and write' when TASK_TRACKER=github)
 # GITHUB_TOKEN=your-github-token-here
 #
-#   GitHub App (GITHUB_APP_ID + private key)
-#     Team / unattended automation: @mention matching on any PR (worker
-#     mention sweep and webhook / devintern worker --listen) and slug[bot]
-#     commit attribution.
-#     Also creates PRs when no GITHUB_TOKEN is set.
+#   Customer-owned GitHub App (advanced, no-relay installations only)
+#     Use this for air-gapped polling or devintern webhook serve when events
+#     cannot pass through the hosted relay. It provides @mention identity,
+#     installation API tokens, and slug[bot] commit attribution.
 #     Both GITHUB_APP_ID and a private key are required; ID alone is ignored.
 #     Create at: https://github.com/settings/apps (or your org's settings)
 #     Install the App on your repositories after generating a private key.
@@ -207,7 +233,8 @@ AGENT_HARNESS=claude-code
 #
 # Precedence when both are set:
 #   CLI / PR creation: GITHUB_TOKEN is used.
-#   worker --listen / webhook server: the App is used (bot identity).
+#   Relay-backed workspace: GITHUB_TOKEN is used; custom App credentials are ignored.
+#   No-relay workspace / webhook serve: the custom App is preferred (bot identity).
 
 # Bitbucket app password for creating pull requests
 # Create at: https://bitbucket.org/account/settings/app-passwords/
@@ -317,34 +344,37 @@ export interface ScaffoldOptions {
 /**
  * Scaffold `.devintern-code/` with env files, settings, and gitignore entries.
  *
- * @returns true when files were written, false when the config dir already
- * existed (nothing touched)
+ * The scaffold always targets the enclosing repository root (found by walking
+ * up for `.git`), so running from a subdirectory of a monorepo does not nest
+ * the config inside that subdirectory. Falls back to `cwd` outside a repo.
+ *
+ * The only hard refusal is an existing `.env`: credentials are never
+ * overwritten. A config folder missing `.env` (or missing `.env.example` /
+ * `settings.json`) is completed in place; existing files are kept.
+ *
+ * @returns true when files were written, false when `.env` already existed
  */
 export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
   const cwd = options.cwd ?? process.cwd();
-  const configDir = resolve(cwd, ".devintern-code");
+  const projectRoot = findProjectRoot({ startDir: cwd });
+  const configDir = resolve(projectRoot, ".devintern-code");
   const envFile = join(configDir, ".env");
   const envSampleFile = join(configDir, ".env.example");
 
-  // Check if .devintern-code folder already exists
-  if (existsSync(configDir)) {
-    console.log(`\n⚠️  Configuration folder already exists: ${configDir}`);
-
-    if (existsSync(envFile)) {
-      console.log("✅ .env file found");
-    } else {
-      console.log("⚠️  .env file not found");
-    }
-
+  // Never overwrite credentials.
+  if (existsSync(envFile)) {
+    console.log(`\n⚠️  Configuration file already exists: ${envFile}`);
     console.log("\n💡 To reconfigure, either:");
-    console.log(`   1. Delete the folder: rm -rf ${configDir}`);
-    console.log("   2. Or edit the files directly");
+    console.log(`   1. Delete the file: rm ${envFile}`);
+    console.log("   2. Or edit the file directly");
     return false;
   }
 
   try {
-    mkdirSync(configDir, { recursive: true });
-    console.log(`✅ Created configuration folder: ${configDir}`);
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true });
+      console.log(`✅ Created configuration folder: ${configDir}`);
+    }
   } catch (error) {
     console.error(`❌ Failed to create configuration folder: ${error}`);
     process.exit(1);
@@ -352,12 +382,14 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
 
   const envSampleContent = buildEnvExample();
 
-  try {
-    writeFileSync(envSampleFile, envSampleContent, "utf8");
-    console.log(`✅ Created template file: ${envSampleFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create .env.example: ${error}`);
-    process.exit(1);
+  if (!existsSync(envSampleFile)) {
+    try {
+      writeFileSync(envSampleFile, envSampleContent, "utf8");
+      console.log(`✅ Created template file: ${envSampleFile}`);
+    } catch (error) {
+      console.error(`❌ Failed to create .env.example: ${error}`);
+      process.exit(1);
+    }
   }
 
   try {
@@ -368,7 +400,7 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     process.exit(1);
   }
 
-  // Create settings.json for per-project configuration
+  // Create settings.json for per-project configuration (kept if present)
   const settingsFile = join(configDir, "settings.json");
   const settingsContent = {
     jira: {
@@ -408,6 +440,15 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
         },
       },
     },
+    gitlab: {
+      projects: {
+        "PROJECT-KEY": {
+          inProgressStatus: "In Progress",
+          todoStatus: "To Do",
+          prStatus: "In Review",
+        },
+      },
+    },
     "azure-devops": {
       projects: {
         "PROJECT-KEY": {
@@ -428,23 +469,26 @@ export function scaffoldProject(options: ScaffoldOptions = {}): boolean {
     },
   };
 
-  try {
-    writeFileSync(settingsFile, JSON.stringify(settingsContent, null, 2), "utf8");
-    console.log(`✅ Created settings file: ${settingsFile}`);
-  } catch (error) {
-    console.error(`❌ Failed to create settings.json: ${error}`);
-    process.exit(1);
+  if (!existsSync(settingsFile)) {
+    try {
+      writeFileSync(settingsFile, JSON.stringify(settingsContent, null, 2), "utf8");
+      console.log(`✅ Created settings file: ${settingsFile}`);
+    } catch (error) {
+      console.error(`❌ Failed to create settings.json: ${error}`);
+      process.exit(1);
+    }
   }
 
   // Ignore everything under .devintern-code/ and whitelist the two files worth
   // committing. Credentials, the lock file, and local state (queue.db) are
   // covered by default, so a new state file never lands in git — or gets wiped
   // by `git clean`.
-  const gitignorePath = join(cwd, ".gitignore");
+  const gitignorePath = join(projectRoot, ".gitignore");
   const gitignoreEntries = [
     ".devintern-code/*",
     "!.devintern-code/settings.json",
     "!.devintern-code/.env.example",
+    "!.devintern-code/automations.toml",
   ];
 
   try {

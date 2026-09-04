@@ -6,6 +6,112 @@
  * This parser accepts all three shapes and ignores unrelated braces in prose.
  */
 
+/**
+ * Escape raw control characters inside JSON string literals.
+ *
+ * Some agents emit pretty-printed JSON where string values (typically long
+ * markdown descriptions) contain literal newlines/tabs instead of `\n`/`\t`
+ * escapes, which is invalid JSON. This pass walks the text tracking string
+ * state and rewrites control characters to their escape sequences.
+ */
+function escapeControlCharsInStrings(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (const character of text) {
+    if (!inString) {
+      if (character === '"') inString = true;
+      result += character;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      result += character;
+      continue;
+    }
+
+    const code = character.codePointAt(0) ?? 0;
+    if (character === "\\") {
+      escaped = true;
+      result += character;
+    } else if (character === '"') {
+      inString = false;
+      result += character;
+    } else if (code < 0x20) {
+      if (code === 0x0a) {
+        result += "\\n";
+      } else if (code === 0x0d) {
+        result += "\\r";
+      } else if (code === 0x09) {
+        result += "\\t";
+      } else {
+        result += `\\u${code.toString(16).padStart(4, "0")}`;
+      }
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Escape unescaped double quotes inside JSON string literals.
+ *
+ * Models sometimes quote terms mid-value (`a legacy "cwd" mode`) without
+ * escaping, which terminates the JSON string early and corrupts everything
+ * after it. A closing quote is only trusted when the next non-whitespace
+ * character is a plausible structural token (`,`, `}`, `]`, `:`, or end of
+ * text); otherwise the quote is escaped. Best-effort: prose like `"a", "b"`
+ * can still fool it, but wrong guesses just produce another failing candidate.
+ */
+function escapeUnescapedQuotesInStrings(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  const isStructural = (index: number): boolean => {
+    let cursor = index;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    if (cursor >= text.length) return true;
+    return ",}]: ".includes(text[cursor]);
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (!inString) {
+      if (character === '"') inString = true;
+      result += character;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      result += character;
+      continue;
+    }
+
+    if (character === "\\") {
+      escaped = true;
+      result += character;
+    } else if (character === '"') {
+      if (isStructural(index + 1)) {
+        inString = false;
+        result += character;
+      } else {
+        result += '\\"';
+      }
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
+}
+
 function balancedObjectCandidates(text: string): string[] {
   const candidates: string[] = [];
   let start = -1;
@@ -72,10 +178,30 @@ export function parseAgentJsonObject(output: string, requiredKey: string): Recor
     }
   }
 
-  candidates.push(...balancedObjectCandidates(output).reverse());
+  const balanced = balancedObjectCandidates(output).reverse();
+  // Grok sometimes emits junk between the final value and the closing brace
+  // (e.g. a literal `\n` after the last string). Retry with the object closed
+  // right after its last string value.
+  const withClosures = [
+    ...balanced,
+    ...balanced.map((object) => {
+      const lastQuote = object.lastIndexOf('"');
+      return lastQuote === -1 ? object : `${object.slice(0, lastQuote + 1)}}`;
+    }),
+  ];
+
+  const baseCandidates = [...candidates, ...withClosures];
 
   let lastParseError: unknown;
-  for (const candidate of candidates) {
+  // Repair ladder: raw → control chars escaped → embedded quotes also escaped.
+  const variants = [
+    ...baseCandidates,
+    ...baseCandidates.map(escapeControlCharsInStrings),
+    ...baseCandidates.map((base) =>
+      escapeUnescapedQuotesInStrings(escapeControlCharsInStrings(base)),
+    ),
+  ];
+  for (const candidate of variants) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       if (

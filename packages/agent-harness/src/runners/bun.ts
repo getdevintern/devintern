@@ -11,10 +11,12 @@
 
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
+import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
-import { spawnReapable } from "../process-reaper.js";
+import { spawnReapable, reapTree } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
+import { assertStructuredOutputSupported, parseStructuredOutput } from "../structured-output.js";
 import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js";
 
 /**
@@ -27,8 +29,11 @@ import type { AgentHarness, AgentRunOptions, AgentRunResult } from "../types.js"
  * @param executablePath - Resolved path to the agent executable.
  * @param prompt - Task prompt passed to the agent.
  * @param options - Run options (turn limits, model, input method, etc.).
- * @returns Captured stdout, stderr, and process exit code.
+ * @returns Captured stdout, stderr, and process exit code, plus the parsed
+ *   structured payload when `options.structuredOutput` was requested.
  * @throws {UnsupportedAgentModeError} when `options.mode` is not supported.
+ * @throws {UnsupportedStructuredOutputError} when `options.structuredOutput`
+ *   is requested from a harness whose CLI cannot emit JSON.
  */
 export async function runAgentBun(
   harness: AgentHarness,
@@ -37,6 +42,7 @@ export async function runAgentBun(
   options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
   assertModeSupported(harness, options.mode);
+  assertStructuredOutputSupported(harness, options);
 
   const inputMethod = options.inputMethod ?? "arg";
   const { prompt: effectivePrompt, imageArgs } = preparePromptWithAttachments(
@@ -74,12 +80,25 @@ export async function runAgentBun(
 
   let stdout = "";
   let stderr = "";
+  let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+  const stopOnUsageLimit = (): void => {
+    if (usageLimit?.limited) {
+      return;
+    }
+    const detected = detectUsageLimit(stdout, stderr);
+    if (detected.limited) {
+      usageLimit = detected;
+      reapTree(proc, "SIGTERM");
+    }
+  };
   proc.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
+    stopOnUsageLimit();
   });
   proc.stderr?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
     stderr += text;
+    stopOnUsageLimit();
     options.onStderr?.(text);
   });
 
@@ -88,10 +107,18 @@ export async function runAgentBun(
     proc.on("error", reject);
   });
 
-  return {
+  if (usageLimit?.limited) {
+    throw new UsageLimitError(usageLimit.resetsAt);
+  }
+
+  const result: AgentRunResult = {
     stdout,
     stderr,
     exitCode,
     maxTurnsReached: detectMaxTurnsReached(stdout, stderr, harness.supportsMaxTurns === true),
   };
+  if (options.structuredOutput) {
+    result.structured = parseStructuredOutput(stdout);
+  }
+  return result;
 }

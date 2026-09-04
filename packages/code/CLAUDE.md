@@ -26,18 +26,21 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Environment Variables (.devintern-code/.env):**
 
-- `TASK_TRACKER` - Task tracker type: `jira` (default), `linear`, `github`, `azure-devops`, `asana`, `trello`, or `markdown`
+- `TASK_TRACKER` - Task tracker type: `jira` (default), `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`
 - `ASANA_API_TOKEN` - Asana personal access token (required when `TASK_TRACKER=asana`); optional `ASANA_DEFAULT_PROJECT_GID`, `ASANA_STORY_POINTS_FIELD`
 - `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT` - Azure DevOps credentials (required when `TASK_TRACKER=azure-devops`)
 - `LINEAR_API_KEY` - Linear personal API key (required when `TASK_TRACKER=linear`)
 - `GITHUB_REPO` - Target `owner/repo` for GitHub Issues (required when `TASK_TRACKER=github`; requires `GITHUB_TOKEN`, App credentials cannot substitute)
 - `GITHUB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitHub transitions
+- `GITLAB_TOKEN`, `GITLAB_PROJECT`, `GITLAB_BASE_URL` - GitLab credentials (required when `TASK_TRACKER=gitlab`; base URL optional, defaults to https://gitlab.com)
+- `GITLAB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitLab transitions
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - JIRA credentials
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions
 - `GITHUB_TOKEN` - Personal / interactive GitHub PAT (required for `TASK_TRACKER=github`; enough for free CLI PRs and own-PR review polling)
-- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Team / unattended-automation GitHub App (required for `@mention` matching and `slug[bot]` commits; CLI uses token first, worker `--listen` uses App first). See https://devintern.com/pricing/
+- `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64` - Advanced no-relay/air-gapped customer-owned GitHub App (`@mention` identity, direct `webhook serve`, and `slug[bot]` commits). Relay-backed workspaces use `GITHUB_TOKEN` locally and the central DevIntern AI App for events. See https://devintern.com/pricing/
 - `BITBUCKET_TOKEN` - Bitbucket auth
+- `PR_LABELS` - Optional comma-separated labels applied to created PRs (GitHub only). Set per repo in workspace.toml (`pr_labels`) for fleet mode
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)
 - `AGENT_SANDBOX` - OS-level sandbox for spawned agent processes: `none` (default), `auto`, `native`, `nono`, `srt`, `docker`, or `smolvm`; overridden per-run by the `--sandbox <name>` CLI flag. Run `devintern sandbox` for a doctor report (detected providers, setup steps, what `auto` would pick)
@@ -75,7 +78,7 @@ Tracker-specific sections are supported. The tool resolves configuration based o
 
 Legacy top-level `projects` is still honored as a Jira fallback for backward compatibility.
 
-Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
+Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state, addressed PR feedback) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
 
 ## Key Implementation Details
 
@@ -88,3 +91,13 @@ Everything under the output directory is a write-only debug artifact. Durable st
   - Branch scoping is also a safety property: the base path `/tmp/devintern-review-worktree` is what project test suites target, so a PR whose own tests call `prepareReviewWorktree` (e.g. devintern reviewing its own PRs) can never delete the worktree the review is running in
   - Automatically cleans up stale worktree registrations from old paths (e.g., `.devintern-code/review-worktree/`)
 - **Dependency installation**: Auto-detects package managers (bun/pnpm/npm/poetry/etc.) when preparing worktrees
+
+## Testing: state database isolation
+
+Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state, addressed PR feedback). Three layers enforce this:
+
+1. `tests/run-tests.ts` (the `bun run test` entry) sets `WEBHOOK_QUEUE_DB` to a temp path before launching `bun test`, so even subprocesses spawned without an explicit env option inherit a safe value.
+2. `tests/setup/guard-queue-db.ts` (bunfig preload) re-pins `WEBHOOK_QUEUE_DB` to a unique mkdtemp db per test-file process, covering every default-resolution code path (`new RunStore()`, `new WorkerState()`, `resolveQueueDbPath()`), and removes it at exit. Bun children that thread `{ ...process.env }` inherit the pin; children without an explicit env option get the start environment, which layer 1 pinned.
+3. The same preload hashes every `.devintern-code/queue.db` reachable by the ancestor walk from cwd and fails the suite if one is created, deleted, or mutated.
+
+When adding tests, keep following the per-test pattern in `webhook-queue.test.ts` / `worker-state.test.ts`: create a unique `mkdtempSync` directory under `os.tmpdir()`, pass an explicit `dbPath` / set `WEBHOOK_QUEUE_DB`, and clean up in `afterEach`. `AutomationStateStore` has no default path and requires an explicit argument by design. See `tests/state-db-isolation.test.ts` for the contract these guarantees make.

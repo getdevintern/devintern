@@ -15,6 +15,8 @@
  * `processed_events` dedupe keeps the two from double-running work.
  */
 
+import { captureError } from "@devintern/utils";
+
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
@@ -32,12 +34,17 @@ export interface RelayEnvelope {
 }
 
 export interface RelayHandlers {
-  /** Review submitted on one of the agent's own PRs → address it. */
-  addressPr(repo: string, prNumber: number): Promise<void>;
+  /**
+   * Review submitted on one of the agent's own PRs → address it.
+   * @returns Whether the run completed; `false` means it failed or matched
+   *          no workspace repo (never silently swallowed by the caller).
+   *          `"deferred"` means every harness is usage-limited.
+   */
+  addressPr(repo: string, prNumber: number): Promise<boolean | "deferred">;
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
-  /** Tracker task changed → re-evaluate the user's query and run if ready. */
-  evaluateTask(taskKey: string): Promise<void>;
+  /** Tracker task changed → re-evaluate the matching team/default source. */
+  evaluateTask(taskKey: string, trackerSource: string): Promise<void>;
 }
 
 export interface RelayAcquirerOptions {
@@ -52,6 +59,8 @@ export interface RelayAcquirerOptions {
   /** Injected for tests. */
   fetchImpl?: typeof fetch;
   verbose?: boolean;
+  /** Records successful long polls so fallback acquirers can yield to relay. */
+  onPollSuccess?: () => void;
 }
 
 /** Dedupe source for relayed envelopes. */
@@ -141,6 +150,7 @@ export class RelayAcquirer implements Acquirer {
     }
 
     const body = (await response.json()) as { events: RelayEnvelope[]; cursor: number };
+    this.options.onPollSuccess?.();
     for (const envelope of body.events) {
       await this.dispatch(envelope);
       // Advance per envelope so a crash never re-delivers handled work
@@ -177,7 +187,18 @@ export class RelayAcquirer implements Acquirer {
             return;
           }
           console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
-          await handlers.addressPr(repo, pr);
+          const ok = await handlers.addressPr(repo, pr);
+          if (ok === "deferred") {
+            console.log(
+              `⏳ [relay] ${repo}#${pr} deferred; will retry when a harness is available`,
+            );
+          } else {
+            console.log(
+              ok
+                ? `✅ [relay] ${repo}#${pr} feedback addressed`
+                : `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly`,
+            );
+          }
           return;
         }
         case "pr.comment_created": {
@@ -192,7 +213,7 @@ export class RelayAcquirer implements Acquirer {
         }
         case "task.changed": {
           if (envelope.ref.task) {
-            await handlers.evaluateTask(envelope.ref.task);
+            await handlers.evaluateTask(envelope.ref.task, envelope.source);
           }
           return;
         }
@@ -202,6 +223,14 @@ export class RelayAcquirer implements Acquirer {
           }
       }
     } catch (error) {
+      captureError(error, {
+        acquirer: this.name,
+        eventType: envelope.eventType,
+        externalId,
+        repo: envelope.repo,
+        prNumber: envelope.ref.pr,
+        stage: "dispatch",
+      });
       console.warn(
         `⚠️  [relay] handler failed for ${envelope.eventType} (${externalId}): ${(error as Error).message}`,
       );

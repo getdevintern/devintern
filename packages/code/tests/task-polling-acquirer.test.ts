@@ -4,10 +4,11 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/change-detector";
-import { TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
+import { processedTaskId, TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
 import type { ReadyTask } from "../src/lib/task-polling-acquirer";
+import type { PickupGate } from "../src/lib/schedule";
+import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/worker-state";
 import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -109,6 +110,7 @@ describe("TaskPollingAcquirer", () => {
     tasks: ReadyTask[];
     executed: string[];
     executeResult?: boolean;
+    gate?: PickupGate;
   }) {
     let call = 0;
     const seenCursors: (string | null)[] = [];
@@ -116,6 +118,7 @@ describe("TaskPollingAcquirer", () => {
       trackerType: "markdown",
       query: "status=todo",
       intervalSeconds: 60,
+      gate: options.gate,
       detector: {
         source: "markdown",
         async changesSince(cursor) {
@@ -136,6 +139,35 @@ describe("TaskPollingAcquirer", () => {
     });
     return { acquirer, seenCursors };
   }
+
+  test("reads task_query dynamically and stays dormant while it is absent", async () => {
+    let query: string | undefined;
+    const seenQueries: string[] = [];
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: () => query,
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        async changesSince() {
+          return { changed: true, nextCursor: "1" };
+        },
+      },
+      workerState,
+      queue,
+      searchTasks: async (activeQuery) => {
+        seenQueries.push(activeQuery);
+        return { tasks: [] };
+      },
+      executeTask: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(seenQueries).toEqual([]);
+    query = "status=ready";
+    await acquirer.tick();
+    expect(seenQueries).toEqual(["status=ready"]);
+  });
 
   test("executes query matches when a change is detected", async () => {
     const executed: string[] = [];
@@ -216,6 +248,51 @@ describe("TaskPollingAcquirer", () => {
     expect(executed).toEqual(["TASK-1"]);
   });
 
+  test("a deferred task retries while completed tasks stay deduped", async () => {
+    const executed: string[] = [];
+    const seenCursors: (string | null)[] = [];
+    let deferredOnce = false;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        async changesSince(cursor) {
+          seenCursors.push(cursor);
+          return { changed: true, nextCursor: "100" };
+        },
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({
+        tasks: [
+          { key: "TASK-1", updated: "a" },
+          { key: "TASK-2", updated: "b" },
+        ],
+      }),
+      executeTask: async (key) => {
+        executed.push(key);
+        if (key === "TASK-2" && !deferredOnce) {
+          deferredOnce = true;
+          return "deferred";
+        }
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(workerState.getCursor("markdown")).toBeNull();
+    expect(queue.hasProcessed("markdown", "task:TASK-1:a")).toBe(true);
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(false);
+
+    await acquirer.tick();
+    expect(executed).toEqual(["TASK-1", "TASK-2", "TASK-2"]);
+    expect(seenCursors).toEqual([null, null]);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
+    expect(queue.hasProcessed("markdown", "task:TASK-2:b")).toBe(true);
+  });
+
   test("resumes from the persisted cursor", async () => {
     workerState.setCursor("markdown", "42");
     const executed: string[] = [];
@@ -227,6 +304,88 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick();
     expect(seenCursors).toEqual(["42"]);
+  });
+
+  test("processedTaskId is empty-stamp when updated is missing", () => {
+    expect(processedTaskId({ key: "DEV-87" })).toBe("task:DEV-87:");
+    expect(processedTaskId({ key: "DEV-87", updated: "  " })).toBe("task:DEV-87:");
+    expect(processedTaskId({ key: "DEV-87", updated: "2026-08-25T18:14:06.827+0700" })).toBe(
+      "task:DEV-87:2026-08-25T18:14:06.827+0700",
+    );
+  });
+
+  test("logs when every matching task is skipped as already processed", async () => {
+    const executed: string[] = [];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [
+        { changed: true, nextCursor: "100" },
+        { changed: true, nextCursor: "200" },
+      ],
+      tasks: [{ key: "DEV-87", updated: "a" }],
+      executed,
+    });
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+      logs.length = 0;
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(executed).toEqual(["DEV-87"]);
+    expect(
+      logs.some((line) => line.includes("skipping DEV-87") && line.includes("already processed")),
+    ).toBe(true);
+  });
+
+  test("a later stamp retriggers after an empty-stamp claim", async () => {
+    const executed: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "DEV-87" }];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [
+        { changed: true, nextCursor: "100" },
+        { changed: true, nextCursor: "200" },
+      ],
+      tasks,
+      executed,
+    });
+
+    await acquirer.tick();
+    tasks[0] = { key: "DEV-87", updated: "2026-08-25T18:14:06.827+0700" };
+    await acquirer.tick();
+    expect(executed).toEqual(["DEV-87", "DEV-87"]);
+  });
+
+  test("warns when a matching task has no update stamp", async () => {
+    const executed: string[] = [];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [{ changed: true, nextCursor: "100" }],
+      tasks: [{ key: "DEV-87" }],
+      executed,
+    });
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await acquirer.tick();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(executed).toEqual(["DEV-87"]);
+    expect(
+      warnings.some(
+        (line) =>
+          line.includes("DEV-87") &&
+          line.includes("no update stamp") &&
+          line.includes("will not retrigger"),
+      ),
+    ).toBe(true);
   });
 
   test("a detector error is contained and does not advance the cursor", async () => {
@@ -249,5 +408,143 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick(); // must not throw
     expect(workerState.getCursor("markdown")?.cursorValue).toBe("42");
+  });
+
+  describe("working-window gating", () => {
+    function stubGate(overrides: Partial<PickupGate> = {}): PickupGate {
+      return {
+        enabled: true,
+        pickupAllowed: () => false, // closed by default
+        consumeManualPickup: () => false,
+        shouldCatchUpOnStart: () => false,
+        snapshot: () => {
+          throw new Error("unused in acquirer tests");
+        },
+        onChange: () => {},
+        ...overrides,
+      };
+    }
+
+    test("a closed gate skips detection, evaluation, and execution entirely", async () => {
+      const executed: string[] = [];
+      const { acquirer, seenCursors } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate(),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+      expect(seenCursors).toEqual([]); // no detection while gated out
+      expect(workerState.getCursor("markdown")).toBeNull();
+    });
+
+    test("a manual run-now request opens the gate for exactly one tick", async () => {
+      const executed: string[] = [];
+      let pendingManual = false;
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          consumeManualPickup: () => {
+            const had = pendingManual;
+            pendingManual = false;
+            return had;
+          },
+        }),
+      });
+      // Simulate `devintern worker run-now`: the sentinel appears before tick 1.
+      pendingManual = true;
+
+      await acquirer.tick();
+      expect(executed).toEqual(["TASK-1"]);
+      expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
+
+      await acquirer.tick(); // request already consumed; window still closed
+      expect(executed).toEqual(["TASK-1"]);
+    });
+
+    test("a run-now consumption failure does not bypass a closed window", async () => {
+      const executed: string[] = [];
+      const { acquirer, seenCursors } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          consumeManualPickup: () => {
+            throw new Error("marker could not be removed");
+          },
+        }),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+      expect(seenCursors).toEqual([]);
+    });
+
+    test("an executed drain records its timestamp for catch-up bookkeeping", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [],
+        executed,
+      });
+
+      expect(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY)).toBeNull();
+      await acquirer.tick();
+      expect(Number(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY))).toBeGreaterThan(0);
+    });
+
+    test("gated-out ticks do not refresh the drain timestamp", async () => {
+      const executed: string[] = [];
+      workerState.setMeta(TASK_POLL_LAST_DRAIN_KEY, String(Date.parse("2026-06-15T00:00:00Z")));
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [],
+        executed,
+        gate: stubGate(),
+      });
+
+      await acquirer.tick();
+      expect(workerState.getMeta(TASK_POLL_LAST_DRAIN_KEY)).toBe(
+        String(Date.parse("2026-06-15T00:00:00Z")),
+      );
+    });
+
+    test("start() performs one bypassing catch-up drain when the gate says a window was missed", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-9", updated: "z" }],
+        executed,
+        gate: stubGate({ shouldCatchUpOnStart: () => true }),
+      });
+
+      await acquirer.start();
+      acquirer.stop();
+      expect(executed).toEqual(["TASK-9"]);
+    });
+
+    test("a broken gate cannot break polling", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        gate: stubGate({
+          pickupAllowed: () => {
+            throw new Error("clock exploded");
+          },
+        }),
+      });
+
+      await acquirer.tick(); // failure degrades to open (fail-safe) + warn
+      expect(executed).toEqual(["TASK-1"]);
+    });
   });
 });

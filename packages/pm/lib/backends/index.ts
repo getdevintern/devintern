@@ -3,6 +3,7 @@ import type { Config } from "../config";
 import { AsanaBackend } from "./asana";
 import { AzureDevOpsBackend } from "./azure-devops";
 import { GitHubBackend } from "./github";
+import { GitLabBackend } from "./gitlab";
 import { JiraBackend } from "./jira";
 import { LinearBackend } from "./linear";
 import { MarkdownBackend } from "./markdown";
@@ -17,7 +18,7 @@ export type { TaskBackend, CreatedTask, ProjectInfo, LabelRef, LabelListResult }
  * @param config - Loaded application configuration.
  * @param baseDir - Base directory for resolving relative paths like the
  *   markdown tasks directory (defaults to cwd; desktop hosts pass the project dir).
- * @returns Backend instance for Jira, Linear, Trello, Azure DevOps, Asana, GitHub, or Markdown.
+ * @returns Backend instance for Jira, Linear, Trello, Azure DevOps, Asana, GitHub, GitLab, or Markdown.
  * @throws When the backend type is unknown or required backend config is missing.
  */
 export async function createBackend(config: Config, baseDir?: string): Promise<TaskBackend> {
@@ -83,6 +84,17 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
       backend = new GitHubBackend(config.github);
       break;
     }
+    case "gitlab": {
+      if (!config.gitlab) {
+        throw new Error(
+          "GitLab backend selected but GitLab configuration is missing. " +
+            "Please set GITLAB_TOKEN and GITLAB_PROJECT (group/repo); " +
+            "GITLAB_BASE_URL is optional and defaults to https://gitlab.com.",
+        );
+      }
+      backend = new GitLabBackend(config.gitlab);
+      break;
+    }
     case "markdown": {
       backend = new MarkdownBackend({
         directory: resolve(
@@ -95,7 +107,7 @@ export async function createBackend(config: Config, baseDir?: string): Promise<T
     default:
       throw new Error(
         `Unknown backend type: ${(config.backend as { type: string }).type}. ` +
-          `Supported: jira, linear, trello, azure-devops, asana, github, markdown`,
+          `Supported: jira, linear, trello, azure-devops, asana, github, gitlab, markdown`,
       );
   }
 

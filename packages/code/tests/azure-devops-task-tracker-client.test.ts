@@ -4,6 +4,7 @@ import {
   parseAzureDevOpsWorkItemReference,
 } from "../src/lib/trackers/azure-devops/azure-devops-task-tracker-client";
 import type { AzureDevOpsClient, AzureDevOpsWorkItemDetail } from "@devintern/task-trackers";
+import { formatProcessingFailureMarkdown } from "../src/lib/trackers/shared/markdown-comment-formatter";
 
 function makeWorkItem(
   overrides: Partial<AzureDevOpsWorkItemDetail> = {},
@@ -69,6 +70,62 @@ describe("AzureDevOpsTaskTrackerClient.getTask", () => {
     expect(task.labels).toEqual(["bug", "login"]);
     expect(task.renderedDescription).toContain("<p>");
     expect(task.description).toContain("Steps with");
+  });
+});
+
+describe("AzureDevOpsTaskTrackerClient.searchTasks", () => {
+  test("maps System.ChangedDate so the worker can dedupe by stamp", async () => {
+    const adapter = makeAdapter({
+      queryWorkItems: async () => ({
+        workItems: [
+          {
+            id: 4211,
+            url: "https://dev.azure.com/myorg/MyProject/_workitems/edit/4211",
+            title: "Fix login bug",
+            changedDate: "2026-01-02T00:00:00Z",
+          },
+        ],
+        total: 1,
+      }),
+    });
+
+    const result = await adapter.searchTasks("SELECT [System.Id] FROM WorkItems");
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]?.key).toBe("4211");
+    expect(result.tasks[0]?.updated).toBe("2026-01-02T00:00:00Z");
+  });
+});
+
+describe("AzureDevOpsTaskTrackerClient comments", () => {
+  test("incomplete comment includes retry pickup instructions", async () => {
+    let html = "";
+    const adapter = makeAdapter({
+      addComment: async (_id: number, text: string) => {
+        html = text;
+        return 1;
+      },
+    });
+
+    await adapter.postIncompleteImplementationComment("4211", "Partial work", "Fix login bug");
+    expect(html).toContain("To retry this task");
+    expect(html).toContain("post a comment");
+  });
+
+  test("generic failure comment includes retry pickup instructions", async () => {
+    let html = "";
+    const adapter = makeAdapter({
+      addComment: async (_id: number, text: string) => {
+        html = text;
+        return 1;
+      },
+    });
+
+    await adapter.postComment("4211", {
+      format: "markdown",
+      body: formatProcessingFailureMarkdown("4211", "Agent exited with code 1"),
+    });
+    expect(html).toContain("To retry this task");
+    expect(html).toContain("post a comment");
   });
 });
 

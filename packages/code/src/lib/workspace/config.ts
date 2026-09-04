@@ -1,24 +1,82 @@
 import { readFileSync } from "fs";
 
-import { supportsPolling, trackersSupportingPolling } from "../tracker-capabilities";
+import {
+  supportsEstimate,
+  supportsPolling,
+  trackersSupportingEstimate,
+  trackersSupportingPolling,
+} from "../tracker-capabilities";
+import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
+import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
+import { parseWorkerScheduleSection } from "../schedule";
+import type { WorkerScheduleConfig } from "../schedule";
+import { parseEstimationEntries } from "../estimation-config";
+import type { EstimationConfig } from "../estimation-config";
 import { parseToml } from "./toml";
+
+/** When automatic conflict resolution on the agent's PRs runs. */
+export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
 
 /** Workspace-wide settings from the `[workspace]` table. */
 export interface WorkspaceSettings {
   /** Days before a leftover (failed-run) task worktree is swept. */
   worktreesTtlDays: number;
+  /** Serve the local observability dashboard from the worker process. */
+  dashboard: boolean;
+  /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
+  dashboardPort?: number;
+  /**
+   * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
+   * they are detected; `scheduled` queues them during polling and resolves
+   * them in the configured window (see {@link WorkspaceSettings.conflictSchedule});
+   * `disabled` turns automatic conflict resolution off entirely — conflicts
+   * stay for manual resolution (`devintern resolve-conflicts <pr-url>`).
+   */
+  conflictResolution: ConflictResolutionMode;
+  /**
+   * Cron-or-interval window for scheduled conflict resolution (same format
+   * as `[[automations]]` schedules). Set only when `conflictResolution` is
+   * `"scheduled"`.
+   */
+  conflictSchedule?: CronOrIntervalSchedule;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
 export interface WorkspaceDefaults {
   /** Tracker driving the fleet query (must support polling). */
   tracker: string;
-  /** Tracker query the worker polls with (`WORKER_TASK_QUERY` equivalent). */
+  /** Tracker query the worker polls with. */
   taskQuery?: string;
-  /** Extra per-task CLI flags (`WORKER_TASK_ARGS` equivalent). */
+  /** Extra per-task CLI flags (default `--create-pr`). */
   workerTaskArgs?: string;
   /** Fallback default branch for repos that do not set one. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for repos that do not override them. */
+  prLabels?: string[];
+  /** Seconds between tracker poll ticks. */
+  pollIntervalSeconds: number;
+}
+
+/**
+ * One team's tracker source from a `[[teams]]` entry.
+ *
+ * Teams let one fleet worker poll several boards/trackers (even several
+ * boards of the same tracker type), each with its own credentials, query,
+ * and cursor. Omitting `[[teams]]` keeps the single `[defaults]` behavior.
+ */
+export interface TeamConfig {
+  /** Unique team name; namespaces cursors, dedupe, and skips (`jira:platform`). */
+  name: string;
+  /** Tracker driving this team's query (must support polling). */
+  tracker: string;
+  /** Tracker query the worker polls with for this team. */
+  taskQuery?: string;
+  /** Fixed destination repo. Omit when this team routes across several repos. */
+  repo?: string;
+  /** Optional env file with this team's credentials, relative to the workspace directory. */
+  envFile?: string;
+  /** Inline env overrides (highest precedence within the team). */
+  env: Record<string, string>;
 }
 
 /** One managed repository from a `[[repos]]` entry. */
@@ -29,16 +87,50 @@ export interface RepoConfig {
   remote: string;
   /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
   defaultBranch?: string;
+  /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
+  prLabels?: string[];
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
 }
 
+/** Provider-neutral base configuration for one error-monitoring project. */
+export interface ErrorMonitorConfigBase {
+  /** Stable source name; namespaces dedupe and worker logs. */
+  id: string;
+  /** Adapter discriminator. */
+  provider: string;
+  enabled: boolean;
+  /** Repository where fixes for this monitoring project are implemented. */
+  repo: string;
+  /** Optional owning team, used for credentials and task execution context. */
+  team?: string;
+  query?: string;
+  intervalSeconds: number;
+  minOccurrences: number;
+  maxIssuesPerTick: number;
+  envFile?: string;
+  env: Record<string, string>;
+}
+
+/** Sentry-specific source settings layered on the provider-neutral base. */
+export interface SentryErrorMonitorConfig extends ErrorMonitorConfigBase {
+  provider: "sentry";
+  organization: string;
+  project: string;
+  baseUrl?: string;
+}
+
+/** Discriminated union extended by each supported monitoring adapter. */
+export type ErrorMonitorConfig = SentryErrorMonitorConfig;
+
 /** One routing rule from a `[[routing.rules]]` entry. Set criteria are AND-ed; list values match any-of. */
 export interface RoutingRule {
   /** Name of the repo tasks matching this rule route to. */
   repo: string;
+  /** Restrict the rule to tasks acquired by this team (multi-team workspaces). */
+  team?: string;
   /** Tracker project key (e.g. Jira key prefix, Linear team key). */
   project?: string;
   /** Task must carry at least one of these components. */
@@ -47,15 +139,34 @@ export interface RoutingRule {
   labels: string[];
 }
 
+/** Worker-scoped settings from the `[worker]` table. */
+export interface WorkerSettings {
+  /**
+   * Working windows (quiet hours) gating new-task pickup; null when the
+   * `[worker.schedule]` table is absent or empty (pickup unrestricted).
+   */
+  schedule: WorkerScheduleConfig | null;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  worker: WorkerSettings;
   defaults: WorkspaceDefaults;
+  /** Team tracker sources; empty means the single `[defaults]` fleet query. */
+  teams: TeamConfig[];
   repos: RepoConfig[];
+  /** Error-monitoring projects, each explicitly mapped to a repo. */
+  errorMonitors: ErrorMonitorConfig[];
   routing: RoutingRule[];
+  automations: AutomationConfig[];
+  estimations: EstimationConfig[];
 }
 
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
+export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
+export const DEFAULT_DASHBOARD = true;
+export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -124,6 +235,45 @@ function readStringList(
   return (value as string[]).map((item) => item.trim());
 }
 
+function readOptionalBoolean(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+): boolean | undefined {
+  const value = table[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    errors.push(`${label}.${key} must be a boolean.`);
+    return undefined;
+  }
+  return value;
+}
+
+function readOptionalInteger(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+  bounds: { min: number; max?: number; message: string },
+): number | undefined {
+  const value = table[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < bounds.min) {
+    errors.push(bounds.message);
+    return undefined;
+  }
+  if (bounds.max !== undefined && value > bounds.max) {
+    errors.push(bounds.message);
+    return undefined;
+  }
+  return value;
+}
+
 function readEnvTable(
   table: Record<string, unknown>,
   label: string,
@@ -167,22 +317,109 @@ export function parseWorkspaceConfig(
   const errors: string[] = [];
 
   const workspaceTable = asTable(document.workspace, "[workspace]", errors);
-  const ttlValue = workspaceTable.worktrees_ttl_days;
-  let worktreesTtlDays = DEFAULT_WORKTREES_TTL_DAYS;
-  if (ttlValue !== undefined && ttlValue !== null) {
-    if (typeof ttlValue !== "number" || !Number.isInteger(ttlValue) || ttlValue < 1) {
-      errors.push("[workspace].worktrees_ttl_days must be a positive integer.");
-    } else {
-      worktreesTtlDays = ttlValue;
+  const worktreesTtlDays =
+    readOptionalInteger(workspaceTable, "worktrees_ttl_days", "[workspace]", errors, {
+      min: 1,
+      message: "[workspace].worktrees_ttl_days must be a positive integer.",
+    }) ?? DEFAULT_WORKTREES_TTL_DAYS;
+  const dashboard =
+    readOptionalBoolean(workspaceTable, "dashboard", "[workspace]", errors) ?? DEFAULT_DASHBOARD;
+  const dashboardPort = readOptionalInteger(
+    workspaceTable,
+    "dashboard_port",
+    "[workspace]",
+    errors,
+    {
+      min: 1,
+      max: 65535,
+      message: "[workspace].dashboard_port must be an integer between 1 and 65535.",
+    },
+  );
+
+  const conflictResolutionRaw = readString(
+    workspaceTable,
+    "conflict_resolution",
+    "[workspace]",
+    errors,
+  );
+  let conflictResolution = DEFAULT_CONFLICT_RESOLUTION;
+  let conflictSchedule: CronOrIntervalSchedule | undefined;
+  if (conflictResolutionRaw === "scheduled") {
+    conflictResolution = "scheduled";
+    conflictSchedule = parseCronOrIntervalSchedule(
+      workspaceTable,
+      {
+        label: "[workspace]",
+        cronKey: "conflict_resolution_cron",
+        intervalKey: "conflict_resolution_interval",
+      },
+      errors,
+    );
+  } else if (conflictResolutionRaw === "disabled") {
+    conflictResolution = "disabled";
+  } else if (conflictResolutionRaw && conflictResolutionRaw !== "auto") {
+    errors.push(`[workspace].conflict_resolution must be "auto", "scheduled", or "disabled".`);
+  }
+  if (conflictResolutionRaw !== "scheduled") {
+    for (const key of ["conflict_resolution_cron", "conflict_resolution_interval"] as const) {
+      if (workspaceTable[key] !== undefined) {
+        errors.push(`[workspace].${key} is only used when conflict_resolution = "scheduled".`);
+      }
     }
   }
 
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
+  const errorMonitorTables = asTableArray(document.error_monitors, "[[error_monitors]]", errors);
+
+  const teams: TeamConfig[] = [];
+  const teamNames = new Set<string>();
+  for (const [index, table] of asTableArray(document.teams, "[[teams]]", errors).entries()) {
+    const label = `[[teams]][${index}]`;
+    const name = readString(table, "name", label, errors);
+    if (!name) {
+      errors.push(`${label}.name is required.`);
+    } else if (!REPO_NAME_PATTERN.test(name)) {
+      errors.push(
+        `${label}.name "${name}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (teamNames.has(name.toLowerCase())) {
+      errors.push(`Duplicate team name "${name}". Team names must be unique.`);
+    } else {
+      teamNames.add(name.toLowerCase());
+    }
+    const teamTracker = readString(table, "tracker", label, errors);
+    if (teamTracker && !supportsPolling(teamTracker)) {
+      errors.push(
+        `${label}.tracker "${teamTracker}" does not support polling. ` +
+          `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+      );
+    }
+    teams.push({
+      name: name ?? "",
+      tracker: teamTracker ?? "",
+      taskQuery: readString(table, "task_query", label, errors),
+      repo: readString(table, "repo", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
+  // brings its own (a [defaults].tracker alongside teams is still honored
+  // for any team that omits one).
+  if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
+    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+  }
   if (tracker && !supportsPolling(tracker)) {
     errors.push(
       `[defaults].tracker "${tracker}" does not support polling. ` +
         `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+    );
+  }
+  if (defaultsTable.estimate_query !== undefined) {
+    errors.push(
+      "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
     );
   }
   const defaults: WorkspaceDefaults = {
@@ -190,9 +427,34 @@ export function parseWorkspaceConfig(
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
+    prLabels:
+      defaultsTable.pr_labels === undefined
+        ? undefined
+        : readStringList(defaultsTable, "pr_labels", "[defaults]", errors),
+    pollIntervalSeconds:
+      readOptionalInteger(defaultsTable, "poll_interval", "[defaults]", errors, {
+        min: 1,
+        message: "[defaults].poll_interval must be a positive integer (seconds).",
+      }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
   };
-  if (!tracker) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+
+  for (const team of teams) {
+    if (!team.tracker) {
+      team.tracker = defaults.tracker;
+    }
+    if (!team.tracker && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a tracker: set its own tracker or [defaults].tracker.`,
+      );
+    }
+    if (!team.taskQuery) {
+      team.taskQuery = defaults.taskQuery;
+    }
+    if (!team.taskQuery && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a task_query: set its own or [defaults].task_query.`,
+      );
+    }
   }
 
   const repos: RepoConfig[] = [];
@@ -222,6 +484,83 @@ export function parseWorkspaceConfig(
       name,
       remote,
       defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      prLabels:
+        table.pr_labels === undefined
+          ? defaults.prLabels
+          : readStringList(table, "pr_labels", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  for (const team of teams) {
+    if (team.repo && !repoNames.has(team.repo)) {
+      errors.push(
+        `[[teams]] "${team.name}".repo "${team.repo}" does not match any [[repos]] name.`,
+      );
+    }
+  }
+
+  const errorMonitors: ErrorMonitorConfig[] = [];
+  const errorMonitorIds = new Set<string>();
+  for (const [index, table] of errorMonitorTables.entries()) {
+    const label = `[[error_monitors]][${index}]`;
+    const id = readString(table, "id", label, errors);
+    const provider = readString(table, "provider", label, errors);
+    const requestedRepo = readString(table, "repo", label, errors);
+    const repo = requestedRepo ?? (repos.length === 1 ? repos[0]?.name : undefined);
+    const team = readString(table, "team", label, errors);
+    const organization = readString(table, "organization", label, errors);
+    const project = readString(table, "project", label, errors);
+
+    if (!id) {
+      errors.push(`${label}.id is required.`);
+    } else if (!REPO_NAME_PATTERN.test(id)) {
+      errors.push(
+        `${label}.id "${id}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (errorMonitorIds.has(id.toLowerCase())) {
+      errors.push(`Duplicate error monitor id "${id}". IDs must be unique.`);
+    } else {
+      errorMonitorIds.add(id.toLowerCase());
+    }
+    if (provider !== "sentry") errors.push(`${label}.provider must be "sentry".`);
+    if (!repo) {
+      errors.push(`${label}.repo is required in a workspace with multiple repositories.`);
+    } else if (!repoNames.has(repo)) {
+      errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
+    }
+    if (team && !teamNames.has(team.toLowerCase())) {
+      errors.push(`${label}.team "${team}" does not match any [[teams]] name.`);
+    }
+    if (!organization) errors.push(`${label}.organization is required for Sentry.`);
+    if (!project) errors.push(`${label}.project is required for Sentry.`);
+
+    errorMonitors.push({
+      id: id ?? "",
+      provider: "sentry",
+      enabled: readOptionalBoolean(table, "enabled", label, errors) ?? true,
+      repo: repo ?? "",
+      team,
+      organization: organization ?? "",
+      project: project ?? "",
+      baseUrl: readString(table, "base_url", label, errors),
+      query: readString(table, "query", label, errors),
+      intervalSeconds:
+        readOptionalInteger(table, "poll_interval", label, errors, {
+          min: 1,
+          message: `${label}.poll_interval must be a positive integer (seconds).`,
+        }) ?? defaults.pollIntervalSeconds,
+      minOccurrences:
+        readOptionalInteger(table, "min_occurrences", label, errors, {
+          min: 1,
+          message: `${label}.min_occurrences must be a positive integer.`,
+        }) ?? 5,
+      maxIssuesPerTick:
+        readOptionalInteger(table, "max_per_tick", label, errors, {
+          min: 1,
+          message: `${label}.max_per_tick must be a positive integer.`,
+        }) ?? 3,
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -243,8 +582,17 @@ export function parseWorkspaceConfig(
     if (!repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
+    const team = readString(table, "team", label, errors);
+    if (team && !teamNames.has(team.toLowerCase())) {
+      errors.push(
+        teamNames.size > 0
+          ? `${label}.team "${team}" does not match any [[teams]] name.`
+          : `${label}.team "${team}" is set but no [[teams]] are configured.`,
+      );
+    }
     const rule: RoutingRule = {
       repo,
+      team,
       project: readString(table, "project", label, errors),
       components: readStringList(table, "components", label, errors),
       labels: readStringList(table, "labels", label, errors),
@@ -255,11 +603,68 @@ export function parseWorkspaceConfig(
     routing.push(rule);
   }
 
+  for (const team of teams) {
+    if (team.repo && routing.some((rule) => rule.team?.toLowerCase() === team.name.toLowerCase())) {
+      errors.push(
+        `[[teams]] "${team.name}" sets repo and cannot also have team-scoped routing rules. ` +
+          "Remove repo when the team spans multiple repositories.",
+      );
+    }
+    if (
+      !team.repo &&
+      repos.length > 1 &&
+      !routing.some((rule) => !rule.team || rule.team.toLowerCase() === team.name.toLowerCase())
+    ) {
+      errors.push(
+        `[[teams]] "${team.name}" spans a multi-repo workspace but has no applicable routing rules. ` +
+          "Set repo for a fixed destination or add [[routing.rules]].",
+      );
+    }
+  }
+
+  const automationResult = parseAutomationEntries(document.automations, {
+    sourceLabel,
+    repoNames,
+  });
+  errors.push(...automationResult.errors);
+
+  const workerTable = asTable(document.worker, "[worker]", errors);
+  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
+  errors.push(...schedule.errors);
+
+  const estimationResult = parseEstimationEntries(document.estimations);
+  errors.push(...estimationResult.errors);
+  // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
+  // with estimate support can serve them; fail the job at startup otherwise.
+  if (estimationResult.estimations.length > 0 && !tracker) {
+    errors.push(
+      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace.",
+    );
+  } else if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
+    for (const estimation of estimationResult.estimations) {
+      errors.push(
+        `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
+          `(supported: ${trackersSupportingEstimate().join(", ")}); ` +
+          `[defaults].tracker "${tracker}" does not.`,
+      );
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
-  return { workspace: { worktreesTtlDays }, defaults, repos, routing };
+  return {
+    workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
+    worker: { schedule: schedule.config },
+    defaults,
+    teams,
+    repos,
+    errorMonitors,
+    routing,
+    automations: automationResult.automations,
+    estimations: estimationResult.estimations,
+  };
 }
 
 /**
@@ -276,7 +681,7 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
   } catch (error) {
     throw new Error(
       `Cannot read workspace config at ${path}: ${error instanceof Error ? error.message : String(error)}\n` +
-        "Run `devintern workspace init` to create one.",
+        "Run `devintern worker scaffold` to create one.",
     );
   }
   return parseWorkspaceConfig(text, path);
@@ -289,4 +694,13 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
  */
 export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | undefined {
   return config.repos.find((repo) => repo.name === name);
+}
+
+/**
+ * Look up a team by name.
+ *
+ * @returns The matching {@link TeamConfig}, or undefined.
+ */
+export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
+  return config.teams.find((team) => team.name === name);
 }

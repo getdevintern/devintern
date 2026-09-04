@@ -1,63 +1,62 @@
 ---
-title: "Observability Dashboard"
-description: "A local web dashboard for worker run history: per-task timelines, stage-by-stage outcomes, and aggregate stats"
-section: "Server Automation"
+title: "Worker Dashboard"
+sidebarLabel: "Dashboard"
+description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
+section: "Automation"
 order: 2
-dateModified: 2026-07-03
+sidebarHidden: true
+dateModified: 2026-09-01
 ---
 
-# Observability Dashboard
+# Worker Dashboard
 
-`devintern dashboard` serves a local web dashboard over the worker's run history: every task and PR mention the worker handled, the stages each run went through (feasibility, implementation, self-review, change requests, outcome), and aggregate stats like success rate and runs per week.
+The dashboard answers a simple question: **what has the worker been doing?** It gives you a local view of current and past runs without making you read terminal output or inspect the worker database.
 
-All data is read from the worker's local database (`.devintern-code/queue.db`). Nothing is uploaded anywhere: the dashboard runs on your machine and binds to localhost by default.
+It starts automatically with `devintern worker`. Open [http://localhost:4400](http://localhost:4400) on the machine running the worker.
 
-## Quick Start
+## What you can do
+
+- See whether the worker is running, waiting for its next working window, or processing a task
+- Follow each run from task pickup through implementation and pull request creation
+- Open the task or pull request behind a run
+- Understand why a run failed and retry it after fixing the cause
+- Run a recurring automation immediately instead of waiting for its next scheduled time
+- Review recent worker logs when something needs attention
+
+The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
+
+## Retry a failed run
+
+Open the failed run and choose **Retry**. The worker queues a fresh attempt using the same task and workspace routing rules.
+
+Retry after correcting the underlying problem, for example missing credentials, unclear task details, or a temporary agent failure. The dashboard prevents duplicate retries while another attempt is already queued or running.
+
+## Run an automation now
+
+Open **Automations**, find the automation, and choose **Run now**. The worker runs it through the same pipeline as a scheduled occurrence, including its normal repository, environment, and overlap protection.
+
+This is useful for testing a new automation prompt or running routine work early.
+
+## View the dashboard without the worker
+
+You can inspect existing run history even when the worker is stopped:
 
 ```bash
-# Standalone: works whether or not the worker is running
 devintern dashboard
-
-# Or serve it alongside the worker daemon
-devintern worker --query "status=todo" --ui
 ```
 
-Then open http://localhost:4400.
+The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied.
 
-The standalone command reads the database in read-only mode, so it is safe to run next to a live worker, and it still works after the worker is stopped (for example to review last week's runs).
+## Local by design
 
-## What it shows
+The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet.
 
-- **Run list**: every run with its status, task key, origin (tracker task or PR mention), agent harness, PR link, and duration. Filter by status or origin.
-- **Run detail**: a stage-by-stage timeline for one run: the feasibility verdict, the implementation summary, each self-review iteration, each human change request and how it was handled, and the final outcome.
-- **Stats**: runs per week, success and escalation rates, median run duration, and a per-harness breakdown over a selectable window (7, 30, or 90 days, or all time).
-- **Worker status**: whether the daemon is running, queued and failed events, open agent PRs, and per-source poll cursors.
+Run history lives in the worker's workspace, alongside its other local state. The dashboard is included with the same automation license or active trial required by the worker.
 
-Success and escalation rates are computed over finished runs only. Run duration is measured from pickup to PR creation and is a proxy for ticket-to-PR time. Merge rate is not shown yet: the worker records PRs as open or closed but does not track merges separately.
+To disable the dashboard or change its port, edit the workspace settings:
 
-## Options
-
-| Option          | Description                                           |
-| --------------- | ----------------------------------------------------- |
-| `--port <port>` | Port to listen on (default: 4400 or `DASHBOARD_PORT`) |
-| `--host <host>` | Host to bind to (default: 127.0.0.1)                  |
-
-The dashboard has no authentication. It binds to localhost by default; binding to another host means anyone who can reach that address can read your run history, so keep it on your own machine or behind something that handles access for you.
-
-With `devintern worker --ui`, use `--ui-port` to change the dashboard port (the worker's own `--port` belongs to the webhook listener).
-
-## JSON API
-
-The dashboard is backed by a small read-only JSON API you can use directly, for example from scripts:
-
-| Endpoint                    | Returns                                                               |
-| --------------------------- | --------------------------------------------------------------------- |
-| `GET /api/runs`             | Paginated run list (`limit`, `offset`, `status`, `origin`, `taskKey`) |
-| `GET /api/runs/:id`         | One run with its stage timeline                                       |
-| `GET /api/stats?window=30d` | Aggregate stats (`7d`, `30d`, `90d`, or `all`)                        |
-| `GET /api/worker`           | Worker liveness, queue counts, agent PRs, poll cursors                |
-| `GET /api/health`           | Health check                                                          |
-
-## License
-
-The dashboard is part of the automation tier and requires an automation license (solo supporter, team subscription, or legacy server addon) or an active trial, the same requirement the worker has.
+```toml
+[workspace]
+dashboard = false
+# dashboard_port = 4400
+```

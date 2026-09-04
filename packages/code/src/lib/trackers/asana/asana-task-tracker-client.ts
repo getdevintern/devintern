@@ -29,7 +29,7 @@ import {
   formatImplementationCommentMarkdown,
   formatIncompleteImplementationCommentMarkdown,
   isDevInternCommentText,
-  isIncompleteImplementationCommentText,
+  isAutomationFailureCommentText,
 } from "../shared/markdown-comment-formatter";
 import type {
   ClarityAssessmentLike,
@@ -281,9 +281,7 @@ export class AsanaTaskTrackerClient implements TaskTrackerClient {
   async hasIncompleteImplementationMarker(taskKey: string): Promise<boolean> {
     try {
       const stories = await this.asanaClient.getStories(this.toTaskGid(taskKey));
-      return stories.some((s) =>
-        isIncompleteImplementationCommentText(s.text || s.html_text || ""),
-      );
+      return stories.some((s) => isAutomationFailureCommentText(s.text || s.html_text || ""));
     } catch (error) {
       console.warn(`Failed to check for duplicate comments: ${error}`);
       return false;

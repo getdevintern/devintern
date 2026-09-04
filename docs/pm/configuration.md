@@ -2,7 +2,7 @@
 title: "@devintern/pm Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
-section: "PM"
+section: "Create Tasks"
 order: 2
 dateModified: 2026-08-08
 ---
@@ -15,7 +15,7 @@ dateModified: 2026-08-08
 
 Set `TASK_TRACKER` to choose your PM tool. Defaults to `jira` if not specified.
 
-Supported backends: `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `markdown`
+Supported backends: `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, `markdown`
 
 ```bash
 TASK_TRACKER=jira
@@ -160,7 +160,20 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
-**Qwen note:** Qwen Code has no `--model` flag; pick the model in `~/.qwen/settings.json`.
+**Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
+
+### Model selection
+
+Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-pm/.env`:
+
+```bash
+# .devintern-pm/.env
+AGENT_MODEL=sonnet
+```
+
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). For a single run, override it with `--model <model>`; the flag wins over the environment. A few harnesses have no model flag and ignore the setting.
+
+In the DevIntern PM desktop app, set the same override per project from **Settings → Agent model**; it persists to `.devintern-pm/.env` (same file the CLI reads) and applies to new agent runs immediately.
 
 **Advanced spawn tuning** (rarely needed):
 
@@ -196,6 +209,24 @@ When set to `1` or `true`, every API request, response status, and retry attempt
 
 Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
 
+## Error Reporting
+
+The CLI and the DevIntern PM desktop app report errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
+
+- Crashes and unhandled errors in the CLI and the desktop app's main process
+- Failed desktop-app operations: agent runs (generate/edit/decompose stories, create tasks) and other IPC operations, with the failing channel as context
+- Renderer errors: uncaught window errors, unhandled promise rejections, and React crashes (reported with a component stack)
+
+What is **never** reported: prompts, ticket text, project paths, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent.
+
+To opt out:
+
+```bash
+SENTRY_DISABLED=1
+```
+
+Set this in your shell environment or in `.devintern-pm/.env`. In the desktop app, you can also disable **Settings → Anonymous analytics**: that toggle gates both usage analytics and error reporting (forwarded renderer errors included), and can be changed while the app is running.
+
 ## CLI Updates
 
 On startup, a globally installed `devpm` checks the npm registry (at most once per day) for a newer `@getdevintern/pm` version.
@@ -208,6 +239,16 @@ On startup, a globally installed `devpm` checks the npm registry (at most once p
 | Opt-in auto-install (including non-interactive) | `DEVPM_AUTO_UPDATE=1` (or `DEVINTERN_AUTO_UPDATE=1`)                                                    |
 
 Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
+
+To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
+
+```bash
+npm install -g @getdevintern/pm@latest
+# or
+bun install -g @getdevintern/pm@latest
+```
+
+Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
 
 ## Troubleshooting
 
@@ -234,3 +275,9 @@ Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and
 - Check `AGENT_HARNESS` spelling (use kebab-case, e.g. `claude-code`, `grok`, `deepseek`)
 - The error lists every valid harness name; pick one from that list
 - Ensure the matching CLI is installed and on your `PATH`, or set `AGENT_CLI_PATH` / `<HARNESS>_CLI_PATH`
+
+**"Failed to parse story from agent output" / "malformed output"**
+
+- devpm automatically repairs common agent-output drift (markdown fences, narration, comments, trailing commas, unquoted keys, stray quotes) and re-runs the agent once with a strict-JSON reminder when repair isn't possible
+- If parsing still fails, the full agent output is saved to `/tmp/devpm-<step>-<timestamp>.log` — check the log to see what came back, then retry
+- Persistent failures usually mean the harness/model emits non-canonical JSON around long descriptions; switching harness (or pinning a different model) resolves it

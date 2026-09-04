@@ -3,7 +3,8 @@
  *
  * Resolution order for harness name:
  *   1. `options.harnessName`
- *   2. `AGENT_HARNESS` environment variable
+ *   2. `AGENT_HARNESS` environment variable (a comma-separated list uses its
+ *      first entry — see `resolveHarnessChain` for full-chain resolution)
  *   3. Default to "claude-code" (backward compatible)
  *
  * Resolution order for executable path:
@@ -17,7 +18,7 @@
 import { execSync } from "child_process";
 import { accessSync, constants, existsSync } from "fs";
 import { resolve } from "path";
-import { getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
+import { DEFAULT_HARNESS_NAME, getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import type { AgentHarness, ResolvedHarness } from "./types.js";
 
 export interface HarnessResolutionOptions {
@@ -41,6 +42,10 @@ export interface HarnessResolutionOptions {
  * Resolve which harness to use and the CLI executable path to invoke.
  *
  * Harness name: `options.harnessName` → `AGENT_HARNESS` → `"claude-code"`.
+ * A comma-separated `AGENT_HARNESS` (e.g. `claude-code,codex`) names a
+ * failover chain; this resolver always picks the first (priority) entry so
+ * one-shot flows keep behaving as a single-harness run — worker-mode failover
+ * across the rest of the chain lives in {@link resolveHarnessChain}.
  * Aliases (e.g. `agy` / deprecated `gemini` → `antigravity`) are applied before
  * registry lookup; deprecated aliases emit a one-line console warning.
  *
@@ -65,10 +70,16 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   const explicitHarnessName = options?.harnessName;
   let harnessName = explicitHarnessName;
   if (!harnessName) {
-    harnessName = env.AGENT_HARNESS;
+    // AGENT_HARNESS may name a comma-separated failover chain; env-driven
+    // (non-explicit) resolution always uses the first (priority) entry, kept
+    // raw so alias/deprecation warnings still fire for the requested name.
+    const firstEntry = env.AGENT_HARNESS?.split(",")[0]?.trim();
+    if (firstEntry) {
+      harnessName = firstEntry;
+    }
   }
   if (!harnessName) {
-    harnessName = "claude-code";
+    harnessName = DEFAULT_HARNESS_NAME;
   }
 
   const alias = HARNESS_ALIASES[harnessName];

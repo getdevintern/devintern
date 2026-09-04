@@ -4,7 +4,8 @@ sidebarLabel: "GitHub Issues Integration"
 description: "Fetch GitHub issues, track status labels, implement with your coding agent, and open the PR in the same repository."
 section: "Code"
 order: 5
-dateModified: 2026-08-17
+sidebarHidden: true
+dateModified: 2026-09-01
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
@@ -12,7 +13,7 @@ tags: ["github", "github-issues", "devintern/code", "integration"]
 
 @devintern/code can implement work directly from GitHub Issues: fetch issue details and comments, run a feasibility check, move status labels, execute your AI agent, commit changes, open a pull request in the same repository, and post results back on the issue.
 
-Looking for webhook-based PR review automation? See the [GitHub webhook server guide](./github-integration.md).
+Looking for unattended PR review automation? Use the [worker](./worker.md) (polling plus the [relay](./relay.md)). Direct GitHub webhooks are an advanced path: [GitHub Integration](./github-integration.md).
 
 ## Prerequisites
 
@@ -39,7 +40,7 @@ GITHUB_REPO=owner/repo
 
 The same `GITHUB_TOKEN` used for pull request creation works here. It needs the `repo` scope (classic token) or `Issues: Read and write` plus `Pull requests: Read and write` (fine-grained token). `GITHUB_REPO` is the repository whose issues you want to implement, in `owner/repo` form.
 
-GitHub App credentials (`GITHUB_APP_ID` + private key) cannot substitute for this tracker. The Issues client only accepts `GITHUB_TOKEN`. Use a token for personal / interactive CLI use; add the App for team / unattended automation (`@mention` matching, `slug[bot]` commits). See [Configuration](./configuration.md#github-authentication) and [Pricing](https://devintern.com/pricing/).
+GitHub App credentials (`GITHUB_APP_ID` + private key) cannot substitute for this tracker. The Issues client only accepts `GITHUB_TOKEN`. Standard relay-backed workspaces use that token locally and the central DevIntern AI App for events. Customer-owned App credentials are only for advanced no-relay installations. See [Configuration](./configuration.md#github-authentication).
 
 ### 3. Configure status labels
 

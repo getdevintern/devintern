@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 export interface FindEnvFileOptions {
   /** Optional config directory name to check first (e.g. '.devintern-code', '.devintern-pm') */
@@ -23,8 +23,21 @@ function walkUpDirectories(options: WalkUpOptions, onDir: (currentDir: string) =
 
   let currentDir = resolve(startDir);
   const homeDir = process.env.HOME ? resolve(process.env.HOME) : null;
+  const gitCeilings = new Set(
+    (process.env.GIT_CEILING_DIRECTORIES ?? "")
+      .split(delimiter)
+      .filter(Boolean)
+      .map((directory) => resolve(directory)),
+  );
 
   while (true) {
+    // Match Git discovery semantics: a ceiling directory itself is not
+    // inspected. This also prevents sandbox-injected ancestor markers (for
+    // example `/tmp/.git`) from capturing isolated fixtures below the ceiling.
+    if (gitCeilings.has(currentDir)) {
+      break;
+    }
+
     if (onDir(currentDir)) {
       return;
     }
@@ -114,4 +127,23 @@ export function findConfigDir(
  */
 export function resolveConfigDir(options: FindEnvFileOptions & { configDirName: string }): string {
   return findConfigDir(options) ?? join(options.startDir ?? process.cwd(), options.configDirName);
+}
+
+/**
+ * Find the enclosing project root by traversing up for a `.git` entry
+ * (directory or worktree file). Falls back to the resolved start directory
+ * when no repository is found.
+ */
+export function findProjectRoot(options: FindEnvFileOptions = {}): string {
+  let found: string | null = null;
+
+  walkUpDirectories(options, (currentDir) => {
+    if (existsSync(join(currentDir, ".git"))) {
+      found = currentDir;
+      return true;
+    }
+    return false;
+  });
+
+  return found ?? resolve(options.startDir ?? process.cwd());
 }

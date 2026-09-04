@@ -13,7 +13,7 @@
 - **Agents:** Claude Code · Codex · Cursor · OpenCode · Grok Build · and others
 - **BYOK:** your model keys, billed on your existing provider contract
 
-Pair with **[`@getdevintern/code`](https://www.npmjs.com/package/@getdevintern/code)** (`devintern`) when you want those tickets implemented into self-reviewed pull requests.
+Pair with **[`@getdevintern/code`](https://www.npmjs.com/package/@getdevintern/code)** (`devintern`) when you want a self-hosted worker to route those tickets across repositories and implement them as pull requests, with optional auto-review.
 
 Chat bot (alpha): run `devpm serve` to create and refine tasks from Slack or Telegram (`devpm connect slack|telegram` to set up). This experimental feature may not work properly and can change without notice. It connects outbound (Socket Mode / long polling), so no public URL is needed.
 

@@ -1,13 +1,17 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
 import {
   generateWebhookSecret,
+  renderLaunchdPlist,
   renderSystemdUnit,
   runWorkerInit,
   upsertEnvVars,
+  workspaceGitHubRepos,
 } from "../src/lib/worker-init";
 
 describe("upsertEnvVars", () => {
@@ -46,9 +50,31 @@ describe("renderSystemdUnit", () => {
     expect(unit).toContain("Restart=on-failure");
   });
 
-  test("appends --listen when webhook mode is chosen", () => {
+  test("does not redirect stdout/stderr — the worker self-captures", () => {
+    const unit = renderSystemdUnit({
+      execPath: "/usr/local/bin/devintern",
+      projectDir: "/srv/app",
+    });
+    expect(unit).not.toContain("StandardOutput=");
+    expect(unit).not.toContain("StandardError=");
+  });
+
+  test("uses the canonical webhook command when webhook mode is chosen", () => {
     const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app", listen: true });
-    expect(unit).toContain("ExecStart=devintern worker --listen");
+    expect(unit).toContain("ExecStart=devintern webhook serve");
+  });
+});
+
+describe("renderLaunchdPlist", () => {
+  test("renders a user agent with escaped paths and restart behavior", () => {
+    const plist = renderLaunchdPlist({
+      execPath: "/Applications/Dev & Intern/devintern",
+      workingDir: "/Users/dev/Dev & Intern",
+    });
+    expect(plist).toContain("com.devintern.worker");
+    expect(plist).toContain("/Applications/Dev &amp; Intern/devintern");
+    expect(plist).toContain("<key>RunAtLoad</key>");
+    expect(plist).toContain("<key>KeepAlive</key>");
   });
 });
 
@@ -60,72 +86,92 @@ describe("generateWebhookSecret", () => {
   });
 });
 
+test("workspaceGitHubRepos registers every GitHub repo once", () => {
+  const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "https://github.com/acme/web.git"
+
+[[repos]]
+name = "mirror"
+remote = "https://git.example.com/acme/api.git"
+[repos.env]
+GITHUB_REPO = "acme/api"
+`);
+
+  expect(workspaceGitHubRepos(config)).toEqual(["acme/api", "acme/web"]);
+});
+
 describe("runWorkerInit", () => {
   let tempDir: string;
+  let workspaceDir: string;
   let logs: string[];
-  let files: Map<string, string>;
   const savedTracker = process.env.TASK_TRACKER;
+  const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-worker-init-"));
+    workspaceDir = path.join(tempDir, "workspace");
     mkdirSync(path.join(tempDir, ".devintern-code"), { recursive: true });
+    mkdirSync(workspaceDir, { recursive: true });
     writeFileSync(path.join(tempDir, ".devintern-code", ".env"), "TASK_TRACKER=markdown\n", "utf8");
+    writeFileSync(path.join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "markdown"\n');
     process.env.TASK_TRACKER = "markdown";
+    process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
     logs = [];
-    files = new Map();
   });
 
   afterEach(() => {
     if (savedTracker === undefined) delete process.env.TASK_TRACKER;
     else process.env.TASK_TRACKER = savedTracker;
+    if (savedWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+    else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspace;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
   function deps(answers: string[], overrides: Partial<Parameters<typeof runWorkerInit>[0]> = {}) {
+    const queued = [...answers, "n", "n"];
     return {
       cwd: tempDir,
       log: (m: string) => logs.push(m),
-      prompt: async () => answers.shift() ?? "",
-      readFile: () => "TASK_TRACKER=markdown\n",
-      writeFile: (p: string, content: string) => files.set(p, content),
+      prompt: async () => queued.shift() ?? "n",
+      ensureTracker: async () => "markdown",
+      bootstrapWorkspace: async () => ({ workspaceDir }),
+      // Detection is real otherwise: PRManager inspects the *runner's* cwd.
+      detectGithubRepo: async () => null,
       ...overrides,
     };
   }
 
-  test("fails when the project is not initialized", async () => {
-    const bare = mkdtempSync(path.join(tmpdir(), "devintern-worker-init-bare-"));
-    const ok = await runWorkerInit(deps([], { cwd: bare }));
-    expect(ok).toBe(false);
-    expect(logs.join("\n")).toContain("devintern init");
-    rmSync(bare, { recursive: true, force: true });
+  test("fails when tracker setup does not finish", async () => {
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => null }));
+    expect(result.ok).toBe(false);
+    expect(logs.join("\n")).toContain("Tracker setup did not finish");
   });
 
-  test("polling-only happy path writes query and interval", async () => {
-    const ok = await runWorkerInit(
-      deps(["status=todo", "", "n", "n"], { dryRunQuery: async () => 3 }),
-    );
-    expect(ok).toBe(true);
-    const env = files.get(path.join(tempDir, ".devintern-code", ".env"))!;
-    expect(env).toContain("WORKER_TASK_QUERY=status=todo");
-    expect(env).toContain("WORKER_POLL_INTERVAL=60");
-    expect(env).not.toContain("WEBHOOK_SECRET");
+  test("writes task_query to workspace.toml, not WORKER_TASK_QUERY", async () => {
+    const result = await runWorkerInit(deps(["status=todo"], { dryRunQuery: async () => 3 }));
+    expect(result.ok).toBe(true);
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.defaults.taskQuery).toBe("status=todo");
+    expect(config.defaults.tracker).toBe("markdown");
+    const env = readFileSync(path.join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).not.toContain("WORKER_TASK_QUERY");
     expect(logs.join("\n")).toContain("3 task(s) match");
-  });
-
-  test("webhook mode generates a secret and systemd unit carries --listen", async () => {
-    const ok = await runWorkerInit(deps(["status=todo", "120", "y", "y"]));
-    expect(ok).toBe(true);
-    const env = files.get(path.join(tempDir, ".devintern-code", ".env"))!;
-    expect(env).toMatch(/WEBHOOK_SECRET=[0-9a-f]{64}/);
-    expect(env).toContain("WORKER_POLL_INTERVAL=120");
-    const unit = files.get(path.join(tempDir, ".devintern-code", "devintern-worker.service"))!;
-    expect(unit).toContain("--listen");
+    expect(logs.join("\n")).not.toContain("webhook listener");
   });
 
   test("failing dry run offers a retry then accepts the corrected query", async () => {
     let calls = 0;
-    const ok = await runWorkerInit(
-      deps(["bad query", "y", "status=todo", "", "n", "n"], {
+    const result = await runWorkerInit(
+      deps(["bad query", "y", "status=todo"], {
         dryRunQuery: async (q) => {
           calls++;
           if (q === "bad query") throw new Error("syntax error");
@@ -133,27 +179,183 @@ describe("runWorkerInit", () => {
         },
       }),
     );
-    expect(ok).toBe(true);
+    expect(result.ok).toBe(true);
     expect(calls).toBe(2);
-    const env = files.get(path.join(tempDir, ".devintern-code", ".env"))!;
-    expect(env).toContain("WORKER_TASK_QUERY=status=todo");
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.defaults.taskQuery).toBe("status=todo");
   });
 
   test("license failure is reported but does not abort setup", async () => {
-    const ok = await runWorkerInit(
-      deps(["status=todo", "", "n", "n"], {
+    const result = await runWorkerInit(
+      deps(["status=todo"], {
         checkAutomationLicense: async () => "No automation license found.",
       }),
     );
-    expect(ok).toBe(true);
+    expect(result.ok).toBe(true);
     expect(logs.join("\n")).toContain("No automation license found.");
     expect(logs.join("\n")).toContain("devintern.com/pricing");
   });
 
   test("refuses trackers without polling support", async () => {
-    process.env.TASK_TRACKER = "not-a-tracker";
-    const ok = await runWorkerInit(deps([]));
-    expect(ok).toBe(false);
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => "not-a-tracker" }));
+    expect(result.ok).toBe(false);
     expect(logs.join("\n")).toContain("does not support worker polling");
+  });
+
+  test("connects signed-in users and stores relay state in the workspace", async () => {
+    const calls: Array<{ workspaceDir: string; trackerType: string }> = [];
+    const result = await runWorkerInit(
+      deps(["status=todo", "", "n"], {
+        getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+        connectRelay: async ({ workspaceDir: dir, trackerType }) => {
+          calls.push({ workspaceDir: dir, trackerType });
+          return true;
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([{ workspaceDir, trackerType: "markdown" }]);
+    expect(logs.join("\n")).toContain("Relay pairing stored");
+  });
+
+  describe("GitHub App step", () => {
+    const relayDeps = {
+      getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+      connectRelay: async () => true,
+    };
+    const savedAppEnv = {
+      appId: process.env.GITHUB_APP_ID,
+      keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+      keyBase64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
+    };
+
+    beforeEach(() => {
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+    });
+
+    afterEach(() => {
+      if (savedAppEnv.appId === undefined) delete process.env.GITHUB_APP_ID;
+      else process.env.GITHUB_APP_ID = savedAppEnv.appId;
+      if (savedAppEnv.keyPath === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppEnv.keyPath;
+      if (savedAppEnv.keyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+      else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppEnv.keyBase64;
+    });
+
+    test("skips silently when no GitHub remote is detected", async () => {
+      const result = await runWorkerInit(deps(["status=todo", "n"]));
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("No GitHub remote detected; skipping the GitHub App step");
+      expect(loadGitHubAppRecord(workspaceDir)).toBeNull();
+    });
+
+    test("an unverified repository points to the relay pairing command", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("No verified GitHub App pairing was recorded");
+      expect(all).toContain("devintern worker connect github");
+      expect(all).toContain("GitHub App events are not enabled:");
+      expect(loadGitHubAppRecord(workspaceDir)).toBeNull();
+    });
+
+    test("does not trust a legacy press-Enter marker without verified GitHub ids", async () => {
+      saveGitHubAppRecord({ repo: "acme/web", enabled: true }, workspaceDir);
+      const result = await runWorkerInit(
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("No verified GitHub App pairing was recorded");
+    });
+
+    test("recognizes a verified relay pairing without another confirmation prompt", async () => {
+      saveGitHubAppRecord(
+        {
+          repo: "acme/web",
+          enabled: true,
+          connectedAt: "2026-08-01T00:00:00.000Z",
+          installationId: 7001,
+          repositoryId: 9001,
+        },
+        workspaceDir,
+      );
+      const result = await runWorkerInit(
+        deps(["status=todo", "", "n"], {
+          ...relayDeps,
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("GitHub App already verified for acme/web");
+      expect(logs.join("\n")).not.toContain("GitHub App events are not enabled:");
+    });
+
+    test("custom App credentials are recognized only on the no-relay path", async () => {
+      process.env.GITHUB_APP_ID = "123456";
+      process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/key.pem";
+      const result = await runWorkerInit(
+        deps(["status=todo", "n", "n"], {
+          detectGithubRepo: async () => "acme/web",
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("advanced no-relay mode");
+      expect(logs.join("\n")).toContain(
+        "Customer-owned GitHub App credentials found in the environment",
+      );
+    });
+  });
+
+  test("writes a Linux user service definition", async () => {
+    const files = new Map<string, string>();
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", ""], {
+        platform: "linux",
+        execPath: "/usr/local/bin/devintern",
+        writeFile: (file, content) => files.set(file, content),
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const unit = files.get(path.join(workspaceDir, "devintern-worker.service"));
+    expect(unit).toContain("WorkingDirectory=" + workspaceDir);
+    expect(unit).toContain("ExecStart=/usr/local/bin/devintern worker");
+  });
+
+  test("writes a macOS launchd agent", async () => {
+    const files = new Map<string, string>();
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", ""], {
+        platform: "darwin",
+        execPath: "/usr/local/bin/devintern",
+        writeFile: (file, content) => files.set(file, content),
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const plist = files.get(path.join(workspaceDir, "com.devintern.worker.plist"));
+    expect(plist).toContain("<string>/usr/local/bin/devintern</string>");
+    expect(plist).toContain(`<string>${workspaceDir}</string>`);
+  });
+
+  test("finds tracker config from a repository subdirectory", async () => {
+    mkdirSync(path.join(tempDir, ".git"));
+    const subdir = path.join(tempDir, "packages", "app");
+    mkdirSync(subdir, { recursive: true });
+    const result = await runWorkerInit(
+      deps(["status=todo"], {
+        cwd: subdir,
+        ensureTracker: undefined,
+      }),
+    );
+    expect(result.ok).toBe(true);
   });
 });

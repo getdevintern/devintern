@@ -100,6 +100,8 @@ function renderCallbackHtml(title: string, body: string, isError: boolean): stri
 export interface AuthCallbackServer {
   /** Redirect URL to pass to Supabase OAuth / magic-link options. */
   redirectTo: string;
+  /** Bound localhost TCP port (useful for SSH LocalForward instructions). */
+  port: number;
   /**
    * Wait for the authorization code from the browser callback.
    *
@@ -125,14 +127,25 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
+/** Options for {@link createAuthCallbackServer}. */
+export interface CreateAuthCallbackServerOptions {
+  /**
+   * Local TCP port to bind. Defaults to an ephemeral port (`0`).
+   * Use a fixed port for SSH LocalForward when signing in over SSH/mosh.
+   */
+  port?: number;
+}
+
 /**
  * Local HTTP server that receives the Supabase PKCE callback (`?code=...`).
  *
- * Resolves once the server is listening on an ephemeral localhost port.
+ * Resolves once the server is listening on localhost (ephemeral or fixed port).
  *
  * @returns Callback server with redirect URL, code waiter, and shutdown hook.
  */
-export async function createAuthCallbackServer(): Promise<AuthCallbackServer> {
+export async function createAuthCallbackServer(
+  options: CreateAuthCallbackServerOptions = {},
+): Promise<AuthCallbackServer> {
   let codePromiseResolve: ((code: string) => void) | null = null;
   let codePromiseReject: ((reason?: unknown) => void) | null = null;
   let stopPromise: Promise<void> | null = null;
@@ -175,9 +188,10 @@ export async function createAuthCallbackServer(): Promise<AuthCallbackServer> {
     sendHtml(res, 200, renderCallbackHtml("Authentication successful", "Login completed.", false));
   });
 
+  const listenPort = options.port ?? 0;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
+    server.listen(listenPort, "127.0.0.1", () => resolve());
   });
 
   const address = server.address();
@@ -188,6 +202,7 @@ export async function createAuthCallbackServer(): Promise<AuthCallbackServer> {
 
   return {
     redirectTo,
+    port: address.port,
     waitForCode(timeoutMs = CALLBACK_TIMEOUT_MS) {
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
@@ -222,3 +237,9 @@ export async function createAuthCallbackServer(): Promise<AuthCallbackServer> {
 export const AUTH_CALLBACK_TIMEOUT_MS = CALLBACK_TIMEOUT_MS;
 /** Magic-link callback wait time (10 minutes). */
 export const EMAIL_AUTH_CALLBACK_TIMEOUT_MS = EMAIL_CALLBACK_TIMEOUT_MS;
+/**
+ * Stable localhost port used for CLI auth when signing in over SSH/mosh
+ * (so a laptop can LocalForward before opening the browser).
+ * Override with `DEVINTERN_AUTH_CALLBACK_PORT`.
+ */
+export const DEFAULT_REMOTE_AUTH_CALLBACK_PORT = 17865;

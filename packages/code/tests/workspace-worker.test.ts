@@ -5,11 +5,23 @@ import { tmpdir } from "os";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
-import { createWorkspaceTaskAcquirer, fleetTaskArgs } from "../src/lib/workspace/workspace-worker";
+import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
+import {
+  buildFleetEventAcquirers,
+  createFleetTaskExecutor,
+  createWorkspaceTaskAcquirer,
+  fleetTaskArgs,
+  resolveWorkspaceAutomationContext,
+  startWorktreeSweeper,
+  sweepAllWorktrees,
+} from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
+import { RunCoordinator } from "../src/lib/run-coordinator";
+import { toRoutableTask } from "../src/lib/workspace/router";
+import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -28,6 +40,20 @@ remote = "git@github.com:acme/frontend.git"
 [[routing.rules]]
 repo = "backend"
 labels = ["backend"]
+
+[[routing.rules]]
+repo = "frontend"
+labels = ["frontend"]
+`);
+
+const FRONTEND_ONLY_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
 
 [[routing.rules]]
 repo = "frontend"
@@ -142,6 +168,7 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(ran[0].cwd).toContain(join("worktrees", "backend"));
     expect(ran[0].env.GITHUB_REPO).toBe("acme/backend");
     expect(ran[0].env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(ran[0].env.DEVINTERN_RUN_ORIGIN).toBe("worker");
 
     // Successful run: worktree removed.
     expect(existsSync(ran[0].cwd)).toBe(false);
@@ -217,10 +244,384 @@ describe("createWorkspaceTaskAcquirer", () => {
     const after = createRepoRunLock("backend", workspaceDir).acquire();
     expect(after.success).toBe(true);
   });
+
+  test("a task deferred by a busy repo retries on the next poll", async () => {
+    tasks = [{ key: "T-6", updated: "u1", labels: ["backend"] }];
+    const heldLock = createRepoRunLock("backend", workspaceDir);
+    expect(heldLock.acquire().success).toBe(true);
+    const acquirer = makeAcquirer();
+
+    await acquirer.tick();
+    expect(ran).toHaveLength(0);
+    expect(state.workerState.getCursor("markdown")).toBeNull();
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(false);
+
+    heldLock.release();
+    await acquirer.tick();
+    expect(ran.map((run) => run.taskKey)).toEqual(["T-6"]);
+    expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
+    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
+  });
+});
+
+describe("createFleetTaskExecutor serialization", () => {
+  let workspaceDir: string;
+  let state: WorkspaceState;
+  let repoManager: FakeRepoManager;
+
+  beforeEach(() => {
+    workspaceDir = join(tmpdir(), `ws-coord-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+    repoManager = new FakeRepoManager(workspaceDir);
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("with a coordinator, task runs wait for held agent slots (account-global limits)", async () => {
+    const coordinator = new RunCoordinator();
+    let agentStarted = false;
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => {
+        agentStarted = true;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return true;
+      },
+      repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      coordinator,
+    });
+
+    // A scheduled estimation sweep holds the process-level slot first.
+    const releaseEstimation = await coordinator.acquire();
+    const routable = toRoutableTask({ key: "T-C1", labels: ["backend"], components: [] });
+    const running = executor("T-C1", routable);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Repo preparation may proceed, but no agent process starts while the
+    // estimation sweep holds the account-global slot.
+    expect(agentStarted).toBe(false);
+    expect(repoManager.calls).toContain("worktree:backend:T-C1");
+
+    releaseEstimation();
+    await running;
+    expect(agentStarted).toBe(true);
+  });
+
+  test("without a coordinator, runs start immediately (unchanged legacy behavior)", async () => {
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => true,
+      repoLock: (name) => createRepoRunLock(name, workspaceDir),
+    });
+    const routable = toRoutableTask({ key: "T-C2", labels: ["backend"], components: [] });
+    const result = await executor("T-C2", routable);
+    expect(result).toBe(true);
+    expect(repoManager.calls).toContain("worktree:backend:T-C2");
+  });
+
+  test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async () => true,
+        repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      },
+      { repo: "frontend", extraArgs: ["--force"] },
+    );
+    const result = await executor(
+      "T-RETRY",
+      toRoutableTask({ key: "T-RETRY", labels: [], components: [] }),
+    );
+    expect(result).toBe(true);
+    expect(repoManager.calls).toContain("worktree:frontend:T-RETRY");
+  });
 });
 
 describe("fleetTaskArgs", () => {
-  test("workspace defaults win over the env default", () => {
+  test("uses worker_task_args from the workspace config", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
+  });
+  test("defaults to --create-pr when worker_task_args is omitted", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+`);
+    expect(fleetTaskArgs(config)).toEqual(["--create-pr"]);
+  });
+});
+
+describe("buildFleetEventAcquirers", () => {
+  test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-relay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    const state = openWorkspaceState(workspaceDir);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const savedToken = process.env.GITHUB_TOKEN;
+    const savedAppId = process.env.GITHUB_APP_ID;
+    const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+    const savedAuthMode = process.env.DEVINTERN_GITHUB_AUTH_MODE;
+    const savedAliases = process.env.GITHUB_BOT_ALIASES;
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_APP_ID = "123456";
+    process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/custom-app.pem";
+    saveRelayState(
+      {
+        relayUrl: "https://relay.test",
+        customerId: "customer-1",
+        connectedAt: new Date(0).toISOString(),
+        registrations: [
+          { kind: "repo", key: "acme/backend", createdAt: Date.now(), lastEventAt: null },
+        ],
+        relayToken: "drt_test",
+      },
+      workspaceDir,
+    );
+
+    try {
+      const acquirers = await buildFleetEventAcquirers({
+        config: CONFIG,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: async () => ({ tasks: [] }),
+        query: "status=todo",
+        intervalSeconds: 60,
+      });
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["relay"]);
+      expect(process.env.DEVINTERN_GITHUB_AUTH_MODE).toBe("token-only");
+      expect(process.env.GITHUB_BOT_ALIASES?.split(",")).toContain("devintern-ai");
+    } finally {
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+      if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+      else process.env.GITHUB_APP_ID = savedAppId;
+      if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
+      if (savedAuthMode === undefined) delete process.env.DEVINTERN_GITHUB_AUTH_MODE;
+      else process.env.DEVINTERN_GITHUB_AUTH_MODE = savedAuthMode;
+      if (savedAliases === undefined) delete process.env.GITHUB_BOT_ALIASES;
+      else process.env.GITHUB_BOT_ALIASES = savedAliases;
+      state.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reconciles mention sweeps when repos are added or removed while running", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-sweep-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    const state = openWorkspaceState(workspaceDir);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const savedToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "test-token";
+
+    // No GitHub remotes yet: review poller idles, zero mention sweeps.
+    const nonGithub = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/gitlab.git"
+
+[[repos]]
+name = "forgejo"
+remote = "https://forgejo.example/acme/forgejo.git"
+`);
+
+    // Block all network access: reconciliation starts new sweeps eagerly,
+    // and their initial poll must not reach api.github.com in tests.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as unknown as typeof fetch;
+
+    try {
+      const intervalUpdaters: Array<(seconds: number) => void> = [];
+      const hooksOut: {
+        hooks?: import("../src/lib/workspace/workspace-worker").FleetEventReloadHooks;
+      } = {};
+      const acquirers = await buildFleetEventAcquirers({
+        config: nonGithub,
+        workspaceDir,
+        state,
+        repoManager,
+        searchTasks: async () => ({ tasks: [] }),
+        query: "status=todo",
+        intervalSeconds: 60,
+        intervalUpdaters,
+        reloadHooksOut: hooksOut,
+      });
+
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["poll:reviews"]);
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
+
+      // Live reload adds two GitHub repos; reconciling attaches their sweeps
+      // without a restart.
+      applyWorkspaceConfig(nonGithub, CONFIG);
+      hooksOut.hooks?.reconcileMentionSweeps();
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual(["acme/backend", "acme/frontend"]);
+      expect(intervalUpdaters.length).toBeGreaterThanOrEqual(2);
+
+      // Removing a repo stops its sweep on the next reload.
+      applyWorkspaceConfig(nonGithub, FRONTEND_ONLY_CONFIG);
+      hooksOut.hooks?.reconcileMentionSweeps();
+      expect(hooksOut.hooks?.mentionSweepRepos()).toEqual(["acme/frontend"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+      state.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveWorkspaceAutomationContext", () => {
+  test("does not prepare the repository when its run lock is unavailable", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+      () => ({
+        acquire: () => ({ success: false, message: "busy" }),
+        release() {},
+      }),
+    );
+
+    expect(context).toBeNull();
+    expect(repoManager.calls).toEqual([]);
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("pins occurrence task files to the workspace home", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.taskFileDir).toBe(join(workspaceDir, "automations"));
+    expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+});
+
+describe("worktree sweeping", () => {
+  const REPOS: RepoConfig[] = [
+    { name: "backend", remote: "https://github.com/acme/backend.git", env: {} },
+    { name: "frontend", remote: "https://github.com/acme/frontend.git", env: {} },
+  ];
+
+  function fakeSweeper(removedPerRepo: Record<string, string[]>) {
+    const swept: Array<{ repo: string; ttlDays: number }> = [];
+    return {
+      swept,
+      repoManager: {
+        sweepStaleWorktrees: async (repoName: string, ttlDays: number) => {
+          swept.push({ repo: repoName, ttlDays });
+          return removedPerRepo[repoName] ?? [];
+        },
+      } as unknown as RepoManagerLike,
+    };
+  }
+
+  test("sweepAllWorktrees sweeps every repo and counts removals", async () => {
+    const { swept, repoManager } = fakeSweeper({ backend: ["/tmp/wt-a", "/tmp/wt-b"] });
+
+    const removed = await sweepAllWorktrees(REPOS, repoManager, 7);
+
+    expect(removed).toBe(2);
+    expect(swept).toEqual([
+      { repo: "backend", ttlDays: 7 },
+      { repo: "frontend", ttlDays: 7 },
+    ]);
+  });
+
+  test("startWorktreeSweeper sweeps periodically until cleared", async () => {
+    const { swept, repoManager } = fakeSweeper({});
+
+    const timer = startWorktreeSweeper(REPOS, repoManager, 7, 10);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(swept.length).toBeGreaterThanOrEqual(REPOS.length);
+      expect(swept.every((entry) => entry.ttlDays === 7)).toBe(true);
+    } finally {
+      clearInterval(timer);
+    }
+
+    const countAfterClear = swept.length;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(swept.length).toBe(countAfterClear);
+  });
+
+  test("startWorktreeSweeper reads live repos and TTL on every pass", async () => {
+    const { swept, repoManager } = fakeSweeper({});
+    let repos = [REPOS[0]!];
+    let ttlDays = 7;
+    const timer = startWorktreeSweeper(
+      () => repos,
+      repoManager,
+      () => ttlDays,
+      10,
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      repos = [REPOS[1]!];
+      ttlDays = 3;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(swept).toContainEqual({ repo: "backend", ttlDays: 7 });
+      expect(swept).toContainEqual({ repo: "frontend", ttlDays: 3 });
+    } finally {
+      clearInterval(timer);
+    }
   });
 });

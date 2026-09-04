@@ -5,9 +5,16 @@
  */
 
 import { existsSync } from "fs";
-import { spawnAgent, reapTree, resolveExecutablePathWithRetry } from "@devintern/agent-harness";
+import {
+  detectUsageLimit,
+  spawnAgent,
+  reapTree,
+  resolveExecutablePathWithRetry,
+  UsageLimitError,
+} from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
+import { resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { Utils } from "./utils";
 import { resolveOutputDir } from "./output-dir";
@@ -194,7 +201,7 @@ export async function runAgentHarnessToFixGitHook(
     displayName: harness.displayName,
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     (async () => {
       console.log(`\n🔧 Attempting to fix git hook errors with ${harness.displayName}...`);
 
@@ -253,11 +260,13 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimited = false;
 
       const agentArgs = buildHeadlessAgentArgs(harness, fixPrompt, {
         maxTurns,
         skipPermissions: true,
         workingDir,
+        model: resolveAgentModel(),
       });
 
       // Spawn agent process to fix the issues. The executable path was already
@@ -270,6 +279,14 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         spawnOptions: { stdio: HEADLESS_AGENT_STDIO, cwd: workingDir },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimited) return;
+        if (detectUsageLimit(stdoutOutput, stderrOutput).limited) {
+          usageLimited = true;
+          reapTree(agent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -293,6 +310,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         agent.stdout.on("data", (data: Buffer) => {
           const output = data.toString();
           stdoutOutput += output;
+          stopOnUsageLimit();
           process.stdout.write(output);
         });
       }
@@ -302,6 +320,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         agent.stderr.on("data", (data: Buffer) => {
           const output = data.toString();
           stderrOutput += output;
+          stopOnUsageLimit();
           process.stderr.write(output);
         });
       }
@@ -320,6 +339,11 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
             `❌ ${harness.displayName} timed out after ${timeoutMinutes} minutes while fixing git hook`,
           );
           resolve(false);
+          return;
+        }
+        if (usageLimited) {
+          const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {
@@ -400,6 +424,10 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         }
       });
     })().catch((error) => {
+      if (error instanceof UsageLimitError) {
+        reject(error);
+        return;
+      }
       console.error(
         `❌ Failed to run ${harness.displayName} for git hook fix: ${error instanceof Error ? error.message : String(error)}`,
       );

@@ -1,15 +1,24 @@
 ---
 title: "@devintern/pm Usage Guide"
-sidebarLabel: "Usage"
+sidebarLabel: "Using DevIntern PM"
 description: "Interactive drafting, source inputs, and posting flows for @devintern/pm."
-section: "PM"
+section: "Create Tasks"
 order: 3
-dateModified: 2026-08-12
+dateModified: 2026-08-23
 ---
 
 # @devintern/pm Usage Guide
 
 [DevIntern PM](https://devintern.com/pm-desktop/) is the primary way to create and review tickets. This guide covers the CLI for terminal workflows and automation.
+
+## Quick Capture (Desktop)
+
+DevIntern PM Desktop can register an OS-level global shortcut so you can turn fleeting context into ticket drafts without switching apps:
+
+- Enable it in **Settings → Quick Capture**. The default binding is `Cmd+Alt+Q` on macOS and `Ctrl+Alt+Q` on Windows/Linux, and you can record any combination.
+- Invoking the shortcut focuses (or launches) the app and opens a **new** ticket workspace as the active tab — open tickets and running agents keep working in the background.
+- If the clipboard holds useful text, it is prefilled and the source tab is inferred automatically (Figma URL → **Figma**, stack-trace-like text → **Error log**, anything else → **Prompt**). An empty clipboard opens an empty Prompt field with the cursor ready.
+- If no project is configured yet, capturing just brings the app forward so you can finish setup first. If the shortcut is already taken by another app, Settings shows how to change the binding.
 
 ## Interactive Mode (Recommended)
 
@@ -65,14 +74,14 @@ devpm --prompt <text> [options]
 
 ### Additional Options
 
-- `--epic, -e <key>`: Link the created story to an epic (e.g., PROJ-100). Ignored for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, Markdown).
+- `--epic, -e <key>`: Link the created story to an epic (e.g., PROJ-100). Ignored for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, GitLab, Markdown).
 - `--type, -t <type>`: Issue type (default: "Task"). Common types: Task, Story, Bug, Epic. Only applied by backends that support issue types (Jira, Azure DevOps, GitHub, Markdown); ignored by Linear, Trello, and Asana.
 - `--custom, -c <text>`: Additional custom instructions for the requirements
 - `--attach <path>`: Attach a local file for agent context (and upload on create when the tracker supports it). Repeatable. Supported: images, text/docs, PDF (not Office binaries such as `.docx`). Max 10 files.
 - `--style, -s <type>`: Prompt style: "pm" (default) or "technical"
   - **pm**: Focuses on user stories and acceptance criteria
   - **technical**: Includes Technical Considerations section
-- `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name)
+- `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
 - `--decompose`: Decompose the story into subtasks (default: off)
 - `--confirm`: Interactively confirm each subtask before creating
 - `--verbose, -v`: Enable verbose API logging for debugging (same as setting `DEVINTERN_VERBOSE=1`)

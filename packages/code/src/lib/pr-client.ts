@@ -9,12 +9,60 @@ export interface PRInfo {
   sourceBranch: string;
   targetBranch: string;
   repository: string;
+  /** Labels to apply to the created PR (GitHub only; other platforms ignore them). */
+  labels?: string[];
+}
+
+/**
+ * Parse a comma-separated `PR_LABELS` value into label names.
+ *
+ * @param value - Raw env value, e.g. `"devintern, auto-pr"`
+ */
+export function parsePrLabels(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((label) => label.trim())
+    .filter(Boolean);
+}
+
+/** Extract the PR number from a PR html_url (`…/pull/123`). */
+function prNumberFromUrl(url: string | undefined): number | undefined {
+  const parsed = Number(url?.match(/\/pull\/(\d+)/)?.[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 export interface PRResult {
   success: boolean;
   url?: string;
   message: string;
+}
+
+/**
+ * Match PR-creation failures worth retrying: DNS/connect failures, timeouts,
+ * and other transport-level errors. Deliberately conservative so API-level
+ * validation errors (401/404/422 "Validation Failed", etc.) fail fast.
+ */
+export function isTransientPrFailure(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("typo in the url or port") ||
+    m.includes("fetch failed") ||
+    m.includes("network") ||
+    m.includes("socket hang up") ||
+    m.includes("epipe") ||
+    m.includes("econnreset") ||
+    m.includes("econnrefused") ||
+    m.includes("econnaborted") ||
+    m.includes("etimedout") ||
+    m.includes("timed out") ||
+    m.includes("timeout") ||
+    m.includes("enotfound") ||
+    m.includes("eai_again") ||
+    m.includes("unable to connect") ||
+    m.includes("unable to resolve") ||
+    m.includes("getaddrinfo")
+  );
 }
 
 export abstract class PRClient {
@@ -135,6 +183,23 @@ export class GitHubPRClient extends PRClient {
         const errorData = (await response
           .json()
           .catch(() => ({ message: "Unknown error" }))) as any;
+
+        // Idempotency: if the create request reached GitHub but the response
+        // was lost and retried, GitHub rejects the duplicate with 422. Treat a
+        // PR that already exists for this branch as success so the run can
+        // proceed to status transitions instead of leaving the ticket stuck.
+        if (response.status === 422) {
+          const existingUrl = await this.findExistingPrUrl(owner, repo, prInfo.sourceBranch);
+          if (existingUrl) {
+            await this.applyLabels(owner, repo, prNumberFromUrl(existingUrl), prInfo.labels);
+            return {
+              success: true,
+              url: existingUrl,
+              message: `Pull request already exists: ${existingUrl}`,
+            };
+          }
+        }
+
         return {
           success: false,
           message: `GitHub PR creation failed: ${errorData.message || response.statusText}`,
@@ -142,6 +207,7 @@ export class GitHubPRClient extends PRClient {
       }
 
       const data = (await response.json()) as any;
+      await this.applyLabels(owner, repo, data.number, prInfo.labels);
       return {
         success: true,
         url: data.html_url,
@@ -152,6 +218,77 @@ export class GitHubPRClient extends PRClient {
         success: false,
         message: `GitHub PR creation failed: ${(error as Error).message}`,
       };
+    }
+  }
+
+  /**
+   * Label a PR (PRs are issues in the GitHub API). Best-effort: labeling is
+   * decoration on top of a successful create, so failures warn but never
+   * fail the run.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param prNumber - PR number
+   * @param labels - Label names to apply
+   */
+  private async applyLabels(
+    owner: string,
+    repo: string,
+    prNumber: number | undefined,
+    labels?: string[],
+  ): Promise<void> {
+    if (!labels || labels.length === 0 || !prNumber) return;
+
+    try {
+      const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${prNumber}/labels`;
+      const response = await Utils.fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+          "User-Agent": "devintern",
+        },
+        body: JSON.stringify({ labels }),
+      });
+      if (!response.ok) {
+        console.warn(
+          `⚠️  Could not label PR #${prNumber}: ${response.status} ${response.statusText}`,
+        );
+      }
+    } catch (error) {
+      console.warn(`⚠️  Could not label PR #${prNumber}: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Look up an open PR for the given head branch.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param headBranch - Head/feature branch name
+   * @returns The existing PR's html_url, or null when none is found
+   */
+  private async findExistingPrUrl(
+    owner: string,
+    repo: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    try {
+      const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls?head=${owner}:${headBranch}&state=open&per_page=1`;
+      const response = await Utils.fetchWithRetry(url, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "devintern",
+        },
+      });
+      if (!response.ok) return null;
+      const pulls = (await response.json()) as Array<{ html_url?: string }>;
+      const match = pulls.find((pr) => pr.html_url);
+      return match?.html_url ?? null;
+    } catch {
+      return null;
     }
   }
 }
@@ -331,12 +468,15 @@ export class PRManager {
    * @param sourceBranch - Head/feature branch name
    * @param targetBranch - Base branch (default `main`)
    * @param implementationSummary - Optional summary appended to PR body
+   * @param labels - Labels to apply to the PR; defaults to the comma-separated
+   *   `PR_LABELS` environment variable (GitHub only)
    */
   async createPullRequest(
     task: Task | JiraIssue,
     sourceBranch: string,
     targetBranch = "main",
     implementationSummary?: string,
+    labels: string[] = parsePrLabels(process.env.PR_LABELS),
   ): Promise<PRResult> {
     const repoInfo = await this.detectRepository();
 
@@ -356,8 +496,49 @@ export class PRManager {
       sourceBranch,
       targetBranch,
       repository: repoInfo.repository,
+      ...(labels.length > 0 ? { labels } : {}),
     };
 
+    // A transient network blip between push and PR creation used to leave the
+    // branch pushed but no PR and the ticket stuck In Progress (e.g. DNS
+    // failures surfacing as "Was there a typo in the url or port?"). Retry
+    // transport-level failures with backoff; idempotency for duplicate creates
+    // is handled by GitHubPRClient's 422 already-exists lookup.
+    const maxAttempts = 3;
+    let result: PRResult = {
+      success: false,
+      message: "PR creation was not attempted",
+    };
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      result = await this.dispatchCreatePullRequest(prInfo, repoInfo);
+      if (result.success || !isTransientPrFailure(result.message)) {
+        return result;
+      }
+      if (attempt < maxAttempts) {
+        const delayMs = 2000 * 2 ** (attempt - 1);
+        console.warn(
+          `⚠️  Transient failure creating PR (${result.message}); retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Dispatch PR creation to the platform-specific client.
+   *
+   * @param prInfo - Assembled PR metadata
+   * @param repoInfo - Detected platform and repository slug
+   */
+  private async dispatchCreatePullRequest(
+    prInfo: PRInfo,
+    repoInfo: {
+      platform: "github" | "bitbucket" | "unknown";
+      repository: string;
+      workspace?: string;
+    },
+  ): Promise<PRResult> {
     if (repoInfo.platform === "github") {
       // Use existing client with personal token
       if (this.githubClient) {

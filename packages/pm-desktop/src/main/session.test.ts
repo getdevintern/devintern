@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { GitExec } from "./git-sync.ts";
 import type { ProjectGitSyncStatus } from "../shared/project-git-sync.ts";
 import { findBindingByLocalPath, rememberProjectBinding } from "./project-bindings.ts";
@@ -16,6 +16,7 @@ import {
   setSessionGitExecForTests,
   switchContext,
   switchHarness,
+  switchModel,
   switchProjectKey,
   switchTracker,
   updateProjectFromRemote,
@@ -57,6 +58,25 @@ async function createGitDirectory(projectDir: string): Promise<void> {
 
 describe("detectCodeConfig", () => {
   let tempDir: string;
+  let previousCeilings: string | undefined;
+
+  beforeAll(() => {
+    // Host tooling can leave a real `.devintern-code` above the OS tmpdir
+    // (for example /tmp/.devintern-code); ceiling discovery at tmpdir keeps
+    // these fixtures hermetic regardless of such ancestor markers.
+    previousCeilings = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = [tmpdir(), previousCeilings]
+      .filter(Boolean)
+      .join(delimiter);
+  });
+
+  afterAll(() => {
+    if (previousCeilings === undefined) {
+      delete process.env.GIT_CEILING_DIRECTORIES;
+    } else {
+      process.env.GIT_CEILING_DIRECTORIES = previousCeilings;
+    }
+  });
 
   afterEach(async () => {
     if (tempDir) {
@@ -610,6 +630,11 @@ describe("context switches while an agent is running", () => {
     await expect(switchProjectKey("OTHER")).rejects.toThrow(
       /Unavailable while an agent is running/,
     );
+  });
+
+  test("switchModel rejects while an agent request is in flight", async () => {
+    beginAgentRequest("test-request");
+    await expect(switchModel("sonnet")).rejects.toThrow(/Unavailable while an agent is running/);
   });
 
   test("loadProject rejects while an agent request is in flight", async () => {

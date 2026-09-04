@@ -46,6 +46,49 @@ That is the final review.`;
     });
   });
 
+  test("repairs raw newlines inside JSON string values", () => {
+    const output = [
+      "```json",
+      "{",
+      '  "approved": true,',
+      '  "summary": "## Notes',
+      "",
+      "Looks good with `code/` changes.",
+      '"',
+      "}",
+      "```",
+    ].join("\n");
+
+    expect(parseAgentJsonObject(output, "approved")).toEqual({
+      approved: true,
+      summary: "## Notes\n\nLooks good with `code/` changes.\n",
+    });
+  });
+
+  test("escapes unescaped double quotes inside string values", () => {
+    const output = [
+      "```json",
+      "{",
+      '  "approved": true,',
+      '  "summary": "A legacy "cwd" mode mutates the repo."',
+      "}",
+      "```",
+    ].join("\n");
+
+    expect(parseAgentJsonObject(output, "approved")).toEqual({
+      approved: true,
+      summary: 'A legacy "cwd" mode mutates the repo.',
+    });
+  });
+
+  test("tolerates literal \\n junk between the final value and the closing brace", () => {
+    const output = "Narration." + String.raw`{"approved": true, "summary": "D."\n}`;
+    expect(parseAgentJsonObject(output, "approved")).toEqual({
+      approved: true,
+      summary: "D.",
+    });
+  });
+
   test("throws when the expected object is absent", () => {
     expect(() => parseAgentJsonObject("No structured response.", "approved")).toThrow(
       'No valid JSON object containing "approved"',

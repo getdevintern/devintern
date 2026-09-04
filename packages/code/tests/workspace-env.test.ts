@@ -3,8 +3,13 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import type { RepoConfig } from "../src/lib/workspace/config";
-import { buildRepoEnv, gitHubSlugFromRemote, parseEnvFile } from "../src/lib/workspace/env";
+import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/workspace/config";
+import {
+  buildErrorMonitorEnv,
+  buildRepoEnv,
+  gitHubSlugFromRemote,
+  parseEnvFile,
+} from "../src/lib/workspace/env";
 
 describe("gitHubSlugFromRemote", () => {
   test("parses ssh and https GitHub remotes", () => {
@@ -61,9 +66,10 @@ describe("buildRepoEnv", () => {
     expect(env.INLINE_ONLY).toBe("inline");
   });
 
-  test("pins WEBHOOK_QUEUE_DB to the central workspace DB", () => {
+  test("pins durable state and analytics identity to the workspace", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
+    expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {
@@ -77,6 +83,51 @@ describe("buildRepoEnv", () => {
       workspaceDir,
     );
     expect(nonGitHub.GITHUB_REPO).toBe(process.env.GITHUB_REPO);
+  });
+
+  test("injects PR_LABELS from repo pr_labels", () => {
+    const env = buildRepoEnv(repo({ prLabels: ["devintern", "auto-pr"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("devintern,auto-pr");
+  });
+
+  test("repo pr_labels overrides a PR_LABELS carried by env layers", () => {
+    writeFileSync(join(workspaceDir, ".env"), "PR_LABELS=from-env\n");
+    const env = buildRepoEnv(repo({ prLabels: ["from-config"] }), workspaceDir);
+    expect(env.PR_LABELS).toBe("from-config");
+
+    const unset = buildRepoEnv(repo(), workspaceDir);
+    expect(unset.PR_LABELS).toBe("from-env");
+  });
+
+  test("error monitor credentials are isolated per source and override team/repo layers", () => {
+    writeFileSync(join(workspaceDir, ".env"), "SENTRY_AUTH_TOKEN=workspace\n");
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "sentry.env"), "SENTRY_AUTH_TOKEN=source-file\n");
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "jira",
+      taskQuery: "project = PLAT",
+      env: { SENTRY_AUTH_TOKEN: "team" },
+    };
+    const source: ErrorMonitorConfig = {
+      id: "api-production",
+      provider: "sentry",
+      enabled: true,
+      repo: "backend",
+      team: "platform",
+      organization: "acme",
+      project: "api",
+      intervalSeconds: 60,
+      minOccurrences: 5,
+      maxIssuesPerTick: 3,
+      envFile: "env/sentry.env",
+      env: { SENTRY_AUTH_TOKEN: "source-inline" },
+    };
+
+    const env = buildErrorMonitorEnv(source, repo(), team, workspaceDir);
+    expect(env.SENTRY_AUTH_TOKEN).toBe("source-inline");
+    expect(env.DEVINTERN_WORKSPACE_REPO).toBe("backend");
+    expect(env.DEVINTERN_WORKSPACE_TEAM).toBe("platform");
   });
 
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {

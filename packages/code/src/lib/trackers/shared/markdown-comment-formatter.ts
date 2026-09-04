@@ -8,12 +8,20 @@
  * across trackers.
  */
 
+/** Heading identifying a processing-failure comment (crash / usage limit / interrupt). */
+export const PROCESSING_FAILURE_MARKER = "Automated implementation did not complete";
+
+/** Identifying phrase of the agent-needs-input questions comment. */
+export const AGENT_INPUT_NEEDED_MARKER = "The agent needs input";
+
 /** Marker strings identifying comments posted by @devintern/code automation. */
 export const DEVINTERN_MARKERS = [
   "Implementation Completed by @devintern/code",
   "Automated Task Feasibility Assessment",
   "Implementation Incomplete",
   "Automated Story Points Estimation",
+  PROCESSING_FAILURE_MARKER,
+  AGENT_INPUT_NEEDED_MARKER,
 ];
 
 /** Marker identifying an automated estimation comment (find/update flows). */
@@ -48,6 +56,21 @@ export interface EstimationResultLike {
 
 /** Maximum agent output length embedded in a tracker comment. */
 const MAX_AGENT_OUTPUT_LENGTH = 8000;
+
+/**
+ * How to unlock another worker/cron pickup after a failed or incomplete run.
+ * The retry gate skips an unchanged ticket; any of these bumps the update
+ * stamp (and, for incomplete runs, satisfies the gate).
+ */
+export const RETRY_PICKUP_HEADING = "To retry this task";
+export const RETRY_PICKUP_BODY =
+  "This ticket will not be picked up again until it changes. " +
+  "Edit the description, post a comment (a one-line clarification is enough), or delete this comment.";
+
+/** Markdown "how to retry" block posted on failure / incomplete comments. */
+export function formatRetryPickupMarkdown(): string {
+  return `**${RETRY_PICKUP_HEADING}:** ${RETRY_PICKUP_BODY}`;
+}
 
 /**
  * Format a clarity/feasibility assessment as markdown.
@@ -102,6 +125,10 @@ export function formatClarityAssessmentMarkdown(assessment: ClarityAssessmentLik
     "> *This assessment focuses on basic implementability. Technical details, UI/UX patterns, and implementation specifics are expected to be inferred from existing codebase.*",
   );
 
+  if (!assessment.isImplementable) {
+    lines.push("", formatRetryPickupMarkdown());
+  }
+
   return lines.join("\n");
 }
 
@@ -124,7 +151,41 @@ export function formatIncompleteImplementationCommentMarkdown(
   const header = taskSummary
     ? `⚠️ Implementation Incomplete\nTask: ${taskSummary}`
     : "⚠️ Implementation Incomplete";
-  return `${header}\n\n${agentOutput.slice(0, MAX_AGENT_OUTPUT_LENGTH)}`;
+  return `${header}\n\n${agentOutput.slice(0, MAX_AGENT_OUTPUT_LENGTH)}\n\n${formatRetryPickupMarkdown()}`;
+}
+
+/** Format the crash / interrupt / usage-limit failure comment body. */
+export function formatProcessingFailureMarkdown(taskKey: string, reason: string): string {
+  return (
+    `🤖 **${PROCESSING_FAILURE_MARKER}** — no pull request was created for this attempt.\n\n` +
+    `**Reason:** ${reason}\n\n` +
+    `Partial work from this attempt may exist on the \`feature/${taskKey.toLowerCase()}\` branch or in a git stash.\n\n` +
+    formatRetryPickupMarkdown()
+  );
+}
+
+/** Format the agent-needs-input questions comment body. */
+export function formatAgentInputNeededMarkdown(questions: string[]): string {
+  const questionList = questions.map((q) => `- ${q}`).join("\n");
+  return (
+    `🤖 ${AGENT_INPUT_NEEDED_MARKER} before it can implement this task:\n\n${questionList}\n\n` +
+    "Answer in the task description or a comment, then re-run devintern."
+  );
+}
+
+/** True when `text` looks like a previously posted processing-failure comment. */
+export function isProcessingFailureCommentText(text: string): boolean {
+  return text.includes(PROCESSING_FAILURE_MARKER);
+}
+
+/**
+ * True when `text` is any automation failure comment (incomplete implementation
+ * or processing failure). These mark a ticket whose last attempt failed, so
+ * they are excluded from "user changed the ticket" detection and unlock a
+ * retry when removed.
+ */
+export function isAutomationFailureCommentText(text: string): boolean {
+  return isIncompleteImplementationCommentText(text) || isProcessingFailureCommentText(text);
 }
 
 /** Format the assessment-failure comment body. */

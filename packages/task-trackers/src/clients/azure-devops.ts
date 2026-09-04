@@ -652,7 +652,10 @@ export class AzureDevOpsClient {
    *   `SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'bug'`
    *
    * The query runs scoped to the configured project. Results are capped at
-   * 100 work items; titles are batch-fetched for the returned IDs.
+   * 100 work items; titles and change dates are batch-fetched for the
+   * returned IDs. `System.ChangedDate` is required: the worker dedupes ready
+   * tasks by `(key, updated)`, and an empty stamp never retriggers after the
+   * first attempt.
    *
    * WIQL reference:
    *   https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax
@@ -661,9 +664,10 @@ export class AzureDevOpsClient {
    * @returns Matching work items (id, url, title fields) and total count.
    * @throws When the WIQL is invalid or the API request fails.
    */
-  async queryWorkItems(
-    wiql: string,
-  ): Promise<{ workItems: Array<AzureDevOpsWorkItem & { title?: string }>; total: number }> {
+  async queryWorkItems(wiql: string): Promise<{
+    workItems: Array<AzureDevOpsWorkItem & { title?: string; changedDate?: string }>;
+    total: number;
+  }> {
     const result = await this.request<{ workItems?: Array<{ id: number }> }>(
       `${this.baseUrl}/${encodeURIComponent(this.defaultProject)}/_apis/wit/wiql?api-version=7.0&$top=100`,
       "POST",
@@ -675,14 +679,14 @@ export class AzureDevOpsClient {
       return { workItems: [], total: 0 };
     }
 
-    // Batch-fetch titles (max 200 IDs per request).
-    const workItems: Array<AzureDevOpsWorkItem & { title?: string }> = [];
+    // Batch-fetch titles and change dates (max 200 IDs per request).
+    const workItems: Array<AzureDevOpsWorkItem & { title?: string; changedDate?: string }> = [];
     for (let i = 0; i < ids.length; i += 200) {
       const chunk = ids.slice(i, i + 200);
       const details = await this.request<{
         value?: Array<{ id: number; fields?: Record<string, unknown> }>;
       }>(
-        `${this.baseUrl}/_apis/wit/workitems?ids=${chunk.join(",")}&fields=System.Id,System.Title&api-version=7.0`,
+        `${this.baseUrl}/_apis/wit/workitems?ids=${chunk.join(",")}&fields=System.Id,System.Title,System.ChangedDate&api-version=7.0`,
       );
 
       for (const item of details.value || []) {
@@ -690,6 +694,7 @@ export class AzureDevOpsClient {
           id: item.id,
           url: `${this.baseUrl}/${encodeURIComponent(this.defaultProject)}/_workitems/edit/${item.id}`,
           title: item.fields?.["System.Title"] as string | undefined,
+          changedDate: item.fields?.["System.ChangedDate"] as string | undefined,
         });
       }
     }

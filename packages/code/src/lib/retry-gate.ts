@@ -1,11 +1,15 @@
 /**
  * Retry gate
  *
- * Decides whether a task whose previous attempt was reported incomplete
+ * Decides whether a task whose previous attempt was reported as a failure
  * should be re-run. A retry is warranted when the user changed something:
  * edited the description, posted a new comment (clarification), or deleted
- * the bot's incomplete-implementation comment from the ticket. `--force`
- * bypasses the gate for local runs.
+ * the bot's automation failure comment from the ticket. `--force` bypasses
+ * the gate for local runs.
+ *
+ * The comments passed here already exclude the bot's own automation comments
+ * (every tracker client filters them), so the harness posting its failure
+ * comment never counts as "the ticket changed" and cannot re-trigger itself.
  *
  * Fails open on every uncertainty (missing state, storage errors,
  * unparseable timestamps): a redundant attempt is cheaper than a silently
@@ -66,12 +70,13 @@ export async function shouldSkipRetry(input: RetryGateInput): Promise<RetryGateD
   }
 
   // The marker check keeps the ticket authoritative: deleting the bot's
-  // incomplete comment unlocks a retry, and per-machine DB drift cannot
-  // block a ticket whose comment was never posted. Trackers fail open
-  // (return false) on API errors.
+  // failure comment (incomplete-implementation or processing failure)
+  // unlocks a retry, and per-machine DB drift cannot block a ticket whose
+  // comment was never posted. Trackers fail open (return false) on API
+  // errors.
   const markerPresent = await tracker.hasIncompleteImplementationMarker(taskKey);
   if (!markerPresent) {
-    return { skip: false, reason: "incomplete-implementation comment no longer on ticket" };
+    return { skip: false, reason: "automation failure comment no longer on ticket" };
   }
 
   return {

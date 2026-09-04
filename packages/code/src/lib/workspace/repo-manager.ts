@@ -59,6 +59,32 @@ export class RepoManager {
   async ensureBareClone(repo: RepoConfig): Promise<string> {
     const clonePath = this.bareClonePath(repo.name);
     if (existsSync(clonePath)) {
+      const currentRemote = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
+        cwd: clonePath,
+      });
+      if (!currentRemote.success) {
+        throw new Error(
+          `Failed to read origin for repo "${repo.name}": ${currentRemote.error || currentRemote.output}`,
+        );
+      }
+      if (currentRemote.output.trim() !== repo.remote) {
+        const updateRemote = await Utils.executeGitCommand(
+          ["remote", "set-url", "origin", repo.remote],
+          { cwd: clonePath },
+        );
+        if (!updateRemote.success) {
+          throw new Error(
+            `Failed to update origin for repo "${repo.name}": ${updateRemote.error || updateRemote.output}`,
+          );
+        }
+        console.log(`🔄 [config] updated origin for repo ${repo.name}`);
+      }
+      const worktreeConfig = await Utils.enableWorktreeConfig(clonePath);
+      if (!worktreeConfig.success) {
+        throw new Error(
+          `Failed to configure worktrees for repo "${repo.name}": ${worktreeConfig.error}`,
+        );
+      }
       return clonePath;
     }
 
@@ -80,6 +106,13 @@ export class RepoManager {
     );
     if (!refspec.success) {
       throw new Error(`Failed to set fetch refspec for repo "${repo.name}": ${refspec.error}`);
+    }
+
+    const worktreeConfig = await Utils.enableWorktreeConfig(clonePath);
+    if (!worktreeConfig.success) {
+      throw new Error(
+        `Failed to configure worktrees for repo "${repo.name}": ${worktreeConfig.error}`,
+      );
     }
 
     await this.fetch(repo.name);

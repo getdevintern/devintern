@@ -17,6 +17,7 @@ export type {
   AgentRunOptions,
   AgentRunResult,
   ResolvedHarness,
+  StructuredOutputResult,
 } from "./types.js";
 
 // Run modes (plan / readonly) and capability checks
@@ -32,7 +33,23 @@ export {
 } from "./modes.js";
 
 // Registry
-export { registerHarness, getHarness, listHarnesses, HARNESS_ALIASES } from "./registry.js";
+export {
+  registerHarness,
+  getHarness,
+  listHarnesses,
+  HARNESS_ALIASES,
+  DEFAULT_HARNESS_NAME,
+} from "./registry.js";
+
+// Harness chain (comma-separated AGENT_HARNESS failover lists)
+export {
+  parseHarnessList,
+  resolveHarnessChain,
+  type HarnessChainEntry,
+  type HarnessChainIssue,
+  type HarnessChainOptions,
+  type ResolvedHarnessChain,
+} from "./harness-chain.js";
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
@@ -121,7 +138,12 @@ export {
 export { detectMaxTurnsReached, findMaxTurnsReachedLine } from "./detect-max-turns.js";
 
 // Usage/rate-limit detection
-export { detectUsageLimit, resetHintToMs, type UsageLimitResult } from "./detect-usage-limit.js";
+export {
+  UsageLimitError,
+  detectUsageLimit,
+  resetHintToMs,
+  type UsageLimitResult,
+} from "./detect-usage-limit.js";
 
 // Incomplete implementation detection
 export {
@@ -131,3 +153,10 @@ export {
 
 // Open-question detection (agent blocked on user input)
 export { detectOpenQuestions, type OpenQuestionsResult } from "./detect-open-questions.js";
+
+// Structured (JSON) output
+export {
+  UnsupportedStructuredOutputError,
+  assertStructuredOutputSupported,
+  parseStructuredOutput,
+} from "./structured-output.js";

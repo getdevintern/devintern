@@ -56,8 +56,9 @@ JIRA_API_TOKEN=your-api-token-here
 # AGENT_CLI_PATH=/custom/path/to/claude
 # Optional: GitHub auth (see ENV_SETUP.md)
 # Personal / interactive (free CLI): GITHUB_TOKEN
-# Team / unattended automation: GitHub App — https://devintern.com/pricing/
+# Workspace automation: GITHUB_TOKEN + the central App through the hosted relay
 GITHUB_TOKEN=your-github-token-here
+# Advanced no-relay installs only:
 # GITHUB_APP_ID=123456
 # GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
 # Bitbucket
@@ -293,7 +294,7 @@ devintern ENG-42 --create-pr
 # Process all "In Progress" issues assigned to you
 devintern --query '{"state":{"name":{"eq":"In Progress"}}}' --create-pr
 
-# Process all issues with the "intern" label (great for cron automations)
+# Process all issues with the "intern" label (typical worker query)
 devintern --query '{"labels":{"name":{"eq":"intern"}}}' --create-pr
 
 # Process high-priority issues
@@ -402,7 +403,7 @@ devintern MYAPP-456
 - Detects repository platform from git remote URL
 - PR title format: `[TASK-123] Task Summary`
 - PR body includes Claude's implementation details and links back to JIRA
-- GitHub: Requires `GITHUB_TOKEN` for personal CLI PR creation (see ENV_SETUP.md). A team GitHub App can also create PRs; `@mention` matching on any PR needs the App.
+- GitHub: Uses `GITHUB_TOKEN` for CLI and relay-backed workspace API access (see ENV_SETUP.md). The central DevIntern AI App supplies workspace events through the relay. Customer-owned Apps are an advanced no-relay option.
 - Bitbucket: Requires `BITBUCKET_TOKEN` (`Repositories: Write`), workspace auto-detected from git remote
 - Can be enabled with `--create-pr` flag
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
@@ -428,43 +429,25 @@ devintern PROJ-123
 devintern PROJ-123 --no-git
 ```
 
-## Automated Processing with Cron
+## Automated Processing
 
-You can set up automated task processing using cron jobs. This is useful for continuously picking up new tasks labeled for the intern to work on:
-
-```bash
-# Example: Process tasks labeled "Intern" in open sprints every 10 minutes
-# Add to crontab (run: crontab -e)
-*/10 * * * * cd /path/to/your/project && devintern --jql 'statusCategory = "To Do" AND sprint in openSprints() AND labels IN (Intern) ORDER BY created DESC' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process assigned tasks every hour
-0 * * * * cd /path/to/your/project && devintern --jql 'assignee = currentUser() AND status = "To Do" AND labels IN (AutoImpl)' --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process high-priority bugs twice daily
-0 9,17 * * * cd /path/to/your/project && devintern --jql 'type = Bug AND priority = High AND status = "To Do" AND labels IN (Intern)' --max-turns 300 --create-pr >> /tmp/devintern-cron.log 2>&1
-```
-
-### Linear cron examples
-
-The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in single quotes so the shell passes it through unchanged:
+Unattended drains belong on the worker, not on a crontab of `devintern --query`:
 
 ```bash
-# Example: Process "intern"-labeled Linear issues every 10 minutes
-*/10 * * * * cd /path/to/your/project && devintern --query '{"labels":{"name":{"eq":"intern"}}}' --max-turns 500 --create-pr >> /tmp/devintern-cron.log 2>&1
-
-# Example: Process high-priority Linear issues assigned to you every hour
-0 * * * * cd /path/to/your/project && devintern --query '{"assignee":{"isMe":{"eq":true}},"priority":{"lte":2}}' --create-pr >> /tmp/devintern-cron.log 2>&1
+devintern worker init
+devintern worker
 ```
 
-**Important notes for cron setup:**
+See the [Worker Daemon guide](https://devintern.com/docs/code/worker) and [Automated Task Processing](https://devintern.com/docs/code/automated-task-processing). The worker natively supports **working windows (quiet hours)**, so "only at night" no longer needs cron — set `[worker.schedule]` in `workspace.toml`:
 
-- Always change to your project directory (`cd /path/to/your/project`) to ensure the correct `.devintern-code/.env` is loaded
-- Use absolute paths or ensure PATH includes `devintern` and `claude` binaries
-- Redirect output to a log file for monitoring (`>> /tmp/devintern-cron.log 2>&1`)
-- For Jira, use the `ORDER BY created DESC` clause to process newest tasks first
-- Consider using labels (e.g., Jira `labels = "Intern"`, Linear `{"labels":{"name":{"eq":"intern"}}}`) to mark tasks for automated processing
-- Test your query manually before adding to cron to ensure it returns the expected tasks
-- Monitor the log file regularly to ensure the cron job is running successfully
+```toml
+[worker.schedule]
+active = ["22:00-06:00"]   # drain new tasks only during these local-time windows
+timezone = ""              # optional IANA name; blank = machine local time
+catch_up_missed = true     # one catch-up drain at startup after a fully missed window
+```
+
+Outside the window nothing is killed mid-run — the in-flight task completes and no new tracker tasks start. Force one immediate drain with `devintern worker run-now`. The only CLI run still worth a timer is story-point estimation (`--estimate`).
 
 ## Troubleshooting
 
@@ -501,14 +484,15 @@ The same idea works for Linear using a JSON `IssueFilter`. Wrap the JSON in sing
 
 7. **"PR creation failed"**
    - Ensure you have the correct token configured:
-     - GitHub: personal `GITHUB_TOKEN` or team/automation GitHub App (`GITHUB_APP_ID` + private key). `TASK_TRACKER=github` requires the token; `@mention` matching requires the App
+     - GitHub: `GITHUB_TOKEN`. `TASK_TRACKER=github` always requires it; relay-backed workspaces also use it for PR/review API calls
      - Bitbucket: `BITBUCKET_TOKEN`
    - Check token/App permissions:
      - GitHub classic token: needs `repo` scope
      - GitHub fine-grained token: needs `Pull requests: Read and write` + `Contents: Read`
-     - GitHub App: needs `Contents: Read` + `Pull requests: Read and write`
+     - Advanced customer-owned GitHub App: needs `Contents: Read` + `Pull requests: Read and write`
      - Bitbucket: needs `Repositories: Write`
-   - For GitHub App: Ensure the App is installed on the repository
+   - Standard workspace: ensure the central DevIntern AI App is installed and the repo is registered with the relay
+   - Advanced no-relay App: ensure your customer-owned App is installed on the repository
    - Verify you're in a repository with a remote origin
    - Confirm the repository platform is detected correctly
    - Use `--verbose` flag to see detailed error messages

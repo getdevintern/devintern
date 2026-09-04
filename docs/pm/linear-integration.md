@@ -4,6 +4,7 @@ sidebarLabel: "Linear Integration"
 description: "Create well-specified Linear issues and sub-issues from AI drafts in your workspace."
 section: "PM"
 order: 8
+sidebarHidden: true
 dateModified: 2026-07-23
 tags: ["linear", "devintern/pm", "integration"]
 ---

@@ -20,6 +20,7 @@ import type { PmInitContext, PmTrackerInfo } from "@getdevintern/pm/init";
 import type { UpdateStatus } from "./auto-update.ts";
 import type { ProjectBindingInfo } from "./project-binding.ts";
 import type { ProjectGitSyncStatus } from "./project-git-sync.ts";
+import type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
 import type { ToolValidation } from "./tool-validation.ts";
 
 export type {
@@ -47,6 +48,8 @@ export {
   projectGitSyncLabel,
   shouldShowUpdateFromRemote,
 } from "./project-git-sync.ts";
+export type { QuickCaptureConfig, QuickCaptureEvent, QuickCaptureStatus } from "./quick-capture.ts";
+export { DEFAULT_QUICK_CAPTURE_ACCELERATOR } from "./quick-capture.ts";
 export type {
   InstalledHarnessSummary,
   RequiredToolId,
@@ -68,6 +71,43 @@ export interface IpcError {
 }
 
 export type IpcResult<T> = { ok: true; value: T } | { ok: false; error: IpcError };
+
+/** Where a renderer error originated. */
+export type RendererErrorKind = "error" | "unhandledrejection" | "react";
+
+/**
+ * Renderer-originated error forwarded to main for error tracking.
+ * Must never include secrets, tokens, or .env contents — only the message,
+ * stack, and (for React crashes) the component stack.
+ */
+export interface RendererErrorReport {
+  kind: RendererErrorKind;
+  message: string;
+  /** Renderer JS stack, when available. */
+  stack?: string;
+  /** React component stack, for error-boundary reports. */
+  componentStack?: string;
+}
+
+/**
+ * Validate an untyped {@link RendererErrorReport} from IPC. Returns `null`
+ * for anything malformed — bad reports are dropped, never echoed as errors
+ * (reporting must not feed back into reporting).
+ */
+export function parseRendererErrorReport(input: unknown): RendererErrorReport | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const { kind, message, stack, componentStack } = input as Record<string, unknown>;
+  if (kind !== "error" && kind !== "unhandledrejection" && kind !== "react") return null;
+  if (typeof message !== "string" || message.trim().length === 0) return null;
+  const report: RendererErrorReport = { kind, message: message.slice(0, 8000) };
+  if (typeof stack === "string" && stack.trim().length > 0) {
+    report.stack = stack.slice(0, 16000);
+  }
+  if (typeof componentStack === "string" && componentStack.trim().length > 0) {
+    report.componentStack = componentStack.slice(0, 16000);
+  }
+  return report;
+}
 
 /** Installed harness option for the header harness switcher. */
 export interface AvailableHarness {
@@ -97,6 +137,11 @@ export interface ProjectStatus {
   harnessDisplayName?: string;
   /** Active harness registry id (e.g. `claude-code`), when config loaded. */
   activeHarnessName?: string;
+  /**
+   * Active `AGENT_MODEL` override (harness-specific string), when set in
+   * `.devintern-pm/.env`. Empty/unset means the harness default model.
+   */
+  activeModel?: string;
   /**
    * Installed/valid harnesses offered by the header switcher. Includes the
    * active harness even when PATH detection would miss a custom CLI path.
@@ -390,6 +435,13 @@ export interface PmDesktopApi {
   /** Enable or disable anonymous usage analytics. */
   setAnalyticsEnabled(enabled: boolean): Promise<IpcResult<null>>;
   /**
+   * Forward a renderer error (global handlers, unhandled rejections, React
+   * error boundary) to main for error tracking. Fire-and-forget: main-side
+   * reporting respects the telemetry toggle and SENTRY_DISABLED=1, and the
+   * result is always ok — malformed reports are dropped silently.
+   */
+  reportRendererError(report: RendererErrorReport): Promise<IpcResult<null>>;
+  /**
    * Persist `TASK_TRACKER` for a configured tracker and reload the session.
    * Open tickets are reset so composer/capabilities match the new backend.
    */
@@ -404,6 +456,11 @@ export interface PmDesktopApi {
    * Open tickets are kept; subsequent agent actions use the new harness.
    */
   switchHarness(harnessName: string): Promise<IpcResult<ProjectStatus>>;
+  /**
+   * Persist `AGENT_MODEL` (harness-specific string; empty clears) and reload
+   * the session. Open tickets are kept; subsequent agent actions use it.
+   */
+  switchModel(model: string): Promise<IpcResult<ProjectStatus>>;
   /**
    * Fetch the project remote and fast-forward when clean or PM soft-dirty.
    * Soft-dirty must not block; hard-dirty skips with a clear message.
@@ -427,6 +484,15 @@ export interface PmDesktopApi {
   dismissUpdateError(): Promise<IpcResult<UpdateStatus>>;
   /** Subscribe to auto-update status changes. */
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
+  /** Current Quick Capture registration snapshot (hotkey state + conflict error). */
+  getQuickCaptureStatus(): Promise<IpcResult<QuickCaptureStatus>>;
+  /**
+   * Persist Quick Capture config and (un)register the OS global hotkey.
+   * Returns the resulting status; `error` explains conflicts.
+   */
+  setQuickCaptureSettings(config: QuickCaptureConfig): Promise<IpcResult<QuickCaptureStatus>>;
+  /** Subscribe to Quick Capture invocations from the OS global shortcut. */
+  onQuickCapture(callback: (event: QuickCaptureEvent) => void): () => void;
 }
 
 export const IPC_CHANNELS = {
@@ -467,9 +533,11 @@ export const IPC_CHANNELS = {
   dismissCodeDiscovery: "pm:dismiss-code-discovery",
   getAnalyticsEnabled: "pm:get-analytics-enabled",
   setAnalyticsEnabled: "pm:set-analytics-enabled",
+  reportRendererError: "pm:report-renderer-error",
   switchTracker: "pm:switch-tracker",
   switchProjectKey: "pm:switch-project-key",
   switchHarness: "pm:switch-harness",
+  switchModel: "pm:switch-model",
   updateProjectFromRemote: "pm:update-project-from-remote",
   agentChunk: "pm:agent-chunk",
   showAbout: "pm:show-about",
@@ -480,4 +548,7 @@ export const IPC_CHANNELS = {
   snoozeUpdate: "pm:snooze-update",
   dismissUpdateError: "pm:dismiss-update-error",
   updateStatus: "pm:update-status",
+  getQuickCaptureStatus: "pm:get-quick-capture-status",
+  setQuickCaptureSettings: "pm:set-quick-capture-settings",
+  quickCapture: "pm:quick-capture",
 } as const;

@@ -1,90 +1,97 @@
-# Sentry Integration
+---
+title: "Sentry Auto-fixes"
+sidebarLabel: "Sentry Auto-fixes"
+description: "Turn Sentry error groups into repo-routed fixes from the workspace worker"
+section: "Automation"
+order: 4
+dateModified: 2026-09-04
+---
 
-`devintern sentry` watches a Sentry organization or project for new errors and
-creates bugfixes automatically. Each new, valid error group is rendered as a
-markdown bugfix task and run through the standard pipeline (branch, agent,
-commit, PR with `--create-pr` semantics from `WORKER_TASK_ARGS`).
+# Sentry Auto-fixes
 
-## Setup
+The workspace worker can poll one or more Sentry projects for unresolved error
+groups and run actionable errors through the normal fix pipeline: isolated
+worktree, coding agent, tests, commit, and pull request.
 
-Add to `.devintern-code/.env`:
+## Configure projects in `workspace.toml`
 
-```bash
-SENTRY_AUTH_TOKEN=sntrys_...   # Sentry auth token (User auth token)
-SENTRY_ORG=my-org              # Organization slug
-SENTRY_PROJECT=my-project      # Optional: scope the watcher to one project
-# SENTRY_BASE_URL=https://sentry.example.com  # Self-hosted Sentry only
+Add one `[[error_monitors]]` entry per Sentry project. Every entry maps to the
+repository that owns the code, so a multi-repo worker never has to guess where
+an error should be fixed.
+
+```toml
+[[error_monitors]]
+id = "api-production"
+provider = "sentry"
+repo = "backend"
+team = "platform"             # optional; must match a [[teams]] name
+organization = "acme"
+project = "api"
+query = "environment:production level:error"
+poll_interval = 60
+min_occurrences = 5
+max_per_tick = 3
+env_file = "env/sentry-api.env"
+
+[[error_monitors]]
+id = "web-production"
+provider = "sentry"
+repo = "frontend"
+organization = "acme"
+project = "web"
+env_file = "env/sentry-web.env"
 ```
 
-Create an auth token in Sentry under **Settings → Auth Tokens** with
-`project:read` and `event:read` scopes.
+`repo` may be omitted only when the workspace has exactly one `[[repos]]`
+entry. In a multi-repo workspace it is required. `team` is optional and lets
+the fix run inherit that team's environment and identity in addition to the
+repository environment.
 
-## Usage
-
-```bash
-# Watch continuously (default: every 60s)
-devintern sentry
-
-# Watch one project, poll every 2 minutes, require at least 10 events
-devintern sentry --project my-project --interval 120 --min-events 10
-
-# Single tick for cron-driven setups
-devintern sentry --once
-
-# Narrow what counts as a new error with Sentry search terms
-devintern sentry --query "environment:production level:error"
-```
-
-## Worker mode
-
-The watcher also runs inside the long-running worker daemon. With
-`SENTRY_AUTH_TOKEN` and `SENTRY_ORG` in `.devintern-code/.env`,
-`devintern worker` automatically registers the Sentry acquirer alongside its
-other event sources — no extra flags needed:
+Each source is independent: use a separate `env_file` or
+`[error_monitors.env]` table when projects need different credentials.
 
 ```bash
-devintern worker --query "status = 'To Do'"   # tracker polling + Sentry watching
+# env/sentry-api.env
+SENTRY_AUTH_TOKEN=sntrys_...
 ```
 
-Worker-mode env vars: `SENTRY_PROJECT`, `SENTRY_BASE_URL`, `SENTRY_QUERY`,
-`SENTRY_POLL_INTERVAL` (falls back to the worker's `--interval`),
-`SENTRY_MIN_EVENTS`, and `SENTRY_MAX_PER_TICK`. Both modes share
-`.devintern-code/queue.db`, so an error group handled by the worker is never
-re-processed by a standalone `devintern sentry` run (or vice versa).
+```toml
+[[error_monitors]]
+id = "internal-api"
+provider = "sentry"
+repo = "backend"
+organization = "acme"
+project = "api"
+base_url = "https://sentry.internal.example"
+  [error_monitors.env]
+  SENTRY_AUTH_TOKEN = "sntrys_..."
+```
 
-## Validity gate
+Do not put a Sentry DSN here. A DSN sends events into Sentry; polling issues
+requires an auth token plus the organization and project slugs. Create an auth
+token with `project:read` and `event:read` access.
 
-An error group is only turned into a bugfix when it passes all checks:
+Credential precedence, from lowest to highest, is: process environment,
+workspace `.env`, repo `env_file`, `[repos.env]`, team credentials, the error
+monitor's `env_file`, then `[error_monitors.env]`. This allows one worker to
+serve teams and projects whose tokens differ.
 
-1. **Minimum event count** — at least `--min-events` occurrences (default 5),
-   so one-off blips are ignored.
-2. **Actionable metadata** — the issue has a title plus a culprit or exception
-   type/file so the agent can locate the failure.
-3. **Injected validator hook** — reserved for custom/agent-based assessment.
-4. **Pipeline clarity check** — the bugfix task still goes through the normal
-   feasibility assessment before any code is written.
+## Behavior
 
-## Deduplication
+An error is eligible when it meets `min_occurrences` (default `5`) and includes
+a title plus a culprit, exception type, or filename. At most `max_per_tick`
+(default `3`) errors are dispatched per poll. `poll_interval` defaults to
+`[defaults].poll_interval`.
 
-Every error group is handled **at most once**, ever. Handled group ids are
-persisted in `.devintern-code/queue.db` (`processed_events`, source `sentry`)
-and marked *before* execution, so restarts, overlapping ticks, and failing runs
-never re-trigger the same error. A group re-enters only if Sentry assigns it a
-new issue id.
+Handled issue IDs are stored in the workspace database under a source key that
+includes the provider and configured source `id`. That prevents collisions
+between Sentry projects. A failed fix is not automatically repeated; a run
+deferred because the repo or agent capacity is busy is released and retried on
+a later poll.
 
-## Options
+The provider contract is shared by all error monitors. Sentry is the first
+adapter; adding Datadog support does not require another polling, deduplication,
+or workspace-routing implementation.
 
-| Option                | Env var               | Default            |
-| --------------------- | --------------------- | ------------------ |
-| `--token <token>`     | `SENTRY_AUTH_TOKEN`   | —                  |
-| `--org <slug>`        | `SENTRY_ORG`          | —                  |
-| `--project <slug>`    | `SENTRY_PROJECT`      | whole organization |
-| `--base-url <url>`    | `SENTRY_BASE_URL`     | `https://sentry.io`|
-| `--interval <secs>`   | `SENTRY_POLL_INTERVAL`| `60`               |
-| `--min-events <n>`    | `SENTRY_MIN_EVENTS`   | `5`                |
-| `--max-per-tick <n>`  | —                     | `3`                |
-| `--query <terms>`     | —                     | —                  |
-| `--once`              | —                     | —                  |
-
-Like the worker, `devintern sentry` is unattended automation and requires the
-automation entitlement.
+`[[error_monitors]]` changes are validated by live reload but require a worker
+restart because clients and credentials are startup-scoped.

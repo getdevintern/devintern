@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { execSync } from "child_process";
 import { Option, program } from "commander";
 import { config } from "dotenv";
 import {
@@ -19,10 +18,9 @@ import {
   getAuthenticatedUser,
   login,
   logout,
-  requireAuthenticatedUser,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense, requireTeamAutomation } from "@devintern/license-check";
+import { checkLicense, requireLicense } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -37,12 +35,29 @@ import {
   resolveExecutablePathWithRetry,
   spawnAgent,
   reapTree,
+  UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
+import { initSentryOnce } from "./lib/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
+import {
+  captureError,
+  findEnvFile,
+  flushErrorTracking,
+  maybeOfferCliUpdate,
+  resolveConfigDir,
+} from "@devintern/utils";
+import {
+  flushAnalytics,
+  isAnonymousIdNewlyCreated,
+  RUN_ORIGIN_ENV,
+  track,
+  trackWorkerTaskRun,
+} from "./lib/analytics";
+import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
+import { resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
@@ -50,6 +65,7 @@ import { resolveOutputDir } from "./lib/output-dir";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
+import { ensureTrackerEnvConfigured } from "./lib/first-run";
 import { TaskTrackerManager } from "./lib/task-tracker-manager";
 import type { TaskTrackerClient } from "./lib/task-tracker-client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
@@ -66,9 +82,27 @@ import {
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/pr-client";
-import { RunStore, beginRun, endRun, recordRunPr, recordRunStage } from "./lib/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  recordRunBranch,
+  recordRunPr,
+  recordRunStage,
+  recordRunTicket,
+} from "./lib/run-recorder";
+import type { RunStatus } from "./lib/run-recorder";
+import { buildTicketUrl } from "./lib/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
 import { shouldSkipRetry } from "./lib/retry-gate";
+import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
+import { reportTaskFailure } from "./lib/failure-feedback";
+import {
+  exitIfWorkerUsageLimit,
+  isWorkerChild,
+  USAGE_LIMIT_EXIT_CODE,
+  writeUsageLimitHint,
+} from "./lib/usage-limit-protocol";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -98,6 +132,56 @@ async function checkForCliUpdate(): Promise<void> {
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
 const __filename_resolved = fileURLToPath(import.meta.url);
 const __dirname_resolved = dirname(__filename_resolved);
+
+const KNOWN_SANDBOX_PROVIDERS = new Set([
+  "none",
+  "auto",
+  "native",
+  "nono",
+  "srt",
+  "docker",
+  "smolvm",
+]);
+
+/** Allowlisted, non-identifying props for the `cli_run` analytics event. */
+function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | undefined> {
+  const sandboxProvider = options.sandbox ?? process.env.AGENT_SANDBOX;
+  return {
+    cli_version: VERSION,
+    os: process.platform,
+    arch: process.arch,
+    ci: isAutomatedEnvironment(),
+    tracker,
+    run_mode: options.estimate ? "estimate" : options.query ? "query" : "tasks",
+    task_count: options.query ? undefined : taskKeys.length,
+    create_pr: options.createPr === true,
+    auto_review: options.autoReview === true,
+    estimate: options.estimate === true,
+    sandbox: KNOWN_SANDBOX_PROVIDERS.has(sandboxProvider ?? "") ? sandboxProvider : undefined,
+  };
+}
+
+function isWorkerTaskProcess(): boolean {
+  const origin = process.env[RUN_ORIGIN_ENV];
+  return (
+    origin === "worker" || origin === "scheduled" || origin === "estimate" || origin === "manual"
+  );
+}
+
+/** Finish the local run record and emit exactly one outcome event for worker tasks. */
+async function finishTaskRun(
+  status: Exclude<RunStatus, "in_progress">,
+  reason?: string,
+): Promise<void> {
+  endRun(status, reason);
+  const tracked = trackWorkerTaskRun(status, {
+    cliVersion: VERSION,
+    tracker: process.env.TASK_TRACKER || "jira",
+  });
+  if (tracked) {
+    await flushAnalytics();
+  }
+}
 
 /**
  * Rename legacy `.claude-intern` project config to `.devintern-code` once.
@@ -253,6 +337,9 @@ function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
   if (trackerType === "github" && process.env.GITHUB_REPO) {
     return process.env.GITHUB_REPO;
   }
+  if (trackerType === "gitlab" && process.env.GITLAB_PROJECT) {
+    return process.env.GITLAB_PROJECT;
+  }
   if (trackerType === "azure-devops" && process.env.AZURE_DEVOPS_PROJECT) {
     return process.env.AZURE_DEVOPS_PROJECT;
   }
@@ -379,6 +466,14 @@ let loadedEnvPath: string | null = null;
  * @returns Path to the loaded .env file, or `null` if none was found
  */
 function loadEnvironment(envFile?: string): string | null {
+  const loaded = loadEnvironmentInner(envFile);
+  // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
+  // loading has had its chance to populate it.
+  initSentryOnce(`code@${VERSION}`);
+  return loaded;
+}
+
+function loadEnvironmentInner(envFile?: string): string | null {
   // If user specified a custom env file, use that first
   if (envFile) {
     const customEnvPath = resolve(envFile);
@@ -421,6 +516,76 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
+function printWebhookHelp(): void {
+  console.log("Usage: devintern webhook <command>");
+  console.log("");
+  console.log("Run advanced direct-webhook services. Relay is recommended for normal workers.");
+  console.log("");
+  console.log("Commands:");
+  console.log("  serve               Start the repo-local GitHub webhook server");
+  console.log("");
+  console.log("Run 'devintern webhook serve --help' for command-specific options.");
+}
+
+function printWebhookServeHelp(): void {
+  console.log("Usage: devintern webhook serve [options]");
+  console.log("");
+  console.log("Start the repo-local webhook server for GitHub PR events.");
+  console.log("");
+  console.log("Options:");
+  console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
+  console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
+  console.log("  -h, --help     Display this help message");
+  console.log("");
+  console.log("Environment variables:");
+  console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
+  console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
+  console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
+  console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");
+  console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
+  console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
+}
+
+async function runWebhookServeCommand(args: string[]): Promise<void> {
+  let portOverride: number | undefined;
+  let hostOverride: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+      portOverride = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i] === "--host" && args[i + 1]) {
+      hostOverride = args[i + 1];
+      i++;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printWebhookServeHelp();
+      return;
+    } else {
+      console.error(`❌ Unknown webhook serve option: ${args[i]}`);
+      console.error("   Run 'devintern webhook serve --help' for usage.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  loadedEnvPath = loadEnvironment();
+  const port = portOverride ?? parseInt(process.env.WEBHOOK_PORT || "3000", 10);
+  const host = hostOverride ?? (process.env.WEBHOOK_HOST || "0.0.0.0");
+  const licenseResult = await checkLicense({
+    productKey: "devintern/code",
+    supabaseConfig: loadSupabaseConfig(),
+    requireAutomation: true,
+  });
+  requireLicense(licenseResult);
+
+  const { startWebhookServer } = await import("./webhook-server");
+  await startWebhookServer({ port, host });
+}
+
+// Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
+// Shared entry-point init (worker/webhook standalone reuse this too); call sites
+// pass the release so standalone entries stay attributed to the CLI version.
+
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
 
@@ -433,154 +598,212 @@ await checkForCliUpdate();
 if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
-      await runInitWizard();
+      if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
+        const { runInitUpgrade } = await import("./lib/init-wizard");
+        await runInitUpgrade();
+      } else {
+        await runInitWizard();
+      }
     } else {
       await initializeProject();
     }
     process.exit(0);
   })();
 } else if (process.argv[2] === "worker") {
-  // Handle worker command - long-running daemon (webhook listener now;
-  // polling acquirers register here as they land)
+  // Handle worker command - long-running workspace daemon.
   (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    // `devintern worker connect ...` — pair this repo with the Mode 2 relay.
+    // `devintern worker connect ...` — pair the configured fleet with the
+    // Mode 2 relay.
     if (process.argv[3] === "connect") {
-      const { runWorkerConnect } = await import("./lib/relay-connect");
-      const exitCode = await runWorkerConnect(process.argv.slice(4), async () => {
-        try {
-          const detected = await new PRManager().detectRepository();
-          return detected.platform === "github" ? detected.repository : null;
-        } catch {
-          return null;
-        }
-      });
+      const { runWorkerConnectCommand } = await import("./lib/worker-connect");
+      const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
       process.exit(exitCode);
+    }
+
+    if (process.argv[3] === "scaffold") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker scaffold");
+        console.log("");
+        console.log("Create ~/.devintern/workspace.toml and the shared .env without the wizard.");
+        process.exit(0);
+      }
+      const { runWorkerScaffold } = await import("./lib/workspace/init");
+      process.exit(runWorkerScaffold());
+    }
+
+    if (process.argv[3] === "add-repo") {
+      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker add-repo");
+        console.log("");
+        console.log("Add the current Git repository to the worker workspace.");
+        process.exit(0);
+      }
+      const { runWorkerAddRepo } = await import("./lib/workspace/init");
+      process.exit(await runWorkerAddRepo(process.cwd()));
+    }
+
+    // `devintern worker run-now` — ask a running workspace worker for one
+    // immediate drain, bypassing working windows without editing them.
+    if (process.argv[3] === "run-now") {
+      const args = process.argv.slice(4);
+      let workspacePath: string | undefined;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === "--workspace" && args[i + 1] && !args[i + 1]?.startsWith("-")) {
+          workspacePath = args[i + 1];
+          i++;
+        } else if (arg === "--help" || arg === "-h") {
+          console.log("Usage: devintern worker run-now [--workspace <path>]");
+          console.log("");
+          console.log("Ask the running workspace worker to drain ready tasks now,");
+          console.log("ignoring working windows (quiet hours) for this one pass.");
+          console.log("The worker picks up the request on its next poll interval");
+          console.log("(default 60s) and deletes the marker once served.");
+          process.exit(0);
+        }
+      }
+      const { resolveWorkspaceDir, workspaceConfigPath, workspaceRunNowPath } =
+        await import("./lib/workspace/paths");
+      const selectedDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+      if (!existsSync(workspaceConfigPath(selectedDir))) {
+        console.error(`❌ No workspace.toml at ${workspaceConfigPath(selectedDir)}.`);
+        process.exit(1);
+      }
+      writeFileSync(workspaceRunNowPath(selectedDir), "");
+      console.log(`✅ Run-now requested for ${workspaceConfigPath(selectedDir)}`);
+      console.log(`   Marker: ${workspaceRunNowPath(selectedDir)}`);
+      console.log("   The worker drains within one poll interval and removes the marker.");
+      process.exit(0);
     }
 
     const args = process.argv.slice(3);
 
     if (args[0] === "init") {
+      if (args.some((arg) => arg === "--help" || arg === "-h")) {
+        console.log("Usage: devintern worker init");
+        console.log("");
+        console.log("Interactively configure unattended automation and a native user service.");
+        process.exit(0);
+      }
+      loadedEnvPath = loadEnvironment();
       const { runWorkerInit } = await import("./lib/worker-init");
       const { isInteractive } = await import("./lib/init-wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: set WORKER_TASK_QUERY, WORKER_POLL_INTERVAL, and");
-        console.log("   (for --listen) WEBHOOK_SECRET in .devintern-code/.env by hand.");
+        console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
+        console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
         process.exit(1);
       }
       const trackerManager = new TaskTrackerManager();
-      const ok = await runWorkerInit({
+      const result = await runWorkerInit({
         dryRunQuery: async (query) => {
           const result = await trackerManager.getClient().searchTasks(query);
           return result.tasks.length;
         },
         checkAutomationLicense: async () => {
-          const result = await checkLicense({
+          const license = await checkLicense({
             productKey: "devintern/code",
             supabaseConfig: loadSupabaseConfig(),
             requireAutomation: true,
           });
-          return result.valid ? null : result.message;
+          return license.valid ? null : license.message;
         },
       });
-      process.exit(ok ? 0 : 1);
+      process.exit(result.ok ? 0 : 1);
     }
 
-    let listen = false;
-    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
-    let intervalSeconds = parseInt(process.env.WORKER_POLL_INTERVAL || "60", 10);
-    let workerQuery = process.env.WORKER_TASK_QUERY;
     let verbose = false;
-    let ui = false;
-    let uiPort: number | undefined;
     let workspacePath: string | undefined;
-    let workspaceFlag = false;
-    let noWorkspace = false;
+
+    const removedWorkerFlags: Record<string, string> = {
+      "--listen": "Use the workspace worker or `devintern webhook serve`.",
+      "--no-workspace": "Use the workspace worker or `devintern webhook serve`.",
+      "--port": "Use the workspace worker or `devintern webhook serve`.",
+      "--host": "Use the workspace worker or `devintern webhook serve`.",
+      "--query": "Set [defaults].task_query in workspace.toml.",
+      "--interval": "Set [defaults].poll_interval in workspace.toml.",
+      "--ui": "The dashboard is on by default. Set [workspace].dashboard = false to disable it.",
+      "--no-ui": "Set [workspace].dashboard = false in workspace.toml.",
+      "--ui-port": "Set [workspace].dashboard_port in workspace.toml.",
+      "--sandbox": "Set AGENT_SANDBOX in the workspace .env.",
+    };
 
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--listen") {
-        listen = true;
-      } else if (args[i] === "--workspace") {
-        workspaceFlag = true;
-        if (args[i + 1] && !args[i + 1].startsWith("-")) {
-          workspacePath = args[i + 1];
-          i++;
+      const arg = args[i];
+      if (arg === undefined) {
+        continue;
+      }
+      const removed = removedWorkerFlags[arg];
+      if (removed) {
+        console.error(`❌ ${arg} has been removed from devintern worker.`);
+        console.error(`   ${removed}`);
+        process.exit(1);
+      }
+      if (arg === "--workspace") {
+        if (!args[i + 1] || args[i + 1].startsWith("-")) {
+          console.error("❌ --workspace requires a path to workspace.toml.");
+          process.exit(1);
         }
-      } else if (args[i] === "--no-workspace") {
-        noWorkspace = true;
-      } else if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
+        workspacePath = args[i + 1];
         i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--interval" && args[i + 1]) {
-        intervalSeconds = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--query" && args[i + 1]) {
-        workerQuery = args[i + 1];
-        i++;
-      } else if (args[i] === "--ui") {
-        ui = true;
-      } else if (args[i] === "--ui-port" && args[i + 1]) {
-        ui = true;
-        uiPort = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--sandbox" && args[i + 1]) {
-        setSandboxOverride(args[i + 1]);
-        i++;
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
+      } else if (arg === "-v" || arg === "--verbose") {
         verbose = true;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern worker [init] [options]");
-        console.log("       devintern worker connect [github|status] [--repo owner/name]");
+      } else if (arg === "--help" || arg === "-h") {
+        console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
+        console.log("       devintern worker connect [target] [--workspace <path>]");
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` pairs this repo with the DevIntern relay (Mode 2) so");
-        console.log("events arrive in seconds without webhook setup; see connect --help.");
+        console.log("`worker connect` pairs workspace repos with the DevIntern relay (Mode 2)");
+        console.log("so events arrive in seconds without webhook setup; see connect --help.");
+        console.log("");
+        console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
+        console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
         console.log("");
         console.log("Subcommands:");
-        console.log("  init                Guided server-automation setup: ready-tasks query");
-        console.log("                      (with a live dry run), webhook secret, license check,");
-        console.log("                      and an optional systemd unit");
+        console.log(
+          "  init                Guided unattended setup: tracker, workspace, ready-tasks",
+        );
+        console.log("                      query (live dry run), and license check");
+        console.log("  scaffold            Create workspace.toml and the shared .env only");
+        console.log("  add-repo            Add the current repository to the worker workspace");
+        console.log("  connect             Pair workspace repos or its tracker with the relay");
+        console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
-        console.log("  --query <query>     Poll the tracker for ready tasks matching this query");
-        console.log("                      (same query language as batch --query runs)");
-        console.log("  --workspace [path]  Fleet mode: serve every repo in the workspace");
-        console.log("                      (~/.devintern/workspace.toml, or the given path).");
-        console.log("                      Auto-enabled when a workspace exists; team tier.");
-        console.log("  --no-workspace      Ignore an existing workspace; single-repo mode");
-        console.log("  --listen            Also run the GitHub webhook listener (direct webhooks)");
-        console.log("  --port <port>       Webhook listener port (default: 3000 or WEBHOOK_PORT)");
-        console.log(
-          "  --host <host>       Webhook listener host (default: 0.0.0.0 or WEBHOOK_HOST)",
-        );
-        console.log("  --interval <secs>   Polling interval in seconds (default: 60)");
-        console.log("  --ui                Also serve the local observability dashboard");
-        console.log("                      (localhost only; see also `devintern dashboard`)");
-        console.log("  --ui-port <port>    Dashboard port (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --sandbox <name>    Sandbox agent runs: none | auto | native | nono |");
-        console.log("                      srt | docker | smolvm (overrides AGENT_SANDBOX)");
+        console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
+        console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
         console.log("  -v, --verbose       Verbose logging");
         console.log("  -h, --help          Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log(
-          "  WEBHOOK_SECRET       (required with --listen) GitHub webhook signature secret",
-        );
-        console.log("  WORKER_TASK_QUERY    Task-selection query (same as --query)");
-        console.log("  WORKER_TASK_ARGS     Extra CLI flags per task run (default: --create-pr)");
-        console.log("  WORKER_POLL_INTERVAL Polling interval in seconds (default: 60)");
-        console.log("  WORKER_RELAY_URL     Relay base URL override (Mode 2; see worker connect)");
-        console.log("  SENTRY_AUTH_TOKEN    (+ SENTRY_ORG) Also watch Sentry for new errors");
-        console.log("                       and create bugfixes; see `devintern sentry --help`");
         process.exit(0);
+      } else if (!arg.startsWith("-")) {
+        console.error(`❌ Unknown worker command: ${arg}`);
+        console.error("   Run `devintern worker --help` for available commands.");
+        process.exit(1);
       }
+    }
+
+    loadedEnvPath = loadEnvironment();
+
+    const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
+      await import("./lib/workspace/paths");
+    const workspaceMode = Boolean(workspacePath) || hasWorkspace();
+    if (!workspaceMode) {
+      console.error("❌ No workspace configured. Run `devintern worker init` first.");
+      process.exit(1);
+    }
+
+    // Workspace credentials must be available before the license gate. This
+    // matters for native services, whose working directory is the workspace
+    // home rather than a source checkout.
+    const { parseEnvFile } = await import("./lib/workspace/env");
+    const selectedWorkspaceDir = workspacePath
+      ? dirname(resolve(workspacePath))
+      : resolveWorkspaceDir();
+    for (const [key, value] of Object.entries(
+      parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)),
+    )) {
+      if (process.env[key] === undefined) process.env[key] = value;
     }
 
     // License check — the worker is unattended automation, so it always
@@ -593,439 +816,19 @@ if (process.argv[2] === "init") {
     });
     requireLicense(licenseResult);
 
-    // Workspace (fleet) mode: one daemon serves every repo in the workspace.
-    // Explicit --workspace wins; otherwise auto-detect ~/.devintern/workspace.toml
-    // unless --no-workspace. Team-tier capability.
-    {
-      const { hasWorkspace } = await import("./lib/workspace/paths");
-      const workspaceMode = workspaceFlag || (!noWorkspace && hasWorkspace());
-      if (workspaceMode && !listen) {
-        requireTeamAutomation(licenseResult);
-        const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
-        await runWorkspaceWorker({
-          workspacePath,
-          query: workerQuery,
-          intervalSeconds,
-          verbose,
-          ui,
-          uiPort,
-        });
-        return;
-      }
-      if (workspaceMode && listen) {
-        console.error(
-          "❌ --listen (direct webhooks) is single-repo and cannot combine with workspace mode.\n" +
-            "   Run `devintern worker --listen --no-workspace` inside the repo instead.",
-        );
-        process.exit(1);
-      }
-    }
-
-    const { startWorker } = await import("./worker");
-    const { WorkerState } = await import("./lib/worker-state");
-    const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
-      await import("./lib/webhook-queue");
-    const dbPath = resolveQueueDbPath();
-    const acquirers = [];
-
-    if (workerQuery) {
-      const trackerType = process.env.TASK_TRACKER || "jira";
-      const { supportsPolling, trackersSupportingPolling } =
-        await import("./lib/tracker-capabilities");
-      if (!supportsPolling(trackerType)) {
-        console.error(
-          `❌ Worker polling is not available for tracker '${trackerType}' yet.\n` +
-            `   Trackers with polling support: ${trackersSupportingPolling().join(", ")}\n` +
-            `   You can still use --listen for webhook-driven review handling.`,
-        );
-        process.exit(1);
-      }
-
-      const { TaskPollingAcquirer, runTaskViaCli } = await import("./lib/task-polling-acquirer");
-      const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
-
-      const tracker = new TaskTrackerManager().getClient();
-
-      const { createChangeDetector } = await import("./lib/change-detector");
-      const detector = createChangeDetector(trackerType, (q) => tracker.searchTasks(q));
-      if (!detector) {
-        console.error(
-          `❌ Could not initialize the ${trackerType} change detector. ` +
-            `Check the tracker's required environment variables.`,
-        );
-        process.exit(1);
-      }
-
-      acquirers.push(
-        new TaskPollingAcquirer({
-          trackerType,
-          query: workerQuery,
-          intervalSeconds,
-          detector,
-          workerState: new WorkerState(dbPath),
-          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-          searchTasks: (q) => tracker.searchTasks(q),
-          executeTask: (taskKey) => runTaskViaCli(taskKey),
-          verbose,
-        }),
-      );
-    }
-
-    // Sentry error watcher: opt-in by configuring SENTRY_AUTH_TOKEN and
-    // SENTRY_ORG in .devintern-code/.env. Shares the same queue DB as the
-    // standalone `devintern sentry` command, so handled error groups are
-    // deduplicated across both modes.
-    if (
-      process.env.SENTRY_AUTH_TOKEN &&
-      (process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION)
-    ) {
-      const { SentryClient } = await import("./lib/sentry-client");
-      const { SentryErrorAcquirer, runSentryBugfixViaCli } = await import("./lib/sentry-acquirer");
-      const sentryClient = new SentryClient({
-        authToken: process.env.SENTRY_AUTH_TOKEN,
-        organization: process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION || "",
-        project: process.env.SENTRY_PROJECT,
-        baseUrl: process.env.SENTRY_BASE_URL,
-      });
-
-      acquirers.push(
-        new SentryErrorAcquirer({
-          intervalSeconds: parseInt(
-            process.env.SENTRY_POLL_INTERVAL || String(intervalSeconds),
-            10,
-          ),
-          minEvents: parseInt(process.env.SENTRY_MIN_EVENTS || "5", 10),
-          maxIssuesPerTick: parseInt(process.env.SENTRY_MAX_PER_TICK || "3", 10),
-          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-          fetchIssues: () => sentryClient.fetchUnresolvedIssues(process.env.SENTRY_QUERY),
-          createBugfix: (issue) => runSentryBugfixViaCli(issue),
-          verbose,
-        }),
-      );
-    }
-
-    // Tier 1 review polling: watch the agent's own PRs (agent_prs registry)
-    // and address review feedback without an @mention. Skipped with --listen
-    // (webhooks already deliver reviews there — polling too would double-run)
-    // and without GitHub credentials.
-    if (!listen && (process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID)) {
-      const { ReviewPollingAcquirer, runAddressReviewViaCli, runResolveConflictsViaCli } =
-        await import("./lib/review-polling-acquirer");
-      const { GitHubReviewsClient } = await import("./lib/github-reviews");
-      const gh = new GitHubReviewsClient({ preferAppAuth: true });
-      const ownerOf = (repo: string) => repo.split("/")[0] as string;
-      const nameOf = (repo: string) => repo.split("/")[1] as string;
-
-      acquirers.push(
-        new ReviewPollingAcquirer({
-          intervalSeconds,
-          workerState: new WorkerState(dbPath),
-          queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-          github: {
-            fetchPr: (repo, n, etag) =>
-              gh.conditionalGet(`/repos/${repo}/pulls/${n}`, ownerOf(repo), nameOf(repo), etag),
-            fetchReviews: (repo, n, etag) =>
-              gh.conditionalGet(
-                `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
-                ownerOf(repo),
-                nameOf(repo),
-                etag,
-              ),
-            fetchReviewCommentsSince: async (repo, n, sinceIso) => {
-              const result = await gh.conditionalGet<
-                Array<{ id: number; user: { login: string; type: string }; created_at: string }>
-              >(
-                `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
-                ownerOf(repo),
-                nameOf(repo),
-              );
-              return result.data ?? [];
-            },
-          },
-          addressPr: (repo, n) => runAddressReviewViaCli(repo, n),
-          resolveConflicts: (repo, n) => runResolveConflictsViaCli(repo, n),
-          verbose,
-        }),
-      );
-
-      // Tier 2 mention sweep: react to @mentions on ANY PR in the repo (two
-      // since-cursor requests per tick). Permission + mention gates apply in
-      // the shared review pipeline; fork PRs without maintainer_can_modify
-      // are skipped with an explanatory comment.
-      const repoSlug =
-        process.env.GITHUB_REPO ||
-        (await new PRManager()
-          .detectRepository()
-          .then((r) => (r.platform === "github" ? r.repository : "")));
-      if (repoSlug) {
-        const { MentionSweepAcquirer } = await import("./lib/mention-sweep-acquirer");
-        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
-        const [repoOwner, repoName] = repoSlug.split("/") as [string, string];
-        const sweepUser = (user: { login: string; type: string }) => ({
-          login: user.login,
-          id: 0,
-          avatar_url: "",
-          type: user.type as "User" | "Bot" | "Organization",
-        });
-
-        acquirers.push(
-          new MentionSweepAcquirer({
-            repo: repoSlug,
-            intervalSeconds,
-            workerState: new WorkerState(dbPath),
-            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-            github: {
-              fetchIssueCommentsSince: async (sinceIso) => {
-                const result = await gh.conditionalGet<
-                  Array<{
-                    id: number;
-                    body: string | null;
-                    user: { login: string; type: string };
-                    created_at: string;
-                    html_url: string;
-                    issue_url?: string;
-                  }>
-                >(
-                  `/repos/${repoSlug}/issues/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
-                  repoOwner,
-                  repoName,
-                );
-                return result.data ?? [];
-              },
-              fetchReviewCommentsSince: async (sinceIso) => {
-                const result = await gh.conditionalGet<
-                  Array<{
-                    id: number;
-                    body: string | null;
-                    user: { login: string; type: string };
-                    created_at: string;
-                    html_url: string;
-                    pull_request_url?: string;
-                  }>
-                >(
-                  `/repos/${repoSlug}/pulls/comments?since=${encodeURIComponent(sinceIso)}&per_page=100&sort=created&direction=asc`,
-                  repoOwner,
-                  repoName,
-                );
-                return result.data ?? [];
-              },
-              getBotUsername: () => gh.getBotUsername(repoOwner, repoName),
-              getPr: async (prNumber) => {
-                const pr = await gh.getPullRequest(repoOwner, repoName, prNumber);
-                return {
-                  number: pr.number,
-                  state: pr.state,
-                  headRepoFullName: pr.head.repo?.full_name,
-                  maintainerCanModify: pr.maintainer_can_modify,
-                };
-              },
-              postComment: (prNumber, body) =>
-                gh.postPullRequestComment(repoOwner, repoName, prNumber, body).then(() => {}),
-            },
-            handleMention: (comment, prNumber) =>
-              processIssueCommentAsync(
-                {
-                  action: "created",
-                  issue: {
-                    number: prNumber,
-                    title: "",
-                    state: "open",
-                    user: sweepUser(comment.user),
-                    pull_request: { url: "", html_url: comment.html_url },
-                  },
-                  comment: {
-                    id: comment.id,
-                    body: comment.body,
-                    user: sweepUser(comment.user),
-                    html_url: comment.html_url,
-                    created_at: comment.created_at,
-                  },
-                  repository: {
-                    id: 0,
-                    name: repoName,
-                    full_name: repoSlug,
-                    private: false,
-                    owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
-                    html_url: `https://github.com/${repoSlug}`,
-                    default_branch: "main",
-                  },
-                  sender: sweepUser(comment.user),
-                },
-                DEFAULT_CONFIG,
-              ),
-            verbose,
-          }),
-        );
-      } else if (verbose) {
-        console.log("   Mention sweep disabled: could not determine the GitHub repo slug.");
-      }
-    }
-
-    // Mode 2 relay: long-poll the control plane for reference envelopes when
-    // this project is connected (`devintern worker connect`) or a relay URL
-    // is set explicitly. Mode 1 polling keeps running as the fallback sweep;
-    // dedupe and live-state re-derivation bound double-triggers.
-    const { loadRelayState } = await import("./lib/relay-connect");
-    const relayState = loadRelayState();
-    if (relayState || process.env.WORKER_RELAY_URL) {
-      const relayToken = relayState?.relayToken;
-      const relayUrl =
-        process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
-      if (!relayToken) {
-        console.warn(
-          "⚠️  Relay is configured but no relay token is stored — run `devintern worker connect` while signed in (`devintern login`). Mode 1 polling continues.",
-        );
-      } else if (relayUrl) {
-        const { RelayAcquirer } = await import("./lib/relay-acquirer");
-        const { runAddressReviewViaCli } = await import("./lib/review-polling-acquirer");
-        const { runTaskViaCli } = await import("./lib/task-polling-acquirer");
-        const { processIssueCommentAsync, DEFAULT_CONFIG } = await import("./webhook-server");
-        const { mentionsBot } = await import("./lib/mention-sweep-acquirer");
-        const relayWorkerState = new WorkerState(dbPath);
-
-        const hasGitHubCreds = Boolean(process.env.GITHUB_TOKEN || process.env.GITHUB_APP_ID);
-        const { GitHubReviewsClient } = await import("./lib/github-reviews");
-        const relayGh = hasGitHubCreds ? new GitHubReviewsClient({ preferAppAuth: true }) : null;
-
-        // Task envelopes re-evaluate the user's query before running
-        // (detect-then-evaluate, same as the polling acquirer).
-        const relayTracker = workerQuery
-          ? await (async () => {
-              const { TaskTrackerManager } = await import("./lib/task-tracker-manager");
-              return new TaskTrackerManager().getClient();
-            })()
-          : null;
-
-        const relayUser = (user: { login: string; type: string }) => ({
-          login: user.login,
-          id: 0,
-          avatar_url: "",
-          type: user.type as "User" | "Bot" | "Organization",
-        });
-
-        acquirers.push(
-          new RelayAcquirer({
-            relayUrl,
-            relayToken,
-            workerState: relayWorkerState,
-            queue: new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH }),
-            isAgentPr: (repo, prNumber) =>
-              relayWorkerState.listOpenAgentPrs(repo).some((pr) => pr.prNumber === prNumber),
-            handlers: {
-              addressPr: async (repo, prNumber) => {
-                await runAddressReviewViaCli(repo, prNumber);
-              },
-              handlePrComment: async (repo, prNumber, commentId) => {
-                if (!relayGh) {
-                  return;
-                }
-                const [repoOwner, repoName] = repo.split("/") as [string, string];
-                // Fetch the referenced comment (envelopes never carry text),
-                // then pre-filter for the bot mention before entering the
-                // pipeline; the permission gate applies inside.
-                const { data: comment } = await relayGh.conditionalGet<{
-                  id: number;
-                  body: string | null;
-                  user: { login: string; type: string };
-                  created_at: string;
-                  html_url: string;
-                }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
-                if (!comment) {
-                  return;
-                }
-                const botName = await relayGh.getBotUsername(repoOwner, repoName);
-                if (!botName || !mentionsBot(comment.body, botName)) {
-                  return;
-                }
-                console.log(`📌 [relay] @mention on ${repo}#${prNumber}`);
-                await processIssueCommentAsync(
-                  {
-                    action: "created",
-                    issue: {
-                      number: prNumber,
-                      title: "",
-                      state: "open",
-                      user: relayUser(comment.user),
-                      pull_request: { url: "", html_url: comment.html_url },
-                    },
-                    comment: {
-                      id: comment.id,
-                      body: comment.body,
-                      user: relayUser(comment.user),
-                      html_url: comment.html_url,
-                      created_at: comment.created_at,
-                    },
-                    repository: {
-                      id: 0,
-                      name: repoName,
-                      full_name: repo,
-                      private: false,
-                      owner: { login: repoOwner, id: 0, avatar_url: "", type: "User" },
-                      html_url: `https://github.com/${repo}`,
-                      default_branch: "main",
-                    },
-                    sender: relayUser(comment.user),
-                  },
-                  DEFAULT_CONFIG,
-                );
-              },
-              evaluateTask: async (taskKey) => {
-                if (!relayTracker || !workerQuery) {
-                  if (verbose) {
-                    console.log(
-                      `   [relay] task ${taskKey} changed but no --query is configured; skipping.`,
-                    );
-                  }
-                  return;
-                }
-                const { tasks } = await relayTracker.searchTasks(workerQuery);
-                if (!tasks.some((task) => task.key === taskKey)) {
-                  return;
-                }
-                console.log(`📌 [relay] task ${taskKey} is ready`);
-                await runTaskViaCli(taskKey);
-              },
-            },
-            verbose,
-          }),
-        );
-      }
-    }
-
-    // Local observability dashboard alongside the daemon (same server module
-    // as the standalone `devintern dashboard` command; reads the DB read-only).
-    if (ui) {
-      const { startDashboardServer } = await import("./dashboard-server");
-      startDashboardServer({ port: uiPort });
-    }
-
-    await startWorker({ listen, port, host, intervalSeconds, verbose }, acquirers);
+    const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
+    await runWorkspaceWorker({
+      workspacePath,
+      verbose,
+      cliVersion: VERSION,
+    });
+    return;
   })();
 } else if (process.argv[2] === "workspace") {
-  // Workspace management: scaffold or grow the multi-repo fleet config.
-  // No license gate here - enforcement lives on the worker's workspace mode.
-  (async () => {
-    const sub = process.argv[3];
-    if (sub === "init") {
-      const { runWorkspaceInit } = await import("./lib/workspace/init");
-      process.exit(runWorkspaceInit());
-    }
-    if (sub === "import") {
-      const { runWorkspaceImport } = await import("./lib/workspace/init");
-      process.exit(await runWorkspaceImport(process.cwd()));
-    }
-    console.log("Usage: devintern workspace <command>");
-    console.log("");
-    console.log("Manage the multi-repo workspace (~/.devintern/workspace.toml).");
-    console.log("The fleet worker serves every repo listed there; see `devintern worker --help`.");
-    console.log("");
-    console.log("Commands:");
-    console.log("  init      Create the workspace config and shared .env");
-    console.log("  import    Add the current repo to the workspace (run inside the repo);");
-    console.log("            merges its .devintern-code/.env into the workspace .env and");
-    console.log("            keeps conflicting values repo-local in [repos.env]");
-    process.exit(sub === undefined || sub === "--help" || sub === "-h" ? 0 : 1);
-  })();
+  console.error("❌ Unknown command: workspace");
+  console.error("   Workspace setup and management live under `devintern worker`.");
+  console.error("   Run `devintern worker --help` for available commands.");
+  process.exit(1);
 } else if (process.argv[2] === "dashboard") {
   // Local observability dashboard, standalone: reads the worker's SQLite
   // read-only, so it works whether or not the worker is running.
@@ -1052,8 +855,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Options:");
         console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --host <host>  Host to bind to (default: 127.0.0.1; no authentication,");
-        console.log("                 so binding beyond localhost is not recommended)");
+        console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
+        console.log("                 accepted: 127.0.0.1, localhost, ::1)");
         console.log("  -h, --help     Display this help message");
         process.exit(0);
       }
@@ -1080,203 +883,20 @@ if (process.argv[2] === "init") {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   })();
-} else if (process.argv[2] === "sentry") {
-  // Sentry error watcher: poll unresolved issues and create bugfixes for new,
-  // valid error groups. Dedupe lives in the shared queue DB (`processed_events`,
-  // source `sentry`), so restarts and overlapping ticks never re-run a group.
+} else if (process.argv[2] === "webhook") {
   (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    const args = process.argv.slice(3);
-    let token = process.env.SENTRY_AUTH_TOKEN;
-    let org = process.env.SENTRY_ORG || process.env.SENTRY_ORGANIZATION;
-    let project = process.env.SENTRY_PROJECT;
-    let baseUrl = process.env.SENTRY_BASE_URL;
-    let intervalSeconds = parseInt(process.env.SENTRY_POLL_INTERVAL || "60", 10);
-    let minEvents = parseInt(process.env.SENTRY_MIN_EVENTS || "5", 10);
-    let maxPerTick = 3;
-    let query: string | undefined;
-    let once = false;
-    let verbose = false;
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--token" && args[i + 1]) {
-        token = args[i + 1];
-        i++;
-      } else if (args[i] === "--org" && args[i + 1]) {
-        org = args[i + 1];
-        i++;
-      } else if (args[i] === "--project" && args[i + 1]) {
-        project = args[i + 1];
-        i++;
-      } else if (args[i] === "--base-url" && args[i + 1]) {
-        baseUrl = args[i + 1];
-        i++;
-      } else if (args[i] === "--interval" && args[i + 1]) {
-        intervalSeconds = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--min-events" && args[i + 1]) {
-        minEvents = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--max-per-tick" && args[i + 1]) {
-        maxPerTick = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--query" && args[i + 1]) {
-        query = args[i + 1];
-        i++;
-      } else if (args[i] === "--once") {
-        once = true;
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
-        verbose = true;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern sentry [options]");
-        console.log("");
-        console.log("Watch Sentry for new errors and create bugfixes automatically.");
-        console.log("Each unresolved error group is validated (minimum event count,");
-        console.log("actionable metadata) before a bugfix task runs through the standard");
-        console.log("pipeline. Every group is handled at most once, persisted across");
-        console.log("restarts in .devintern-code/queue.db.");
-        console.log("");
-        console.log("Options:");
-        console.log("  --token <token>     Sentry auth token (or SENTRY_AUTH_TOKEN)");
-        console.log("  --org <slug>        Organization slug (or SENTRY_ORG)");
-        console.log("  --project <slug>    Project slug (or SENTRY_PROJECT); omit to watch");
-        console.log("                      every project in the organization");
-        console.log("  --base-url <url>    Sentry base URL for self-hosted (or");
-        console.log("                      SENTRY_BASE_URL; default: https://sentry.io)");
-        console.log("  --interval <secs>   Polling interval in seconds (default: 60 or");
-        console.log("                      SENTRY_POLL_INTERVAL)");
-        console.log("  --min-events <n>    Minimum event count to treat an error as valid");
-        console.log("                      (default: 5 or SENTRY_MIN_EVENTS)");
-        console.log("  --max-per-tick <n>  Max bugfixes started per polling tick (default: 3)");
-        console.log("  --query <terms>     Extra Sentry search terms ANDed with is:unresolved");
-        console.log("  --once              Run a single polling tick and exit (for cron)");
-        console.log("  -v, --verbose       Verbose logging");
-        console.log("  -h, --help          Display this help message");
-        process.exit(0);
-      }
+    const command = process.argv[3];
+    if (!command || command === "--help" || command === "-h") {
+      printWebhookHelp();
+      return;
     }
-
-    if (!token || !org) {
-      console.error(
-        "❌ Sentry is not configured. Set SENTRY_AUTH_TOKEN and SENTRY_ORG in\n" +
-          "   .devintern-code/.env (or pass --token / --org). Use --project to scope\n" +
-          "   the watcher to a single project.",
-      );
-      process.exit(1);
+    if (command !== "serve") {
+      console.error(`❌ Unknown webhook command: ${command}`);
+      console.error("   Run 'devintern webhook --help' for usage.");
+      process.exitCode = 1;
+      return;
     }
-
-    // Unattended automation — same entitlement as the worker.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    requireLicense(licenseResult);
-
-    const { SentryClient } = await import("./lib/sentry-client");
-    const { SentryErrorAcquirer, runSentryBugfixViaCli } = await import("./lib/sentry-acquirer");
-    const { WebhookQueue, resolveQueueDbPath, LEGACY_DB_PATH } =
-      await import("./lib/webhook-queue");
-
-    const client = new SentryClient({ authToken: token, organization: org, project, baseUrl });
-    const dbPath = resolveQueueDbPath();
-    const queue = new WebhookQueue({ dbPath, legacyDbPath: LEGACY_DB_PATH });
-
-    const acquirer = new SentryErrorAcquirer({
-      intervalSeconds,
-      minEvents,
-      maxIssuesPerTick: maxPerTick,
-      queue,
-      fetchIssues: () => client.fetchUnresolvedIssues(query),
-      createBugfix: (issue) => runSentryBugfixViaCli(issue),
-      verbose,
-    });
-
-    if (once) {
-      await acquirer.tick();
-      queue.close();
-      process.exit(0);
-    }
-
-    await acquirer.start();
-    console.log(
-      `👷 Watching Sentry ${project ? `project ${project}` : `org ${org}`} for new errors`,
-    );
-    const shutdown = (): void => {
-      console.log("\n👋 Sentry watcher stopped");
-      acquirer.stop();
-      queue.close();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-  })();
-} else if (process.argv[2] === "serve") {
-  // Handle serve command - start webhook server
-  // Deprecated alias for `devintern worker --listen`.
-  (async () => {
-    console.warn(
-      "⚠️  `devintern serve` is deprecated; use `devintern worker --listen` instead.\n" +
-        "   The worker daemon also supports tracker polling (no webhook setup needed).",
-    );
-
-    // Load environment for webhook server
-    loadedEnvPath = loadEnvironment();
-
-    // Parse serve-specific options
-    const args = process.argv.slice(3);
-    let port = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-    let host = process.env.WEBHOOK_HOST || "0.0.0.0";
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern serve [options]");
-        console.log("");
-        console.log("Start the webhook server to automatically address PR review feedback");
-        console.log("");
-        console.log("Options:");
-        console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
-        console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
-        console.log("  -h, --help     Display this help message");
-        console.log("");
-        console.log("Environment variables:");
-        console.log(
-          "  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures",
-        );
-        console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
-        console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
-        console.log(
-          "  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments",
-        );
-        console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
-        console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
-        console.log("");
-        console.log("See docs/WEBHOOK-DEPLOYMENT.md for deployment instructions.");
-        process.exit(0);
-      }
-    }
-
-    // License check — the webhook server is unattended automation, so it
-    // always requires an automation license.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    requireLicense(licenseResult);
-
-    // Import and start webhook server
-    const { startWebhookServer } = await import("./webhook-server");
-    startWebhookServer({ port, host });
+    await runWebhookServeCommand(process.argv.slice(4));
   })();
 } else if (process.argv[2] === "address-review") {
   // Handle address-review command - manually address PR review feedback
@@ -1336,10 +956,18 @@ if (process.argv[2] === "init") {
     try {
       await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
-      endRun("failed", (error as Error).message);
-      console.error(`❌ Error: ${(error as Error).message}`);
+      endRun("failed", message);
+      captureError(error, { command: "address-review", prUrl });
+      console.error(`❌ Error: ${message}`);
+      // This is a handled exception, so the process-level fatal handlers do
+      // not run. Flush explicitly before the subprocess reports failure.
+      await flushErrorTracking();
       process.exit(1);
     }
   })();
@@ -1353,10 +981,16 @@ if (process.argv[2] === "init") {
     let prUrl: string | undefined;
     let noPush = false;
     let verbose = false;
+    let expectedHeadSha: string | undefined;
+    let expectedBaseSha: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
         noPush = true;
+      } else if (args[i] === "--expected-head") {
+        expectedHeadSha = args[++i];
+      } else if (args[i] === "--expected-base") {
+        expectedBaseSha = args[++i];
       } else if (args[i] === "-v" || args[i] === "--verbose") {
         verbose = true;
       } else if (args[i] === "--help" || args[i] === "-h") {
@@ -1389,14 +1023,43 @@ if (process.argv[2] === "init") {
 
     const { resolveConflictsOnPr } = await import("./lib/conflict-resolver");
     try {
-      const result = await resolveConflictsOnPr(prUrl, { noPush, verbose });
+      const result = await resolveConflictsOnPr(prUrl, {
+        noPush,
+        verbose,
+        expectedHeadSha,
+        expectedBaseSha,
+      });
+      const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
+      if (Number.isInteger(resultFd) && resultFd >= 3) {
+        const { writeSync } = await import("fs");
+        writeSync(resultFd, `${JSON.stringify(result)}\n`);
+      }
       if (result.outcome === "skipped") {
         console.log(`⏭️  Skipped: ${result.message}`);
+      } else if (result.outcome === "failed") {
+        // A landed-but-unconfirmed failure means the merge commit IS on the
+        // PR branch even though verification failed; only the other failure
+        // kinds leave the PR untouched.
+        const untouchedHint =
+          result.failureKind === "landed-but-unconfirmed"
+            ? "The merge commit is on the branch; see the PR for details."
+            : "No changes landed on the PR; see the PR comment for details.";
+        console.error(`❌ Failed: ${result.message}. ${untouchedHint}`);
+      } else if (result.outcome === "deferred") {
+        console.log(`⏳ Deferred: ${result.message}`);
       }
-      process.exit(result.outcome === "failed" ? 1 : 0);
+      process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
       console.error(`❌ Error: ${(error as Error).message}`);
-      process.exit(1);
+      // Thrown (unexpected) resolution errors are user actions that failed —
+      // reported like address-review; `failed`/`deferred` outcomes above are
+      // expected results and stay unreported.
+      captureError(error, { command: "resolve-conflicts", prUrl });
+      await flushErrorTracking();
+      process.exitCode = 1;
     }
   })();
 } else if (process.argv[2] === "login") {
@@ -1449,6 +1112,31 @@ if (process.argv[2] === "init") {
     // Non-zero exit when the configured provider guarantees a failed run, so
     // scripts and CI can gate on 'devintern sandbox'.
     process.exit(report.nextRunFails ? 1 : 0);
+  })();
+} else if (process.argv[2] === "doctor") {
+  // Readiness doctor: everything needed for a first successful run, with a
+  // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
+  (async () => {
+    const { collectReadinessChecks, renderReadinessReport } = await import("./lib/readiness");
+    loadedEnvPath = loadEnvironment();
+    let supabaseConfig;
+    try {
+      supabaseConfig = loadSupabaseConfig();
+    } catch {
+      supabaseConfig = undefined;
+    }
+    const checks = await collectReadinessChecks({ envPath: loadedEnvPath, supabaseConfig });
+    console.log("🩺 devintern readiness:\n");
+    const report = renderReadinessReport(checks);
+    console.log(report.lines.join("\n"));
+    if (report.hasFailures) {
+      console.log("\n❌ Not ready — fix the failed checks above.");
+    } else if (report.hasWarnings) {
+      console.log("\n✅ Ready to run (with the warnings above).");
+    } else {
+      console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
+    }
+    process.exit(report.hasFailures ? 1 : 0);
   })();
 } else if (process.argv[2] === "whoami") {
   (async () => {
@@ -1518,7 +1206,7 @@ program
   .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
   .option(
     "--estimate",
-    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub posts comment-only estimates)",
+    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub and GitLab post comment-only estimates)",
   )
   .option(
     "--sandbox <provider>",
@@ -1544,6 +1232,11 @@ Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
 Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
   devintern 123 --create-pr
   devintern https://github.com/acme/webapp/issues/123 --create-pr
+  devintern --query "is:open label:bug" --create-pr
+
+Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
+  devintern 123 --create-pr
+  devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
 Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
@@ -1574,19 +1267,20 @@ Subcommands:
   init                 Initialize .devintern-code configuration in current directory
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
-  worker               Run the worker daemon (webhook listener via --listen);
-                       'worker init' runs a guided server-automation setup
+  worker               Run the workspace worker daemon;
+                        'worker init' writes a workspace, ready-tasks query,
+                        relay pairing, and the GitHub App (@mentions)
   dashboard            Serve the local observability dashboard (run history and stats)
-  serve                Deprecated alias for 'worker --listen'
+  webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
-  sandbox              Sandbox doctor: providers, remaining setup steps, and what
+   sandbox              Sandbox doctor: providers, remaining setup steps, and what
                         the next run will do (exit 1 if it would fail)
-  sentry               Watch Sentry for new errors and create bugfixes
-                        automatically (deduplicated per error group)
+  doctor               Readiness check: runtime, git, agent CLI, tracker
+                        credentials, sign-in, license (exit 1 if anything fails)
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`,
 );
@@ -1597,14 +1291,14 @@ const isSubcommand = [
   "worker",
   "dashboard",
   "workspace",
-  "serve",
+  "webhook",
   "address-review",
   "resolve-conflicts",
   "login",
   "logout",
   "whoami",
   "sandbox",
-  "sentry",
+  "doctor",
 ].includes(process.argv[2]);
 if (!isSubcommand) {
   program.parse();
@@ -1671,16 +1365,41 @@ function validateEnvironment(): void {
   }
 }
 
+// Context for the task currently being processed, so signal handlers and
+// error paths can leave feedback on the ticket instead of failing silently
+// with the task stranded in "In Progress".
+let activeTaskContext: {
+  taskKey: string;
+  tracker: TaskTrackerClient;
+  projectKey: string;
+  movedToInProgress: boolean;
+} | null = null;
+
 /**
- * Thrown when the agent hits an account-wide usage/rate limit. Since every
- * remaining task in a batch would fail identically, callers abort the batch
- * rather than retrying immediately.
+ * Best-effort failure feedback: post a comment explaining why no pull request
+ * was created and move the ticket back to its To Do status so the next
+ * scheduled run can retry. Never throws — feedback must not mask the
+ * original error.
+ *
+ * After posting, the attempt is recorded for the retry gate so posting the
+ * comment (which bumps the ticket's `updated` stamp) does not itself cause
+ * an immediate re-pickup loop.
  */
-class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
-    super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
-    this.name = "UsageLimitError";
-  }
+async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
+  const context = activeTaskContext;
+  if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
+
+  await reportTaskFailure({
+    taskKey,
+    reason,
+    tracker: context.tracker,
+    trackerType: process.env.TASK_TRACKER || "jira",
+    projectKey: context.projectKey,
+    movedToInProgress: context.movedToInProgress,
+    getTodoStatus: () => getTodoStatusForProject(context.projectKey, loadProjectSettings()),
+    log: console.log,
+    warn: console.warn,
+  });
 }
 
 /**
@@ -1720,6 +1439,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Load project settings to get status transitions
     const projectSettings = loadProjectSettings();
     const projectKey = resolveProjectKey(workflowKey, task);
+    activeTaskContext = {
+      taskKey: workflowKey,
+      tracker,
+      projectKey,
+      movedToInProgress: false,
+    };
 
     // Fetch comments before the retry gate: a new comment since the last
     // incomplete attempt counts as a clarification and unlocks a retry.
@@ -1769,10 +1494,30 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     // Structured run record for this attempt (skips above are not attempts).
+    // Scheduled automations run through this same pipeline with their prompt
+    // materialized as a markdown task; env markers attribute those runs.
+    // Dashboard "Run now" triggers use the same markers with a `manual`
+    // origin so run history distinguishes them from scheduled runs.
+    const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
+    const trackerName = process.env.TASK_TRACKER || "jira";
+    const isManualAutomationRun =
+      scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
     beginRun({
-      origin: "task",
+      origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
       taskKey: workflowKey,
-      tracker: process.env.TASK_TRACKER || "jira",
+      tracker: trackerName,
+      team: process.env.DEVINTERN_WORKSPACE_TEAM,
+      repo: process.env.DEVINTERN_WORKSPACE_REPO,
+      // The harness that will implement this run (resolved at startup).
+      harness: resolvedAgent.harness.name,
+      ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+      // Ticket link for remote trackers only: markdown-file inputs and
+      // materialized automation prompts have no tracker page, and deriving
+      // URLs from their synthetic keys would point nowhere.
+      ticketUrl:
+        markdownInput || scheduledAutomationId
+          ? undefined
+          : buildTicketUrl(trackerName, workflowKey),
     });
 
     if (!isMarkdownTaskTracker(tracker)) {
@@ -1815,6 +1560,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       console.error("❌ Error formatting task details:", formatError);
       throw formatError;
     }
+
+    // Snapshot the ticket's description as markdown for the run record so the
+    // dashboard shows what was asked even if the ticket changes or is deleted.
+    recordRunTicket({
+      description: TaskFormatter.buildTaskDescriptionMarkdown(taskDetails),
+    });
 
     // Display summary
     console.log("\n📋 Task Summary:");
@@ -2000,6 +1751,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
       if (branchResult.success) {
         console.log(`✅ ${branchResult.message}`);
+        // Record the actual branch (it can gain an attempt suffix) so the
+        // dashboard shows which branch a run worked on.
+        recordRunBranch(branchResult.branchName);
       } else {
         // Branch creation failed - this is critical for safety
         console.error(`\n❌ Failed to create feature branch: ${branchResult.message}`);
@@ -2017,7 +1771,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.error(`   devintern ${taskKey} --no-git`);
         }
 
-        endRun("abandoned", "feature branch creation failed");
+        await finishTaskRun("abandoned", "feature branch creation failed");
         // Release lock before exiting
         if (lockManager) {
           lockManager.release();
@@ -2072,7 +1826,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
               `\n⚠️  Task ${workflowKey} failed clarity assessment but continuing with batch processing...`,
             );
           } else {
-            endRun("abandoned", "failed feasibility assessment");
+            await finishTaskRun("abandoned", "failed feasibility assessment");
             if (lockManager) {
               lockManager.release();
             }
@@ -2086,6 +1840,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           /* ignore */
         }
       } catch (clarityError) {
+        // Account-global usage limits must abort the run so the worker can
+        // fail over. Swallowing them here used to launch implementation on
+        // the same exhausted harness (Grok 402 during the clarity check).
+        if (clarityError instanceof UsageLimitError) {
+          throw clarityError;
+        }
         recordRunStage("feasibility", {
           status: "failed",
           summary: `assessment errored: ${(clarityError as Error).message}`,
@@ -2119,6 +1879,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.log(`\n🔄 Transitioning ${workflowKey} to '${inProgressStatus}'...`);
           await tracker.transitionStatus(workflowKey, inProgressStatus.trim());
           console.log(`✅ Task moved to '${inProgressStatus}'`);
+          if (activeTaskContext && activeTaskContext.taskKey === workflowKey) {
+            activeTaskContext.movedToInProgress = true;
+          }
         } catch (statusError) {
           console.warn(
             `⚠️  Failed to transition task to '${inProgressStatus}': ${
@@ -2220,18 +1983,50 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       await tracker.markDoneIfSuccessful(workflowKey, taskDir);
     }
     if (implementationIncomplete) {
-      endRun("escalated", "implementation incomplete; handed back to a human");
+      await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
     } else {
-      endRun("succeeded");
+      await finishTaskRun("succeeded");
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
+    activeTaskContext = null;
   } catch (error) {
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
-      endRun("deferred", error.message);
+      await finishTaskRun("deferred", error.message);
+      if (isWorkerChild()) {
+        console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+        // Hand the ticket back to To Do without a failure comment so the
+        // incomplete-attempt gate cannot strand it, and the parent can retry
+        // on the next harness (or pick it up again once a window elapses).
+        if (activeTaskContext?.movedToInProgress) {
+          try {
+            const todoStatus = getTodoStatusForProject(
+              activeTaskContext.projectKey,
+              loadProjectSettings(),
+            );
+            if (todoStatus?.trim()) {
+              await activeTaskContext.tracker.transitionStatus(taskKey, todoStatus.trim());
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        if (lockManager) {
+          lockManager.release();
+        }
+        writeUsageLimitHint(error);
+        process.exit(USAGE_LIMIT_EXIT_CODE);
+      }
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
+      // The ticket may already be "In Progress": leave feedback and move it
+      // back so the deferred retry can actually pick it up.
+      try {
+        await reportProcessingFailure(taskKey, `${error.message} (usage limit)`);
+      } catch {
+        /* best-effort */
+      }
       if (totalTasks > 1) {
         throw error;
       }
@@ -2242,18 +2037,35 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     }
 
     const err = error as Error;
-    endRun("failed", err.message);
+    await finishTaskRun("failed", err.message);
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
     console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // A failed task run interrupted a user action — report it with the task
+    // context so Sentry shows which pipeline stage is failing for users.
+    captureError(error, {
+      taskKey,
+      tracker: process.env.TASK_TRACKER || "jira",
+      stage: "process-task",
+    });
+
+    // Leave feedback on the ticket so a failed run never ends silently with
+    // the task stranded in "In Progress" and no PR.
+    try {
+      await reportProcessingFailure(taskKey, err.message);
+    } catch {
+      /* best-effort */
+    }
+    activeTaskContext = null;
 
     // For batch processing, throw the error to be handled by the main function
     // For single task processing, exit immediately
     if (totalTasks > 1) {
       throw error;
     }
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -2264,6 +2076,8 @@ let lockManager: LockManager | null = null;
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
   try {
+    initSentryOnce(`code@${VERSION}`);
+
     // Acquire lock to prevent multiple instances
     lockManager = new LockManager();
     const lockResult = lockManager.acquire();
@@ -2294,11 +2108,35 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
+    // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
+    // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
+    // analytics.enabled: false in .devintern-code/settings.json.
+    if (!isWorkerTaskProcess()) {
+      const firstTelemetryRun = isAnonymousIdNewlyCreated();
+      void track("cli_run", buildCliRunProps(activeTrackerType));
+      if (firstTelemetryRun && !isAutomatedEnvironment()) {
+        console.log(
+          "ℹ️  devintern collects anonymous usage stats (never task content, code, or credentials)." +
+            "\n   Disable with DEVINTERN_TELEMETRY_DISABLED=1 — see https://devintern.com/privacy/",
+        );
+      }
+    }
+
     // Validate environment — skip when every argument is a local markdown file path
-    // (those tasks need no PM credentials)
+    // (those tasks need no PM credentials). With missing credentials in an
+    // interactive terminal, offer the setup wizard inline before failing.
     const needsTrackerEnv = options.query || taskKeys.some((k) => !isMarkdownFilePath(k));
     if (needsTrackerEnv) {
-      validateEnvironment();
+      const firstRun = await ensureTrackerEnvConfigured({
+        automated: isAutomatedEnvironment(),
+        runWizard: () => runInitWizard(),
+        reloadEnv: () => {
+          loadedEnvPath = loadEnvironment(options.envFile);
+        },
+      });
+      if (firstRun === "failed") {
+        validateEnvironment();
+      }
     }
 
     // License check — interactive use is free under FSL; only unattended
@@ -2439,6 +2277,19 @@ async function main(): Promise<void> {
 
           estimationResults.total++;
 
+          // Structured run record for this attempt (skips above are not
+          // attempts). Estimation is its own dashboard origin — never an
+          // implement run — and scheduled sweeps carry the schedule id.
+          const estimationScheduleId = process.env.DEVINTERN_AUTOMATION_ID;
+          beginRun({
+            origin: "estimate",
+            taskKey,
+            tracker: activeTrackerType,
+            // Every origin records the harness that executed it.
+            harness: resolvedAgent.harness.name,
+            ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
+          });
+
           // Fetch comments and linked resources
           const comments = await tracker.getComments(taskKey);
           const linkedResources = tracker.extractLinkedResources(task);
@@ -2495,10 +2346,23 @@ async function main(): Promise<void> {
               error: "Failed to parse estimation response",
             });
           }
+          await finishTaskRun(
+            result ? "succeeded" : "failed",
+            result ? undefined : "Failed to parse estimation response",
+          );
         } catch (error) {
           // Usage limit is account-global — abort the rest of the estimation
           // batch and exit 0 so the scheduler retries next window.
           if (error instanceof UsageLimitError) {
+            await finishTaskRun("deferred", error.message);
+            if (isWorkerChild()) {
+              console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+              if (lockManager) {
+                lockManager.release();
+              }
+              writeUsageLimitHint(error);
+              process.exit(USAGE_LIMIT_EXIT_CODE);
+            }
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
@@ -2512,6 +2376,13 @@ async function main(): Promise<void> {
             error: (error as Error).message,
           });
           console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
+          // A failed estimation is a user action that did not complete.
+          captureError(error, {
+            taskKey,
+            tracker: process.env.TASK_TRACKER || "jira",
+            stage: "estimate",
+          });
+          await finishTaskRun("failed", (error as Error).message);
         }
       }
 
@@ -2533,7 +2404,9 @@ async function main(): Promise<void> {
       if (lockManager) {
         lockManager.release();
       }
+      await flushAnalytics();
       if (estimationResults.failed > 0) {
+        await flushErrorTracking();
         process.exit(1);
       }
       return;
@@ -2563,6 +2436,13 @@ async function main(): Promise<void> {
         // hammering tasks that would all fail. Exit 0 so the scheduler retries
         // next window without marking the run failed.
         if (error instanceof UsageLimitError) {
+          if (isWorkerChild()) {
+            if (lockManager) {
+              lockManager.release();
+            }
+            writeUsageLimitHint(error);
+            process.exit(USAGE_LIMIT_EXIT_CODE);
+          }
           const remaining = tasksToProcess.length - i - 1;
           console.warn(
             `\n⏳ ${error.message}. Aborting batch — ${remaining} task(s) left, ` +
@@ -2604,6 +2484,10 @@ async function main(): Promise<void> {
         if (lockManager) {
           lockManager.release();
         }
+        await flushAnalytics();
+        // Task failures were already captured in processSingleTask; make sure
+        // those events are sent before this exit.
+        await flushErrorTracking();
         process.exit(1);
       }
     }
@@ -2612,16 +2496,22 @@ async function main(): Promise<void> {
     if (lockManager) {
       lockManager.release();
     }
+    await flushAnalytics();
   } catch (error) {
     const err = error as Error;
     console.error(`❌ Error: ${err.message}`);
     if (options.verbose && err.stack) {
       console.error(err.stack);
     }
+    // Setup/query failures that reach here were not captured by the per-task
+    // handlers (lock, tracker query, license, ...).
+    captureError(error, { stage: "main" });
     // Release lock before exiting on error
     if (lockManager) {
       lockManager.release();
     }
+    await flushAnalytics();
+    await flushErrorTracking();
     process.exit(1);
   }
 }
@@ -2675,6 +2565,7 @@ async function runClarityCheck(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process for clarity check
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
@@ -2683,6 +2574,15 @@ async function runClarityCheck(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(clarityAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -2705,6 +2605,7 @@ async function runClarityCheck(
       if (clarityAgent.stdout) {
         clarityAgent.stdout.on("data", (data: Buffer) => {
           stdoutOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -2712,6 +2613,7 @@ async function runClarityCheck(
       if (clarityAgent.stderr) {
         clarityAgent.stderr.on("data", (data: Buffer) => {
           stderrOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -2739,6 +2641,11 @@ async function runClarityCheck(
               `${harness.displayName} clarity check timed out after ${timeoutMinutes} minutes`,
             ),
           );
+          return;
+        }
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {
@@ -3062,6 +2969,7 @@ async function runEstimation(
       let stdoutOutput = "";
       let stderrOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       const { child: estimationAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -3069,6 +2977,15 @@ async function runEstimation(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(estimationAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -3090,12 +3007,14 @@ async function runEstimation(
       if (estimationAgent.stdout) {
         estimationAgent.stdout.on("data", (data: Buffer) => {
           stdoutOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
       if (estimationAgent.stderr) {
         estimationAgent.stderr.on("data", (data: Buffer) => {
           stderrOutput += data.toString();
+          stopOnUsageLimit();
         });
       }
 
@@ -3121,7 +3040,7 @@ async function runEstimation(
           return;
         }
 
-        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
           if (usage.matchedLine) {
             console.log(`   Matched output: ${usage.matchedLine}`);
@@ -3485,9 +3404,10 @@ async function runAgentHarness(
         maxTurns,
         skipPermissions: true,
         workingDir: process.cwd(),
+        model: resolveAgentModel(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
-      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")} --verbose`);
+      console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
       console.log(`   Timeout: ${timeoutMinutes} minutes`);
       console.log(
@@ -3499,6 +3419,7 @@ async function runAgentHarness(
       let stderrOutput = "";
       let stdoutOutput = "";
       let timedOut = false;
+      let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process with enhanced permissions and max turns
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
@@ -3507,6 +3428,15 @@ async function runAgentHarness(
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
+
+      const stopOnUsageLimit = (): void => {
+        if (usageLimit?.limited) return;
+        const detected = detectUsageLimit(stdoutOutput, stderrOutput);
+        if (detected.limited) {
+          usageLimit = detected;
+          reapTree(codeAgent, "SIGTERM");
+        }
+      };
 
       const timeout = setTimeout(
         () => {
@@ -3530,6 +3460,7 @@ async function runAgentHarness(
         codeAgent.stdout.on("data", (data: Buffer) => {
           const output = data.toString();
           stdoutOutput += output;
+          stopOnUsageLimit();
           process.stdout.write(output);
         });
       }
@@ -3539,6 +3470,7 @@ async function runAgentHarness(
         codeAgent.stderr.on("data", (data: Buffer) => {
           const output = data.toString();
           stderrOutput += output;
+          stopOnUsageLimit();
           process.stderr.write(output);
         });
       }
@@ -3571,7 +3503,7 @@ async function runAgentHarness(
 
         // A usage/rate limit is account-global — abort the batch rather than
         // treating this task as a normal failure (every other task would fail too).
-        const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
           console.log(
             `\n⏳ ${harness.displayName} hit a usage limit${
@@ -3759,12 +3691,9 @@ async function runAgentHarness(
 
             if (tracker && !skipComments && taskKey) {
               try {
-                const questionList = openQuestions.questions.map((q) => `- ${q}`).join("\n");
                 await tracker.postComment(taskKey, {
                   format: "markdown",
-                  body:
-                    `🤖 The agent needs input before it can implement this task:\n\n${questionList}\n\n` +
-                    `Answer in the task description or a comment, then re-run devintern.`,
+                  body: formatAgentInputNeededMarkdown(openQuestions.questions),
                 });
                 console.log("💬 Posted the questions as a comment on the task");
               } catch (commentError) {
@@ -3960,9 +3889,17 @@ async function runAgentHarness(
                 }
               } else {
                 console.log(`⚠️  PR creation failed: ${prResult.message}`);
+                // The run "succeeds" without a PR — a silent user-visible
+                // degradation worth tracking. prResult.message can quote API
+                // errors; captureError redacts token-like substrings.
+                captureError(new Error(prResult.message || "PR creation failed"), {
+                  taskKey,
+                  stage: "create-pr",
+                });
               }
             } catch (prError) {
               console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
+              captureError(prError, { taskKey, stage: "create-pr" });
             }
           };
           // --- End shared helpers ---
@@ -4066,6 +4003,7 @@ async function runAgentHarness(
                       maxTurns,
                       skipPermissions: true,
                       workingDir: process.cwd(),
+                      model: resolveAgentModel(),
                     });
                     const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
                       displayName: harness.displayName,
@@ -4271,6 +4209,10 @@ async function runAgentHarness(
                         return;
                       }
                     } catch (autoReviewError) {
+                      if (autoReviewError instanceof UsageLimitError) {
+                        reject(autoReviewError);
+                        return;
+                      }
                       recordRunStage("auto_review", {
                         status: "failed",
                         summary: `loop errored: ${(autoReviewError as Error).message}`,
@@ -4332,6 +4274,9 @@ async function runAgentHarness(
                 console.log(
                   'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
                 );
+                // Agent output exists but was never committed — track the
+                // degradation; captureError redacts credential-like text.
+                captureError(commitError, { taskKey, stage: "commit" });
                 resolve(); // Still resolve since Agent succeeded
               });
           } else {
@@ -4353,28 +4298,51 @@ process.on("unhandledRejection", (error: Error) => {
   if (options.verbose && error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Handle process termination signals
-process.on("SIGINT", () => {
-  console.log("\n\n⚠️  Received SIGINT (Ctrl+C), cleaning up...");
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
+  // If a task is mid-flight, tell the tracker it was interrupted instead of
+  // leaving it silently in "In Progress" with no PR and no feedback.
+  const context = activeTaskContext;
+  if (context) {
+    // Bound the feedback attempt so tracker I/O can never stall shutdown.
+    const shutdownTimer = setTimeout(() => process.exit(exitCode), 15_000);
+    try {
+      await reportProcessingFailure(
+        context.taskKey,
+        `Processing was interrupted (${signal}) before a pull request could be created`,
+      );
+    } catch {
+      /* best-effort: never block shutdown on tracker I/O */
+    }
+    clearTimeout(shutdownTimer);
+  }
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(130); // Standard exit code for SIGINT
+  // Bounded; pending crash/handled-error events get a chance to send.
+  await flushErrorTracking();
+  process.exit(exitCode);
+}
+
+process.on("SIGINT", () => {
+  void gracefulShutdown("SIGINT", 130); // Standard exit code for SIGINT
 });
 
 process.on("SIGTERM", () => {
-  console.log("\n\n⚠️  Received SIGTERM, cleaning up...");
-  if (lockManager) {
-    lockManager.release();
-  }
-  process.exit(143); // Standard exit code for SIGTERM
+  void gracefulShutdown("SIGTERM", 143); // Standard exit code for SIGTERM
 });
 
 // Handle uncaught exceptions
@@ -4383,11 +4351,12 @@ process.on("uncaughtException", (error: Error) => {
   if (error.stack) {
     console.error(error.stack);
   }
+  captureError(error);
   // Release lock before exiting
   if (lockManager) {
     lockManager.release();
   }
-  process.exit(1);
+  void flushErrorTracking().finally(() => process.exit(1));
 });
 
 // Run the main function (only if not running a subcommand)

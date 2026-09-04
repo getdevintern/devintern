@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
-import { routeTask, ruleMatches, toRoutableTask } from "../src/lib/workspace/router";
+import {
+  effectiveRoutingRules,
+  routeTask,
+  routeTaskWithRules,
+  ruleMatches,
+  toRoutableTask,
+} from "../src/lib/workspace/router";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -94,11 +100,94 @@ describe("routeTask", () => {
     expect(routeTask(task("MISC-9"), CONFIG)).toEqual({ kind: "unrouted" });
   });
 
+  test("a 1-repo workspace routes every task without routing rules", () => {
+    const oneRepo = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`);
+    const decision = routeTask(task("MISC-9"), oneRepo);
+    expect(decision.kind).toBe("routed");
+    if (decision.kind === "routed") {
+      expect(decision.repo).toBe("app");
+      expect(decision.matchedRules).toEqual([]);
+    }
+  });
+
   test("label-only routing works for trackers without project keys", () => {
     const decision = routeTask(task("123", ["ops"]), CONFIG);
     expect(decision.kind).toBe("routed");
     if (decision.kind === "routed") {
       expect(decision.repo).toBe("infra");
     }
+  });
+});
+
+describe("team-scoped routing", () => {
+  const TEAM_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+
+[[teams]]
+name = "growth"
+tracker = "linear"
+task_query = "{}"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[routing.rules]]
+team = "platform"
+repo = "api"
+project = "PLAT"
+
+[[routing.rules]]
+repo = "web"
+labels = ["docs"]
+`);
+
+  test("team rules apply only within their team", () => {
+    const platformRules = effectiveRoutingRules(TEAM_CONFIG, "platform");
+    const growthRules = effectiveRoutingRules(TEAM_CONFIG, "growth");
+
+    // The PLAT rule is scoped to platform; growth never sees it.
+    expect(routeTaskWithRules(task("PLAT-1"), growthRules)).toEqual({ kind: "unrouted" });
+    expect(routeTaskWithRules(task("PLAT-1"), platformRules).kind).toBe("routed");
+  });
+
+  test("unscoped rules apply to every team", () => {
+    for (const team of ["platform", "growth"]) {
+      const decision = routeTaskWithRules(
+        task("123", ["docs"]),
+        effectiveRoutingRules(TEAM_CONFIG, team),
+      );
+      expect(decision).toEqual({
+        kind: "routed",
+        repo: "web",
+        matchedRules: [TEAM_CONFIG.routing[1]],
+      });
+    }
+  });
+
+  test("without a team every rule applies (single-defaults mode)", () => {
+    expect(effectiveRoutingRules(TEAM_CONFIG)).toHaveLength(2);
+    expect(effectiveRoutingRules(CONFIG)).toHaveLength(CONFIG.routing.length);
+  });
+
+  test("team matching is case-insensitive", () => {
+    expect(effectiveRoutingRules(TEAM_CONFIG, "PLATFORM")).toHaveLength(2);
   });
 });

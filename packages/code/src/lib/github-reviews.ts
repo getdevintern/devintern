@@ -12,12 +12,37 @@ export interface ReviewsClientConfig {
   token?: string;
   appAuth?: GitHubAppAuth;
   /**
+   * Authentication policy for GitHub API calls.
+   *
+   * - `token-only`: hosted-relay workspaces. The central App receives events,
+   *   while the local `GITHUB_TOKEN` fetches and mutates GitHub data.
+   * - `app-first`: direct/self-hosted webhook installations, where the
+   *   customer-owned App identity is needed for mention matching.
+   * - `token-first`: interactive/default CLI behavior, preserving App auth as
+   *   a backwards-compatible fallback when no token is configured.
+   */
+  authMode?: GitHubAuthMode;
+  /**
    * Prefer GitHub App auth over a personal access token when both are
    * available. Used by the webhook server so the bot identity resolves
    * (`slug[bot]`), which is required for @mention matching and bot-attributed
    * commits. Default behavior (CLI) keeps the token taking precedence.
    */
   preferAppAuth?: boolean;
+}
+
+export type GitHubAuthMode = "token-only" | "token-first" | "app-first";
+
+/** Internal subprocess override set by relay-backed workspace workers. */
+export const GITHUB_AUTH_MODE_ENV = "DEVINTERN_GITHUB_AUTH_MODE";
+
+/** Resolve the internal auth-mode override, falling back to the caller's mode. */
+export function resolveGitHubAuthMode(fallback: GitHubAuthMode): GitHubAuthMode {
+  const configured = process.env[GITHUB_AUTH_MODE_ENV];
+  if (configured === "token-only" || configured === "token-first" || configured === "app-first") {
+    return configured;
+  }
+  return fallback;
 }
 
 export interface PullRequestInfo {
@@ -33,16 +58,37 @@ export interface PullRequestInfo {
   };
   base: {
     ref: string;
+    sha: string;
   };
   html_url: string;
   /** Whether maintainers may push to a fork PR's branch. */
   maintainer_can_modify?: boolean;
+  /**
+   * GitHub's computed merge state (`clean`, `dirty`, `behind`, `unstable`,
+   * `blocked`, `unknown`...). Recomputed asynchronously, so it can lag a
+   * recent push; absent while GitHub has never computed it.
+   */
+  mergeable_state?: string;
 }
 
 export interface FileContent {
   path: string;
   content: string;
   sha: string;
+}
+
+/**
+ * Whether an error thrown by a GitHub API client call is an HTTP 404
+ * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
+ * the credential has no access. Callers mapping PR fetches to the agent PR
+ * registry use this to stop watching rows that can never be fetched again
+ * instead of erroring on every poll tick.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubNotFound(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("GitHub API error (404)");
 }
 
 /**
@@ -59,7 +105,15 @@ export class GitHubReviewsClient {
    * @param config - Optional PAT or GitHub App auth (falls back to env)
    */
   constructor(config: ReviewsClientConfig = {}) {
-    if (config.preferAppAuth) {
+    const authMode =
+      config.authMode ?? resolveGitHubAuthMode(config.preferAppAuth ? "app-first" : "token-first");
+
+    if (authMode === "token-only") {
+      this.token = config.token || process.env.GITHUB_TOKEN;
+      return;
+    }
+
+    if (authMode === "app-first") {
       // App-first: use GitHub App auth when available, falling back to a token
       // only if no App credentials are configured. The two are kept mutually
       // exclusive so getToken() routes through the App.
@@ -246,6 +300,9 @@ export class GitHubReviewsClient {
 
   /**
    * Fetch pull request metadata.
+   *
+   * The raw PR API payload is passed through unfiltered (cast, not remapped),
+   * so fields like `mergeable_state` and `mergeable` reach callers as-is.
    *
    * @param owner - Repository owner
    * @param repo - Repository name

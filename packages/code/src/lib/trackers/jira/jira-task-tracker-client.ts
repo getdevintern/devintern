@@ -13,6 +13,11 @@ import {
   getRelatedWorkItems,
 } from "@devintern/task-trackers";
 import type { JiraIssue } from "@devintern/task-trackers";
+import { markdownToADFContent } from "@devintern/text-formatter";
+import {
+  isAutomationFailureCommentText,
+  isDevInternCommentText,
+} from "../shared/markdown-comment-formatter";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -141,6 +146,15 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
   // ------------------------------------------------------------------
 
   async postComment(taskKey: string, content: TaskTrackerCommentContent): Promise<void> {
+    if (content.format === "markdown") {
+      // Jira renders comments as ADF, so raw markdown would appear as
+      // literal `**bold**` / backtick text. Convert before posting.
+      await this.jiraClient.postCommentADF(
+        taskKey,
+        markdownToADFContent(content.body, { includeTables: true }),
+      );
+      return;
+    }
     await this.jiraClient.postComment(taskKey, content.body);
   }
 
@@ -248,44 +262,26 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
   }
 
   private isDevInternComment(comment: { body?: unknown; renderedBody?: string }): boolean {
-    let commentText = "";
-
-    if (comment.renderedBody) {
-      commentText = comment.renderedBody;
-    } else if (typeof comment.body === "string" && comment.body.length > 0) {
-      commentText = comment.body;
-    } else if (comment.body && typeof comment.body === "object" && "content" in comment.body) {
-      commentText = JSON.stringify(comment.body);
-    }
-
-    const devinternCodeMarkers = [
-      "Implementation Completed by @devintern/code",
-      "Automated Task Feasibility Assessment",
-      "Implementation Incomplete",
-      "Automated Story Points Estimation",
-    ];
-
-    return devinternCodeMarkers.some((marker) => commentText.includes(marker));
+    return isDevInternCommentText(JiraTaskTrackerClient.commentText(comment));
   }
 
   private isIncompleteImplementationComment(comment: {
     body?: unknown;
     renderedBody?: string;
   }): boolean {
-    let commentText = "";
+    return isAutomationFailureCommentText(JiraTaskTrackerClient.commentText(comment));
+  }
 
+  private static commentText(comment: { body?: unknown; renderedBody?: string }): string {
     if (comment.renderedBody) {
-      commentText = comment.renderedBody;
-    } else if (typeof comment.body === "string" && comment.body.length > 0) {
-      commentText = comment.body;
-    } else if (comment.body && typeof comment.body === "object" && "content" in comment.body) {
-      commentText = JSON.stringify(comment.body);
+      return comment.renderedBody;
     }
-
-    return (
-      commentText.includes("⚠️ Implementation Incomplete") ||
-      commentText.includes("Implementation Incomplete") ||
-      commentText.includes("Implementation was incomplete")
-    );
+    if (typeof comment.body === "string" && comment.body.length > 0) {
+      return comment.body;
+    }
+    if (comment.body && typeof comment.body === "object" && "content" in comment.body) {
+      return JSON.stringify(comment.body);
+    }
+    return "";
   }
 }

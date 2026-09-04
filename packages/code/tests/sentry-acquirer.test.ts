@@ -5,16 +5,14 @@ import { tmpdir } from "os";
 
 import { SentryClient } from "../src/lib/sentry-client";
 import type { SentryIssue } from "../src/lib/sentry-client";
-import {
-  SENTRY_SOURCE,
-  SentryErrorAcquirer,
-  buildBugfixTaskMarkdown,
-  isIssueValid,
-} from "../src/lib/sentry-acquirer";
+import { ErrorMonitorAcquirer } from "../src/lib/error-monitor";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 
 function issue(overrides: Partial<SentryIssue> = {}): SentryIssue {
   return {
+    externalId: "issue:1001",
+    displayId: "APP-1",
+    occurrenceCount: 12,
     id: "1001",
     shortId: "APP-1",
     title: "TypeError: cannot read properties of undefined",
@@ -87,24 +85,21 @@ describe("SentryClient", () => {
 
 describe("isIssueValid", () => {
   test("accepts an issue with enough events and metadata", () => {
-    expect(isIssueValid(issue(), 5).valid).toBe(true);
-  });
-
-  test("rejects issues below the event threshold", () => {
-    const verdict = isIssueValid(issue({ count: "2" }), 5);
-    expect(verdict.valid).toBe(false);
-    expect(verdict.reason).toContain("event");
+    const client = new SentryClient({ authToken: "t", organization: "acme" });
+    expect(client.validateIssue(issue()).valid).toBe(true);
   });
 
   test("rejects issues without any locating context", () => {
-    const verdict = isIssueValid(issue({ culprit: null, metadata: undefined }), 5);
+    const client = new SentryClient({ authToken: "t", organization: "acme" });
+    const verdict = client.validateIssue(issue({ culprit: null, metadata: undefined }));
     expect(verdict.valid).toBe(false);
   });
 });
 
 describe("buildBugfixTaskMarkdown", () => {
   test("includes the error details and fix instructions", () => {
-    const md = buildBugfixTaskMarkdown(issue());
+    const client = new SentryClient({ authToken: "t", organization: "acme" });
+    const md = client.buildTaskMarkdown(issue());
     expect(md).toContain("# Fix Sentry error APP-1");
     expect(md).toContain("TypeError");
     expect(md).toContain("src/app.ts in handler");
@@ -112,7 +107,7 @@ describe("buildBugfixTaskMarkdown", () => {
   });
 });
 
-describe("SentryErrorAcquirer", () => {
+describe("ErrorMonitorAcquirer with Sentry issues", () => {
   let dir: string;
   let dbPath: string;
   let queue: WebhookQueue;
@@ -131,26 +126,32 @@ describe("SentryErrorAcquirer", () => {
 
   function makeAcquirer(
     scriptedIssues: SentryIssue[] | Error,
-    overrides: Partial<ConstructorParameters<typeof SentryErrorAcquirer>[0]> = {},
-  ): { acquirer: SentryErrorAcquirer; fixed: SentryIssue[]; validateCalls: string[] } {
+    overrides: Partial<ConstructorParameters<typeof ErrorMonitorAcquirer<SentryIssue>>[0]> = {},
+  ): { acquirer: ErrorMonitorAcquirer<SentryIssue>; fixed: SentryIssue[] } {
     const fixed: SentryIssue[] = [];
-    const validateCalls: string[] = [];
-    const acquirer = new SentryErrorAcquirer({
-      intervalSeconds: 60,
-      queue,
+    const provider = {
+      providerName: "sentry",
       fetchIssues: async () => {
-        if (scriptedIssues instanceof Error) {
-          throw scriptedIssues;
-        }
+        if (scriptedIssues instanceof Error) throw scriptedIssues;
         return scriptedIssues;
       },
-      createBugfix: async (i) => {
+      validateIssue: (item: SentryIssue) =>
+        new SentryClient({ authToken: "t", organization: "acme" }).validateIssue(item),
+      buildTaskMarkdown: (item: SentryIssue) =>
+        new SentryClient({ authToken: "t", organization: "acme" }).buildTaskMarkdown(item),
+    };
+    const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      executeTask: async (i) => {
         fixed.push(i);
         return true;
       },
       ...overrides,
     });
-    return { acquirer, fixed, validateCalls };
+    return { acquirer, fixed };
   }
 
   test("creates bugfixes for new valid issues and marks them processed", async () => {
@@ -159,7 +160,7 @@ describe("SentryErrorAcquirer", () => {
 
     expect(fixed).toHaveLength(1);
     expect(fixed[0]?.shortId).toBe("APP-1");
-    expect(queue.hasProcessed(SENTRY_SOURCE, "issue:1001")).toBe(true);
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(true);
   });
 
   test("never processes the same error group twice", async () => {
@@ -171,30 +172,27 @@ describe("SentryErrorAcquirer", () => {
   });
 
   test("skips invalid issues without marking them processed", async () => {
-    const { acquirer, fixed } = makeAcquirer([issue({ count: "1" })]);
+    const { acquirer, fixed } = makeAcquirer([issue({ count: "1", occurrenceCount: 1 })]);
     await acquirer.tick();
 
     expect(fixed).toHaveLength(0);
-    expect(queue.hasProcessed(SENTRY_SOURCE, "issue:1001")).toBe(false);
-  });
-
-  test("honors the injected validator", async () => {
-    const { acquirer, fixed } = makeAcquirer([issue()], {
-      validateIssue: (i) => (i.shortId === "APP-1" ? { valid: false, reason: "noise" } : true),
-    });
-    await acquirer.tick();
-
-    expect(fixed).toHaveLength(0);
-    expect(queue.hasProcessed(SENTRY_SOURCE, "issue:1001")).toBe(false);
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
   });
 
   test("marks before executing so failing runs do not loop every tick", async () => {
     let attempts = 0;
-    const acquirer = new SentryErrorAcquirer({
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => [issue()],
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+    };
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
       intervalSeconds: 60,
       queue,
-      fetchIssues: async () => [issue()],
-      createBugfix: async () => {
+      provider,
+      executeTask: async () => {
         attempts++;
         return false;
       },
@@ -206,11 +204,27 @@ describe("SentryErrorAcquirer", () => {
     expect(attempts).toBe(1);
   });
 
+  test("unclaims capacity-deferred issues so a later tick can retry", async () => {
+    let attempts = 0;
+    const { acquirer } = makeAcquirer([issue()], {
+      executeTask: async () => {
+        attempts++;
+        return attempts === 1 ? "deferred" : true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
+    await acquirer.tick();
+    expect(attempts).toBe(2);
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(true);
+  });
+
   test("caps work per tick", async () => {
     const many = [
       issue(),
-      issue({ id: "1002", shortId: "APP-2" }),
-      issue({ id: "1003", shortId: "APP-3" }),
+      issue({ id: "1002", shortId: "APP-2", externalId: "issue:1002", displayId: "APP-2" }),
+      issue({ id: "1003", shortId: "APP-3", externalId: "issue:1003", displayId: "APP-3" }),
     ];
     const { acquirer, fixed } = makeAcquirer(many, { maxIssuesPerTick: 2 });
     await acquirer.tick();
@@ -223,6 +237,6 @@ describe("SentryErrorAcquirer", () => {
     await acquirer.tick();
 
     expect(fixed).toHaveLength(0);
-    expect(queue.hasProcessed(SENTRY_SOURCE, "issue:1001")).toBe(false);
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
   });
 });

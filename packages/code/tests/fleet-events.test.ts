@@ -6,8 +6,10 @@ import { tmpdir } from "os";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
+  coalescePrFeedbackRuns,
   createFleetAddressPr,
   createFleetMentionHandler,
+  createFleetResolveConflicts,
   createFleetTaskEvaluator,
   fleetGitHubSlugs,
   repoBySlug,
@@ -101,6 +103,13 @@ describe("fleet event handlers", () => {
     env: Record<string, string | undefined>;
   }>;
   let pushAccess: boolean | Error;
+  const resolutions: Array<{
+    slug: string;
+    prNumber: number;
+    cwd?: string;
+    expectedHeadSha?: string;
+    expectedBaseSha?: string;
+  }> = [];
 
   const deps = () => ({
     config: CONFIG,
@@ -120,6 +129,25 @@ describe("fleet event handlers", () => {
       reviews.push({ slug, prNumber, cwd: opts.cwd, env: opts.env });
       return true;
     },
+    runResolve: async (
+      slug: string,
+      prNumber: number,
+      opts: {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+        expectedHeadSha?: string;
+        expectedBaseSha?: string;
+      } = {},
+    ) => {
+      resolutions.push({
+        slug,
+        prNumber,
+        cwd: opts.cwd,
+        expectedHeadSha: opts.expectedHeadSha,
+        expectedBaseSha: opts.expectedBaseSha,
+      });
+      return { outcome: "clean" as const, message: "merged" };
+    },
   });
 
   beforeEach(() => {
@@ -128,6 +156,7 @@ describe("fleet event handlers", () => {
     repoManager = new FakeRepoManager(workspaceDir);
     reviews = [];
     pushAccess = true;
+    resolutions.length = 0;
   });
 
   afterEach(() => {
@@ -149,6 +178,48 @@ describe("fleet event handlers", () => {
     const addressPr = createFleetAddressPr(deps());
     expect(await addressPr("acme/unknown", 7)).toBe(false);
     expect(reviews).toHaveLength(0);
+  });
+
+  test("coalesces overlapping feedback events into one follow-up reconciliation", async () => {
+    let releaseFirst!: () => void;
+    const firstRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const addressPr = coalescePrFeedbackRuns(async () => {
+      calls++;
+      if (calls === 1) await firstRun;
+      return true;
+    });
+
+    const relay = addressPr("acme/backend", 42);
+    const reviewPoll = addressPr("ACME/backend", 42);
+    const mentionPoll = addressPr("acme/backend", 42);
+    expect(calls).toBe(1);
+
+    releaseFirst();
+    expect(await Promise.all([relay, reviewPoll, mentionPoll])).toEqual([true, true, true]);
+    expect(calls).toBe(2);
+  });
+
+  test("base sync uses the fleet repo worktree and forwards expected SHAs", async () => {
+    const resolve = createFleetResolveConflicts(deps());
+    const result = await resolve("acme/backend", 42, {
+      headSha: "head1",
+      baseSha: "base1",
+    });
+
+    expect(result.outcome).toBe("clean");
+    expect(resolutions).toEqual([
+      {
+        slug: "acme/backend",
+        prNumber: 42,
+        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+        expectedHeadSha: "head1",
+        expectedBaseSha: "base1",
+      },
+    ]);
+    expect(repoManager.calls).toContain("fetch:backend");
   });
 
   test("mention handler gates on push access and fails closed", async () => {

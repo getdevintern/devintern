@@ -2,9 +2,9 @@
 title: "@devintern/code Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
-section: "Code"
-order: 2
-dateModified: 2026-08-17
+section: "Automation"
+order: 4
+dateModified: 2026-09-01
 ---
 
 # @devintern/code Configuration
@@ -26,7 +26,7 @@ You can run `devintern` from any subdirectory of your project and it will find t
 
 ## Required Configuration
 
-The active task tracker is set with `TASK_TRACKER` (defaults to `jira`). Supported values: `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `markdown`.
+The active task tracker is set with `TASK_TRACKER` (defaults to `jira`). Supported values: `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `gitlab`, `markdown`.
 
 ### Jira (default)
 
@@ -53,7 +53,7 @@ LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
 
 Create a Personal API key at [https://linear.app/settings/api](https://linear.app/settings/api). Story points are written to Linear's built-in `estimate` field, so no custom field ID is required.
 
-See the [Linear Integration guide](./linear-integration.md) for state transitions, JSON `IssueFilter` batch runs, and cron examples.
+See the [Linear Integration guide](./linear-integration.md) for state transitions and JSON `IssueFilter` batch runs. For unattended drains, use the [worker](./worker.md).
 
 ### Trello
 
@@ -83,44 +83,73 @@ You can also pass file paths directly as arguments without setting `TASK_TRACKER
 
 ## GitHub authentication
 
-**Personal / interactive:** a `GITHUB_TOKEN` (personal access token). That is enough for free CLI use from your terminal (`devintern TICKET-123`, `--create-pr`).
+### Standard workspace setup
 
-**Team / unattended automation:** a GitHub App (`GITHUB_APP_ID` plus a private key). That is what `@mention` matching, `devintern worker --listen` / webhooks, and `slug[bot]` commit attribution need so the bot has a shared team identity. Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
+Set `GITHUB_TOKEN` for interactive runs and workspace automation. When the workspace is paired with the hosted relay, the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) delivers events and the token stays on your machine for GitHub API reads/writes. You do not create a GitHub App or handle an App private key.
 
-The two credentials are complementary, not drop-in replacements. A team setup that also uses GitHub Issues as the tracker still needs `GITHUB_TOKEN`.
+Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/pricing/).
 
-| What you want | Need |
-| --- | --- |
-| Implement tickets and open PRs from the CLI (personal) | `GITHUB_TOKEN` |
-| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute) |
-| Worker review polling on the agent's own PRs | `GITHUB_TOKEN` (solo) or GitHub App (if already configured) |
-| `@mention` the bot on any PR (worker sweep or webhook) | GitHub App (`GITHUB_APP_ID` + private key) |
-| Commits attributed to `slug[bot]` | GitHub App |
+| What you want                                                 | Need                                                           |
+| ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Implement tickets and open PRs from the CLI (personal)        | `GITHUB_TOKEN`                                                 |
+| Use GitHub Issues as the task tracker (`TASK_TRACKER=github`) | `GITHUB_TOKEN` (the App cannot substitute)                     |
+| Worker review polling and replies                             | `GITHUB_TOKEN`                                                 |
+| `@devintern-ai` on any PR (standard workspace)                | `GITHUB_TOKEN` + relay + central DevIntern AI App installation |
+| Air-gapped mentions or `devintern webhook serve`              | Customer-owned GitHub App (advanced)                           |
+| Custom `slug[bot]` attribution                                | Customer-owned GitHub App (advanced)                           |
 
-Set both when you run mention-driven automation and also use GitHub Issues as a tracker. See [GitHub Issues Integration](./github-issues-integration.md) and [GitHub Integration](./github-integration.md).
+See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Integration](./github-integration.md) guide.
 
 **Precedence when both are set:**
 
-- CLI and PR creation use `GITHUB_TOKEN`
-- `devintern worker --listen` and the webhook server prefer the App so the bot identity (`slug[bot]`) resolves
+- Relay-backed workspace: only `GITHUB_TOKEN` is used locally; custom App credentials are ignored
+- No-relay workspace: a complete customer-owned App is preferred, with `GITHUB_TOKEN` as fallback
+- CLI and PR creation: `GITHUB_TOKEN` is preferred
+- `devintern webhook serve`: the customer-owned App is preferred so its bot identity resolves
 
-Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. The ID alone is ignored for auth, but the worker treats it as "GitHub credentials present."
+Do not set `GITHUB_APP_ID` without `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`. An ID alone is not a usable credential.
+
+### Bot mention aliases
+
+Relay-backed workspaces recognize `devintern-ai` automatically. Advanced installations can add other bot logins as aliases:
+
+```bash
+GITHUB_BOT_ALIASES=devintern-ai
+```
+
+The value is a comma-separated list of logins (with or without the `[bot]` suffix). Aliases count everywhere mentions are matched: commented reviews, inline comment scopes, and the `@mention` sweep.
+
+### Which feedback gets re-processed
+
+Addressed feedback is tracked locally in the worker's state database, so a comment is never processed twice on the same machine. A 🎉 reaction is also left on each addressed comment as visual feedback for humans — it carries no gating meaning, so reaction-permission problems can never cause feedback to be re-processed.
 
 ### GitHub Personal Access Token
 
-For personal / interactive CLI use, and for `TASK_TRACKER=github`:
+For interactive CLI use, relay-backed workspaces, and `TASK_TRACKER=github`:
 
 ```bash
 GITHUB_TOKEN=your-github-token
 ```
 
 - **Classic token**: Requires `repo` scope
-- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
+- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
-### GitHub App Authentication
+> **`Contents` must be _Read and write_, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
 
-For team / unattended automation (`@mention` matching, webhook / `worker --listen`, `slug[bot]` commit attribution):
+#### How git picks push credentials
+
+Pushes use git's ambient credential chain — devintern does not inject tokens into `git push`:
+
+1. If `gh auth git-credential` is configured (typical with the GitHub CLI) and `$GITHUB_TOKEN` is exported in the environment, **the environment variable wins over your keyring login**. An under-scoped `GITHUB_TOKEN` therefore silently overrides a working `gho_…` login.
+2. Otherwise the keyring/token-helper credentials apply.
+3. SSH remotes use your SSH keys.
+
+The worker dry-runs a push against each configured GitHub HTTPS remote at startup and warns when it is rejected (`✅ [fleet] push access verified for <repo>` / a `⚠️ [fleet] … rejects pushes` line), so credential problems surface before the first task burns its pickup.
+
+### Advanced: customer-owned GitHub App
+
+Use this only when the hosted relay cannot be used—for example an air-gapped installation—or when operating `devintern webhook serve` against your own endpoint. It provides no-relay `@mention` identity, installation API tokens, and custom `slug[bot]` attribution.
 
 ```bash
 GITHUB_APP_ID=123456
@@ -141,12 +170,13 @@ Both the ID and a private key are required.
 
 1. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
 2. Set repository permissions:
-   - **Contents:** Read
+   - **Contents:** Read and write
    - **Pull requests:** Read and write
+   - **Issues:** Read and write
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation and PR creation. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
@@ -219,7 +249,7 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
 - `todoStatus`: Status to reset to if implementation fails (e.g., "To Do", "Backlog")
 - `storyPointsField`: Custom field ID for story points (e.g., `"customfield_10016"` for Jira); auto-discovered if omitted
 
-**Supported trackers:** `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `markdown`.
+**Supported trackers:** `jira`, `linear`, `trello`, `asana`, `azure-devops`, `github`, `gitlab`, `markdown`.
 
 **Backward compatibility:** Existing Jira-only files using the legacy top-level `projects` key continue to work without any changes.
 
@@ -241,7 +271,70 @@ To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` e
 DEVINTERN_VERBOSE=1
 ```
 
-This logs every API request, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
+
+## Error Reporting
+
+The CLI reports errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
+
+- Crashes and unhandled errors (any entry point: task runs, `worker`, `webhook serve`, `dashboard`, subcommands)
+- Task runs that fail mid-pipeline (agent errors, tracker/PR API failures) with context such as the task key, active tracker, and pipeline stage
+- Failed PR creation, failed estimation, and failed commits (which continue without completing that step)
+- Webhook review/comment processing failures
+
+What is **never** reported: task content, code, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent, and contexts contain only identifiers (task key, tracker type, stage/command names).
+
+To opt out:
+
+```bash
+SENTRY_DISABLED=1
+```
+
+Set this in your shell environment or in `.devintern-code/.env`.
+
+## Anonymous Usage Analytics
+
+The CLI sends one anonymous usage event per run to DevIntern's PostHog project so we can understand popularity and which features are used. It never sends task content, code, repository names, file paths, or credentials — only:
+
+- CLI version, OS, architecture
+- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
+- Whether the session runs in CI
+
+A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`. Analytics are disabled automatically when running from source. To opt out, either:
+
+```bash
+# Shell or .devintern-code/.env
+DEVINTERN_TELEMETRY_DISABLED=1
+```
+
+or set in `.devintern-code/settings.json`:
+
+```json
+{
+  "analytics": { "enabled": false }
+}
+```
+
+See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+
+## Readiness Check
+
+Run `devintern doctor` for a one-screen answer to "is everything set up?":
+
+```bash
+devintern doctor
+```
+
+It checks, in order:
+
+- **Bun runtime** and **Git** availability
+- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
+- **DevIntern sign-in**: local session validity (`devintern login` when missing)
+- **License**: entitlement status when signed in (only needed for unattended automation)
+
+Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
 ## Output Directory
 
@@ -278,6 +371,9 @@ AGENT_HARNESS=claude-code
 
 # Optional: path to the agent CLI (leave unset in most cases)
 # AGENT_CLI_PATH=/custom/path/to/claude
+
+# Optional: model the harness runs with (harness-specific string)
+# AGENT_MODEL=sonnet
 ```
 
 You usually only need `AGENT_HARNESS`. By default devintern uses the harness's standard command (for example `claude` for `claude-code`) and finds it on your `PATH` automatically, so `AGENT_CLI_PATH` can be left unset.
@@ -290,11 +386,48 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **DeepSeek note:** Harness id is `deepseek`; the CLI binary is `reasonix` (DeepSeek-Reasonix, listed in DeepSeek's agent integrations). Install with `npm i -g reasonix`, set `DEEPSEEK_API_KEY` (or run `reasonix setup`), then set `AGENT_HARNESS=deepseek`. `--max-turns` and permission-skip flags have no effect on `reasonix run` (turn limits live in Reasonix config; headless runs are already autonomous).
 
-**Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning; DevIntern does not spawn the retired `gemini` binary. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`. `--max-turns` has no effect; model selection is via Antigravity settings/`/model`, not a DevIntern model flag.
+**Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning; DevIntern does not spawn the retired `gemini` binary. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`. `--max-turns` has no effect; model selection accepts slugs from `agy models` via `AGENT_MODEL`.
 
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
-**Qwen note:** Qwen Code has no `--model` flag; pick the model in `~/.qwen/settings.json`.
+**Qwen note:** Qwen Code accepts a model via its `--model` flag (e.g. `qwen3-coder-plus`) — set it with `AGENT_MODEL`; you can also keep the model in `~/.qwen/settings.json`.
+
+### Failover across multiple harnesses
+
+`AGENT_HARNESS` accepts a comma-separated, priority-ordered list so the unattended worker keeps processing when an agent hits its usage limit:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=claude-code,codex
+```
+
+The first entry is your preferred harness; later entries are fallbacks in priority order. A single value behaves exactly as before.
+
+**Failover behavior (worker mode):**
+
+Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
+
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`).
+- When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
+- When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
+- If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
+- Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
+
+Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
+
+**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. `AGENT_MODEL` applies to whichever harness is active (the string is harness-specific).
+
+### Model selection
+
+Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-code/.env`:
+
+```bash
+# .devintern-code/.env
+AGENT_MODEL=sonnet
+```
+
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes). A few harnesses have no model flag and ignore the setting.
 
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 
@@ -325,15 +458,14 @@ DevIntern always runs the full workflow after fetching a task (clarity check →
 Agents run with their own permission prompts disabled (the equivalent of `--dangerously-skip-permissions`), so by default they have the same access to your machine as your user account. DevIntern can wrap every agent run in an OS-level sandbox so the agent stays confined even in fully automated worker runs.
 
 ```bash
-# In .devintern-code/.env
+# In the workspace .env (~/.devintern/.env)
 AGENT_SANDBOX=auto
 ```
 
-Or per run:
+Or per interactive run:
 
 ```bash
 devintern PROJ-123 --sandbox nono
-devintern worker --sandbox auto
 ```
 
 Run `devintern sandbox` at any time for a full diagnosis: which providers are installed, the one-time setup steps each still needs, which one `auto` would pick, and exactly what your next run will do with the current configuration, including why it would fail. The command exits non-zero when the configured provider guarantees a failed run, so scripts and CI can gate on it.
@@ -496,6 +628,16 @@ On startup, a globally installed `devintern` checks the npm registry (at most on
 | Opt-in auto-install (including non-interactive)     | `DEVINTERN_AUTO_UPDATE=1`                                                                               |
 
 Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
+
+To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
+
+```bash
+bun install -g @getdevintern/code@latest
+# or
+npm install -g @getdevintern/code@latest
+```
+
+Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
 
 ## Troubleshooting
 

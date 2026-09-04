@@ -4,11 +4,10 @@
  * Serves the local observability dashboard: a read-only JSON API over the
  * worker's SQLite state (handlers in `lib/dashboard-api.ts`) plus the static
  * UI built from `packages/dashboard-ui`. Started standalone by
- * `devintern dashboard`, or alongside the daemon by `devintern worker --ui`.
+ * `devintern dashboard`, or alongside the daemon by `devintern worker`.
  *
- * All data stays in the customer's SQLite; the server binds to localhost by
- * default and there is no authentication, so a non-loopback host is warned
- * about loudly.
+ * All data stays in the customer's SQLite. The dashboard uses the loopback
+ * interface as its access boundary and refuses non-loopback binds.
  */
 
 import { existsSync } from "fs";
@@ -16,13 +15,30 @@ import { join, normalize, resolve } from "path";
 
 import {
   DashboardData,
+  handleAgentPrs,
+  handleAutomations,
+  handleLogs,
+  handleRetryRun,
+  handleRunAutomation,
   handleRuns,
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
 } from "./lib/dashboard-api";
+import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/dashboard-api";
+import type { DashboardAutomationActions } from "./lib/automation-acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
+const LOOPBACK_DASHBOARD_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/** Whether a dashboard bind target is an explicitly supported loopback host. */
+export function isLoopbackDashboardHost(host: string): boolean {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  return LOOPBACK_DASHBOARD_HOSTS.has(normalized);
+}
 
 export interface DashboardServerOptions {
   port?: number;
@@ -30,6 +46,26 @@ export interface DashboardServerOptions {
   dbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /** Live working-window snapshot provider (embedded dashboard). */
+  scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
+  /**
+   * Retry execution mode (default `spawn`). The workspace worker passes
+   * `schedule` so dashboard retries are drained through the fleet pipeline;
+   * a standalone `devintern dashboard` keeps the detached-CLI spawn.
+   */
+  retryMode?: "spawn" | "schedule";
+  /** Collaborator overrides for the retry action (tests). */
+  retryDeps?: RetryHandlerDeps;
+  /**
+   * Automation listing/triggering overrides. The workspace worker passes its
+   * in-process scheduler so "Run now" rides the exact scheduled pipeline;
+   * a standalone dashboard falls back to the project's automations.toml.
+   */
+  automationActions?: DashboardAutomationActions;
+  /** Collaborator overrides for the manual-run action (tests). */
+  automationDeps?: AutomationRunDeps;
+  /** Directories to search for worker capture files (primary first). */
+  logDirs?: string[];
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -87,31 +123,52 @@ export function startDashboardServer(
   const port =
     options.port ?? parseInt(process.env.DASHBOARD_PORT || String(DEFAULT_DASHBOARD_PORT), 10);
   const host = options.host ?? "127.0.0.1";
-  const data = new DashboardData({ dbPath: options.dbPath, workingDir: options.workingDir });
-  const uiDir = resolveUiDir();
-
-  if (host !== "127.0.0.1" && host !== "localhost") {
-    console.warn(
-      `⚠️  Dashboard binding to ${host} — it has no authentication. ` +
-        "Anyone who can reach this address can read run history.",
+  if (!isLoopbackDashboardHost(host)) {
+    throw new Error(
+      `Dashboard host "${host}" is not loopback. ` +
+        "Remote dashboard access is disabled until request authentication is implemented; " +
+        "use 127.0.0.1, localhost, or ::1.",
     );
   }
+  const data = new DashboardData({
+    dbPath: options.dbPath,
+    workingDir: options.workingDir,
+    scheduleSnapshot: options.scheduleSnapshot,
+    retryMode: options.retryMode,
+    automationActions: options.automationActions,
+    logDirs: options.logDirs,
+  });
+  const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
+  const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
   const server = Bun.serve({
     port,
     hostname: host,
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
+        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
+        if (retry) {
+          return json(await handleRetryRun(data, retry[1], options.retryDeps));
+        }
+        const automationRun =
+          request.method === "POST" ? pathname.match(automationRunPattern) : null;
+        if (automationRun) {
+          return json(await handleRunAutomation(data, automationRun[1], options.automationDeps));
+        }
         if (request.method !== "GET") {
           return json({ status: 405, body: { error: "method not allowed" } });
         }
         if (pathname === "/api/health") {
           return json({ status: 200, body: { status: "ok" } });
+        }
+        if (pathname === "/api/automations") {
+          return json(handleAutomations(data));
         }
         if (pathname === "/api/runs") {
           return json(handleRuns(data, url.searchParams));
@@ -125,6 +182,12 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/agent-prs") {
+          return json(handleAgentPrs(data));
+        }
+        if (pathname === "/api/logs") {
+          return json(handleLogs(data, url.searchParams));
         }
         return json({ status: 404, body: { error: "not found" } });
       }
