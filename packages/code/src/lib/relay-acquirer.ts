@@ -36,8 +36,9 @@ export interface RelayHandlers {
    * Review submitted on one of the agent's own PRs → address it.
    * @returns Whether the run completed; `false` means it failed or matched
    *          no workspace repo (never silently swallowed by the caller).
+   *          `"deferred"` means every harness is usage-limited.
    */
-  addressPr(repo: string, prNumber: number): Promise<boolean>;
+  addressPr(repo: string, prNumber: number): Promise<boolean | "deferred">;
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
   /** Tracker task changed → re-evaluate the user's query and run if ready. */
@@ -182,11 +183,17 @@ export class RelayAcquirer implements Acquirer {
           }
           console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
           const ok = await handlers.addressPr(repo, pr);
-          console.log(
-            ok
-              ? `✅ [relay] ${repo}#${pr} feedback addressed`
-              : `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly`,
-          );
+          if (ok === "deferred") {
+            console.log(
+              `⏳ [relay] ${repo}#${pr} deferred; will retry when a harness is available`,
+            );
+          } else {
+            console.log(
+              ok
+                ? `✅ [relay] ${repo}#${pr} feedback addressed`
+                : `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly`,
+            );
+          }
           return;
         }
         case "pr.comment_created": {

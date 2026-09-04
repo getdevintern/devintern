@@ -81,6 +81,15 @@ describe("detectUsageLimit", () => {
     expect(result.resetsAt).toBe("6:03 PM");
   });
 
+  test("detects Codex's ERROR:-prefixed usage-limit line from the CLI", () => {
+    const out =
+      "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:27 PM.";
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4:27 PM");
+    expect(result.matchedLine).toContain("You've hit your usage limit");
+  });
+
   test("detects Codex named limits, workspace credits, and spend caps", () => {
     const messages = [
       "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 8:10 PM.",

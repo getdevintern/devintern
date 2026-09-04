@@ -44,9 +44,10 @@ const USAGE_LIMIT_PATTERNS = [
   // Claude Code 2.1.218 exports these as USAGE_LIMIT_ERROR_PREFIXES.
   /^(?:error:\s*)?(?:you(?:'|’)re out of (?:usage credits|extra usage)|your org is out of usage\s*·\s*(?:add funds to continue|contact your admin)|your seat type doesn(?:'|’)t include usage credits|your usage allocation has been disabled by your admin|your group(?:'|’)s usage limit is set to \$0)(?:\s*(?:[.·—-]\s*)?(?:resets?|try again|available again|retry[- ]after)\b[^\n]*)?[.!]?$/i,
   // Codex UsageLimitReachedError variants. Keep these whole-line anchored:
-  // Codex writes its complete tool transcript to stderr.
-  /^you(?:'|’)ve hit your usage limit\.\s+(?:(?:upgrade to (?:pro|plus)|visit https:\/\/chatgpt\.com\/codex\/settings\/usage|contact your admin)\b[^\n]*?)(?:or\s+)?try again at\s+[^\n.]+[.]?$/i,
-  /^you(?:'|’)ve hit your usage limit for [^.]+\.\s+switch to another model now, or try again at\s+[^\n.]+[.]?$/i,
+  // Codex writes its complete tool transcript to stderr, often with an
+  // `ERROR:` prefix (e.g. `ERROR: You've hit your usage limit. Upgrade to Pro...`).
+  /^(?:error:\s*)?you(?:'|’)ve hit your usage limit\.\s+(?:(?:upgrade to (?:pro|plus)|visit https:\/\/chatgpt\.com\/codex\/settings\/usage|contact your admin)\b[^\n]*?)(?:or\s+)?try again at\s+[^\n.]+[.]?$/i,
+  /^(?:error:\s*)?you(?:'|’)ve hit your usage limit for [^.]+\.\s+switch to another model now, or try again at\s+[^\n.]+[.]?$/i,
   /^your workspace is out of credits\.\s+(?:add credits to continue|ask your workspace owner to add credits)[.]?$/i,
   /^you hit your spend cap set in your workspace\.\s+(?:increase your spend cap to continue|ask your workspace owner to increase the spend cap)[.]?$/i,
   /^quota exceeded\.\s+check your plan and billing details[.]?$/i,
@@ -198,11 +199,17 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
 
   return lines.find((line) => {
     const normalized = line.normalized.trim();
-    if (!normalized || isSourceOrDiffLine(normalized)) {
+    // Codex (and some other CLIs) prefix diagnostics with `ERROR:`. Strip it
+    // only for subscription-limit matching so a prefixed Codex message is
+    // still detected without treating arbitrary transcript lines as errors.
+    const diagnostic = normalized.replace(/^(?:error:\s*)/i, "");
+    if (!normalized || isSourceOrDiffLine(normalized) || isSourceOrDiffLine(diagnostic)) {
       return false;
     }
 
-    if (USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    if (
+      USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(diagnostic) || pattern.test(normalized))
+    ) {
       return true;
     }
 

@@ -24,6 +24,7 @@ import { TASK_POLL_LAST_DRAIN_KEY } from "./worker-state";
 import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
+import { cliResultToTaskResult, runWithFailover } from "./worker-failover";
 
 export interface ReadyTask {
   key: string;
@@ -79,25 +80,31 @@ export function workerTaskArgs(): string[] {
  * @param opts - Working directory and environment for the subprocess;
  *               the workspace worker routes each task to its repo's worktree
  *               with per-repo env; direct callers inherit both
- * @returns true when the CLI exited 0
+ * @returns true when the CLI exited 0, `"deferred"` when every harness in
+ *   the failover chain is usage-limited, false on any other failure
  */
-export function runTaskViaCli(
+export async function runTaskViaCli(
   taskKey: string,
   extraArgs: string[] = workerTaskArgs(),
   opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
-      stdio: "inherit",
-      cwd: opts.cwd,
-      env: opts.env ?? process.env,
-    });
-    child.on("close", (code) => resolve(code === 0));
-    child.on("error", (error) => {
-      console.error(`❌ Failed to spawn task run for ${taskKey}: ${error.message}`);
-      resolve(false);
-    });
-  });
+): Promise<TaskExecutionResult> {
+  const result = await runWithFailover(
+    (env) =>
+      new Promise<number>((resolve) => {
+        const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
+          stdio: "inherit",
+          cwd: opts.cwd,
+          env,
+        });
+        child.on("close", (code) => resolve(code ?? 1));
+        child.on("error", (error) => {
+          console.error(`❌ Failed to spawn task run for ${taskKey}: ${error.message}`);
+          resolve(1);
+        });
+      }),
+    opts.env ?? process.env,
+  );
+  return cliResultToTaskResult(result);
 }
 
 /**

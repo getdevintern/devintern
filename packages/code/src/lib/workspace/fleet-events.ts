@@ -12,6 +12,7 @@
 
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
 import type { AutomaticResolveResult } from "../review-polling-acquirer";
+import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -32,7 +33,7 @@ export interface FleetEventDeps {
       cwd: string;
       env: Record<string, string | undefined>;
     },
-  ) => Promise<boolean>;
+  ) => Promise<TaskExecutionResult>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
@@ -71,7 +72,7 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
  */
 export function createFleetAddressPr(
   deps: FleetEventDeps,
-): (slug: string, prNumber: number) => Promise<boolean> {
+): (slug: string, prNumber: number) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
 

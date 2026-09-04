@@ -11,6 +11,7 @@ import {
   spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
+  UsageLimitError,
 } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentModel } from "./agent-model";
@@ -156,7 +157,7 @@ export async function runAgent(
     displayName: harness.displayName,
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     (async () => {
       // Use high default like regular development (500 turns)
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
@@ -241,6 +242,11 @@ export async function runAgent(
       agent.on("close", (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
+        if (usageLimited) {
+          const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+          reject(new UsageLimitError(usage.resetsAt));
+          return;
+        }
         const maxTurnsReached = detectMaxTurnsReached(
           stdoutOutput,
           stderrOutput,
@@ -249,12 +255,16 @@ export async function runAgent(
         const output = stdoutOutput + stderrOutput;
 
         resolve({
-          success: code === 0 && !maxTurnsReached && !timedOut && !usageLimited,
+          success: code === 0 && !maxTurnsReached && !timedOut,
           output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
           maxTurnsReached,
         });
       });
     })().catch((error) => {
+      if (error instanceof UsageLimitError) {
+        reject(error);
+        return;
+      }
       resolve({
         success: false,
         output: `Failed to run ${harness.displayName}: ${error instanceof Error ? error.message : String(error)}`,
@@ -896,7 +906,11 @@ export async function addressReview(
     endRun("succeeded");
     return;
   } catch (error) {
-    endRun("failed", (error as Error).message);
+    if (error instanceof UsageLimitError) {
+      endRun("deferred", error.message);
+    } else {
+      endRun("failed", (error as Error).message);
+    }
     throw error;
   } finally {
     // Clean up any untracked files left by linters/tools/agent

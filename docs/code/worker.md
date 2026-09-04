@@ -35,6 +35,10 @@ devintern worker
 devintern webhook serve
 ```
 
+## Agent failover
+
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work. Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+
 ## Recurring automations
 
 Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
