@@ -15,6 +15,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { configureSqliteConnection } from "./sqlite";
 import { buildTicketUrl } from "./ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
@@ -80,15 +81,14 @@ export class WorkerState {
   constructor(dbPath: string = resolveQueueDbPath(), options: { readonly?: boolean } = {}) {
     if (options.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue may hold a connection to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 

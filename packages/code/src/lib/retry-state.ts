@@ -16,6 +16,7 @@
 
 import { createHash } from "crypto";
 import { Database } from "bun:sqlite";
+import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export interface RetryState {
@@ -48,8 +49,7 @@ export class RetryStateStore {
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue / run store may hold connections to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS task_retry_state (
         task_key TEXT PRIMARY KEY,
