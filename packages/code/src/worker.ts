@@ -27,7 +27,18 @@ export interface WorkerOptions {
   logDir?: string;
   /** Called once after every configured event source starts successfully. */
   onStarted?: (acquirerNames: string[]) => Promise<void> | void;
+  /**
+   * Mode-specific cleanup awaited after acquirers stop and before the worker
+   * lock is released. A future execution supervisor uses this to settle jobs,
+   * destroy sandboxes, and close its durable stores.
+   */
+  onShutdown?: () => Promise<void> | void;
+  /** Maximum time allowed for `onShutdown` before the worker exits. */
+  shutdownTimeoutMs?: number;
 }
+
+/** Default bound for mode-specific graceful shutdown work. */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 /**
  * An event acquirer turns "something changed at the source" into queued work.
@@ -37,6 +48,107 @@ export interface Acquirer {
   name: string;
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
+}
+
+export interface WorkerShutdownDependencies {
+  acquirers: Array<Pick<Acquirer, "name" | "stop">>;
+  lock: Pick<LockManager, "release">;
+  capture?: Pick<WorkerCaptureHandle, "stop"> | null;
+  onShutdown?: () => Promise<void> | void;
+  shutdownTimeoutMs?: number;
+  flush?: () => Promise<void>;
+  exit?: (code: number) => void;
+}
+
+/** Await one hook, rejecting when its graceful-shutdown allowance expires. */
+async function runShutdownHook(hook: () => Promise<void> | void, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(hook),
+      // oxlint-disable-next-line promise/avoid-new -- setTimeout has no promise API.
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`shutdown hook timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Build the worker's idempotent signal handler.
+ *
+ * The first signal performs graceful cleanup. A second signal requests an
+ * immediate non-zero exit so an uncooperative acquirer or child process can
+ * never trap the daemon indefinitely. Dependencies are injectable so shutdown
+ * ordering can be verified without sending signals to the test process.
+ */
+export function createWorkerShutdownHandler(
+  dependencies: WorkerShutdownDependencies,
+): (signal: string) => Promise<void> {
+  let shuttingDown = false;
+  let forceExitRequested = false;
+  const exit = dependencies.exit ?? ((code: number) => process.exit(code));
+  const flush = dependencies.flush ?? flushErrorTracking;
+
+  return async (signal: string): Promise<void> => {
+    if (shuttingDown) {
+      if (!forceExitRequested) {
+        forceExitRequested = true;
+        console.warn(`\n⚠️  Received ${signal} during shutdown; forcing exit.`);
+        exit(1);
+      }
+      return;
+    }
+    shuttingDown = true;
+    console.log(`\n🛑 Received ${signal}, shutting down worker...`);
+
+    for (const acquirer of dependencies.acquirers) {
+      try {
+        await acquirer.stop();
+      } catch (error) {
+        console.warn(`⚠️  Failed to stop acquirer ${acquirer.name}: ${(error as Error).message}`);
+      }
+    }
+
+    if (dependencies.onShutdown) {
+      const timeoutMs = dependencies.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+      try {
+        await runShutdownHook(dependencies.onShutdown, timeoutMs);
+      } catch (error) {
+        console.warn(`⚠️  Shutdown hook failed: ${(error as Error).message}`);
+      }
+    }
+
+    // Release singleton ownership only after mode-specific resources settle.
+    try {
+      dependencies.lock.release();
+    } catch (error) {
+      console.warn(`⚠️  Failed to release worker lock: ${(error as Error).message}`);
+    }
+    try {
+      dependencies.capture?.stop();
+    } catch (error) {
+      console.warn(`⚠️  Failed to stop worker log capture: ${(error as Error).message}`);
+    }
+    // Acquirers may have captured handled failures (poll/dispatch errors);
+    // give pending events a bounded chance to send before exiting.
+    try {
+      await flush();
+    } catch (error) {
+      console.warn(`⚠️  Failed to flush error tracking: ${(error as Error).message}`);
+    }
+    console.log("👋 Worker stopped");
+    if (!forceExitRequested) {
+      exit(0);
+    }
+  };
 }
 
 /**
@@ -99,32 +211,13 @@ export async function startWorker(
   }
   await options.onStarted?.(acquirers.map((acquirer) => acquirer.name));
 
-  let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
-    if (shuttingDown) {
-      return;
-    }
-    shuttingDown = true;
-    console.log(`\n🛑 Received ${signal}, shutting down worker...`);
-
-    for (const acquirer of acquirers) {
-      try {
-        await acquirer.stop();
-      } catch (error) {
-        console.warn(`⚠️  Failed to stop acquirer ${acquirer.name}: ${(error as Error).message}`);
-      }
-    }
-
-    // In-flight queue events stay marked in SQLite and are recovered on the
-    // next start; shutdown never loses accepted work.
-    lock.release();
-    capture?.stop();
-    // Acquirers may have captured handled failures (poll/dispatch errors);
-    // give pending events a bounded chance to send before exiting.
-    await flushErrorTracking();
-    console.log("👋 Worker stopped");
-    process.exit(0);
-  };
+  const shutdown = createWorkerShutdownHandler({
+    acquirers,
+    lock,
+    capture,
+    onShutdown: options.onShutdown,
+    shutdownTimeoutMs: options.shutdownTimeoutMs,
+  });
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

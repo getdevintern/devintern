@@ -17,6 +17,7 @@ import { basename } from "path";
 
 import type { RunRecord, RunStatus } from "./run-recorder";
 import { prepareQueueDbDirectory } from "./webhook-queue";
+import { configureSqliteConnection } from "./sqlite";
 
 /** Terminal, non-success statuses a support engineer can re-run. */
 export const RETRIABLE_RUN_STATUSES: readonly RunStatus[] = ["failed", "escalated", "abandoned"];
@@ -153,7 +154,7 @@ export class RunRetryAuditStore {
     }
     prepareQueueDbDirectory(this.dbPath);
     this.db = new Database(this.dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS run_retry_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,7 +222,7 @@ export class RunRetryAuditStore {
 
   private openReadonly(): Database {
     const conn = new Database(this.dbPath, { readonly: true });
-    conn.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(conn, { readonly: true });
     return conn;
   }
 
@@ -294,7 +295,7 @@ export class ScheduledRetryStore {
     }
     prepareQueueDbDirectory(this.dbPath);
     this.db = new Database(this.dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS scheduled_retries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

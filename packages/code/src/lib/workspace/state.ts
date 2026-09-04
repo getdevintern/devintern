@@ -20,6 +20,7 @@ import { dirname, join } from "path";
 
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
+import { configureSqliteConnection } from "../sqlite";
 import { WebhookQueue } from "../webhook-queue";
 import { WorkerState } from "../worker-state";
 import { locksDir, resolveWorkspaceDir, workspaceDbPath } from "./paths";
@@ -114,7 +115,7 @@ export class RoutingSkipStore {
       mkdirSync(dir, { recursive: true });
     }
     this.db = new Database(dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS routing_skips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

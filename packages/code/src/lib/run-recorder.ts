@@ -13,6 +13,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export type RunOrigin =
@@ -173,15 +174,14 @@ export class RunStore {
   constructor(dbPath: string = resolveQueueDbPath(), options: { readonly?: boolean } = {}) {
     if (options.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue / worker state may hold connections to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 
