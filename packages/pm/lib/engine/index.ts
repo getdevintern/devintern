@@ -20,6 +20,7 @@ import type { CreatedTask, LabelListResult, TaskBackend } from "../backends/inde
 import type { Config } from "../config.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
+import { createReadableStdoutTap, structuredPayloadFromResult } from "./structured.js";
 import { EngineError } from "./types.js";
 import type {
   EngineCallEvents,
@@ -210,6 +211,13 @@ export async function createEngine(
   const runAgent = deps.runAgent ?? defaultRunAgent;
   const promptsDir = options.promptsDir ?? defaultPromptsDir();
   const model = options.model;
+  /**
+   * Structured (JSON) mode is capability-gated: harnesses whose CLI documents
+   * a JSON output flag are always asked for machine-readable output, and the
+   * engine treats their parsed payload as authoritative. Harnesses without
+   * the capability keep the plain-text path unchanged.
+   */
+  const structuredMode = config.agent.harness.supportsStructuredOutput === true;
 
   const defaultProjectKey =
     config.jira?.defaultProjectKey ||
@@ -245,7 +253,8 @@ export async function createEngine(
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
     const onAgentChunk = events?.onAgentChunk;
-    const dumpContext = { harness: config.agent.harness.name, cliPath: config.agent.path };
+    const harnessName = config.agent.harness.name;
+    const dumpContext = { harness: harnessName, cliPath: config.agent.path };
 
     type AttemptOutcome =
       | { ok: true; payload: T }
@@ -253,16 +262,28 @@ export async function createEngine(
       | { ok: false; stage: "parse"; error: EngineError; rawResult: AgentRunResult };
 
     async function attemptParse(currentPrompt: string): Promise<AttemptOutcome> {
+      // With JSON mode on, raw stdout chunks are machine events; live output
+      // views still get readable assistant text via the tap. The raw streams
+      // themselves (transcript detectors, debug dumps) stay untouched, and
+      // plain-text runs forward chunks exactly as before.
+      const rawStdoutForward = onAgentChunk
+        ? (chunk: string) => onAgentChunk(chunk, "stdout")
+        : undefined;
+      const stdoutTap = structuredMode
+        ? createReadableStdoutTap(harnessName, rawStdoutForward)
+        : undefined;
       const result = await runAgent(config.agent.harness, config.agent.path, currentPrompt, {
         maxTurns: 100,
         skipPermissions: true,
         model,
         silent: true,
+        structuredOutput: structuredMode,
         attachmentPaths: agentFiles?.attachmentPaths,
         imagePaths: agentFiles?.imagePaths,
-        onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
+        onStdout: stdoutTap ? (chunk) => stdoutTap.forward(chunk) : rawStdoutForward,
         onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
       });
+      stdoutTap?.flush();
 
       if (result.exitCode !== 0) {
         const dumpFile = await dumpAgentOutput(label, result, dumpContext);
@@ -278,6 +299,27 @@ export async function createEngine(
         };
       }
 
+      // Structured (JSON) mode: the runner already parsed the machine-readable
+      // payload from the CLI's output — unwrap it through the harness's exact
+      // envelope schema (Claude Code result envelopes, NDJSON event streams,
+      // ...) and validate directly instead of scraping raw transcript text.
+      const fromStructured = structuredPayloadFromResult(
+        result,
+        harnessName,
+        validate,
+        invalidMessage,
+      );
+      if (fromStructured.ok) {
+        // Surface the token usage / cost the harness envelope reported, if any.
+        if (fromStructured.stats) {
+          events?.onAgentUsage?.(fromStructured.stats);
+        }
+        return { ok: true, payload: fromStructured.payload };
+      }
+
+      // Structured parsing failed (or the harness has no JSON mode): fall
+      // back to the tolerant repair heuristics over raw stdout before giving
+      // up with `parse-failed`.
       try {
         return { ok: true, payload: extractJsonPayload(result.stdout, validate, invalidMessage) };
       } catch (error) {

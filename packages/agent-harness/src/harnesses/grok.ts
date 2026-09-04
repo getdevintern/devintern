@@ -35,7 +35,16 @@ export class GrokHarness implements AgentHarness {
   readonly defaultPath = "grok";
   readonly promptFlag = "-p";
   readonly supportedModes = ["plan", "readonly"] as const;
-  /** `--output-format json` emits one JSON object (text, stopReason, session, usage). */
+  /**
+   * `--output-format json` emits one pretty-printed object: `text` (the
+   * model's reply — may embed the JSON payload after narration prose),
+   * `stopReason`, `sessionId`/`requestId`, optional `thought`, a Claude-style
+   * snake_case `usage` (incl. `reasoning_tokens`/`total_tokens`), and
+   * `total_cost_usd` when the bill is complete. Verified against the
+   * open-source CLI (xai-org/grok-build,
+   * `crates/codegen/xai-grok-pager/src/headless.rs`, `build_json_result`);
+   * the envelope schema lives in `structured-envelope.ts`.
+   */
   readonly supportsStructuredOutput = true;
 
   /**
