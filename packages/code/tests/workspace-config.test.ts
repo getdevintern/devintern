@@ -703,6 +703,85 @@ interval = "1d"
 `),
     ).toThrow(/\[\[estimations\]\] uses \[defaults\]\.tracker/);
   });
+
+  test("parses repo- and team-scoped Sentry monitors with independent credentials", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+poll_interval = 90
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "api"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[error_monitors]]
+id = "api-production"
+provider = "sentry"
+repo = "api"
+team = "platform"
+organization = "acme"
+project = "api"
+env_file = "env/sentry-api.env"
+min_occurrences = 10
+max_per_tick = 2
+  [error_monitors.env]
+  SENTRY_AUTH_TOKEN = "api-token"
+
+[[error_monitors]]
+id = "web-production"
+provider = "sentry"
+repo = "web"
+organization = "acme"
+project = "web"
+poll_interval = 30
+`);
+
+    expect(config.errorMonitors).toHaveLength(2);
+    expect(config.errorMonitors[0]).toMatchObject({
+      id: "api-production",
+      repo: "api",
+      team: "platform",
+      intervalSeconds: 90,
+      minOccurrences: 10,
+      maxIssuesPerTick: 2,
+      env: { SENTRY_AUTH_TOKEN: "api-token" },
+    });
+    expect(config.errorMonitors[1]).toMatchObject({
+      id: "web-production",
+      repo: "web",
+      intervalSeconds: 30,
+    });
+  });
+
+  test("requires explicit monitor routing in multi-repo workspaces", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[error_monitors]]
+id = "production"
+provider = "sentry"
+organization = "acme"
+project = "web"
+`),
+    ).toThrow(/repo is required in a workspace with multiple repositories/);
+  });
 });
 
 describe("parseWorkspaceConfig [worker.schedule] (quiet hours)", () => {

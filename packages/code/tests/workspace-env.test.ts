@@ -3,8 +3,13 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import type { RepoConfig } from "../src/lib/workspace/config";
-import { buildRepoEnv, gitHubSlugFromRemote, parseEnvFile } from "../src/lib/workspace/env";
+import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/workspace/config";
+import {
+  buildErrorMonitorEnv,
+  buildRepoEnv,
+  gitHubSlugFromRemote,
+  parseEnvFile,
+} from "../src/lib/workspace/env";
 
 describe("gitHubSlugFromRemote", () => {
   test("parses ssh and https GitHub remotes", () => {
@@ -92,6 +97,37 @@ describe("buildRepoEnv", () => {
 
     const unset = buildRepoEnv(repo(), workspaceDir);
     expect(unset.PR_LABELS).toBe("from-env");
+  });
+
+  test("error monitor credentials are isolated per source and override team/repo layers", () => {
+    writeFileSync(join(workspaceDir, ".env"), "SENTRY_AUTH_TOKEN=workspace\n");
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "sentry.env"), "SENTRY_AUTH_TOKEN=source-file\n");
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "jira",
+      taskQuery: "project = PLAT",
+      env: { SENTRY_AUTH_TOKEN: "team" },
+    };
+    const source: ErrorMonitorConfig = {
+      id: "api-production",
+      provider: "sentry",
+      enabled: true,
+      repo: "backend",
+      team: "platform",
+      organization: "acme",
+      project: "api",
+      intervalSeconds: 60,
+      minOccurrences: 5,
+      maxIssuesPerTick: 3,
+      envFile: "env/sentry.env",
+      env: { SENTRY_AUTH_TOKEN: "source-inline" },
+    };
+
+    const env = buildErrorMonitorEnv(source, repo(), team, workspaceDir);
+    expect(env.SENTRY_AUTH_TOKEN).toBe("source-inline");
+    expect(env.DEVINTERN_WORKSPACE_REPO).toBe("backend");
+    expect(env.DEVINTERN_WORKSPACE_TEAM).toBe("platform");
   });
 
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {

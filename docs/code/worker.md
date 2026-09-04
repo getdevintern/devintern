@@ -42,6 +42,14 @@ devintern webhook serve
 
 Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work. Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
 
+## Error-monitor auto-fixes
+
+`[[error_monitors]]` entries let the worker turn unresolved production errors
+into normal repo-scoped fix runs. Each Sentry project maps explicitly to one
+`[[repos]]` entry and can inherit an optional `[[teams]]` environment, so one
+worker can safely serve multiple teams, repositories, and credentials. See
+[Sentry Auto-fixes](./sentry-integration.md) for the schema and setup.
+
 ## Recurring automations
 
 Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:

@@ -89,6 +89,21 @@ default_branch = "main"
 # repo = "web"
 # labels = ["frontend"]
 
+# Error-monitoring projects map explicitly to their owning repository. Add one
+# entry per Sentry project; source-local env files allow different tokens.
+# ----
+# [[error_monitors]]
+# id = "backend-production"
+# provider = "sentry"
+# repo = "backend"             # required when multiple repos are configured
+# team = "platform"            # optional [[teams]] owner
+# organization = "acme"
+# project = "backend"
+# query = "environment:production"
+# min_occurrences = 5
+# max_per_tick = 3
+# env_file = "env/sentry-backend.env" # contains SENTRY_AUTH_TOKEN
+
 # Recurring work is hot-reloaded: edits apply to the running worker without a
 # restart. Each occurrence runs the prompt through the normal task pipeline as
 # a local markdown task.

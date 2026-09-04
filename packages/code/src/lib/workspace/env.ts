@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import type { RepoConfig, TeamConfig } from "./config";
+import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../analytics";
 
@@ -167,4 +167,24 @@ export function buildTeamTaskEnv(
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
+}
+
+/**
+ * Compose credentials and task context for one error-monitor source.
+ *
+ * Precedence: process < workspace < repo < team < source env_file < source
+ * inline env. Source-local layers let two Sentry projects use different auth
+ * tokens without leaking either token into another repository's runs.
+ */
+export function buildErrorMonitorEnv(
+  source: ErrorMonitorConfig,
+  repo: RepoConfig,
+  team: TeamConfig | undefined,
+  workspaceDir: string = resolveWorkspaceDir(),
+): Record<string, string | undefined> {
+  const env = team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir);
+  const sourceFileEnv = source.envFile
+    ? parseEnvFile(isAbsolute(source.envFile) ? source.envFile : join(workspaceDir, source.envFile))
+    : {};
+  return { ...env, ...sourceFileEnv, ...source.env };
 }
