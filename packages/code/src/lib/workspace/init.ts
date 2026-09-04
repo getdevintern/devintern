@@ -29,6 +29,9 @@ worktrees_ttl_days = 7
 # Local observability dashboard (http://localhost:4400). Set false to disable.
 dashboard = true
 # dashboard_port = 4400
+# Ask the agent to repair failing CI on its own open PRs. This can spend
+# tokens and push commits, so it is opt-in. Changes apply without a restart.
+ci_failure_fix = false
 # When automatic merge-conflict resolution runs on the agent's PRs.
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window

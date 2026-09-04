@@ -34,8 +34,9 @@ interface InstallationCache {
  *
  * Advanced no-relay installations can create their own GitHub App with these permissions:
  * - Repository permissions:
- *   - Contents: Read (to check branches)
+ *   - Contents: Read and write (to check and push branches)
  *   - Pull requests: Read and write (to create PRs)
+ *   - Checks, Actions, Commit statuses: Read (when automatic CI fixes are enabled)
  */
 export class GitHubAppAuth {
   private appId: string;

@@ -132,7 +132,7 @@ GITHUB_TOKEN=your-github-token
 ```
 
 - **Classic token**: Requires `repo` scope
-- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
+- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. When `[workspace].ci_failure_fix = true`, also grant `Checks: Read`, `Actions: Read`, and `Commit statuses: Read`. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
 > **`Contents` must be _Read and write_, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
@@ -173,6 +173,9 @@ Both the ID and a private key are required.
    - **Contents:** Read and write
    - **Pull requests:** Read and write
    - **Issues:** Read and write
+   - **Checks:** Read (when automatic CI failure fixes are enabled)
+   - **Actions:** Read (when automatic CI failure fixes are enabled)
+   - **Commit statuses:** Read (when automatic CI failure fixes are enabled)
 3. Generate and save a private key
 4. Install the App on your repositories
 

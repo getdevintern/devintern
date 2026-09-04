@@ -223,7 +223,7 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
 }
 
 /** Serialize automatic pipelines that target the same PR worktree. */
-async function serializePrRun<T>(
+export async function serializePrRun<T>(
   repo: string,
   prNumber: number,
   run: () => Promise<T>,
