@@ -507,11 +507,17 @@ export async function resolveConflictsOnPr(
           outcome = "resolved";
         } else {
           console.log(`⚔️  ${conflictedFiles.length} conflicted file(s); handing to the agent`);
-          const agentResult = await agentRunner(
-            buildConflictPrompt({ baseRef, branch, conflictedFiles }),
-            workDir,
-            verbose,
-          );
+          let agentResult: { success: boolean; output: string };
+          try {
+            agentResult = await agentRunner(
+              buildConflictPrompt({ baseRef, branch, conflictedFiles }),
+              workDir,
+              verbose,
+            );
+          } catch (error) {
+            await Utils.executeGitCommand(["merge", "--abort"], { cwd: workDir });
+            throw error;
+          }
 
           // Trust the tree, not the agent's word: nothing may be left unmerged.
           const unmerged = await Utils.executeGitCommand(
@@ -618,6 +624,9 @@ export async function resolveConflictsOnPr(
             verbose,
           );
         } catch (error) {
+          if (error instanceof Error && error.name === "UsageLimitError") {
+            throw error;
+          }
           fixResult = { success: false, output: (error as Error).message };
         }
         // Trust the tree, not the agent's word: fold any leftover changes into

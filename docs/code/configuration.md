@@ -392,6 +392,32 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **Qwen note:** Qwen Code accepts a model via its `--model` flag (e.g. `qwen3-coder-plus`) — set it with `AGENT_MODEL`; you can also keep the model in `~/.qwen/settings.json`.
 
+### Failover across multiple harnesses
+
+`AGENT_HARNESS` accepts a comma-separated, priority-ordered list so the unattended worker keeps processing when an agent hits its usage limit:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=claude-code,codex
+```
+
+The first entry is your preferred harness; later entries are fallbacks in priority order. A single value behaves exactly as before.
+
+**Failover behavior (worker mode):**
+
+Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
+
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`).
+- When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
+- When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
+- If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
+- Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
+
+Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
+
+**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. `AGENT_MODEL` applies to whichever harness is active (the string is harness-specific).
+
 ### Model selection
 
 Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-code/.env`:

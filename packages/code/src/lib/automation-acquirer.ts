@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
+import { tmpdir } from "os";
 import { join } from "path";
 
 import { resolveConfigDir } from "@devintern/utils";
@@ -12,6 +13,12 @@ import { nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
+import { getWorkerFailover } from "./worker-failover";
+import {
+  readUsageLimitHint,
+  USAGE_LIMIT_EXIT_CODE,
+  USAGE_LIMIT_FILE_ENV,
+} from "./usage-limit-protocol";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
 export const AUTOMATION_ORIGIN_ENV = RUN_ORIGIN_ENV;
@@ -627,21 +634,22 @@ export function spawnAutomationProcess(
   },
 ): SpawnedAutomationRun {
   const detached = process.platform !== "win32";
-  const child: ChildProcess = spawn(executable, args, {
-    cwd: options.cwd,
-    env: options.env,
-    stdio: "inherit",
-    detached,
-  });
+  let child: ChildProcess | null = null;
   let terminating = false;
   let exitResult: boolean | undefined;
   let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+  let hintDir: string | undefined;
   let settle!: (ok: boolean) => void;
   const completion = new Promise<boolean>((resolve) => {
     settle = resolve;
   });
+  const cleanupHint = () => {
+    if (!hintDir) return;
+    rmSync(hintDir, { recursive: true, force: true });
+    hintDir = undefined;
+  };
   const kill = (signal: NodeJS.Signals) => {
-    if (child.pid && detached) {
+    if (child?.pid && detached) {
       try {
         process.kill(-child.pid, signal);
         return;
@@ -650,13 +658,13 @@ export function spawnAutomationProcess(
       }
     }
     try {
-      child.kill(signal);
+      child?.kill(signal);
     } catch {
       // The child may already have exited.
     }
   };
   const processGroupAlive = () => {
-    if (!child.pid || !detached) return false;
+    if (!child?.pid || !detached) return false;
     try {
       process.kill(-child.pid, 0);
       return true;
@@ -670,26 +678,75 @@ export function spawnAutomationProcess(
     kill("SIGTERM");
     terminationTimer = setTimeout(() => {
       kill("SIGKILL");
+      cleanupHint();
       settle(false);
     }, options.terminationGraceMs ?? TERMINATION_GRACE_MS);
   };
 
-  child.once("close", (code) => {
-    exitResult = code === 0;
-    if (!terminating) settle(exitResult);
-    else if (!processGroupAlive()) {
+  const start = (env: Record<string, string | undefined>): void => {
+    const spawned = spawn(executable, args, {
+      cwd: options.cwd,
+      env,
+      stdio: "inherit",
+      detached,
+    });
+    child = spawned;
+    spawned.once("close", (code) => {
+      if (terminating) {
+        if (!processGroupAlive()) {
+          if (terminationTimer) clearTimeout(terminationTimer);
+          cleanupHint();
+          settle(false);
+        }
+        return;
+      }
+      if (code === USAGE_LIMIT_EXIT_CODE) {
+        const failover = getWorkerFailover();
+        if (failover && !failover.allLimited()) {
+          const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
+          if (outcome.kind !== "exhausted") {
+            cleanupHint();
+            const nextEnv = pinAutomationEnv(options.env);
+            hintDir = nextEnv.hintDir;
+            start(nextEnv.env);
+            return;
+          }
+        }
+        exitResult = false;
+        cleanupHint();
+        settle(false);
+        return;
+      }
+      exitResult = code === 0;
+      cleanupHint();
+      settle(exitResult);
+    });
+    spawned.once("error", () => {
+      exitResult = false;
       if (terminationTimer) clearTimeout(terminationTimer);
+      cleanupHint();
       settle(false);
-    }
-  });
-  child.once("error", () => {
-    exitResult = false;
-    if (terminationTimer) clearTimeout(terminationTimer);
-    settle(false);
-  });
+    });
+  };
+
+  const initial = pinAutomationEnv(options.env);
+  hintDir = initial.hintDir;
+  start(initial.env);
 
   return {
     completion,
     terminate: beginTermination,
   };
+}
+
+function pinAutomationEnv(base: Record<string, string | undefined>): {
+  env: Record<string, string | undefined>;
+  hintDir?: string;
+} {
+  const failover = getWorkerFailover();
+  if (!failover) {
+    return { env: base };
+  }
+  const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
+  return { env: failover.childEnv(base, join(hintDir, "hint.json")), hintDir };
 }

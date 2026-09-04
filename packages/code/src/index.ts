@@ -97,6 +97,12 @@ import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/r
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { reportTaskFailure } from "./lib/failure-feedback";
+import {
+  exitIfWorkerUsageLimit,
+  isWorkerChild,
+  USAGE_LIMIT_EXIT_CODE,
+  writeUsageLimitHint,
+} from "./lib/usage-limit-protocol";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -950,6 +956,9 @@ if (process.argv[2] === "init") {
     try {
       await addressReview(prUrl, { noPush, noReply, verbose });
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
@@ -1041,6 +1050,9 @@ if (process.argv[2] === "init") {
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
       console.error(`❌ Error: ${(error as Error).message}`);
       // Thrown (unexpected) resolution errors are user actions that failed —
       // reported like address-review; `failed`/`deferred` outcomes above are
@@ -1828,6 +1840,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           /* ignore */
         }
       } catch (clarityError) {
+        // Account-global usage limits must abort the run so the worker can
+        // fail over. Swallowing them here used to launch implementation on
+        // the same exhausted harness (Grok 402 during the clarity check).
+        if (clarityError instanceof UsageLimitError) {
+          throw clarityError;
+        }
         recordRunStage("feasibility", {
           status: "failed",
           summary: `assessment errored: ${(clarityError as Error).message}`,
@@ -1977,6 +1995,30 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
       await finishTaskRun("deferred", error.message);
+      if (isWorkerChild()) {
+        console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+        // Hand the ticket back to To Do without a failure comment so the
+        // incomplete-attempt gate cannot strand it, and the parent can retry
+        // on the next harness (or pick it up again once a window elapses).
+        if (activeTaskContext?.movedToInProgress) {
+          try {
+            const todoStatus = getTodoStatusForProject(
+              activeTaskContext.projectKey,
+              loadProjectSettings(),
+            );
+            if (todoStatus?.trim()) {
+              await activeTaskContext.tracker.transitionStatus(taskKey, todoStatus.trim());
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        if (lockManager) {
+          lockManager.release();
+        }
+        writeUsageLimitHint(error);
+        process.exit(USAGE_LIMIT_EXIT_CODE);
+      }
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       // The ticket may already be "In Progress": leave feedback and move it
       // back so the deferred retry can actually pick it up.
@@ -2313,6 +2355,14 @@ async function main(): Promise<void> {
           // batch and exit 0 so the scheduler retries next window.
           if (error instanceof UsageLimitError) {
             await finishTaskRun("deferred", error.message);
+            if (isWorkerChild()) {
+              console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+              if (lockManager) {
+                lockManager.release();
+              }
+              writeUsageLimitHint(error);
+              process.exit(USAGE_LIMIT_EXIT_CODE);
+            }
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
@@ -2386,6 +2436,13 @@ async function main(): Promise<void> {
         // hammering tasks that would all fail. Exit 0 so the scheduler retries
         // next window without marking the run failed.
         if (error instanceof UsageLimitError) {
+          if (isWorkerChild()) {
+            if (lockManager) {
+              lockManager.release();
+            }
+            writeUsageLimitHint(error);
+            process.exit(USAGE_LIMIT_EXIT_CODE);
+          }
           const remaining = tasksToProcess.length - i - 1;
           console.warn(
             `\n⏳ ${error.message}. Aborting batch — ${remaining} task(s) left, ` +
@@ -2586,8 +2643,9 @@ async function runClarityCheck(
           );
           return;
         }
-        if (usageLimit?.limited) {
-          reject(new UsageLimitError(usageLimit.resetsAt));
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {

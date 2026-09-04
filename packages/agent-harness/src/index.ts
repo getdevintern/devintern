@@ -33,7 +33,23 @@ export {
 } from "./modes.js";
 
 // Registry
-export { registerHarness, getHarness, listHarnesses, HARNESS_ALIASES } from "./registry.js";
+export {
+  registerHarness,
+  getHarness,
+  listHarnesses,
+  HARNESS_ALIASES,
+  DEFAULT_HARNESS_NAME,
+} from "./registry.js";
+
+// Harness chain (comma-separated AGENT_HARNESS failover lists)
+export {
+  parseHarnessList,
+  resolveHarnessChain,
+  type HarnessChainEntry,
+  type HarnessChainIssue,
+  type HarnessChainOptions,
+  type ResolvedHarnessChain,
+} from "./harness-chain.js";
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
