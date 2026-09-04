@@ -95,15 +95,40 @@ describe("detectUsageLimit", () => {
       "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 8:10 PM.",
       "Your workspace is out of credits. Add credits to continue.",
       "Your workspace is out of credits. Ask your workspace owner to add credits.",
+      "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
       "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
       "You hit your spend cap set in your workspace. Ask your workspace owner to increase the spend cap.",
+      "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
       "Quota exceeded. Check your plan and billing details.",
       "To use Codex with your ChatGPT plan, upgrade to Plus at https://chatgpt.com/pricing.",
+      "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
     ];
 
     for (const message of messages) {
       expect(detectUsageLimit("", message).limited).toBe(true);
     }
+  });
+
+  test("detects current Codex plan copy including try-again-later and admin upsell", () => {
+    const messages = [
+      "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later.",
+      "You've hit your usage limit. To get more access now, send a request to your admin or try again later.",
+      "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+      "You've hit your usage limit. Try again later.",
+      "You've hit your usage limit. To continue using Codex, start a free trial of today, or try again at 6:03 PM.",
+      "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+    ];
+
+    for (const message of messages) {
+      expect(detectUsageLimit("", message).limited).toBe(true);
+    }
+
+    const withReset = detectUsageLimit(
+      "",
+      "You've hit your usage limit. To get more access now, send a request to your admin or try again at 4:27 PM.",
+    );
+    expect(withReset.limited).toBe(true);
+    expect(withReset.resetsAt).toBe("4:27 PM");
   });
 
   test("detects current Claude Code credit and allocation exhaustion messages", () => {
@@ -147,6 +172,43 @@ describe("detectUsageLimit", () => {
     for (const message of messages) {
       expect(detectUsageLimit("", message).limited).toBe(true);
     }
+  });
+
+  test("detects Grok Build's pretty-printed 402 usage-balance JSON", () => {
+    const out = [
+      "Internal error: {",
+      '  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",',
+      '  "http_status": 402',
+      "}",
+    ].join("\n");
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.matchedLine).toContain("usage balance exhausted");
+  });
+
+  test("detects Grok Build's Error-prefixed 402 reprint and compact JSON", () => {
+    const reprint = [
+      "Error: Internal error: {",
+      '  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",',
+      '  "http_status": 402',
+      "}",
+    ].join("\n");
+    const compact =
+      'Internal error: {"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}';
+
+    expect(detectUsageLimit("", reprint).limited).toBe(true);
+    expect(detectUsageLimit(compact, "").limited).toBe(true);
+  });
+
+  test("ignores Grok 402 phrases in source and prose", () => {
+    const transcript = [
+      'const message = "API error (status 402 Payment Required): Grok Build usage balance exhausted";',
+      '"Grok Build usage balance exhausted"',
+      "The docs mention Grok Build usage balance exhausted as a billing state.",
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
   });
 
   test("detects Goose credits exhaustion despite its successful exit", () => {
@@ -265,6 +327,34 @@ describe("detectUsageLimit", () => {
     const result = detectUsageLimit("", out);
     expect(result.limited).toBe(true);
     expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("detects OpenCode GoUsageLimitError and FreeUsageLimitError retry copy", () => {
+    const goLimit =
+      "5 hour usage limit reached. It will reset in 5 hours 23 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01K6XGM22R6FM8JVABE9XDQXGH/go";
+    const goLimitResult = detectUsageLimit("", goLimit);
+    expect(goLimitResult.limited).toBe(true);
+    expect(goLimitResult.resetsAt).toBe("5 hours 23 minutes");
+
+    const unnamed = detectUsageLimit(
+      "",
+      "Usage limit reached. It will reset in 15 minutes. To continue using this model now, enable usage from your available balance",
+    );
+    expect(unnamed.limited).toBe(true);
+    expect(unnamed.resetsAt).toBe("15 minutes");
+
+    expect(
+      detectUsageLimit(
+        "",
+        "Weekly usage limit reached. It will reset in 2 days. To continue using this model now, enable usage from your available balance",
+      ).limited,
+    ).toBe(true);
+    expect(detectUsageLimit("", "Free usage exceeded, subscribe to Go").limited).toBe(true);
+    expect(detectUsageLimit("", "Free usage exceeded").limited).toBe(true);
+    expect(
+      detectUsageLimit("", "Subscription quota exceeded. You can continue using free models.")
+        .limited,
+    ).toBe(true);
   });
 
   test("extracts a usage limit from OpenCode's printed structured log", () => {

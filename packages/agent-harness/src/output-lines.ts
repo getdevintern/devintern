@@ -46,7 +46,9 @@ export function isSourceOrDiffLine(line: string): boolean {
     /^(?:(?:\.?\.?\/|\/)?(?:[^:\s]+\/)+[^:\s]+|[^:\s]+\.[a-z\d]+):\d+(?::\d+)?:/i.test(trimmed) ||
     /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||
     /^(?:super|throw\s+new\s+Error|[\w$.]+\.(?:error|warn|log))\s*\(/.test(trimmed) ||
-    /^(?:["'`]).*(?:["'`])[,;)]?$/.test(trimmed) ||
+    // A single quoted string / JS string literal — not JSON `"key": "value"`,
+    // which Grok (and others) print as pretty-printed Internal error objects.
+    /^(?:["'`])(?:[^"'`\\]|\\.)*(?:["'`])[,;)]?$/.test(trimmed) ||
     /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
     /=>/.test(trimmed)
   );

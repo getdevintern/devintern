@@ -1825,6 +1825,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           /* ignore */
         }
       } catch (clarityError) {
+        // Account-global usage limits must abort the run so the worker can
+        // fail over. Swallowing them here used to launch implementation on
+        // the same exhausted harness (Grok 402 during the clarity check).
+        if (clarityError instanceof UsageLimitError) {
+          throw clarityError;
+        }
         recordRunStage("feasibility", {
           status: "failed",
           summary: `assessment errored: ${(clarityError as Error).message}`,
@@ -2598,8 +2604,9 @@ async function runClarityCheck(
           );
           return;
         }
-        if (usageLimit?.limited) {
-          reject(new UsageLimitError(usageLimit.resetsAt));
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {
