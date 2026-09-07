@@ -54,9 +54,6 @@ worker_task_args = "--create-pr"
 # pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
-# Omit default_branch to follow each repository's origin/HEAD. Set it here only
-# when the whole fleet intentionally uses the same branch name.
-# default_branch = "main"
 
 # Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
@@ -64,6 +61,7 @@ poll_interval = 60
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
+# default_branch = "main"    # optional; otherwise follows origin/HEAD
 # ----
 # [[routing.rules]]
 # repo = "backend"
@@ -395,27 +393,11 @@ export async function runWorkerAddRepo(
     name = `${rawName}-${suffix++}`;
   }
 
-  // Default branch from origin/HEAD when it differs from the workspace default.
-  let defaultBranch: string | undefined;
-  const head = await Utils.executeGitCommand(
-    ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-    { cwd },
-  );
-  if (head.success && head.output.trim()) {
-    const branch = head.output.trim().replace(/^origin\//, "");
-    if (branch !== (config.defaults.defaultBranch ?? "")) {
-      defaultBranch = branch;
-    }
-  }
-
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
   const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
 
   let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
-  if (defaultBranch) {
-    block += `default_branch = ${tomlString(defaultBranch)}\n`;
-  }
   if (Object.keys(conflicts).length > 0) {
     block += "  [repos.env]\n";
     for (const [key, value] of Object.entries(conflicts)) {
@@ -442,9 +424,6 @@ export async function runWorkerAddRepo(
   loadWorkspaceConfig(configPath);
 
   log(`✅ Added ${remote} as "${name}"`);
-  if (defaultBranch) {
-    log(`   default_branch: ${defaultBranch}`);
-  }
   if (Object.keys(conflicts).length > 0) {
     log(
       `   ${Object.keys(conflicts).length} env value(s) differed from the workspace .env and were kept in [repos.env]: ` +

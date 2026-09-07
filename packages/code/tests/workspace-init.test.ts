@@ -123,15 +123,14 @@ describe("worker scaffold/add-repo", () => {
     expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
   });
 
-  test("leaves default branch unset when origin/HEAD is unavailable", async () => {
+  test("does not pin the repository's current origin/HEAD", async () => {
     runWorkerScaffold();
-    git(repoDir, "remote set-head origin -d");
 
     expect(await runWorkerAddRepo(repoDir)).toBe(0);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
-    expect(config.defaults.defaultBranch).toBeUndefined();
     expect(config.repos[0]?.defaultBranch).toBeUndefined();
+    expect(readFileSync(workspaceConfigPath(), "utf8")).not.toMatch(/^default_branch\s*=/m);
   });
 
   test("add-repo from a package subdirectory still merges the repo-root .env", async () => {

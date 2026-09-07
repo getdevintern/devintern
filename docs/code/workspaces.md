@@ -41,7 +41,6 @@ tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
 poll_interval = 60
-# default_branch = "main" # optional fleet-wide override; otherwise origin/HEAD
 # pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
@@ -89,7 +88,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
-- Omit `default_branch` to follow each repository's advertised `origin/HEAD`. Set it under `[defaults]` only when the whole fleet intentionally uses one branch name, or per `[[repos]]` for an exception.
+- Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
