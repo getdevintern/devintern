@@ -164,7 +164,9 @@ export class TrelloClient {
       options.headers = { "Content-Type": "application/x-www-form-urlencoded" };
     }
 
-    const response = await fetch(url, options);
+    // fetchWithRetry absorbs transient network errors ("Unable to connect",
+    // DNS/connect failures) and retryable HTTP statuses (DEVINTERN-8).
+    const response = await fetchWithRetry(url, options);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -350,7 +352,7 @@ export class TrelloClient {
     form.append("file", new Blob([bytes], { type: mimeType }), filename);
     form.append("name", filename);
 
-    const response = await fetch(this.buildUrl(`/cards/${cardId}/attachments`), {
+    const response = await fetchWithRetry(this.buildUrl(`/cards/${cardId}/attachments`), {
       method: "POST",
       body: form,
     });
@@ -462,7 +464,7 @@ export class TrelloClient {
     }
 
     const url = this.buildUrl(`/boards/${boardId}/actions`, params);
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url);
 
     if (!response.ok) {
       const errorText = await response.text();
