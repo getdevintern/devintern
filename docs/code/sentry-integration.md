@@ -69,23 +69,12 @@ base_url = "https://sentry.internal.example"
 ```
 
 Do not put a Sentry DSN here. A DSN sends events into Sentry; polling issues
-requires an auth token plus the organization and project slugs. With
-`comment_on_action` omitted or `false` (the default), create an auth token with
-`project:read` and `event:read` access.
+requires an auth token plus the organization and project slugs. Create a
+personal auth token with `event:write` access.
 
-When `comment_on_action = true`, DevIntern leaves a short comment after a
-terminal successful or failed remediation run. It does not comment when a run
-is deferred, resolve the issue, or change its status, assignment, or priority.
-Comment delivery is best effort: a Sentry API rejection is logged as a warning
-and never changes the run outcome or deduplication state.
-
-Sentry's issue-comment endpoint is private and is not part of its documented
-public API. In addition to the read scopes, use a personal token that
-authenticates a Sentry user and grants **Issue & Event: Write** (`event:write`).
-A read-only token must therefore be extended or replaced. Organization/internal
-integration tokens may still be rejected because the endpoint requires an
-authenticated user; leave the option disabled if your Sentry setup cannot use
-a personal token. Sentry may change this private endpoint without notice.
+When `comment_on_action = true`, DevIntern leaves a short comment on the Sentry
+issue after a remediation run finishes successfully or fails. Comments are best
+effort and never change the run outcome or the issue status.
 
 Credential precedence, from lowest to highest, is: process environment,
 workspace `.env`, repo `env_file`, `[repos.env]`, team credentials, the error
