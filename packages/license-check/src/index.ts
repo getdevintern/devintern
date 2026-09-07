@@ -413,15 +413,29 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
 }
 
 /**
- * Enforces a license check result: logs success or grace info, or exits with code 1 on failure.
+ * Error thrown by {@link requireLicense} when the license check result is not
+ * valid. Library code must never terminate the host process; CLI entry points
+ * catch this error and exit with code 1.
+ */
+export class LicenseCheckError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LicenseCheckError";
+  }
+}
+
+/**
+ * Enforces a license check result: logs success or grace info, or throws a
+ * {@link LicenseCheckError} on failure (the caller decides the process exit).
  *
  * @param result - Outcome from {@link checkLicense}.
+ * @throws {@link LicenseCheckError} when `result.valid` is false.
  */
 export function requireLicense(result: LicenseCheckResult): void {
   if (!result.valid) {
     console.error("\n❌ License check failed");
     console.error(`   ${result.message}\n`);
-    process.exit(1);
+    throw new LicenseCheckError(result.message);
   }
 
   if (result.source === "grace") {
