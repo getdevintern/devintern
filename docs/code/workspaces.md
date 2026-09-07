@@ -94,6 +94,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+- `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
 ### Multiple teams and tracker boards
 
@@ -229,7 +230,7 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations or estimations can omit the defaults query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus the task-polling timestamp used for missed-window catch-up, live in the central workspace database.
+The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations, estimations, or an enabled error monitor can omit the defaults query. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus task-polling and error-monitor deduplication state, live in the central workspace database.
 
 While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 
@@ -239,6 +240,7 @@ The worker watches `workspace.toml` and reloads it automatically a moment after 
 
 - **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
+- **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
 - **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
 - **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.

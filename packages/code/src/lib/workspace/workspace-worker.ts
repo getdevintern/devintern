@@ -8,7 +8,7 @@
  * in the central workspace DB.
  */
 
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { LockManager } from "../lock-manager";
@@ -31,7 +31,13 @@ import { ScheduledRetryStore } from "../run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamEnv, buildTeamTaskEnv, parseEnvFile } from "./env";
+import {
+  buildErrorMonitorEnv,
+  buildRepoEnv,
+  buildTeamEnv,
+  buildTeamTaskEnv,
+  parseEnvFile,
+} from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -704,7 +710,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     !multiTeam &&
     !initialQuery &&
     config.automations.length === 0 &&
-    config.estimations.length === 0
+    config.estimations.length === 0 &&
+    !config.errorMonitors.some((source) => source.enabled)
   ) {
     if (retryQueue.hasPending()) {
       console.warn(
@@ -829,6 +836,50 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       ),
   });
   acquirers.push(estimationAcquirer);
+
+  // Error-monitor adapters share one provider-neutral acquirer. Each source
+  // is pinned to a repo (and optionally a team), so projects with different
+  // credentials cannot be dispatched into the wrong codebase.
+  const { ErrorMonitorAcquirer, createErrorMonitorProvider } = await import("../error-monitor");
+  const errorTaskDir = join(workspaceDir, "error-fixes");
+  for (const source of config.errorMonitors) {
+    if (!source.enabled) continue;
+    const repo = findRepo(config, source.repo);
+    if (!repo) throw new Error(`Error monitor "${source.id}" references unknown repo.`);
+    const team = source.team ? findTeam(config, source.team) : undefined;
+    const env = buildErrorMonitorEnv(source, repo, team, workspaceDir);
+
+    const provider = createErrorMonitorProvider(source, env);
+    const execute = createFleetTaskExecutor(
+      {
+        config,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        team,
+        coordinator,
+      },
+      { repo: repo.name },
+    );
+    acquirers.push(
+      new ErrorMonitorAcquirer({
+        sourceId: source.id,
+        intervalSeconds: source.intervalSeconds,
+        minOccurrences: source.minOccurrences,
+        maxIssuesPerTick: source.maxIssuesPerTick,
+        queue: state.queue,
+        provider,
+        verbose: options.verbose,
+        executeTask: async (issue, markdown) => {
+          mkdirSync(errorTaskDir, { recursive: true });
+          const safeId = `${source.id}-${issue.displayId}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
+          const taskFile = join(errorTaskDir, `${safeId}.md`);
+          writeFileSync(taskFile, markdown);
+          return execute(taskFile, { key: issue.externalId, labels: [], components: [] });
+        },
+      }),
+    );
+  }
 
   // Tracker identities and credentials are startup-only. Queries and fixed
   // team repo mappings stay live through lookups against the shared config.
@@ -964,6 +1015,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         throw new Error(
           "Team names, trackers, env_file, and inline env are startup-only; restart the worker to change them.",
         );
+      }
+      if (JSON.stringify(next.errorMonitors) !== JSON.stringify(current.errorMonitors)) {
+        throw new Error("[[error_monitors]] is startup-only; restart the worker to change it.");
       }
       if (!multiTeam && next.defaults.taskQuery && sources.length === 0) {
         throw new Error(
