@@ -18,6 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { fetchWithRetry } from "@devintern/utils";
 import { mimeTypeFromFilename } from "./mime.ts";
 
 export interface TrelloBoard {
@@ -437,7 +438,8 @@ export class TrelloClient {
    * @param query - Trello search query.
    * @param boardId - Optional board ID to scope the search to.
    * @returns Matching cards (first 100) and total count of returned cards.
-   * @throws When the Trello API request fails.
+   * @throws When the Trello API request fails. Transient network errors and
+   *   retryable HTTP statuses are retried with backoff via `fetchWithRetry`.
    */
   /**
    * List recent actions on a board (newest first).
@@ -485,7 +487,7 @@ export class TrelloClient {
     }
 
     const url = this.buildUrl("/search", params);
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url);
 
     if (!response.ok) {
       const errorText = await response.text();
