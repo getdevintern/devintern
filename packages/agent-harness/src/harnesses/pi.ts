@@ -75,9 +75,10 @@ export class PiHarness implements AgentHarness {
    * or `<id>:<thinking>`) and `structuredOutput` (`--mode json`, which pairs
    * with the `-p` prompt flag: print mode with JSON event output). `effort`
    * is composed into the model string when a model is set (see
-   * {@link composePiModelWithEffort}); without a model it is a no-op because
-   * pi has no separate thinking flag. Pi's CLI does not currently expose
-   * turns or permission flags.
+   * {@link composePiModelWithEffort}); without a model it cannot be applied
+   * because pi has no separate thinking flag, so a one-line warning is
+   * emitted instead of silently dropping the option. Pi's CLI does not
+   * currently expose turns or permission flags.
    *
    * @param options - Accepted for interface compatibility; only `model`,
    *   `effort`, and `structuredOutput` are used.
@@ -90,6 +91,12 @@ export class PiHarness implements AgentHarness {
     const model = composePiModelWithEffort(options.model, options.effort);
     if (model) {
       args.push("--model", model);
+    } else if (options.effort && !options.model) {
+      console.warn(
+        `⚠️  Pi (${this.name}) composes reasoning effort into the model string, but no model is ` +
+          `set; ignoring effort "${options.effort}". ` +
+          `Set AGENT_MODEL (or pass --model) to apply it.`,
+      );
     }
 
     if (options.structuredOutput) {

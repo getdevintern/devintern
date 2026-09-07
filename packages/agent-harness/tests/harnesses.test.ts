@@ -447,8 +447,21 @@ describe("PiHarness", () => {
     ]);
   });
 
-  test("buildArgs ignores effort without a model (nothing to compose onto)", () => {
-    expect(h.buildArgs({ effort: "high" })).toEqual([]);
+  test("buildArgs ignores effort without a model (nothing to compose onto) and warns", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.buildArgs({ effort: "high" })).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("Pi (pi) composes reasoning effort into the model string");
+    expect(warnings[0]).toContain("no model is set");
+    expect(warnings[0]).toContain('ignoring effort "high"');
   });
 
   test("composePiModelWithEffort composition rules", () => {

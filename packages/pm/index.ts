@@ -15,7 +15,12 @@ import type { PmEngine, SourceInput, StoryDraft } from "./lib/engine";
 import { runInteractiveMode } from "./lib/components/interactive";
 import { initializeProject } from "./lib/init";
 import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
-import { extractHarnessFlags, parseArgs, validateHarnessName } from "./lib/parse-args";
+import {
+  extractHarnessFlags,
+  parseArgs,
+  parseEffortValue,
+  validateHarnessName,
+} from "./lib/parse-args";
 import type { CLIArgs } from "./lib/parse-args";
 import { runConnect } from "./lib/chat/connect";
 import { runServe } from "./lib/chat/serve";
@@ -176,14 +181,9 @@ async function main() {
     const platformFlag = args[args.indexOf("--platform") + 1];
     const modelFlag = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
     let effortFlag: AgentEffort | undefined;
-    if (args.includes("--effort")) {
-      const rawEffort = args[args.indexOf("--effort") + 1];
-      try {
-        effortFlag = parseAgentEffort(rawEffort);
-      } catch (error) {
-        console.error(`Error: ${(error as Error).message}`);
-        process.exit(1);
-      }
+    const effortIndex = args.indexOf("--effort");
+    if (effortIndex !== -1) {
+      effortFlag = parseEffortValue(args, effortIndex);
     }
     await runServe({
       platforms:

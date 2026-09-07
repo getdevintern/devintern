@@ -94,7 +94,8 @@ capable and incapable harnesses.
   override). Where effort is encoded in the model string, compose rather than
   emit a separate flag (pi's `<id>:<thinking>` suffix — see
   `composePiModelWithEffort`; an explicit suffix already present in the model
-  string wins, and effort without a model is a no-op).
+  string wins, and effort without a model is ignored with a one-line warning
+  because pi has nothing to attach the thinking level to).
 - **Per-harness behavior** (verified against upstream docs):
 
   | Harness | Mechanism |

@@ -272,16 +272,7 @@ Examples:
       model = args[i + 1]!; // Non-null assertion safe due to check above
       i++; // Skip next arg
     } else if (arg === "--effort") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --effort requires a value (low, medium, or high)");
-        process.exit(1);
-      }
-      try {
-        effort = parseAgentEffort(args[i + 1]);
-      } catch (error) {
-        console.error(`Error: ${(error as Error).message}`);
-        process.exit(1);
-      }
+      effort = parseEffortValue(args, i);
       i++; // Skip next arg
     } else if (arg === "--harness") {
       // Consumed by extractHarnessFlags() before parseArgs() runs; the value
@@ -329,6 +320,31 @@ Examples:
     extraInstructions: customInstructions,
     attachments: attachments.length > 0 ? attachments : undefined,
   };
+}
+
+/**
+ * Parse the value following an `--effort` flag at `index` in raw argv.
+ *
+ * Shared by the {@link parseArgs} loop and the `serve` branch in `index.ts`
+ * so both surfaces behave identically: `--effort` as the last argument is an
+ * error rather than a silent no-op, and an invalid value fails with the
+ * accepted levels.
+ *
+ * @param args - Raw argv slice.
+ * @param index - Index of the `--effort` flag within `args`.
+ * @returns The validated effort, or `undefined` when the value is blank.
+ */
+export function parseEffortValue(args: string[], index: number): AgentEffort | undefined {
+  if (index + 1 >= args.length) {
+    console.error("Error: --effort requires a value (low, medium, or high)");
+    process.exit(1);
+  }
+  try {
+    return parseAgentEffort(args[index + 1]);
+  } catch (error) {
+    console.error(`Error: ${(error as Error).message}`);
+    process.exit(1);
+  }
 }
 
 /**
