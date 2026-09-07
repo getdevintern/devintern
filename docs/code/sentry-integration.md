@@ -4,7 +4,7 @@ sidebarLabel: "Sentry Auto-fixes"
 description: "Turn Sentry error groups into repo-routed fixes from the workspace worker"
 section: "Automation"
 order: 4
-dateModified: 2026-09-04
+dateModified: 2026-09-07
 ---
 
 # Sentry Auto-fixes
@@ -31,6 +31,7 @@ query = "environment:production level:error"
 poll_interval = 60
 min_occurrences = 5
 max_per_tick = 3
+comment_on_action = true
 env_file = "env/sentry-api.env"
 
 [[error_monitors]]
@@ -68,8 +69,23 @@ base_url = "https://sentry.internal.example"
 ```
 
 Do not put a Sentry DSN here. A DSN sends events into Sentry; polling issues
-requires an auth token plus the organization and project slugs. Create an auth
-token with `project:read` and `event:read` access.
+requires an auth token plus the organization and project slugs. With
+`comment_on_action` omitted or `false` (the default), create an auth token with
+`project:read` and `event:read` access.
+
+When `comment_on_action = true`, DevIntern leaves a short comment after a
+terminal successful or failed remediation run. It does not comment when a run
+is deferred, resolve the issue, or change its status, assignment, or priority.
+Comment delivery is best effort: a Sentry API rejection is logged as a warning
+and never changes the run outcome or deduplication state.
+
+Sentry's issue-comment endpoint is private and is not part of its documented
+public API. In addition to the read scopes, use a personal token that
+authenticates a Sentry user and grants **Issue & Event: Write** (`event:write`).
+A read-only token must therefore be extended or replaced. Organization/internal
+integration tokens may still be rejected because the endpoint requires an
+authenticated user; leave the option disabled if your Sentry setup cannot use
+a personal token. Sentry may change this private endpoint without notice.
 
 Credential precedence, from lowest to highest, is: process environment,
 workspace `.env`, repo `env_file`, `[repos.env]`, team credentials, the error

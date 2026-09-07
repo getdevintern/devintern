@@ -34,6 +34,8 @@ export interface ErrorMonitorProvider<TIssue extends ErrorMonitorIssue> {
   fetchIssues(): Promise<TIssue[]>;
   validateIssue(issue: TIssue): IssueValidity;
   buildTaskMarkdown(issue: TIssue): string;
+  /** Optionally leave provider-native feedback after a terminal automation run. */
+  reportAction?(issue: TIssue, succeeded: boolean): Promise<void>;
 }
 
 export interface ErrorMonitorAcquirerOptions<TIssue extends ErrorMonitorIssue> {
@@ -44,6 +46,7 @@ export interface ErrorMonitorAcquirerOptions<TIssue extends ErrorMonitorIssue> {
   executeTask: (issue: TIssue, markdown: string) => Promise<TaskExecutionResult>;
   minOccurrences?: number;
   maxIssuesPerTick?: number;
+  commentOnAction?: boolean;
   verbose?: boolean;
 }
 
@@ -78,12 +81,18 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   private readonly options: ErrorMonitorAcquirerOptions<TIssue> & {
     minOccurrences: number;
     maxIssuesPerTick: number;
+    commentOnAction: boolean;
   };
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
-    this.options = { minOccurrences: 5, maxIssuesPerTick: 3, ...options };
+    this.options = {
+      minOccurrences: 5,
+      maxIssuesPerTick: 3,
+      commentOnAction: false,
+      ...options,
+    };
     this.name = `errors:${options.provider.providerName}:${options.sourceId}`;
   }
 
@@ -146,6 +155,7 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
           break;
         }
         handled++;
+        await this.reportAction(issue, result);
         console.log(
           result
             ? `✅ [${this.name}] fix for ${issue.displayId} completed`
@@ -156,6 +166,19 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
       this.busy = false;
+    }
+  }
+
+  private async reportAction(issue: TIssue, succeeded: boolean): Promise<void> {
+    const { provider, commentOnAction } = this.options;
+    if (!commentOnAction || !provider.reportAction) return;
+
+    try {
+      await provider.reportAction(issue, succeeded);
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not comment on ${issue.displayId}: ${(error as Error).message}`,
+      );
     }
   }
 }

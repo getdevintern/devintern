@@ -105,6 +105,7 @@ default_branch = "main"
 # query = "environment:production"
 # min_occurrences = 5
 # max_per_tick = 3
+# comment_on_action = true      # best-effort Sentry comment after terminal runs
 # env_file = "env/sentry-backend.env" # contains SENTRY_AUTH_TOKEN
 
 # Recurring work is hot-reloaded: edits apply to the running worker without a

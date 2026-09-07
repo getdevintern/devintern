@@ -867,6 +867,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         intervalSeconds: source.intervalSeconds,
         minOccurrences: source.minOccurrences,
         maxIssuesPerTick: source.maxIssuesPerTick,
+        commentOnAction: source.commentOnAction,
         queue: state.queue,
         provider,
         verbose: options.verbose,

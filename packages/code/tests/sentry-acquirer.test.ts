@@ -3,7 +3,11 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { SentryClient } from "../src/lib/sentry-client";
+import {
+  SENTRY_ACTION_FAILED_COMMENT,
+  SENTRY_ACTION_SUCCEEDED_COMMENT,
+  SentryClient,
+} from "../src/lib/sentry-client";
 import type { SentryIssue } from "../src/lib/sentry-client";
 import { ErrorMonitorAcquirer } from "../src/lib/error-monitor";
 import { WebhookQueue } from "../src/lib/webhook-queue";
@@ -80,6 +84,38 @@ describe("SentryClient", () => {
       new Response("denied", { status: 401 })) as unknown as typeof fetch;
     const client = new SentryClient({ authToken: "bad", organization: "acme", fetchImpl });
     expect(client.fetchUnresolvedIssues()).rejects.toThrow("auth token");
+  });
+
+  test("posts terminal action feedback without changing issue status", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return new Response(null, { status: 201 });
+    }) as typeof fetch;
+    const client = new SentryClient({
+      authToken: "sntrys_write",
+      organization: "acme",
+      baseUrl: "https://sentry.example.com/",
+      fetchImpl,
+    });
+
+    await client.reportAction(issue(), true);
+    await client.reportAction(issue(), false);
+
+    expect(requests[0]?.url).toBe(
+      "https://sentry.example.com/api/0/organizations/acme/issues/1001/comments/",
+    );
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.body).toBe(JSON.stringify({ text: SENTRY_ACTION_SUCCEEDED_COMMENT }));
+    expect(requests[1]?.init?.body).toBe(JSON.stringify({ text: SENTRY_ACTION_FAILED_COMMENT }));
+  });
+
+  test("explains the write-token requirement when a comment is rejected", async () => {
+    const fetchImpl = (async () =>
+      new Response("denied", { status: 403 })) as unknown as typeof fetch;
+    const client = new SentryClient({ authToken: "read-only", organization: "acme", fetchImpl });
+
+    expect(client.reportAction(issue(), true)).rejects.toThrow("Issue & Event write access");
   });
 });
 
@@ -231,6 +267,60 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
     await acquirer.tick();
     expect(attempts).toBe(2);
+    expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(true);
+  });
+
+  test("comments once after a terminal run but not after a deferral", async () => {
+    const outcomes: boolean[] = [];
+    let attempts = 0;
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => [issue()],
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+      reportAction: async (_item: SentryIssue, succeeded: boolean) => {
+        outcomes.push(succeeded);
+      },
+    };
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      commentOnAction: true,
+      executeTask: async () => {
+        attempts++;
+        return attempts === 1 ? "deferred" : false;
+      },
+    });
+
+    await acquirer.tick();
+    expect(outcomes).toEqual([]);
+    await acquirer.tick();
+    expect(outcomes).toEqual([false]);
+  });
+
+  test("a rejected action comment does not fail the completed run", async () => {
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => [issue()],
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+      reportAction: async () => {
+        throw new Error("comment denied");
+      },
+    };
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      commentOnAction: true,
+      executeTask: async () => true,
+    });
+
+    await acquirer.tick();
+
     expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(true);
   });
 

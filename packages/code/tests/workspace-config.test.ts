@@ -738,6 +738,7 @@ project = "api"
 env_file = "env/sentry-api.env"
 min_occurrences = 10
 max_per_tick = 2
+comment_on_action = true
   [error_monitors.env]
   SENTRY_AUTH_TOKEN = "api-token"
 
@@ -758,12 +759,14 @@ poll_interval = 30
       intervalSeconds: 90,
       minOccurrences: 10,
       maxIssuesPerTick: 2,
+      commentOnAction: true,
       env: { SENTRY_AUTH_TOKEN: "api-token" },
     });
     expect(config.errorMonitors[1]).toMatchObject({
       id: "web-production",
       repo: "web",
       intervalSeconds: 30,
+      commentOnAction: false,
     });
   });
 
