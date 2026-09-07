@@ -118,4 +118,69 @@ describe("TrelloClient.searchCards", () => {
 
     expect(result).toEqual({ cards: [], total: 0 });
   });
+
+  test("retries a transient connection failure and succeeds", async () => {
+    const previous = process.env.DEVINTERN_FETCH_MAX_RETRIES;
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "1";
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new TypeError("Unable to connect. Is the computer able to access the url?");
+      }
+      return new Response(JSON.stringify({ cards: [] }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+      const result = await client.searchCards("is:open");
+
+      expect(result).toEqual({ cards: [], total: 0 });
+      expect(attempts).toBe(2);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+      } else {
+        process.env.DEVINTERN_FETCH_MAX_RETRIES = previous;
+      }
+    }
+  });
+
+  test("throws the connection error when the network stays unreachable", async () => {
+    const previous = process.env.DEVINTERN_FETCH_MAX_RETRIES;
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "0";
+    globalThis.fetch = (async () => {
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    }) as typeof fetch;
+
+    try {
+      const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+      await expect(client.searchCards("is:open")).rejects.toThrow(
+        "Unable to connect. Is the computer able to access the url?",
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+      } else {
+        process.env.DEVINTERN_FETCH_MAX_RETRIES = previous;
+      }
+    }
+  });
+
+  test("still surfaces the Trello API error for persistent HTTP failures", async () => {
+    const previous = process.env.DEVINTERN_FETCH_MAX_RETRIES;
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "0";
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+
+    try {
+      const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
+      await expect(client.searchCards("is:open")).rejects.toThrow("Trello API error (500): boom");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+      } else {
+        process.env.DEVINTERN_FETCH_MAX_RETRIES = previous;
+      }
+    }
+  });
 });
