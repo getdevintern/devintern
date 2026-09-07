@@ -36,6 +36,7 @@ import {
   reconcileOpenAgentPrs,
 } from "./agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
+import { isGitHubAuthError } from "./github-reviews";
 import { nextScheduleOccurrence } from "./automation-config";
 import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";
@@ -492,6 +493,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
+  /** Last time a rejected-credential warning was printed (rate-limited). */
+  private lastAuthWarnAt = 0;
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -623,6 +626,13 @@ export class ReviewPollingAcquirer implements Acquirer {
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
           );
         } catch (error) {
+          if (isGitHubAuthError(error)) {
+            // A rejected credential fails identically on every request, so
+            // re-reporting it per PR per tick floods error tracking with
+            // duplicates. Warn the operator throttled and keep polling.
+            this.warnAuthFailure(error as Error);
+            continue;
+          }
           captureError(error, {
             acquirer: this.name,
             repo: pr.repo,
@@ -637,6 +647,21 @@ export class ReviewPollingAcquirer implements Acquirer {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One auth-related warning per hour, not one per PR per tick. */
+  private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+  private warnAuthFailure(error: Error): void {
+    const now = this.now();
+    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) {
+      return;
+    }
+    this.lastAuthWarnAt = now;
+    console.warn(
+      `⚠️  [${this.name}] ${error.message} Renew GITHUB_TOKEN ` +
+        "(or reconnect the workspace's GitHub credentials); polling continues.",
+    );
   }
 
   /** Poll a single PR; triggers at most one address-review run. */
