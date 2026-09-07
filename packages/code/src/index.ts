@@ -700,9 +700,14 @@ if (process.argv[2] === "init") {
 
     if (args[0] === "init") {
       if (args.some((arg) => arg === "--help" || arg === "-h")) {
-        console.log("Usage: devintern worker init");
+        console.log("Usage: devintern worker init [--no-service]");
         console.log("");
         console.log("Interactively configure unattended automation and a native user service.");
+        console.log("");
+        console.log("Options:");
+        console.log(
+          "  --no-service  Skip the install-and-launch offer for the systemd/launchd service",
+        );
         process.exit(0);
       }
       loadedEnvPath = loadEnvironment();
@@ -716,6 +721,7 @@ if (process.argv[2] === "init") {
       }
       const trackerManager = new TaskTrackerManager();
       const result = await runWorkerInit({
+        noService: args.some((arg) => arg === "--no-service"),
         dryRunQuery: async (query) => {
           const result = await trackerManager.getClient().searchTasks(query);
           return result.tasks.length;

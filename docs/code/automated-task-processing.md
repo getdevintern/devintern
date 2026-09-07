@@ -4,7 +4,7 @@ description: "Choose when the worker picks up tasks and keep unattended runs hea
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-09-07
 ---
 
 # Running the Worker Unattended
@@ -16,7 +16,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers verified relay pairing through the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access). GitHub pairing is enabled only after the relay verifies the App installation and requested repository; skipped pairing is reminded in the summary. The wizard can also generate a user-level systemd unit (Linux) or launchd agent (macOS). Opening http://localhost:4400 is how you know it worked. Air-gapped/no-relay installations use the separate customer-owned App workflow.
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers verified relay pairing through the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access). GitHub pairing is enabled only after the relay verifies the App installation and requested repository; skipped pairing is reminded in the summary. The wizard then offers to install and start the user-level service (systemd on Linux, launchd on macOS) so setup ends with the worker running — open http://localhost:4400 to see it. Air-gapped/no-relay installations use the separate customer-owned App workflow.
 
 Keep the worker running and use [working windows](#working-windows-quiet-hours) when you want to control when it may pick up new tasks.
 
@@ -105,7 +105,7 @@ Instead of system units under `/etc/systemd/system` (which need `sudo`), you can
 loginctl enable-linger "$USER"
 ```
 
-`devintern worker init` already writes a user-level systemd unit (Linux) or launchd agent (macOS) for the resident worker.
+`devintern worker init` installs and starts a user-level systemd unit (Linux) or launchd agent (macOS) for the resident worker when you accept its final offer; the manual steps above remain the fallback for hosts where the automatic install fails (WSL without a systemd user session, headless macOS, or a command error).
 
 #### Git push under automation
 

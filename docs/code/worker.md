@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
 order: 1
-dateModified: 2026-09-03
+dateModified: 2026-09-07
 ---
 
 # Worker Daemon
@@ -19,10 +19,9 @@ The fastest way to set up the worker is the guided setup:
 
 ```bash
 devintern worker init
-devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), and offers zero-port relay setup plus the central DevIntern App. It then offers to install and start the background service for you — a user-level systemd unit on Linux or a launchd agent on macOS — so setup finishes with the worker already running and auto-restarting. Decline (or pass `--no-service`) to keep it manual: the definition is written into the workspace home together with the exact install commands. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
 In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
 
@@ -333,7 +332,20 @@ Every run is recorded stage by stage in the local database. The worker serves th
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
+The worker runs identically on a laptop, VM, or container. When `devintern worker init` reaches its final step, it offers to install and start the service for you:
+
+- **Linux**: the unit is installed into `~/.config/systemd/user/`, then `systemctl --user daemon-reload` plus `systemctl --user enable --now devintern-worker` run automatically. On success the wizard verifies the unit reports active and points you at the dashboard to confirm.
+- **macOS**: the agent is installed into `~/Library/LaunchAgents/` and started with `launchctl bootstrap gui/$(id -u)` (with a `launchctl load -w` fallback on older hosts).
+
+If any step fails — a missing systemd user session (WSL, some containers), a headless host without launchd, or a command error — the wizard reports the error, restores the previous state (a freshly written definition is removed; an existing one is put back and reloaded), and prints the manual install commands so nothing is left half-installed. Declining the offer prints the same manual path. Pass `--no-service` to skip the step entirely.
+
+Re-running `worker init` detects an existing service and offers to update and restart it in place instead of installing a duplicate. On Linux, enable lingering once so the service keeps running after you log out:
+
+```bash
+loginctl enable-linger
+```
+
+Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## License
 
