@@ -31,7 +31,6 @@ worktrees_ttl_days = 3
 tracker = "jira"
 task_query = "labels = devintern"
 worker_task_args = "--create-pr"
-default_branch = "main"
 pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
@@ -78,9 +77,9 @@ describe("parseWorkspaceConfig", () => {
     expect(backend?.envFile).toBe("env/backend.env");
     expect(backend?.env).toEqual({ GITHUB_REPO: "acme/backend" });
 
-    // frontend has no default_branch of its own: inherits [defaults].
+    // frontend has no override and will resolve the remote's origin/HEAD.
     const frontend = findRepo(config, "frontend");
-    expect(frontend?.defaultBranch).toBe("main");
+    expect(frontend?.defaultBranch).toBeUndefined();
     expect(frontend?.prLabels).toEqual(["devintern", "auto-pr"]);
     expect(frontend?.env).toEqual({});
 
@@ -323,6 +322,16 @@ pr_labels = [""]
 tracker = "fossil"
 `),
     ).toThrow(/does not support polling/);
+  });
+
+  test("rejects [defaults].default_branch", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+default_branch = "main"
+`),
+    ).toThrow(/\[defaults\]\.default_branch is not supported/);
   });
 
   describe("[[estimations]]", () => {

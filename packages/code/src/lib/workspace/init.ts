@@ -54,7 +54,6 @@ worker_task_args = "--create-pr"
 # pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
-default_branch = "main"
 
 # Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
@@ -62,6 +61,7 @@ default_branch = "main"
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
+# default_branch = "main"    # optional; otherwise follows origin/HEAD
 # ----
 # [[routing.rules]]
 # repo = "backend"
@@ -316,6 +316,8 @@ export function writeSentryErrorMonitor(
       normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
   );
   if (existing) {
+    const existingEnvPath = join(workspaceDir, existing.envFile ?? "");
+    if (existing.envFile && existsSync(existingEnvPath)) chmodSync(existingEnvPath, 0o600);
     return {
       id: existing.id,
       envFile: existing.envFile ?? `env/sentry-${existing.id}.env`,
@@ -395,8 +397,9 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
   writeFileSync(configPath, CONFIG_TEMPLATE);
   const envPath = workspaceEnvPath(workspaceDir);
   if (!existsSync(envPath)) {
-    writeFileSync(envPath, ENV_TEMPLATE);
+    writeFileSync(envPath, ENV_TEMPLATE, { mode: 0o600 });
   }
+  chmodSync(envPath, 0o600);
 
   log(`✅ Workspace created at ${workspaceDir}`);
   log(`   Config: ${configPath}`);
@@ -480,27 +483,11 @@ export async function runWorkerAddRepo(
     name = `${rawName}-${suffix++}`;
   }
 
-  // Default branch from origin/HEAD when it differs from the workspace default.
-  let defaultBranch: string | undefined;
-  const head = await Utils.executeGitCommand(
-    ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-    { cwd },
-  );
-  if (head.success && head.output.trim()) {
-    const branch = head.output.trim().replace(/^origin\//, "");
-    if (branch !== (config.defaults.defaultBranch ?? "")) {
-      defaultBranch = branch;
-    }
-  }
-
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
   const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
 
   let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
-  if (defaultBranch) {
-    block += `default_branch = ${tomlString(defaultBranch)}\n`;
-  }
   if (Object.keys(conflicts).length > 0) {
     block += "  [repos.env]\n";
     for (const [key, value] of Object.entries(conflicts)) {
@@ -527,9 +514,6 @@ export async function runWorkerAddRepo(
   loadWorkspaceConfig(configPath);
 
   log(`✅ Added ${remote} as "${name}"`);
-  if (defaultBranch) {
-    log(`   default_branch: ${defaultBranch}`);
-  }
   if (Object.keys(conflicts).length > 0) {
     log(
       `   ${Object.keys(conflicts).length} env value(s) differed from the workspace .env and were kept in [repos.env]: ` +
@@ -636,6 +620,7 @@ function mergeEnv(
     writeFileSync(envPath, existing + separator + additions.join("\n") + "\n");
     log(`   Merged ${additions.length} env key(s) into ${envPath}`);
   }
+  if (existsSync(envPath)) chmodSync(envPath, 0o600);
 
   return conflicts;
 }

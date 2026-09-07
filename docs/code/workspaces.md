@@ -41,7 +41,6 @@ tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
 poll_interval = 60
-default_branch = "main"
 # pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
@@ -89,6 +88,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
@@ -217,7 +217,7 @@ devintern worker connect sentry # add a Sentry auto-fix project
 
 ## Environment
 
-Secrets live in one shared `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
+Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Worker setup and repository imports enforce mode `0600`. Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
 
 1. Shared workspace `.env`
 2. The repo's `env_file` (if set)

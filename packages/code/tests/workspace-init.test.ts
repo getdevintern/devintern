@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -71,6 +79,7 @@ describe("worker scaffold/add-repo", () => {
     expect(runWorkerScaffold()).toBe(0);
     expect(existsSync(workspaceConfigPath())).toBe(true);
     expect(existsSync(workspaceEnvPath())).toBe(true);
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.defaults.tracker).toBe("jira");
@@ -112,6 +121,17 @@ describe("worker scaffold/add-repo", () => {
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("GITHUB_TOKEN=repo-token");
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
+  });
+
+  test("does not pin the repository's current origin/HEAD", async () => {
+    runWorkerScaffold();
+
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
+
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.repos[0]?.defaultBranch).toBeUndefined();
+    expect(readFileSync(workspaceConfigPath(), "utf8")).not.toMatch(/^default_branch\s*=/m);
   });
 
   test("add-repo from a package subdirectory still merges the repo-root .env", async () => {
@@ -238,6 +258,8 @@ remote = "git@github.com:acme/app.git"
       repo: "origin",
       query: "environment:production",
     });
+    const firstEnvPath = join(workspaceDir, first.envFile);
+    chmodSync(firstEnvPath, 0o644);
     const duplicate = writeSentryErrorMonitor(workspaceDir, {
       authToken: "token-1",
       organization: "acme",
@@ -258,6 +280,7 @@ remote = "git@github.com:acme/app.git"
       envFile: "env/sentry-api.env",
       added: false,
     });
+    expect(statSync(firstEnvPath).mode & 0o777).toBe(0o600);
     expect(secondProject.id).toBe("sentry-api-2");
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.errorMonitors).toHaveLength(2);
