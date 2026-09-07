@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 
 const sentryCalls = {
   init: 0,
@@ -17,7 +17,16 @@ mock.module("@sentry/node", () => ({
 const { initSentryOnce } = await import("../src/lib/sentry-init.ts");
 
 describe("initSentryOnce", () => {
+  afterEach(() => {
+    process.env.SENTRY_DISABLED = "1";
+  });
+
   test("initializes error tracking at most once per process", () => {
+    // guard-sentry.ts preloads SENTRY_DISABLED=1 across the suite; lift it
+    // here so initErrorTracking proceeds (no real DSN traffic happens —
+    // @sentry/node is mocked above). Restored in afterEach.
+    delete process.env.SENTRY_DISABLED;
+
     // Repeated calls (CLI shell, worker, webhook all run through this in one
     // process) must not re-initialize or double-report.
     initSentryOnce("code@1.2.3");
