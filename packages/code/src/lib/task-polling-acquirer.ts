@@ -67,7 +67,7 @@ export interface TaskPollingAcquirerOptions {
 
 /** Default CLI flags the worker passes to each task run. */
 export function workerTaskArgs(): string[] {
-  return ["--create-pr"];
+  return ["--create-pr", "--auto-review"];
 }
 
 /**

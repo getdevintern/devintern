@@ -272,7 +272,7 @@ export async function resolveWorkspaceAutomationContext(
   }
 }
 
-/** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
+/** Per-task CLI args from `[defaults].worker_task_args`, else create a PR and self-review it. */
 export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   const raw = config.defaults.workerTaskArgs;
   if (raw && raw.trim()) {

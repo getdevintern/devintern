@@ -385,7 +385,7 @@ describe("fleetTaskArgs", () => {
   test("uses worker_task_args from the workspace config", () => {
     expect(fleetTaskArgs(CONFIG)).toEqual(["--create-pr", "--auto-review"]);
   });
-  test("defaults to --create-pr when worker_task_args is omitted", () => {
+  test("defaults worker-created PRs to the auto-review loop", () => {
     const config = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -394,7 +394,7 @@ tracker = "markdown"
 name = "backend"
 remote = "git@github.com:acme/backend.git"
 `);
-    expect(fleetTaskArgs(config)).toEqual(["--create-pr"]);
+    expect(fleetTaskArgs(config)).toEqual(["--create-pr", "--auto-review"]);
   });
 
   test("error monitor runs skip the redundant feasibility assessment", () => {

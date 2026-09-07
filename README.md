@@ -130,7 +130,7 @@ A slice of `workspace.toml` shows most of the story:
 ```toml
 [defaults]
 task_query = "status=todo"
-worker_task_args = "--create-pr"
+worker_task_args = "--create-pr --auto-review"
 poll_interval = 60
 
 [[automations]]

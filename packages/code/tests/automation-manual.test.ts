@@ -102,7 +102,7 @@ prompt = "Groom flaky tests."
     });
   });
 
-  test("workerTaskArgs still defaults to --create-pr for manual pipeline parity", () => {
-    expect(workerTaskArgs()).toEqual(["--create-pr"]);
+  test("workerTaskArgs defaults manual automation runs to a self-reviewed PR", () => {
+    expect(workerTaskArgs()).toEqual(["--create-pr", "--auto-review"]);
   });
 });

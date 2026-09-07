@@ -39,7 +39,7 @@ dashboard = true
 [defaults]
 tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
-worker_task_args = "--create-pr"
+worker_task_args = "--create-pr --auto-review"
 poll_interval = 60
 default_branch = "main"
 # pr_labels = ["devintern", "auto-pr"]

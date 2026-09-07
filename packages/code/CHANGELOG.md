@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Worker PRs self-review by default**: new workspaces and workspaces without an explicit `worker_task_args` now run `--create-pr --auto-review`, so unattended task, automation, and error-monitor pull requests receive the same agent review pass by default. Set `worker_task_args = "--create-pr"` to opt out
 - **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
 
 ## [2.9.0] - 2026-09-07

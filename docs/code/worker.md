@@ -107,7 +107,7 @@ The prompt replaces the ticket description the agent would normally read, so tre
 
 ### Tuning how occurrences run
 
-Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr`). For example, set `worker_task_args = "--create-pr --auto-review"` to have every automated PR go through the review loop too. This setting applies to polled tracker tasks as well.
+Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr --auto-review`). Every worker-created PR therefore goes through the self-review loop unless you remove `--auto-review`. This setting applies to polled tracker tasks as well.
 
 ### Schedule semantics
 
@@ -171,7 +171,7 @@ How a poll cycle works:
 1. A cheap change detector asks the tracker "did anything change since the last cursor?" and nothing else.
 2. Only when something changed, the worker re-runs your query to get the tasks that are actually ready.
 3. Each ready task is picked up once per change: the worker remembers the task's last seen update stamp, so a task re-enters only when it is updated again.
-4. Tasks run one at a time through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`).
+4. Tasks run one at a time through the normal pipeline (branch, implementation, PR, self-review, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr --auto-review`).
 
 Cursors persist in `.devintern-code/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
@@ -246,7 +246,7 @@ ci_failure_fix = false    # opt in to automatic CI repair on agent PRs
 
 [defaults]
 task_query = "status=todo"
-worker_task_args = "--create-pr"
+worker_task_args = "--create-pr --auto-review"
 poll_interval = 60
 ```
 

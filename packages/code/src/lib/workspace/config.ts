@@ -49,7 +49,7 @@ export interface WorkspaceDefaults {
   tracker: string;
   /** Tracker query the worker polls with. */
   taskQuery?: string;
-  /** Extra per-task CLI flags (default `--create-pr`). */
+  /** Extra per-task CLI flags (default `--create-pr --auto-review`). */
   workerTaskArgs?: string;
   /** Fallback default branch for repos that do not set one. */
   defaultBranch?: string;
