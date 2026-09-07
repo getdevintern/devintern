@@ -121,7 +121,7 @@ Once it's running, the worker:
 Set it up once:
 
 ```bash
-devintern worker init    # guided setup: tracker query, optional Sentry + relay, background service
+devintern worker init    # guided setup: query, operating policy, optional integrations + service
 devintern worker         # keeps running: polling, reviews, automations, dashboard
 ```
 

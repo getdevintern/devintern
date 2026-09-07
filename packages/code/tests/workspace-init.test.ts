@@ -12,10 +12,11 @@ import {
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import {
   runWorkerAddRepo,
   runWorkerScaffold,
+  upsertWorkerOperatingPolicy,
   upsertWorkspaceDefaults,
   writeSentryErrorMonitor,
 } from "../src/lib/workspace/init";
@@ -213,6 +214,37 @@ remote = "git@github.com:acme/app.git"
     expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
     expect(updated).toContain('  tracker = "repo-specific"');
     expect(updated).toContain('  task_query = "leave-me-alone"');
+  });
+
+  test("upsertWorkerOperatingPolicy preserves unrelated workspace settings", () => {
+    const updated = upsertWorkerOperatingPolicy(
+      `[workspace]
+dashboard = false
+ci_failure_fix = false
+# conflict_resolution = "scheduled"
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`,
+      {
+        ciFailureFix: true,
+        conflictResolution: "scheduled",
+        conflictResolutionInterval: "1d",
+        activeWindows: ["22:00-06:00"],
+        timezone: "Asia/Ho_Chi_Minh",
+      },
+    );
+    const config = parseWorkspaceConfig(updated);
+    expect(config.workspace.dashboard).toBe(false);
+    expect(config.workspace.ciFailureFix).toBe(true);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule?.interval).toBe("1d");
+    expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["22:00-06:00"]);
+    expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
   });
 
   test("writeSentryErrorMonitor appends once and chooses a unique stable id", async () => {

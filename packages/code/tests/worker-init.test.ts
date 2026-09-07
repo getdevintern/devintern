@@ -6,6 +6,7 @@ import path from "path";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
 import {
+  configureWorkerOperatingPolicy,
   generateWebhookSecret,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -151,6 +152,7 @@ describe("runWorkerInit", () => {
       prompt: async () => queued.shift() ?? "n",
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
+      configureOperatingPolicy: async () => {},
       // Detection is real otherwise: PRManager inspects the *runner's* cwd.
       detectGithubRepo: async () => null,
       ...overrides,
@@ -173,6 +175,22 @@ describe("runWorkerInit", () => {
     expect(env).not.toContain("WORKER_TASK_QUERY");
     expect(logs.join("\n")).toContain("3 task(s) match");
     expect(logs.join("\n")).not.toContain("webhook listener");
+  });
+
+  test("configures task hours and pull-request maintenance policy", async () => {
+    const answers = ["y", "scheduled", "1d", "y", "09:00-17:00", "Asia/Ho_Chi_Minh"];
+    await configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async () => answers.shift() ?? "",
+      log: (message) => logs.push(message),
+    });
+
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.workspace.ciFailureFix).toBe(true);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule?.interval).toBe("1d");
+    expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["09:00-17:00"]);
+    expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
   });
 
   test("failing dry run offers a retry then accepts the corrected query", async () => {

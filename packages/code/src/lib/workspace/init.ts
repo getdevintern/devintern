@@ -190,6 +190,96 @@ export function writeWorkspaceDefaults(
   writeFileSync(configPath, updated);
 }
 
+export interface WorkerOperatingPolicy {
+  ciFailureFix: boolean;
+  conflictResolution: "auto" | "scheduled" | "disabled";
+  conflictResolutionCron?: string;
+  conflictResolutionInterval?: string;
+  activeWindows: string[];
+  blockedWindows?: string[];
+  timezone?: string;
+  catchUpMissed?: boolean;
+}
+
+function replaceTomlSection(
+  content: string,
+  header: string,
+  transform: (body: string) => string,
+): string {
+  const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escapedHeader}\\s*$`, "m").exec(content);
+  if (!match) {
+    const suffix = content.endsWith("\n") ? "" : "\n";
+    return `${content}${suffix}\n${header}\n${transform("")}`;
+  }
+  const bodyStart = content.indexOf("\n", match.index) + 1;
+  const remainder = content.slice(bodyStart);
+  const nextHeader = remainder.search(/^\s*\[[^\n]*\]\s*$/m);
+  const bodyEnd = nextHeader === -1 ? content.length : bodyStart + nextHeader;
+  return (
+    content.slice(0, bodyStart) +
+    transform(content.slice(bodyStart, bodyEnd)) +
+    content.slice(bodyEnd)
+  );
+}
+
+function replaceTomlKeys(body: string, values: Record<string, string | undefined>): string {
+  let next = body;
+  for (const [key, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*.*(?:\\n|$)`, "gm");
+    next = next.replace(pattern, "");
+    if (value !== undefined) {
+      const separator = next.length > 0 && !next.endsWith("\n") ? "\n" : "";
+      next += `${separator}${key} = ${value}\n`;
+    }
+  }
+  return next;
+}
+
+/** Update the worker's consequential operating choices while preserving unrelated TOML. */
+export function upsertWorkerOperatingPolicy(
+  content: string,
+  policy: WorkerOperatingPolicy,
+): string {
+  let next = replaceTomlSection(content, "[workspace]", (body) =>
+    replaceTomlKeys(body, {
+      ci_failure_fix: String(policy.ciFailureFix),
+      conflict_resolution: tomlString(policy.conflictResolution),
+      conflict_resolution_cron:
+        policy.conflictResolution === "scheduled"
+          ? policy.conflictResolutionCron === undefined
+            ? undefined
+            : tomlString(policy.conflictResolutionCron)
+          : undefined,
+      conflict_resolution_interval:
+        policy.conflictResolution === "scheduled" && policy.conflictResolutionInterval
+          ? tomlString(policy.conflictResolutionInterval)
+          : undefined,
+    }),
+  );
+
+  next = replaceTomlSection(next, "[worker.schedule]", (body) =>
+    replaceTomlKeys(body, {
+      active: `[${policy.activeWindows.map(tomlString).join(", ")}]`,
+      blocked: `[${(policy.blockedWindows ?? []).map(tomlString).join(", ")}]`,
+      timezone: tomlString(policy.timezone ?? ""),
+      catch_up_missed: String(policy.catchUpMissed ?? true),
+    }),
+  );
+  return next;
+}
+
+/** Validate and persist guided worker operating-policy choices. */
+export function writeWorkerOperatingPolicy(
+  workspaceDir: string,
+  policy: WorkerOperatingPolicy,
+): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const updated = upsertWorkerOperatingPolicy(readFileSync(configPath, "utf8"), policy);
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
 export interface SentryMonitorInput {
   authToken: string;
   organization: string;
