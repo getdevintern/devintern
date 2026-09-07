@@ -65,6 +65,7 @@ See [`AgentHarness`](src/types.ts) for full semantics. Quick decision table:
 | [`supportedModes`](src/modes.ts) | List only plan/readonly modes the CLI can **natively enforce** via flags. If you cannot enforce them, leave empty (or omit) — requests fail closed via `assertModeSupported` inside `buildArgs`. Never fake a mode by ignoring it. |
 | `supportsMaxTurns` | Set `true` only if the CLI accepts a turn-limit flag *and* emits a recognizable diagnostic on exhaustion. Callers skip transcript scanning when this is false/unset, so tool output cannot be mistaken for a turn-limit error. |
 | [`supportsStructuredOutput`](src/structured-output.ts) | Set `true` only if the CLI has a documented JSON output mode (verify upstream docs — don't assume). Supporting harnesses emit the flag in `buildArgs` when `options.structuredOutput` is set; runners fail closed with `UnsupportedStructuredOutputError` when it is false/unset. See the per-CLI flag table in [Structured (JSON) output](#structured-json-output). |
+| [`supportsEffort`](src/effort.ts) | Set `true` only if the CLI can apply a reasoning-effort level — as a dedicated flag/config override (Codex `-c model_reasoning_effort="…"`) or composed into the model string (pi `<id>:<thinking>`). Supporting harnesses consume `options.effort` in `buildArgs`; the rest ignore it and runners print a one-line warning (no fail-closed) so failover chains mixing capable and incapable harnesses keep working. See [Reasoning effort](#reasoning-effort). |
 | `constrainedModeAllowsExternalTools` | Set `true` only if your constrained mode still permits network + MCP tools. No built-in harness sets it today (Codex's read-only sandbox disables network; Claude's plan mode denies non-annotated MCP tools, which aborts headless runs). Callers whose agents need web/MCP access skip constrained modes unless this is true. |
 | `promptFlag` | Set when the prompt must arrive as a flag value (`kimi --prompt "..."`). Omit for positional prompts (`codex exec "..."`). Prefer argv over stdin — see below. |
 | `imageInput` / `buildImageArgs` | `"path"` (default): images go into the prompt as markdown paths only. `"native"`: also emit CLI flags via `buildImageArgs(paths)` after the prompt (Codex `-i`). Runners call [`preparePromptWithAttachments`](src/attachments.ts); paths should also appear in `attachmentPaths`. |
@@ -73,6 +74,37 @@ Inside `buildArgs`: always call `assertModeSupported(this, options.mode)`
 first; use [`effectiveSkipPermissions`](src/modes.ts) instead of reading
 `options.skipPermissions` directly — constrained modes always suppress YOLO /
 bypass flags. When `mode` is plan/readonly, never emit write-capable flags.
+
+## Reasoning effort
+
+[`src/effort.ts`](src/effort.ts) lets callers tune reasoning depth per run
+alongside `model`: pass `effort: "low" | "medium" | "high"` in
+[`AgentRunOptions`](src/types.ts). Unlike structured output this is **not**
+fail-closed — harnesses without support ignore the option and runners warn
+once per run, because a failover chain (`resolveHarnessChain`) routinely mixes
+capable and incapable harnesses.
+
+- **Validation.** The option is a string union at the type level, but raw
+  input arrives as env vars / CLI flags. Config surfaces validate with
+  `parseAgentEffort` (`isAgentEffort` for non-throwing checks), which accepts
+  exactly `low`, `medium`, `high`, treats blank input as unset, and throws
+  `InvalidAgentEffortError` (listing the accepted values) otherwise.
+- **Composition vs. flags.** Where a CLI takes effort as its own argument,
+  emit it in `buildArgs` (Codex's `-c model_reasoning_effort="…"` config
+  override). Where effort is encoded in the model string, compose rather than
+  emit a separate flag (pi's `<id>:<thinking>` suffix — see
+  `composePiModelWithEffort`; an explicit suffix already present in the model
+  string wins, and effort without a model is a no-op).
+- **Per-harness behavior** (verified against upstream docs):
+
+  | Harness | Mechanism |
+  | --- | --- |
+  | codex | `-c model_reasoning_effort="<effort>"` config override |
+  | pi | composed into the model string: `--model <model>:<effort>` |
+  | all others | ignored (runner warns when the option is requested) |
+
+- **Default unchanged.** When `effort` is unset, no effort-related args are
+  emitted and the warning never fires — existing callers are unaffected.
 
 ## Structured (JSON) output
 

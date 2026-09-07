@@ -24,7 +24,7 @@ import {
 import type { ResolvedHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
 import { parseEnvInteger } from "./lib/env-integer";
-import { resolveAgentModel } from "./lib/agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
 import { initSentryOnce } from "./lib/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
@@ -1292,6 +1292,7 @@ async function runAgentHarnessForReview(
         skipPermissions: true,
         workingDir: workDir,
         model: resolveAgentModel(),
+        effort: resolveAgentEffort(),
       };
       const agentArgs = buildHeadlessAgentArgs(harness, promptContent, runOptions);
 

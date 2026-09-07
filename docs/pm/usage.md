@@ -82,6 +82,7 @@ devpm --prompt <text> [options]
   - **pm**: Focuses on user stories and acceptance criteria
   - **technical**: Includes Technical Considerations section
 - `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
+- `--effort <level>`: Reasoning effort for agent runs — `low`, `medium`, or `high`. Overrides the `AGENT_EFFORT` environment variable. Emitted only by harnesses that support reasoning effort (Codex via its `model_reasoning_effort` config override; pi composes it into the model string); ignored by the others with a warning.
 - `--decompose`: Decompose the story into subtasks (default: off)
 - `--confirm`: Interactively confirm each subtask before creating
 - `--verbose, -v`: Enable verbose API logging for debugging (same as setting `DEVINTERN_VERBOSE=1`)

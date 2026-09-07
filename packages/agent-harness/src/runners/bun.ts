@@ -12,6 +12,7 @@
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
+import { warnEffortUnsupported } from "../effort.js";
 import { assertModeSupported } from "../modes.js";
 import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable, reapTree } from "../process-reaper.js";
@@ -43,6 +44,7 @@ export async function runAgentBun(
 ): Promise<AgentRunResult> {
   assertModeSupported(harness, options.mode);
   assertStructuredOutputSupported(harness, options);
+  warnEffortUnsupported(harness, options);
 
   const inputMethod = options.inputMethod ?? "arg";
   const { prompt: effectivePrompt, imageArgs } = preparePromptWithAttachments(

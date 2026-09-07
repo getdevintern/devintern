@@ -54,6 +54,52 @@ describe("parseArgs", () => {
     });
   });
 
+  describe("--effort flag", () => {
+    test("accepts each documented effort value", () => {
+      for (const level of ["low", "medium", "high"] as const) {
+        const result = parseArgs(["--prompt", "Add login", "--effort", level]);
+        expect(
+          result && typeof result === "object" && "effort" in result ? result.effort : null,
+        ).toBe(level);
+      }
+    });
+
+    test("trims surrounding whitespace in the value", () => {
+      const result = parseArgs(["--prompt", "Add login", "--effort", " high "]);
+      expect(
+        result && typeof result === "object" && "effort" in result ? result.effort : null,
+      ).toBe("high");
+    });
+
+    test("defaults to undefined when --effort is absent", () => {
+      const result = parseArgs(["--prompt", "Add login"]);
+      expect(
+        result && typeof result === "object" && "effort" in result ? result.effort : null,
+      ).toBeUndefined();
+    });
+
+    test("exits with a clear error for an invalid effort value", () => {
+      withExitAndErrorSpies((exitSpy, errSpy) => {
+        expect(() => parseArgs(["--prompt", "Add login", "--effort", "ultra"])).toThrow(
+          "__process_exit__",
+        );
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+        expect(errMessage).toContain('Invalid agent effort "ultra"');
+        expect(errMessage).toContain("Valid values: low, medium, high");
+      });
+    });
+
+    test("exits when --effort is the last argument (missing value)", () => {
+      withExitAndErrorSpies((exitSpy, errSpy) => {
+        expect(() => parseArgs(["--prompt", "Add login", "--effort"])).toThrow("__process_exit__");
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+        expect(errMessage).toContain("--effort requires a value");
+      });
+    });
+  });
+
   describe("interactive / command sentinels", () => {
     test("returns null for --interactive", () => {
       expect(parseArgs(["--interactive"])).toBeNull();

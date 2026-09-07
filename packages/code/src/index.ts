@@ -58,7 +58,7 @@ import {
 } from "./lib/analytics";
 import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
-import { resolveAgentModel } from "./lib/agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
@@ -3444,6 +3444,7 @@ async function runAgentHarness(
         skipPermissions: true,
         workingDir: process.cwd(),
         model: resolveAgentModel(),
+        effort: resolveAgentEffort(),
       });
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
@@ -4043,6 +4044,7 @@ async function runAgentHarness(
                       skipPermissions: true,
                       workingDir: process.cwd(),
                       model: resolveAgentModel(),
+                      effort: resolveAgentEffort(),
                     });
                     const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
                       displayName: harness.displayName,

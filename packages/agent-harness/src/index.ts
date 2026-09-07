@@ -12,6 +12,7 @@
 
 // Types
 export type {
+  AgentEffort,
   AgentHarness,
   AgentRunMode,
   AgentRunOptions,
@@ -31,6 +32,15 @@ export {
   isModeSupported,
   type ConstrainedAgentRunMode,
 } from "./modes.js";
+
+// Reasoning-effort validation and per-run capability warning
+export {
+  AGENT_EFFORTS,
+  InvalidAgentEffortError,
+  isAgentEffort,
+  parseAgentEffort,
+  warnEffortUnsupported,
+} from "./effort.js";
 
 // Registry
 export {

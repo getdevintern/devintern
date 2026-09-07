@@ -16,6 +16,13 @@
  */
 export type AgentRunMode = "default" | "plan" | "readonly";
 
+/**
+ * Reasoning-effort levels shared by harnesses that expose the concept
+ * (e.g. Codex `model_reasoning_effort`, pi's `<model>:<thinking>` suffix).
+ * Validate raw config input with {@link parseAgentEffort} in `src/effort.ts`.
+ */
+export type AgentEffort = "low" | "medium" | "high";
+
 export interface AgentRunOptions {
   /** Maximum conversation turns (if supported by the agent). */
   maxTurns?: number;
@@ -23,6 +30,12 @@ export interface AgentRunOptions {
   skipPermissions?: boolean;
   /** Model override, format is agent-specific. */
   model?: string;
+  /**
+   * Reasoning-effort override alongside {@link AgentRunOptions.model}.
+   * Emitted only by harnesses with `AgentHarness.supportsEffort`; others
+   * ignore it (runners warn). See `src/effort.ts` for the per-harness table.
+   */
+  effort?: AgentEffort;
   /**
    * Absolute path to the directory the agent should operate in.
    *
@@ -153,6 +166,15 @@ export interface AgentHarness {
    * {@link buildArgs}.
    */
   readonly supportsStructuredOutput?: boolean;
+  /**
+   * Whether this harness can apply {@link AgentRunOptions.effort} — either as
+   * a dedicated CLI flag / config override (Codex `-c
+   * model_reasoning_effort="…"`) or by composing it into the model string
+   * (pi `<id>:<thinking>`). Omitted / false means the option is ignored:
+   * runners emit a one-line warning instead of failing, so a failover chain
+   * mixing capable and incapable harnesses degrades cleanly.
+   */
+  readonly supportsEffort?: boolean;
   /**
    * Whether this harness's constrained modes still allow unrestricted
    * network and MCP tool use (web search, web fetch, MCP servers).

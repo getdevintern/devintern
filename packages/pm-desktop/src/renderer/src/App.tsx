@@ -342,6 +342,24 @@ export function App() {
     }
   }, []);
 
+  // Persist AGENT_EFFORT and apply the reloaded session status. Same contract
+  // as switchModel: error message on failure, null on success.
+  const switchEffort = useCallback(async (effort: string): Promise<string | null> => {
+    const projectStore = useProjectStore.getState();
+    if (isContextBusy()) return "Another operation is in progress. Try again in a moment.";
+    projectStore.setLoadingProject(true);
+    try {
+      const result = await window.pm.switchEffort(effort);
+      if (!result.ok) return toError(result.error).message;
+      // Effort switches keep open tickets; only the agent for subsequent
+      // generate/edit/decompose changes.
+      projectStore.setStatus(result.value);
+      return null;
+    } finally {
+      useProjectStore.getState().setLoadingProject(false);
+    }
+  }, []);
+
   // Restore last project only after required tools are present, so a missing
   // git/agent CLI surfaces on launch instead of as a later spawn error.
   useEffect(() => {
@@ -800,6 +818,7 @@ export function App() {
         onSwitchProjectKey={switchProjectKey}
         onSwitchHarness={switchHarness}
         onSwitchModel={switchModel}
+        onSwitchEffort={switchEffort}
         onChangeTrackerSettings={openTrackerSettings}
         onUpdateFromRemote={updateFromRemote}
         onProjectRemoved={onProjectRemoved}

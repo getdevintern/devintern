@@ -15,7 +15,7 @@ import {
 } from "@devintern/agent-harness";
 import { readFileSync } from "fs";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
-import { resolveAgentModel } from "./agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
@@ -180,6 +180,7 @@ export async function runAgent(
         skipPermissions: true,
         workingDir: workDir,
         model: resolveAgentModel(),
+        effort: resolveAgentEffort(),
       };
       const agentArgs = buildHeadlessAgentArgs(harness, prompt, runOptions);
 

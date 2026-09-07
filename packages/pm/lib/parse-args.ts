@@ -9,7 +9,8 @@
  */
 
 import { resolve } from "node:path";
-import { getHarness, listHarnesses } from "@devintern/agent-harness";
+import { getHarness, listHarnesses, parseAgentEffort } from "@devintern/agent-harness";
+import type { AgentEffort } from "@devintern/agent-harness";
 import type { SourceInput } from "./engine/index.js";
 
 export interface CLIArgs {
@@ -20,6 +21,7 @@ export interface CLIArgs {
   decompose: boolean;
   confirm: boolean;
   model?: string;
+  effort?: AgentEffort;
   issueType: string;
   /** Local files for agent context and post-create upload. */
   attachments?: Array<{ path: string }>;
@@ -102,6 +104,9 @@ Options:
                         - pm: Focuses on user stories and acceptance criteria
                         - technical: Includes Technical Considerations section
   --model, -m <model>  Model to use (agent-specific, e.g., "sonnet", "opus", or provider/model)
+  --effort <level>     Reasoning effort for harnesses that support it: low, medium, or high.
+                        Overrides the AGENT_EFFORT environment variable; ignored by harnesses
+                        without effort support (with a warning).
   --harness <name>     AI agent harness to use (e.g., "claude-code", "opencode", "codex")
   --decompose          Decompose the story into subtasks (default: off)
   --confirm            Interactively confirm each subtask before creating
@@ -131,6 +136,8 @@ Environment variables (set in .env):
   GITHUB_TOKEN        Your GitHub Personal Access Token
   GITHUB_REPO         Target repository as owner/repo (e.g. acme/my-app)
   AGENT_HARNESS       Default AI agent harness (overridden by --harness)
+  AGENT_MODEL         Default agent model (overridden by --model)
+  AGENT_EFFORT        Reasoning effort for agent runs: low | medium | high (overridden by --effort)
   AGENT_CLI_PATH      Optional path/command for the agent CLI (PATH lookup by default)
 
 Examples:
@@ -167,6 +174,7 @@ Examples:
   let decompose = false; // Default to NOT decomposing
   let confirm = false;
   let model: string | undefined;
+  let effort: AgentEffort | undefined;
   let issueType = "Task"; // Default to Task
   const attachments: Array<{ path: string }> = [];
 
@@ -263,6 +271,18 @@ Examples:
       }
       model = args[i + 1]!; // Non-null assertion safe due to check above
       i++; // Skip next arg
+    } else if (arg === "--effort") {
+      if (i + 1 >= args.length) {
+        console.error("Error: --effort requires a value (low, medium, or high)");
+        process.exit(1);
+      }
+      try {
+        effort = parseAgentEffort(args[i + 1]);
+      } catch (error) {
+        console.error(`Error: ${(error as Error).message}`);
+        process.exit(1);
+      }
+      i++; // Skip next arg
     } else if (arg === "--harness") {
       // Consumed by extractHarnessFlags() before parseArgs() runs; the value
       // is validated exactly once in main(). Skip here to avoid treating it
@@ -304,6 +324,7 @@ Examples:
     decompose,
     confirm,
     model,
+    effort,
     issueType,
     extraInstructions: customInstructions,
     attachments: attachments.length > 0 ? attachments : undefined,

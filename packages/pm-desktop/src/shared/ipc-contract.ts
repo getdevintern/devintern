@@ -143,6 +143,11 @@ export interface ProjectStatus {
    */
   activeModel?: string;
   /**
+   * Active `AGENT_EFFORT` override (`low` | `medium` | `high`), when set in
+   * `.devintern-pm/.env`. Empty/unset means the harness default effort.
+   */
+  activeEffort?: string;
+  /**
    * Installed/valid harnesses offered by the header switcher. Includes the
    * active harness even when PATH detection would miss a custom CLI path.
    */
@@ -462,6 +467,11 @@ export interface PmDesktopApi {
    */
   switchModel(model: string): Promise<IpcResult<ProjectStatus>>;
   /**
+   * Persist `AGENT_EFFORT` (low | medium | high; empty clears) and reload
+   * the session. Open tickets are kept; subsequent agent actions use it.
+   */
+  switchEffort(effort: string): Promise<IpcResult<ProjectStatus>>;
+  /**
    * Fetch the project remote and fast-forward when clean or PM soft-dirty.
    * Soft-dirty must not block; hard-dirty skips with a clear message.
    */
@@ -538,6 +548,7 @@ export const IPC_CHANNELS = {
   switchProjectKey: "pm:switch-project-key",
   switchHarness: "pm:switch-harness",
   switchModel: "pm:switch-model",
+  switchEffort: "pm:switch-effort",
   updateProjectFromRemote: "pm:update-project-from-remote",
   agentChunk: "pm:agent-chunk",
   showAbout: "pm:show-about",

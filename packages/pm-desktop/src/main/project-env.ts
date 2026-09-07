@@ -12,6 +12,7 @@ import {
   getHarness,
   isHarnessInstalled,
   listHarnesses,
+  parseAgentEffort,
   resolveExecutablePathStrict,
   resolveHarness,
 } from "@devintern/agent-harness";
@@ -195,6 +196,23 @@ export async function persistActiveModel(projectDir: string, model: string): Pro
   // empty value, which is falsy for the engine.
   await upsertProjectEnvVars(projectDir, { AGENT_MODEL: model.trim() });
   return model.trim();
+}
+
+/**
+ * Persist `AGENT_EFFORT` for the active harness.
+ *
+ * The value must be one of `low | medium | high`; an empty value clears the
+ * override so the harness default effort applies.
+ *
+ * @throws When there is no env file or the value is not a valid effort.
+ */
+export async function persistActiveEffort(projectDir: string, effort: string): Promise<string> {
+  const trimmed = effort.trim();
+  if (trimmed) {
+    parseAgentEffort(trimmed); // Throws InvalidAgentEffortError with the valid values.
+  }
+  await upsertProjectEnvVars(projectDir, { AGENT_EFFORT: trimmed });
+  return trimmed;
 }
 
 /**
