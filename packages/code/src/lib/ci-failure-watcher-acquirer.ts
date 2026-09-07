@@ -9,6 +9,9 @@
  * 2. ETag-cached conditional GETs on the head SHA's Actions runs and combined
  *    commit status. Only terminal `failure` conclusions are actionable —
  *    the agent's own pushes constantly re-run CI as `in_progress`.
+ *    Pending, failing, and not-yet-reported CI stays on the workspace cadence;
+ *    unchanged terminal-green PRs progressively back off to 5, 15, then 30
+ *    minutes. Any observed PR or CI change restores the fast cadence.
  * 3. When a new failure appears, fetch the failing jobs' logs, truncate them
  *    to the error-relevant tail, and run
  *    `devintern address-review --ci-feedback <file>` as a CLI
@@ -103,6 +106,8 @@ export interface CiFailureWatcherAcquirerOptions {
   maxAttempts?: number;
   /** Live workspace switch; false suppresses all GitHub polling and fixes. */
   enabled?: () => boolean;
+  /** Clock override for deterministic scheduling tests. */
+  now?: () => number;
   verbose?: boolean;
 }
 
@@ -116,6 +121,9 @@ const STATUS_CURSOR_PREFIX = "github:cistatus:";
 
 /** Default consecutive-attempt cap per PR (`CI_FIX_MAX_ATTEMPTS` override). */
 export const DEFAULT_CI_FIX_MAX_ATTEMPTS = 3;
+
+/** Poll delays for PRs whose terminal-green CI remains unchanged. */
+export const CI_GREEN_BACKOFF_SECONDS = [5 * 60, 15 * 60, 30 * 60] as const;
 
 /** Log excerpt limits: raw CI logs can be megabytes. */
 const LOG_MAX_LINES = 200;
@@ -253,6 +261,14 @@ interface CachedCiSnapshot {
   failures: PendingFailure[];
 }
 
+type PollOutcome = "active" | "unchanged-green" | "removed";
+
+interface GreenPollSchedule {
+  /** Index of the delay to use after the next unchanged-green observation. */
+  nextBackoffIndex: number;
+  nextPollAt: number;
+}
+
 function parseSnapshot(value?: string): CachedCiSnapshot | null {
   if (!value?.startsWith("{")) return null;
   try {
@@ -273,6 +289,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   private options: CiFailureWatcherAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  private greenPollSchedules = new Map<string, GreenPollSchedule>();
 
   constructor(options: CiFailureWatcherAcquirerOptions) {
     this.options = {
@@ -304,6 +321,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   /** Apply a live workspace poll-interval change. */
   updateInterval(seconds: number): void {
     this.options.intervalSeconds = seconds;
+    // Reconcile every watched PR promptly after a live cadence change.
+    this.greenPollSchedules.clear();
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = setInterval(() => void this.tick(), seconds * 1000);
@@ -311,16 +330,41 @@ export class CiFailureWatcherAcquirer implements Acquirer {
 
   /** One polling cycle over all watched PRs. Skipped while busy. */
   async tick(): Promise<void> {
-    if (this.busy || !(this.options.enabled?.() ?? true)) {
+    if (this.busy) {
+      return;
+    }
+    if (!(this.options.enabled?.() ?? true)) {
+      // Re-enabling should always perform a prompt reconciliation.
+      this.greenPollSchedules.clear();
       return;
     }
     this.busy = true;
 
     try {
-      for (const pr of this.options.workerState.listOpenAgentPrs()) {
+      const watchedPrs = this.options.workerState.listOpenAgentPrs();
+      const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
+      for (const key of this.greenPollSchedules.keys()) {
+        if (!watchedKeys.has(key)) this.greenPollSchedules.delete(key);
+      }
+
+      for (const pr of watchedPrs) {
+        const key = this.prKey(pr.repo, pr.prNumber);
+        const schedule = this.greenPollSchedules.get(key);
+        if (schedule && schedule.nextPollAt > this.now()) {
+          continue;
+        }
+
         try {
-          await this.pollPr(pr.repo, pr.prNumber);
+          const outcome = await this.pollPr(pr.repo, pr.prNumber);
+          if (outcome === "unchanged-green") {
+            this.scheduleGreenPoll(key, schedule?.nextBackoffIndex ?? 0);
+          } else {
+            // Pending, failing, newly changed, and newly observed CI stays on
+            // the configured fast cadence. Closed PRs are removed separately.
+            this.greenPollSchedules.delete(key);
+          }
         } catch (error) {
+          this.greenPollSchedules.delete(key);
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
@@ -332,7 +376,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   }
 
   /** Poll a single PR; triggers at most one fix attempt per poll. */
-  private async pollPr(repo: string, prNumber: number): Promise<void> {
+  private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
     const { workerState, github, verbose } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
@@ -341,7 +385,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     const prResult = await github.fetchPr(repo, prNumber, prCursor?.etag);
     if ((prResult as CiConditionalResult<PolledCiPr> & { gone?: boolean }).gone) {
       workerState.markAgentPrClosed(repo, prNumber);
-      return;
+      return "removed";
     }
     if (!prResult.notModified) {
       if (prResult.etag) {
@@ -350,13 +394,13 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       if (prResult.data && prResult.data.state !== "open") {
         console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${prResult.data.state}; unwatching`);
         workerState.markAgentPrClosed(repo, prNumber);
-        return;
+        return "removed";
       }
     }
 
     const headSha = prResult.notModified ? prCursor?.cursorValue : prResult.data?.head?.sha;
     if (!headSha) {
-      return;
+      return "active";
     }
 
     // Fork PRs: Actions usually does not run in the base repository for the
@@ -366,7 +410,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       if (verbose) {
         console.log(`   [${this.name}] ${repo}#${prNumber} is a fork PR (${headRepo}); skipping`);
       }
-      return;
+      return "active";
     }
 
     const pending: PendingFailure[] = [];
@@ -483,6 +527,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     if (fullyGreen) {
       this.resetRetryBudget(repo, prNumber, "CI passed");
     }
+    const ciChanged =
+      !prResult.notModified || !actionsResult.notModified || !statusResult.notModified;
 
     // 4. Split failures into fresh vs already-handled. Mark only after a
     // successful invocation so crashes/no-op runs remain retryable.
@@ -493,7 +539,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       }
     }
     if (pending.length === 0) {
-      return;
+      return fullyGreen && !ciChanged ? "unchanged-green" : "active";
     }
 
     // 5. Retry cap & escalation bookkeeping — evaluated on every observation
@@ -525,11 +571,11 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           `   [${this.name}] ${repo}#${prNumber}: retry budget exhausted; waiting for human`,
         );
       }
-      return;
+      return "active";
     }
 
     if (fresh.length === 0) {
-      return;
+      return "active";
     }
 
     console.log(
@@ -580,6 +626,31 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     } finally {
       rmSync(feedbackDir, { recursive: true, force: true });
     }
+    return "active";
+  }
+
+  /** Schedule the next observation for CI that is still terminal green. */
+  private scheduleGreenPoll(key: string, backoffIndex: number): void {
+    const boundedIndex = Math.min(backoffIndex, CI_GREEN_BACKOFF_SECONDS.length - 1);
+    const delaySeconds = Math.max(
+      this.options.intervalSeconds,
+      CI_GREEN_BACKOFF_SECONDS[boundedIndex],
+    );
+    this.greenPollSchedules.set(key, {
+      nextBackoffIndex: Math.min(boundedIndex + 1, CI_GREEN_BACKOFF_SECONDS.length - 1),
+      nextPollAt: this.now() + delaySeconds * 1000,
+    });
+    if (this.options.verbose) {
+      console.log(`   [${this.name}] ${key} remains green; next poll in ${delaySeconds}s`);
+    }
+  }
+
+  private prKey(repo: string, prNumber: number): string {
+    return `${repo.toLowerCase()}#${prNumber}`;
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   /** Collect an error-focused excerpt from failing GitHub Actions job logs. */

@@ -94,11 +94,15 @@ describe("CiFailureWatcherAcquirer", () => {
     seenPrEtag?: string;
     seenActionsEtag?: string;
     seenStatusEtag?: string;
+    prCalls?: number;
+    actionsCalls?: number;
+    statusCalls?: number;
   }
 
   function makeGithub(gh: FakeGitHubState): CiFailureWatcherGitHub {
     return {
       async fetchPr(_repo, _n, etag): Promise<CiConditionalResult<PolledCiPr>> {
+        gh.prCalls = (gh.prCalls ?? 0) + 1;
         gh.seenPrEtag = etag;
         if (gh.prEtagHit) {
           return { data: null, etag, notModified: true };
@@ -122,6 +126,7 @@ describe("CiFailureWatcherAcquirer", () => {
         _sha,
         etag,
       ): Promise<CiConditionalResult<WatchedWorkflowRun[]>> {
+        gh.actionsCalls = (gh.actionsCalls ?? 0) + 1;
         gh.seenActionsEtag = etag;
         if (gh.actionsEtagHit) {
           return { data: null, etag, notModified: true };
@@ -129,6 +134,7 @@ describe("CiFailureWatcherAcquirer", () => {
         return { data: gh.workflowRuns, etag: 'W/"actions-1"', notModified: false };
       },
       async fetchCommitStatus(_repo, _sha, etag): Promise<CiConditionalResult<WatchedStatusState>> {
+        gh.statusCalls = (gh.statusCalls ?? 0) + 1;
         gh.seenStatusEtag = etag;
         if (gh.statusEtagHit) {
           return { data: null, etag, notModified: true };
@@ -148,7 +154,12 @@ describe("CiFailureWatcherAcquirer", () => {
 
   function makeAcquirer(
     gh: FakeGitHubState,
-    overrides: { maxAttempts?: number; fixResults?: boolean[]; enabled?: () => boolean } = {},
+    overrides: {
+      maxAttempts?: number;
+      fixResults?: boolean[];
+      enabled?: () => boolean;
+      now?: () => number;
+    } = {},
   ) {
     const fixed: string[] = [];
     const comments: string[] = [];
@@ -169,6 +180,7 @@ describe("CiFailureWatcherAcquirer", () => {
         return overrides.fixResults?.shift() ?? true;
       },
       enabled: overrides.enabled,
+      now: overrides.now,
       verbose: false,
     };
     if (overrides.maxAttempts !== undefined) {
@@ -326,6 +338,100 @@ describe("CiFailureWatcherAcquirer", () => {
     await acquirer.tick();
     expect(gh.seenPrEtag).toBe('W/"pr-1"');
     expect(gh.seenActionsEtag).toBe('W/"actions-1"');
+  });
+
+  test("progressively backs off unchanged terminal-green PRs", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 0;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [{ id: 710, name: "ok", status: "completed", conclusion: "success" }],
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+
+    await acquirer.tick(); // Fresh observation stays on the fast cadence.
+    gh.prEtagHit = true;
+    gh.actionsEtagHit = true;
+    gh.statusEtagHit = true;
+    now = 60_000;
+    await acquirer.tick(); // Unchanged green → wait 5 minutes.
+    expect(gh.prCalls).toBe(2);
+
+    now = 359_999;
+    await acquirer.tick();
+    expect(gh.prCalls).toBe(2);
+    now = 360_000;
+    await acquirer.tick(); // Still green → wait 15 minutes.
+    expect(gh.prCalls).toBe(3);
+
+    now = 1_259_999;
+    await acquirer.tick();
+    expect(gh.prCalls).toBe(3);
+    now = 1_260_000;
+    await acquirer.tick(); // Still green → wait 30 minutes.
+    expect(gh.prCalls).toBe(4);
+
+    now = 3_059_999;
+    await acquirer.tick();
+    expect(gh.prCalls).toBe(4);
+    now = 3_060_000;
+    await acquirer.tick();
+    expect(gh.prCalls).toBe(5);
+    expect(gh.actionsCalls).toBe(5);
+    expect(gh.statusCalls).toBe(5);
+  });
+
+  test("an observed CI change resets a green PR to the fast cadence", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 0;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [{ id: 720, name: "ok", status: "completed", conclusion: "success" }],
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+
+    await acquirer.tick();
+    gh.prEtagHit = true;
+    gh.actionsEtagHit = true;
+    gh.statusEtagHit = true;
+    now = 60_000;
+    await acquirer.tick(); // Enter 5-minute backoff.
+
+    now = 360_000;
+    gh.actionsEtagHit = false;
+    gh.workflowRuns = [{ id: 721, name: "rerun", status: "in_progress", conclusion: null }];
+    await acquirer.tick(); // Change observed: leave backoff.
+    expect(gh.prCalls).toBe(3);
+
+    now = 420_000;
+    await acquirer.tick();
+    expect(gh.prCalls).toBe(4);
+  });
+
+  test("PRs with pending or no CI stay on the configured cadence", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 0;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+
+    await acquirer.tick();
+    gh.prEtagHit = true;
+    gh.actionsEtagHit = true;
+    gh.statusEtagHit = true;
+    now = 60_000;
+    await acquirer.tick();
+    now = 120_000;
+    await acquirer.tick();
+
+    expect(gh.prCalls).toBe(3);
+    expect(gh.actionsCalls).toBe(3);
+    expect(gh.statusCalls).toBe(3);
   });
 
   test("CI success resets the retry counter", async () => {

@@ -290,6 +290,8 @@ The watch is continuous while the worker and PR remain open, not just when the P
 
 Only completed `failure` and `timed_out` workflow runs, plus failed legacy commit statuses, trigger repair. The worker waits while any workflow is pending before declaring CI green, deduplicates successful repair runs by head SHA and workflow-run or status ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Failing Actions job logs are reduced to an error-focused excerpt.
 
+Pending, failing, and not-yet-reported CI is checked at the configured workspace poll interval. Once a PR's CI is terminal green and remains unchanged, the watcher progressively backs off that PR to 5, 15, and then 30 minutes. An observed PR or CI change returns it to the configured interval, and a worker restart performs an immediate reconciliation. The worker continues checking green PRs while they remain open so delayed reruns and newly added workflows are still detected.
+
 Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
 
 ## Mention the bot on any PR
