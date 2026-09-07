@@ -9,6 +9,7 @@ import {
   runWorkerAddRepo,
   runWorkerScaffold,
   upsertWorkspaceDefaults,
+  writeSentryErrorMonitor,
 } from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
@@ -192,6 +193,64 @@ remote = "git@github.com:acme/app.git"
     expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
     expect(updated).toContain('  tracker = "repo-specific"');
     expect(updated).toContain('  task_query = "leave-me-alone"');
+  });
+
+  test("writeSentryErrorMonitor appends once and chooses a unique stable id", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+
+    const first = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "environment:production",
+    });
+    const duplicate = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "a changed query does not create a duplicate",
+    });
+    const secondProject = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-2",
+      organization: "other-org",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(first).toEqual({ id: "sentry-api", envFile: "env/sentry-api.env", added: true });
+    expect(duplicate).toEqual({
+      id: "sentry-api",
+      envFile: "env/sentry-api.env",
+      added: false,
+    });
+    expect(secondProject.id).toBe("sentry-api-2");
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.errorMonitors).toHaveLength(2);
+    expect(config.errorMonitors[0]?.query).toBe("environment:production");
+  });
+
+  test("writeSentryErrorMonitor never overwrites an unrelated credential file", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    const occupiedPath = join(workspaceDir, "env", "sentry-api.env");
+    writeFileSync(occupiedPath, "KEEP_ME=1\n");
+
+    const result = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "new-token",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(result.id).toBe("sentry-api-2");
+    expect(readFileSync(occupiedPath, "utf8")).toBe("KEEP_ME=1\n");
+    expect(readFileSync(join(workspaceDir, result.envFile), "utf8")).toBe(
+      "SENTRY_AUTH_TOKEN=new-token\n",
+    );
   });
 
   test("add-repo fails cleanly without a workspace or origin remote", async () => {

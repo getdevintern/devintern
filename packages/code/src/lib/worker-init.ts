@@ -3,9 +3,9 @@
  *
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
  * `.env`, dry-runs the ready-tasks query, checks any automation license,
- * offers relay pairing plus the central DevIntern App (@mention events), and
- * can emit a native service definition. Polling is always on; direct webhooks
- * run as a separate advanced service.
+ * offers Sentry auto-fixes, relay pairing plus the central DevIntern App
+ * (@mention events), and can emit a native service definition. Polling is
+ * always on; direct webhooks run as a separate advanced service.
  *
  * Prompt-loop mechanics come from `@devintern/task-trackers` (shared with
  * `devintern init`); everything effectful is injectable for tests.
@@ -33,12 +33,17 @@ import {
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
+import { DEFAULT_SENTRY_BASE_URL, SentryClient } from "./sentry-client";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
   trackersSupportingPolling,
 } from "./tracker-capabilities";
-import { ensureWorkspaceAndAddRepo, writeWorkspaceDefaults } from "./workspace/init";
+import {
+  ensureWorkspaceAndAddRepo,
+  writeSentryErrorMonitor,
+  writeWorkspaceDefaults,
+} from "./workspace/init";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
@@ -199,7 +204,7 @@ export interface WorkerInitDeps {
   bootstrapWorkspace?: (opts: {
     cwd: string;
     log: LogFn;
-  }) => Promise<{ workspaceDir: string; created?: boolean } | { error: string }>;
+  }) => Promise<{ workspaceDir: string; created?: boolean; repoName?: string } | { error: string }>;
   /** Signed-in user lookup for relay onboarding. */
   getUser?: (projectRoot: string) => Promise<InitUserLike | null>;
   /** Interactive login for relay onboarding. */
@@ -213,6 +218,14 @@ export interface WorkerInitDeps {
   }) => Promise<boolean>;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
+  /** Validate Sentry credentials and project access; returns the current issue count. */
+  validateSentry?: (options: {
+    authToken: string;
+    organization: string;
+    project: string;
+    baseUrl: string;
+    query?: string;
+  }) => Promise<number>;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -283,6 +296,17 @@ async function detectGitHubRepo(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function defaultValidateSentry(options: {
+  authToken: string;
+  organization: string;
+  project: string;
+  baseUrl: string;
+  query?: string;
+}): Promise<number> {
+  const issues = await new SentryClient(options).fetchUnresolvedIssues();
+  return issues.length;
 }
 
 /** GitHub slugs already represented by a workspace, deduped in config order. */
@@ -380,7 +404,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         if (!result.ok) {
           return { error: result.error };
         }
-        return { workspaceDir: result.workspaceDir, created: result.created };
+        return {
+          workspaceDir: result.workspaceDir,
+          created: result.created,
+          repoName: result.repoName,
+        };
       });
     const workspace = await bootstrap({ cwd, log });
     if ("error" in workspace) {
@@ -436,9 +464,86 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     writeWorkspaceDefaults(workspaceDir, { tracker: trackerType, taskQuery: query });
     log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
 
-    // 4. Automation license — any SKU; do not special-case workspace.
+    // 4. Optional production-error source. Tracker tasks remain the worker's
+    // primary input; this adds a repo-pinned Sentry project alongside them.
+    log("\n4️⃣  Sentry auto-fixes (optional)");
+    log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
+    const sentryAnswer = (
+      await prompt("Watch a Sentry project and create fixes for recurring errors? [y/N]: ")
+    )
+      .trim()
+      .toLowerCase();
+    if (sentryAnswer === "y" || sentryAnswer === "yes") {
+      const baseUrl =
+        (await prompt(`Sentry URL [${DEFAULT_SENTRY_BASE_URL}]: `)).trim() ||
+        DEFAULT_SENTRY_BASE_URL;
+      const organization = (await prompt("Sentry organization slug: ")).trim();
+      const project = (await prompt("Sentry project slug: ")).trim();
+      const sentryQuery = (
+        await prompt("Sentry search filter (optional, e.g. environment:production): ")
+      ).trim();
+
+      if (!organization || !project) {
+        log("⚠️  Sentry setup skipped: organization and project slugs are required.");
+      } else {
+        const workspaceEnv = parseEnvContent(
+          existsSync(join(workspaceDir, ".env"))
+            ? readFileSync(join(workspaceDir, ".env"), "utf8")
+            : "",
+        );
+        const existingToken = process.env.SENTRY_AUTH_TOKEN || workspaceEnv.SENTRY_AUTH_TOKEN;
+        if (existingToken) log("   Using SENTRY_AUTH_TOKEN from the existing environment.");
+        log(
+          "   Create a token with event access: https://sentry.io/settings/account/api/auth-tokens/",
+        );
+        const authToken =
+          existingToken || (await prompt("Sentry auth token (input is visible): ")).trim();
+        if (!authToken) {
+          log("⚠️  Sentry setup skipped: an auth token is required.");
+        } else {
+          try {
+            const issueCount = await (deps.validateSentry ?? defaultValidateSentry)({
+              authToken,
+              organization,
+              project,
+              baseUrl,
+              query: sentryQuery || undefined,
+            });
+            log(`✅ Sentry access works: ${issueCount} unresolved issue(s) currently match.`);
+
+            const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+            const repo = workspace.repoName
+              ? config.repos.find((candidate) => candidate.name === workspace.repoName)
+              : config.repos[0];
+            if (!repo) throw new Error("the workspace has no repository for this monitor");
+            const monitor = writeSentryErrorMonitor(workspaceDir, {
+              authToken,
+              organization,
+              project,
+              repo: repo.name,
+              baseUrl,
+              query: sentryQuery || undefined,
+            });
+            if (monitor.added) {
+              const envPath = join(workspaceDir, monitor.envFile);
+              log(`💾 Added [[error_monitors]] "${monitor.id}" to workspace.toml.`);
+              log(`🔐 Stored its token in ${envPath} (mode 0600).`);
+            } else {
+              log(`   Sentry monitor "${monitor.id}" is already configured; no duplicate added.`);
+            }
+          } catch (error) {
+            log(`⚠️  Sentry setup skipped: ${(error as Error).message}`);
+            log("   No monitor or credential file was written.");
+          }
+        }
+      }
+    } else {
+      log("   Sentry auto-fixes skipped; add [[error_monitors]] to workspace.toml later.");
+    }
+
+    // 5. Automation license — any SKU; do not special-case workspace.
     if (deps.checkAutomationLicense) {
-      log("\n4️⃣  Checking your automation license (the worker runs unattended)...");
+      log("\n5️⃣  Checking your automation license (the worker runs unattended)...");
       try {
         const failure = await deps.checkAutomationLicense();
         if (failure === null) {
@@ -456,10 +561,10 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
     }
 
-    // 5. Relay: polling remains the correctness layer, while a signed-in
+    // 6. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
     let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
-    log("\n5️⃣  Instant events (optional; polling always stays on)");
+    log("\n6️⃣  Instant events (optional; polling always stays on)");
     const relayAnswer = (
       await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
     )
@@ -521,7 +626,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
     }
 
-    // 6. GitHub App: relay-backed workspaces install the central App and keep
+    // 7. GitHub App: relay-backed workspaces install the central App and keep
     // GitHub API access local through GITHUB_TOKEN. A customer-owned App is an
     // advanced, no-relay path for air-gapped/direct installations only.
     let githubAppOutcome: "connected" | "existing" | "skipped" | "unavailable" = "unavailable";
@@ -534,10 +639,10 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     }
 
     if (!githubRepo) {
-      log("\n6️⃣  GitHub App (@mentions)");
+      log("\n7️⃣  GitHub App (@mentions)");
       log("   No GitHub remote detected; skipping the GitHub App step.");
     } else if (!relayConnected) {
-      log(`\n6️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+      log(`\n7️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
       if (hasGitHubAppCredentials()) {
         githubAppOutcome = "existing";
         log("✅ Customer-owned GitHub App credentials found in the environment.");
@@ -552,7 +657,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         log("   with GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY_PATH/BASE64.");
       }
     } else {
-      log(`\n6️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+      log(`\n7️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
       log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
       log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
       log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
@@ -575,9 +680,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
     }
 
-    // 7. Write, but do not install, the native user-service definition. The
+    // 8. Write, but do not install, the native user-service definition. The
     // foreground command remains an honest supported path on every platform.
-    log("\n7️⃣  Background service (optional)");
+    log("\n8️⃣  Background service (optional)");
     const serviceAnswer = (await prompt("Write a background service definition? [Y/n]: "))
       .trim()
       .toLowerCase();

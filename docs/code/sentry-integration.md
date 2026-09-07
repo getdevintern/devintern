@@ -13,6 +13,14 @@ The workspace worker can poll one or more Sentry projects for unresolved error
 groups and run actionable errors through the normal fix pipeline: isolated
 worktree, coding agent, tests, commit, and pull request.
 
+For the first project in a workspace, the shortest path is
+`devintern worker init`. Its optional Sentry step validates the project and token before writing
+an enabled monitor, pins the monitor to the initial repository, and stores the
+token in a source-specific file with owner-only permissions. The worker still
+requires its normal tracker and ready-tasks query; Sentry is an additional work
+source. Use the manual configuration below for more projects or advanced
+options.
+
 ## Configure projects in `workspace.toml`
 
 Add one `[[error_monitors]]` entry per Sentry project. Every entry maps to the
