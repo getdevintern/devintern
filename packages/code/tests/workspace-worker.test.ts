@@ -475,7 +475,10 @@ remote = "https://forgejo.example/acme/forgejo.git"
         reloadHooksOut: hooksOut,
       });
 
-      expect(acquirers.map((acquirer) => acquirer.name)).toEqual(["poll:reviews"]);
+      expect(acquirers.map((acquirer) => acquirer.name)).toEqual([
+        "poll:reviews",
+        "poll:ci-failures",
+      ]);
       expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
 
       // Live reload adds two GitHub repos; reconciling attaches their sweeps

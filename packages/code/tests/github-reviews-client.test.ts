@@ -133,3 +133,16 @@ describe("GitHubReviewsClient.getPullRequest", () => {
 
 /** `mergeable` exists on the wire format but is not part of PullRequestInfo. */
 type PullRequestWithMergeable = { mergeable?: boolean | null };
+
+describe("GitHubReviewsClient CI APIs", () => {
+  test("downloads job logs from the documented job-id endpoint", async () => {
+    let requested = "";
+    globalThis.fetch = mockFetch(async (url) => {
+      requested = String(url);
+      return new Response("failing test output", { status: 200 });
+    });
+    const client = new GitHubReviewsClient({ token: "test-token" });
+    expect(await client.getJobLogs("acme", "widgets", 399444496)).toBe("failing test output");
+    expect(requested).toBe("https://api.github.com/repos/acme/widgets/actions/jobs/399444496/logs");
+  });
+});

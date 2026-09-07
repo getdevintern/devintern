@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+### Added
+
+- **Opt-in automatic CI repair for agent-created PRs**: `[workspace].ci_failure_fix = true` continuously watches GitHub Actions and commit statuses while the worker and PR remain open, sends failing job logs through the existing review-fix pipeline, retries failed/no-op invocations with a bounded budget, and records CI-fix runs in the dashboard. Pending, failing, and not-yet-reported CI uses the configured poll interval; unchanged terminal-green PRs progressively back off to 5, 15, and 30 minutes. The feature is disabled by default and live-reloads; fine-grained tokens and customer-owned Apps need read access to Actions and Commit statuses.
+
 ## [2.8.0] - 2026-09-02
 
 Relay-first worker release: central-App GitHub auth with verified pairing, serialized review feedback, and a more trustworthy dashboard run list.

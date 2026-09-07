@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import {
   DEFAULT_DASHBOARD,
+  DEFAULT_CI_FAILURE_FIX,
   DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
   findRepo,
@@ -63,6 +64,7 @@ describe("parseWorkspaceConfig", () => {
     expect(config.workspace.worktreesTtlDays).toBe(3);
     expect(config.workspace.dashboard).toBe(true);
     expect(config.workspace.dashboardPort).toBeUndefined();
+    expect(config.workspace.ciFailureFix).toBe(DEFAULT_CI_FAILURE_FIX);
     expect(config.defaults.tracker).toBe("jira");
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
@@ -109,6 +111,7 @@ tracker = "markdown"
 [workspace]
 dashboard = false
 dashboard_port = 4410
+ci_failure_fix = true
 
 [defaults]
 tracker = "markdown"
@@ -116,6 +119,7 @@ poll_interval = 15
 `);
     expect(config.workspace.dashboard).toBe(false);
     expect(config.workspace.dashboardPort).toBe(4410);
+    expect(config.workspace.ciFailureFix).toBe(true);
     expect(config.defaults.pollIntervalSeconds).toBe(15);
   });
 
