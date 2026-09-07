@@ -1,9 +1,22 @@
 # @devintern/code Changelog
 
-## Unreleased
+## [2.9.0] - 2026-09-07
+
+Sentry-driven autonomy release: the worker now watches Sentry for production errors and fixes them automatically, fails over across agent harnesses when usage limits hit, and reports its own crashes to Sentry.
 
 ### Added
 
+- **Sentry error watcher that auto-creates bugfixes**: the new `devintern sentry` command (and a worker-mode acquirer registered automatically when `SENTRY_AUTH_TOKEN` + `SENTRY_ORG` are configured in `.devintern-code/.env`) polls a Sentry org/project for unresolved error groups and turns valid ones into markdown bugfix tasks run through the standard pipeline. A validity gate (minimum event count, actionable metadata, optional injected validator) filters one-off blips, handled group ids persist in the queue database and are marked before execution, so restarts, overlapping ticks, and failing runs never re-process the same error — standalone and worker modes share dedupe state. Supports self-hosted Sentry via `SENTRY_BASE_URL`, `--once` for cron setups, `--query` for Sentry search scoping, and `--min-events`/`--interval` tuning
+- **Automatic harness failover when usage limits are hit (DEV-106)**: an ordered harness chain (`AGENT_HARNESS=codex,grok,...`) retries worker jobs on the next harness when the current one reports usage limits, instead of crashing or idling — Codex's `ERROR:`-prefixed limit lines, OpenCode Go retry strings, and Grok's pretty-printed 402 JSON are all recognized as usage limits, and fleet/polling children are pinned to the active harness so one-shot CLI spawns no longer ignore the chain. Every worker job type participates (tasks, reviews, mentions, conflict resolution, automations, estimations); an exhausted chain defers the job until a retry window elapses
+- **Crash and unhandled-error reporting to Sentry (DEV-113)**: the CLI, worker, and webhook server report crashes and unhandled errors through a baked-in DevIntern DSN so production failures surface without user reports; the desktop app gets the same reporting with an opt-out setting in Preferences. `SENTRY_DISABLED=1` disables reporting entirely
+
+### Changed
+
+- **Handled review failures are reported to Sentry**: address-review and relay/polling acquirers now capture failures they would otherwise swallow silently, so review-feedback pipeline errors are visible even when the run itself is handled
+
+### Fixed
+
+- **Trello client hardening (DEVINTERN-8, DEVINTERN-9)**: network failures and malformed search responses in the Trello tracker client no longer surface as unhandled errors
 - **Optional Sentry action comments**: `comment_on_action = true` leaves a best-effort comment after a terminal successful or failed remediation run without resolving the issue or changing its workflow fields. Deferred runs stay silent, comment failures never affect execution or deduplication, and the option remains off by default because Sentry's private comment endpoint requires a user-authenticated token with Issue & Event write access. Sentry runs now skip the redundant generic feasibility assessment and carry a distinct `error_monitor` origin, so restart recovery reaps an interrupted run without trying to fetch its synthetic identifier from the configured task tracker
 - **Opt-in automatic CI repair for agent-created PRs**: `[workspace].ci_failure_fix = true` continuously watches GitHub Actions and commit statuses while the worker and PR remain open, sends failing job logs through the existing review-fix pipeline, retries failed/no-op invocations with a bounded budget, and records CI-fix runs in the dashboard. Pending, failing, and not-yet-reported CI uses the configured poll interval; unchanged terminal-green PRs progressively back off to 5, 15, and 30 minutes. The feature is disabled by default and live-reloads; fine-grained tokens and customer-owned Apps need read access to Actions and Commit statuses.
 
