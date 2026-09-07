@@ -9,6 +9,12 @@
 import type { ErrorMonitorIssue, ErrorMonitorProvider, IssueValidity } from "./error-monitor";
 
 export const DEFAULT_SENTRY_BASE_URL = "https://sentry.io";
+export const SENTRY_ACTION_SUCCEEDED_COMMENT =
+  "🤖 DevIntern completed an automated remediation run for this issue. " +
+  "The issue remains unresolved pending deployment and verification.";
+export const SENTRY_ACTION_FAILED_COMMENT =
+  "🤖 DevIntern attempted automated remediation, but the run did not complete successfully. " +
+  "The issue remains unresolved.";
 
 /** Subset of the Sentry issue (group) payload the acquirer needs. */
 export interface SentryIssue extends ErrorMonitorIssue {
@@ -118,6 +124,33 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
   /** Shared-provider adapter entry point. */
   fetchIssues(): Promise<SentryIssue[]> {
     return this.fetchUnresolvedIssues();
+  }
+
+  /** Leave best-effort human-visible feedback without changing issue status. */
+  async reportAction(issue: SentryIssue, succeeded: boolean): Promise<void> {
+    const url =
+      `${this.baseUrl}/api/0/organizations/${encodeURIComponent(this.organization)}` +
+      `/issues/${encodeURIComponent(issue.id)}/comments/`;
+    const response = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.authToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: succeeded ? SENTRY_ACTION_SUCCEEDED_COMMENT : SENTRY_ACTION_FAILED_COMMENT,
+      }),
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        `Sentry rejected issue-comment access (HTTP ${response.status}); ` +
+          "use a user-authenticated token with Issue & Event write access",
+      );
+    }
+    if (!response.ok) {
+      throw new Error(`Sentry comment API error (HTTP ${response.status}) for ${url}`);
+    }
   }
 
   /** Sentry-specific actionability check after the shared occurrence gate. */

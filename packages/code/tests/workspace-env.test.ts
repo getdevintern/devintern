@@ -120,6 +120,7 @@ describe("buildRepoEnv", () => {
       intervalSeconds: 60,
       minOccurrences: 5,
       maxIssuesPerTick: 3,
+      commentOnAction: false,
       envFile: "env/sentry.env",
       env: { SENTRY_AUTH_TOKEN: "source-inline" },
     };

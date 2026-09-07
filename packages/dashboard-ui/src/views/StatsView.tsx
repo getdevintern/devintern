@@ -18,6 +18,7 @@ import { formatDuration, formatRate } from "@/lib/utils";
 const WINDOWS = ["7d", "30d", "90d", "all"] as const;
 const RUN_ORIGINS: RunOrigin[] = [
   "task",
+  "error_monitor",
   "pr_mention",
   "ci_fix",
   "conflict_resolution",

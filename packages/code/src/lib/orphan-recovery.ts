@@ -124,16 +124,23 @@ export async function recoverOrphanedTaskRuns(
     return { reaped, recovered: 0, skipped: 0 };
   }
 
+  // PR, automation, and error-monitor runs have no tracker ticket to repair.
+  // Reaping them is sufficient and must not initialize or warn about a task
+  // tracker merely because a non-ticket subprocess was interrupted.
+  if (orphans.length === 0) {
+    return { reaped, recovered: 0, skipped: 0 };
+  }
+
   if (!deps.tracker) {
     warn(
-      `⚠️  ${reaped} orphaned run(s) from the previous worker marked failed, ` +
+      `⚠️  ${orphans.length} orphaned task run(s) from the previous worker marked failed, ` +
         "but no tracker client is available to notify their tickets",
     );
     return { reaped, recovered: 0, skipped: 0 };
   }
 
   log(
-    `🔁 ${reaped} in-progress run(s) left behind by the previous worker; ` +
+    `🔁 ${orphans.length} in-progress task run(s) left behind by the previous worker; ` +
       "recovering affected tickets before picking up new work",
   );
 

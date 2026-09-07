@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Optional Sentry action comments**: `comment_on_action = true` leaves a best-effort comment after a terminal successful or failed remediation run without resolving the issue or changing its workflow fields. Deferred runs stay silent, comment failures never affect execution or deduplication, and the option remains off by default because Sentry's private comment endpoint requires a user-authenticated token with Issue & Event write access. Sentry runs now skip the redundant generic feasibility assessment and carry a distinct `error_monitor` origin, so restart recovery reaps an interrupted run without trying to fetch its synthetic identifier from the configured task tracker
 - **Opt-in automatic CI repair for agent-created PRs**: `[workspace].ci_failure_fix = true` continuously watches GitHub Actions and commit statuses while the worker and PR remain open, sends failing job logs through the existing review-fix pipeline, retries failed/no-op invocations with a bounded budget, and records CI-fix runs in the dashboard. Pending, failing, and not-yet-reported CI uses the configured poll interval; unchanged terminal-green PRs progressively back off to 5, 15, and 30 minutes. The feature is disabled by default and live-reloads; fine-grained tokens and customer-owned Apps need read access to Actions and Commit statuses.
 
 ### Fixed

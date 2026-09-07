@@ -220,6 +220,25 @@ describe("trackWorkerTaskRun", () => {
     );
   });
 
+  test("counts error-monitor subprocesses as worker task runs", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[RUN_ORIGIN_ENV] = "error_monitor";
+    let received: unknown;
+    setAnalyticsSenderForTests({
+      send: async (payload) => {
+        received = payload;
+      },
+    });
+
+    expect(trackWorkerTaskRun("failed", { cliVersion: "2.8.0", tracker: "sentry" })).toBe(true);
+    await Promise.resolve();
+
+    expect(received).toMatchObject({
+      event: "worker_task_run",
+      properties: { outcome: "failed", tracker: "sentry", worker_trigger: "task" },
+    });
+  });
+
   test("attributes manual automation runs from the dashboard Run now action", async () => {
     process.env.POSTHOG_API_KEY = "phc_test";
     process.env[RUN_ORIGIN_ENV] = "manual";

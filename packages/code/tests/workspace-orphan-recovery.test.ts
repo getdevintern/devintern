@@ -87,6 +87,31 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     expect(store.getRun(done)?.outcomeReason).toBeUndefined();
   });
 
+  test("reaps interrupted error-monitor runs without treating them as Jira tickets", async () => {
+    process.env.TASK_TRACKER = "jira";
+    delete process.env.JIRA_BASE_URL;
+    delete process.env.JIRA_EMAIL;
+    delete process.env.JIRA_API_TOKEN;
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    const runId = store.createRun({
+      origin: "error_monitor",
+      taskKey: "devintern-public-devintern-a",
+      tracker: "sentry",
+    });
+
+    try {
+      await recoverOrphanedWorkspaceRuns({ config: workspaceConfig(), workspaceDir, dbPath });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(store.getRun(runId)?.status).toBe("failed");
+    expect(warnings.some((warning) => warning.includes("JIRA"))).toBe(false);
+    expect(warnings.some((warning) => warning.includes("recover"))).toBe(false);
+  });
+
   test("settles scheduled retries left running by the previous worker", async () => {
     process.env.TASK_TRACKER = "jira";
     delete process.env.JIRA_BASE_URL;

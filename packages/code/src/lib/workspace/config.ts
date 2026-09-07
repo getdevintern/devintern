@@ -112,6 +112,8 @@ export interface ErrorMonitorConfigBase {
   intervalSeconds: number;
   minOccurrences: number;
   maxIssuesPerTick: number;
+  /** Leave a best-effort provider comment after terminal runs. */
+  commentOnAction: boolean;
   envFile?: string;
   env: Record<string, string>;
 }
@@ -567,6 +569,7 @@ export function parseWorkspaceConfig(
           min: 1,
           message: `${label}.max_per_tick must be a positive integer.`,
         }) ?? 3,
+      commentOnAction: readOptionalBoolean(table, "comment_on_action", label, errors) ?? false,
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });

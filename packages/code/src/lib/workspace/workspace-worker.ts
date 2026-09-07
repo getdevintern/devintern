@@ -281,6 +281,12 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
+/** Error groups are pre-qualified by the monitor, so skip the generic feasibility agent pass. */
+export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
+  const args = fleetTaskArgs(config);
+  return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
+}
+
 const PUSH_PERMISSION_HINT =
   "Pushes use the ambient git credential chain — when GITHUB_TOKEN is exported, " +
   "'gh auth git-credential' serves it instead of your keyring login. Grant " +
@@ -447,7 +453,11 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-  options: { extraArgs?: string[] | (() => string[]); repo?: string } = {},
+  options: {
+    extraArgs?: string[] | (() => string[]);
+    repo?: string;
+    runOrigin?: "worker" | "error_monitor";
+  } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
@@ -519,7 +529,7 @@ export function createFleetTaskExecutor(
             ...(team
               ? buildTeamTaskEnv(repo, team, workspaceDir)
               : buildRepoEnv(repo, workspaceDir)),
-            [RUN_ORIGIN_ENV]: "worker",
+            [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
           },
         });
       const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
@@ -859,7 +869,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         team,
         coordinator,
       },
-      { repo: repo.name },
+      {
+        repo: repo.name,
+        runOrigin: "error_monitor",
+        extraArgs: () => errorMonitorTaskArgs(config),
+      },
     );
     acquirers.push(
       new ErrorMonitorAcquirer({
@@ -867,6 +881,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         intervalSeconds: source.intervalSeconds,
         minOccurrences: source.minOccurrences,
         maxIssuesPerTick: source.maxIssuesPerTick,
+        commentOnAction: source.commentOnAction,
         queue: state.queue,
         provider,
         verbose: options.verbose,

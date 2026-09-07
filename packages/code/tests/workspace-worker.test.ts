@@ -10,6 +10,7 @@ import {
   buildFleetEventAcquirers,
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
+  errorMonitorTaskArgs,
   fleetTaskArgs,
   resolveWorkspaceAutomationContext,
   startWorktreeSweeper,
@@ -348,6 +349,36 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(result).toBe(true);
     expect(repoManager.calls).toContain("worktree:frontend:T-RETRY");
   });
+
+  test("an error-monitor executor marks the subprocess origin and skips feasibility", async () => {
+    let observed: { args: string[]; env: Record<string, string | undefined> } | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async (_taskKey, args, options) => {
+          observed = { args, env: options.env };
+          return true;
+        },
+        repoLock: (name) => createRepoRunLock(name, workspaceDir),
+      },
+      {
+        repo: "backend",
+        runOrigin: "error_monitor",
+        extraArgs: errorMonitorTaskArgs(CONFIG),
+      },
+    );
+
+    await executor(
+      "/workspace/error-fixes/SENTRY-1.md",
+      toRoutableTask({ key: "issue:1001", labels: [], components: [] }),
+    );
+
+    expect(observed?.env.DEVINTERN_RUN_ORIGIN).toBe("error_monitor");
+    expect(observed?.args).toContain("--skip-clarity-check");
+  });
 });
 
 describe("fleetTaskArgs", () => {
@@ -364,6 +395,22 @@ name = "backend"
 remote = "git@github.com:acme/backend.git"
 `);
     expect(fleetTaskArgs(config)).toEqual(["--create-pr"]);
+  });
+
+  test("error monitor runs skip the redundant feasibility assessment", () => {
+    expect(errorMonitorTaskArgs(CONFIG)).toEqual([
+      "--create-pr",
+      "--auto-review",
+      "--skip-clarity-check",
+    ]);
+    const alreadySkipped = {
+      ...CONFIG,
+      defaults: {
+        ...CONFIG.defaults,
+        workerTaskArgs: "--create-pr --skip-clarity-check",
+      },
+    };
+    expect(errorMonitorTaskArgs(alreadySkipped)).toEqual(["--create-pr", "--skip-clarity-check"]);
   });
 });
 

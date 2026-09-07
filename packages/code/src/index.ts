@@ -165,7 +165,11 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 function isWorkerTaskProcess(): boolean {
   const origin = process.env[RUN_ORIGIN_ENV];
   return (
-    origin === "worker" || origin === "scheduled" || origin === "estimate" || origin === "manual"
+    origin === "worker" ||
+    origin === "error_monitor" ||
+    origin === "scheduled" ||
+    origin === "estimate" ||
+    origin === "manual"
   );
 }
 
@@ -1528,10 +1532,17 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     const trackerName = process.env.TASK_TRACKER || "jira";
     const isManualAutomationRun =
       scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
+    const isErrorMonitorRun = process.env[RUN_ORIGIN_ENV] === "error_monitor";
     beginRun({
-      origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
+      origin: scheduledAutomationId
+        ? isManualAutomationRun
+          ? "manual"
+          : "scheduled"
+        : isErrorMonitorRun
+          ? "error_monitor"
+          : "task",
       taskKey: workflowKey,
-      tracker: trackerName,
+      tracker: isErrorMonitorRun ? "sentry" : trackerName,
       team: process.env.DEVINTERN_WORKSPACE_TEAM,
       repo: process.env.DEVINTERN_WORKSPACE_REPO,
       // The harness that will implement this run (resolved at startup).
