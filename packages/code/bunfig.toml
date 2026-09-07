@@ -8,4 +8,13 @@
 # guard-queue-db.ts pins WEBHOOK_QUEUE_DB to a unique temp database and fails
 # the run if any real .devintern-code/queue.db is mutated, so tests can never
 # write into a developer's live state database.
-preload = ["./tests/setup/guard-git-state.ts", "./tests/setup/guard-queue-db.ts"]
+#
+# guard-sentry.ts pins SENTRY_DISABLED=1 so test code and CLI subprocesses it
+# spawns never report events to the baked-in production Sentry DSN (expected
+# user-input validation errors from test scenarios were being shipped to
+# Sentry from CI, see DEVINTERN-7).
+preload = [
+  "./tests/setup/guard-git-state.ts",
+  "./tests/setup/guard-queue-db.ts",
+  "./tests/setup/guard-sentry.ts",
+]
