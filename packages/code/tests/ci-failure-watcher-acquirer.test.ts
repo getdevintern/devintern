@@ -8,8 +8,8 @@ import type {
   CiConditionalResult,
   CiFailureWatcherGitHub,
   PolledCiPr,
-  WatchedCheckRun,
   WatchedStatusState,
+  WatchedWorkflowRun,
 } from "../src/lib/ci-failure-watcher-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
@@ -86,13 +86,13 @@ describe("CiFailureWatcherAcquirer", () => {
     headSha?: string;
     headRepoFullName?: string;
     prEtagHit?: boolean;
-    checkRuns: WatchedCheckRun[];
-    checksEtagHit?: boolean;
+    workflowRuns: WatchedWorkflowRun[];
+    actionsEtagHit?: boolean;
     status?: WatchedStatusState;
     statusEtagHit?: boolean;
     jobLogs?: string | null;
     seenPrEtag?: string;
-    seenChecksEtag?: string;
+    seenActionsEtag?: string;
     seenStatusEtag?: string;
   }
 
@@ -117,12 +117,16 @@ describe("CiFailureWatcherAcquirer", () => {
           notModified: false,
         };
       },
-      async fetchCheckRuns(_repo, _sha, etag): Promise<CiConditionalResult<WatchedCheckRun[]>> {
-        gh.seenChecksEtag = etag;
-        if (gh.checksEtagHit) {
+      async fetchWorkflowRuns(
+        _repo,
+        _sha,
+        etag,
+      ): Promise<CiConditionalResult<WatchedWorkflowRun[]>> {
+        gh.seenActionsEtag = etag;
+        if (gh.actionsEtagHit) {
           return { data: null, etag, notModified: true };
         }
-        return { data: gh.checkRuns, etag: 'W/"checks-1"', notModified: false };
+        return { data: gh.workflowRuns, etag: 'W/"actions-1"', notModified: false };
       },
       async fetchCommitStatus(_repo, _sha, etag): Promise<CiConditionalResult<WatchedStatusState>> {
         gh.seenStatusEtag = etag;
@@ -177,17 +181,17 @@ describe("CiFailureWatcherAcquirer", () => {
   const sha1 = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
   const sha2 = "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222";
 
-  function failingCheck(id: number): WatchedCheckRun {
-    return { id, name: `check-${id}`, status: "completed", conclusion: "failure" };
+  function failingRun(id: number): WatchedWorkflowRun {
+    return { id, name: `workflow-${id}`, status: "completed", conclusion: "failure" };
   }
 
-  test("a failing completed check run triggers exactly one fix attempt", async () => {
+  test("a failing completed Actions run triggers exactly one fix attempt", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [
-        failingCheck(101),
+      workflowRuns: [
+        failingRun(101),
         { id: 102, name: "lint", status: "completed", conclusion: "success" },
       ],
     };
@@ -206,7 +210,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [
+      workflowRuns: [
         { id: 201, name: "build", status: "in_progress", conclusion: null },
         { id: 202, name: "build", status: "completed", conclusion: "success" },
         { id: 203, name: "skipped-job", status: "completed", conclusion: "skipped" },
@@ -224,7 +228,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(301)],
+      workflowRuns: [failingRun(301)],
     };
     const first = makeAcquirer(gh);
     await first.acquirer.tick();
@@ -241,13 +245,13 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(401)],
+      workflowRuns: [failingRun(401)],
     };
     const { acquirer, fixed } = makeAcquirer(gh);
     await acquirer.tick();
 
     gh.headSha = sha2;
-    gh.checkRuns = [failingCheck(402)];
+    gh.workflowRuns = [failingRun(402)];
     await acquirer.tick();
     expect(fixed).toEqual(["acme/widgets#42", "acme/widgets#42"]);
   });
@@ -257,7 +261,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [],
+      workflowRuns: [],
       status: {
         state: "failure",
         total_count: 2,
@@ -281,7 +285,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "closed",
       headSha: sha1,
-      checkRuns: [failingCheck(501)],
+      workflowRuns: [failingRun(501)],
     };
     const { acquirer, fixed } = makeAcquirer(gh);
 
@@ -296,7 +300,7 @@ describe("CiFailureWatcherAcquirer", () => {
       prState: "open",
       headSha: sha1,
       headRepoFullName: "contributor/widgets-fork",
-      checkRuns: [failingCheck(601)],
+      workflowRuns: [failingRun(601)],
     };
     const { acquirer, fixed } = makeAcquirer(gh);
 
@@ -309,19 +313,19 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [{ id: 701, name: "ok", status: "completed", conclusion: "success" }],
+      workflowRuns: [{ id: 701, name: "ok", status: "completed", conclusion: "success" }],
     };
     const { acquirer } = makeAcquirer(gh);
 
     await acquirer.tick();
     expect(gh.seenPrEtag).toBeUndefined();
-    expect(gh.seenChecksEtag).toBeUndefined();
+    expect(gh.seenActionsEtag).toBeUndefined();
 
     gh.prEtagHit = true;
-    gh.checksEtagHit = true;
+    gh.actionsEtagHit = true;
     await acquirer.tick();
     expect(gh.seenPrEtag).toBe('W/"pr-1"');
-    expect(gh.seenChecksEtag).toBe('W/"checks-1"');
+    expect(gh.seenActionsEtag).toBe('W/"actions-1"');
   });
 
   test("CI success resets the retry counter", async () => {
@@ -329,7 +333,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(801)],
+      workflowRuns: [failingRun(801)],
     };
     const { acquirer } = makeAcquirer(gh, { maxAttempts: 1 });
 
@@ -341,20 +345,20 @@ describe("CiFailureWatcherAcquirer", () => {
     await acquirer.tick();
     expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
 
-    gh.checkRuns = [{ id: 802, name: "build", status: "completed", conclusion: "success" }];
+    gh.workflowRuns = [{ id: 802, name: "build", status: "completed", conclusion: "success" }];
     await acquirer.tick(); // CI passed → reset
     const state = workerState.getCiFixState("acme/widgets", 42);
     expect(state.consecutiveFailures).toBe(0);
     expect(state.escalatedSha).toBeUndefined();
   });
 
-  test("does not reset the retry budget while another check is still running", async () => {
+  test("does not reset the retry budget while another workflow is still running", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     workerState.setCiFixState("acme/widgets", 42, { consecutiveFailures: 2 });
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [
+      workflowRuns: [
         { id: 810, name: "lint", status: "completed", conclusion: "success" },
         { id: 811, name: "tests", status: "in_progress", conclusion: null },
       ],
@@ -369,7 +373,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(820)],
+      workflowRuns: [failingRun(820)],
     };
     const { acquirer, fixed, comments } = makeAcquirer(gh, {
       maxAttempts: 2,
@@ -377,7 +381,7 @@ describe("CiFailureWatcherAcquirer", () => {
     });
     await acquirer.tick();
     gh.prEtagHit = true;
-    gh.checksEtagHit = true;
+    gh.actionsEtagHit = true;
     gh.statusEtagHit = true;
     await acquirer.tick();
     expect(fixed).toHaveLength(2);
@@ -390,7 +394,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(830)],
+      workflowRuns: [failingRun(830)],
     };
     const { acquirer, fixed } = makeAcquirer(gh, { enabled: () => false });
     await acquirer.tick();
@@ -403,7 +407,7 @@ describe("CiFailureWatcherAcquirer", () => {
     const gh: FakeGitHubState = {
       prState: "open",
       headSha: sha1,
-      checkRuns: [failingCheck(901)],
+      workflowRuns: [failingRun(901)],
     };
     const { acquirer, fixed, comments } = makeAcquirer(gh, { maxAttempts: 2 });
 
@@ -412,26 +416,26 @@ describe("CiFailureWatcherAcquirer", () => {
     await acquirer.tick(); // new failure at new SHA? No — dedupe; nothing happens
 
     gh.headSha = sha2;
-    gh.checkRuns = [failingCheck(902)];
+    gh.workflowRuns = [failingRun(902)];
     await acquirer.tick(); // attempt 2 → exhausted
     expect(fixed).toHaveLength(2);
 
     gh.headSha = "cccc3333cccc3333cccc3333cccc3333cccc3333";
-    gh.checkRuns = [failingCheck(903)];
+    gh.workflowRuns = [failingRun(903)];
     await acquirer.tick(); // budget exhausted → escalate, no fix
     expect(fixed).toHaveLength(2);
     expect(comments).toHaveLength(1);
     expect(comments[0]).toContain("stopped retrying");
 
     // Still blocked at the escalation head even for brand-new failures.
-    gh.checkRuns = [failingCheck(904)];
+    gh.workflowRuns = [failingRun(904)];
     await acquirer.tick();
     expect(fixed).toHaveLength(2);
     expect(comments).toHaveLength(1); // escalation posted exactly once
 
     // A human push moves the head past the escalation point → unblocked.
     gh.headSha = "dddd4444dddd4444dddd4444dddd4444dddd4444";
-    gh.checkRuns = [failingCheck(905)];
+    gh.workflowRuns = [failingRun(905)];
     await acquirer.tick();
     expect(fixed).toHaveLength(3);
   });

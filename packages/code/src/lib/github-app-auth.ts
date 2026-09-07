@@ -36,7 +36,7 @@ interface InstallationCache {
  * - Repository permissions:
  *   - Contents: Read and write (to check and push branches)
  *   - Pull requests: Read and write (to create PRs)
- *   - Checks, Actions, Commit statuses: Read (when automatic CI fixes are enabled)
+ *   - Actions, Commit statuses: Read (when automatic CI fixes are enabled)
  */
 export class GitHubAppAuth {
   private appId: string;

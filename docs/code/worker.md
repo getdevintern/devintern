@@ -38,6 +38,10 @@ devintern worker
 devintern webhook serve
 ```
 
+## Agent failover
+
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work. Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+
 ## Recurring automations
 
 Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
@@ -280,13 +284,13 @@ To turn automatic conflict resolution off entirely — no detection, no queuing,
 
 ## CI failures on the agent's PRs
 
-Set `[workspace].ci_failure_fix = true` to watch checks on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.
+Set `[workspace].ci_failure_fix = true` to watch GitHub Actions and commit statuses on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.
 
 The watch is continuous while the worker and PR remain open, not just when the PR is created. It runs once at worker startup and then every `[defaults].poll_interval` seconds, survives restarts through the workspace database, and stops when the PR closes, its repository leaves the workspace, or the setting is disabled. Only PRs recorded in the local `agent_prs` registry are watched; similarly named PRs created elsewhere are not discovered automatically.
 
-Only completed `failure` and `timed_out` checks trigger repair. The worker waits while any check is pending before declaring CI green, deduplicates successful repair runs by head SHA and check ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Job logs are reduced to an error-focused excerpt; check annotations are the fallback when logs are unavailable.
+Only completed `failure` and `timed_out` workflow runs, plus failed legacy commit statuses, trigger repair. The worker waits while any workflow is pending before declaring CI green, deduplicates successful repair runs by head SHA and workflow-run or status ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Failing Actions job logs are reduced to an error-focused excerpt.
 
-Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Checks: Read**, **Actions: Read**, and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled.
+Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
 
 ## Mention the bot on any PR
 

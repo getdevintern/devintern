@@ -1,17 +1,17 @@
 /**
  * CI failure watcher acquirer (worker Mode 1, Tier 1): watch GitHub Actions
- * check runs and commit statuses on the agent's own PRs and auto-fix
+ * workflow runs and commit statuses on the agent's own PRs and auto-fix
  * failures, closing the loop from "agent opened PR" to "PR green".
  *
  * Each tick, for every open PR in the `agent_prs` registry:
  * 1. Conditional GET on the PR itself — closed/merged PRs leave the watch
  *    list; fork PRs are skipped gracefully (Actions rarely runs there).
- * 2. ETag-cached conditional GETs on the head SHA's check runs and combined
+ * 2. ETag-cached conditional GETs on the head SHA's Actions runs and combined
  *    commit status. Only terminal `failure` conclusions are actionable —
  *    the agent's own pushes constantly re-run CI as `in_progress`.
- * 3. When a new failure appears, fetch the failing jobs' logs (with a
- *    check-run annotation fallback), truncate them to the error-relevant
- *    tail, and run `devintern address-review --ci-feedback <file>` as a CLI
+ * 3. When a new failure appears, fetch the failing jobs' logs, truncate them
+ *    to the error-relevant tail, and run
+ *    `devintern address-review --ci-feedback <file>` as a CLI
  *    subprocess — reusing the whole review pipeline (worktree prep,
  *    sandboxed agent spawn, commit/push with hook retries).
  *
@@ -45,14 +45,14 @@ export interface PolledCiPr {
   };
 }
 
-export interface WatchedCheckRun {
+export interface WatchedWorkflowRun {
   id: number;
-  name: string;
-  /** `queued`, `in_progress`, or `completed`. */
+  name?: string;
+  /** `queued`, `in_progress`, `waiting`, or `completed`. */
   status: string;
   /** Terminal outcome; null while still executing. */
   conclusion: string | null;
-  details_url?: string;
+  html_url?: string;
 }
 
 export interface WatchedStatusState {
@@ -64,11 +64,11 @@ export interface WatchedStatusState {
 /** GitHub access used by the watcher (injected for tests). */
 export interface CiFailureWatcherGitHub {
   fetchPr(repo: string, prNumber: number, etag?: string): Promise<CiConditionalResult<PolledCiPr>>;
-  fetchCheckRuns(
+  fetchWorkflowRuns(
     repo: string,
     sha: string,
     etag?: string,
-  ): Promise<CiConditionalResult<WatchedCheckRun[]>>;
+  ): Promise<CiConditionalResult<WatchedWorkflowRun[]>>;
   fetchCommitStatus(
     repo: string,
     sha: string,
@@ -76,14 +76,9 @@ export interface CiFailureWatcherGitHub {
   ): Promise<CiConditionalResult<WatchedStatusState>>;
   /**
    * Fetch raw log text of the failing Actions jobs for a SHA (workflow runs
-   * → jobs → `logs_url`). Returns null on 403/404/scope problems.
+   * → jobs → job-log endpoint). Returns null on 403/404/scope problems.
    */
   fetchFailingJobLogs(repo: string, sha: string): Promise<string | null>;
-  /**
-   * Fallback details for one check run when job logs are unavailable:
-   * its annotations rendered as text. Returns null when unsupported.
-   */
-  fetchCheckRunDetails?(repo: string, checkRunId: number): Promise<string | null>;
   /** Best-effort escalation comment on the PR conversation. */
   postComment(repo: string, prNumber: number, body: string): Promise<void>;
 }
@@ -111,12 +106,12 @@ export interface CiFailureWatcherAcquirerOptions {
   verbose?: boolean;
 }
 
-/** Dedupe source for CI failures (keyed by head SHA + check run/status id). */
+/** Dedupe source for CI failures (keyed by head SHA + workflow run/status id). */
 const SOURCE = "github:ci";
 
 /** Cursor source prefixes persisted per watched PR. */
 const PR_CURSOR_PREFIX = "github:cipr:";
-const CHECKS_CURSOR_PREFIX = "github:cichecks:";
+const ACTIONS_CURSOR_PREFIX = "github:ciactions:";
 const STATUS_CURSOR_PREFIX = "github:cistatus:";
 
 /** Default consecutive-attempt cap per PR (`CI_FIX_MAX_ATTEMPTS` override). */
@@ -248,7 +243,6 @@ interface PendingFailure {
   name: string;
   conclusion: string | null;
   detailsUrl?: string;
-  checkRunId?: number;
 }
 
 type CiAggregateState = "unknown" | "empty" | "pending" | "success" | "failure";
@@ -365,8 +359,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       return;
     }
 
-    // Fork PRs: check runs live on the head repo and Actions usually does not
-    // run there. Skip quietly instead of burning requests or commenting.
+    // Fork PRs: Actions usually does not run in the base repository for the
+    // fork head. Skip quietly instead of burning requests or commenting.
     const headRepo = prResult.data?.head?.repo?.full_name;
     if (headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) {
       if (verbose) {
@@ -376,61 +370,62 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     const pending: PendingFailure[] = [];
-    let checksState: CiAggregateState = "unknown";
+    let actionsState: CiAggregateState = "unknown";
     let statusState: CiAggregateState = "unknown";
 
-    // 2. Check runs (ETag-cached): terminal failures only.
-    const checksSource = `${CHECKS_CURSOR_PREFIX}${repo}#${prNumber}`;
-    const checksCursor = workerState.getCursor(checksSource);
-    const cachedChecks = parseSnapshot(checksCursor?.cursorValue);
-    const checksResult = await github.fetchCheckRuns(
+    // 2. GitHub Actions workflow runs (ETag-cached): terminal failures only.
+    // This API is available to fine-grained PATs with Actions: Read; unlike
+    // the Checks API, it does not require a GitHub App or classic PAT.
+    const actionsSource = `${ACTIONS_CURSOR_PREFIX}${repo}#${prNumber}`;
+    const actionsCursor = workerState.getCursor(actionsSource);
+    const cachedActions = parseSnapshot(actionsCursor?.cursorValue);
+    const actionsResult = await github.fetchWorkflowRuns(
       repo,
       headSha,
-      cachedChecks?.sha === headSha ? checksCursor?.etag : undefined,
+      cachedActions?.sha === headSha ? actionsCursor?.etag : undefined,
     );
-    if (checksResult.notModified && cachedChecks?.sha === headSha) {
-      checksState = cachedChecks.state;
-      pending.push(...cachedChecks.failures);
+    if (actionsResult.notModified && cachedActions?.sha === headSha) {
+      actionsState = cachedActions.state;
+      pending.push(...cachedActions.failures);
     }
-    if (!checksResult.notModified && checksResult.data) {
-      let sawCheckSuccess = false;
-      let sawCheckPending = false;
-      const checkFailures: PendingFailure[] = [];
-      for (const check of checksResult.data) {
-        if (check.status !== "completed") {
-          sawCheckPending = true;
+    if (!actionsResult.notModified && actionsResult.data) {
+      let sawActionSuccess = false;
+      let sawActionPending = false;
+      const actionFailures: PendingFailure[] = [];
+      for (const run of actionsResult.data) {
+        if (run.status !== "completed") {
+          sawActionPending = true;
           continue;
         }
-        if (check.conclusion === "success") {
-          sawCheckSuccess = true;
+        if (run.conclusion === "success") {
+          sawActionSuccess = true;
           continue;
         }
-        if (check.conclusion !== "failure" && check.conclusion !== "timed_out") {
+        if (run.conclusion !== "failure" && run.conclusion !== "timed_out") {
           continue;
         }
-        checkFailures.push({
-          externalId: `check:${repo}#${prNumber}:${headSha}:${check.id}`,
-          name: check.name,
-          conclusion: check.conclusion,
-          detailsUrl: check.details_url,
-          checkRunId: check.id,
+        actionFailures.push({
+          externalId: `action:${repo}#${prNumber}:${headSha}:${run.id}`,
+          name: run.name ?? `workflow-run-${run.id}`,
+          conclusion: run.conclusion,
+          detailsUrl: run.html_url,
         });
       }
-      checksState =
-        checkFailures.length > 0
+      actionsState =
+        actionFailures.length > 0
           ? "failure"
-          : sawCheckPending
+          : sawActionPending
             ? "pending"
-            : checksResult.data.length === 0
+            : actionsResult.data.length === 0
               ? "empty"
-              : sawCheckSuccess || checksResult.data.every((check) => check.status === "completed")
+              : sawActionSuccess || actionsResult.data.every((run) => run.status === "completed")
                 ? "success"
                 : "unknown";
-      pending.push(...checkFailures);
+      pending.push(...actionFailures);
       workerState.setCursor(
-        checksSource,
-        JSON.stringify({ sha: headSha, state: checksState, failures: checkFailures }),
-        checksResult.etag,
+        actionsSource,
+        JSON.stringify({ sha: headSha, state: actionsState, failures: actionFailures }),
+        actionsResult.etag,
       );
     }
 
@@ -479,12 +474,12 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     // Fully green observation: zero the attempt counter. A mixed result
-    // (some checks pass, others fail) must NOT keep refunding the budget.
+    // (some workflows pass, others fail) must NOT keep refunding the budget.
     const fullyGreen =
       pending.length === 0 &&
-      (checksState === "success" || checksState === "empty") &&
+      (actionsState === "success" || actionsState === "empty") &&
       (statusState === "success" || statusState === "empty") &&
-      (checksState === "success" || statusState === "success");
+      (actionsState === "success" || statusState === "success");
     if (fullyGreen) {
       this.resetRetryBudget(repo, prNumber, "CI passed");
     }
@@ -543,7 +538,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     );
 
     // 6. Gather failure-relevant logs and run one fix attempt.
-    const logs = await this.collectLogs(repo, headSha, fresh);
+    const logs = await this.collectLogs(repo, headSha);
     const feedback: CiFailureFeedback = {
       repository: repo,
       prNumber,
@@ -587,12 +582,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
   }
 
-  /** Job logs first; fall back to check-run annotations per failing check. */
-  private async collectLogs(
-    repo: string,
-    headSha: string,
-    failures: PendingFailure[],
-  ): Promise<string | null> {
+  /** Collect an error-focused excerpt from failing GitHub Actions job logs. */
+  private async collectLogs(repo: string, headSha: string): Promise<string | null> {
     const { github, verbose } = this.options;
 
     let rawLogs: string | null = null;
@@ -609,32 +600,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       return excerpt;
     }
 
-    // Annotations fallback (also covers non-Actions statuses via details URL).
-    const snippets: string[] = [];
-    for (const failure of failures) {
-      const match =
-        failure.detailsUrl?.match(/checks\/(\d+)/) ??
-        failure.detailsUrl?.match(/check-runs\/(\d+)/);
-      const checkRunId = failure.checkRunId ?? (match ? parseInt(match[1], 10) : NaN);
-      if (!github.fetchCheckRunDetails || Number.isNaN(checkRunId)) {
-        continue;
-      }
-      try {
-        const detail = await github.fetchCheckRunDetails(repo, checkRunId);
-        if (detail) {
-          snippets.push(detail);
-        }
-      } catch {
-        // Details are best-effort only.
-      }
-    }
-    const annotationExcerpt = truncateCiLogs(snippets.join("\n") || null);
-    if (annotationExcerpt) {
-      return annotationExcerpt;
-    }
-
     console.warn(
-      `⚠️  [${this.name}] ${repo}: could not fetch logs (scope/fork?); proceeding without them`,
+      `⚠️  [${this.name}] ${repo}: could not fetch Actions logs; proceeding without them`,
     );
     return null;
   }

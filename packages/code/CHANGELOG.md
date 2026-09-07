@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Opt-in automatic CI repair for agent-created PRs**: `[workspace].ci_failure_fix = true` continuously watches GitHub checks and commit statuses while the worker and PR remain open, sends failing job logs or check annotations through the existing review-fix pipeline, retries failed/no-op invocations with a bounded budget, and records CI-fix runs in the dashboard. The feature is disabled by default and live-reloads; tokens or customer-owned Apps need read access to Checks, Actions, and Commit statuses.
+- **Opt-in automatic CI repair for agent-created PRs**: `[workspace].ci_failure_fix = true` continuously watches GitHub Actions and commit statuses while the worker and PR remain open, sends failing job logs through the existing review-fix pipeline, retries failed/no-op invocations with a bounded budget, and records CI-fix runs in the dashboard. The feature is disabled by default and live-reloads; fine-grained tokens and customer-owned Apps need read access to Actions and Commit statuses.
 
 ## [2.8.0] - 2026-09-02
 

@@ -13,6 +13,7 @@
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
 import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
 import type { AutomaticResolveResult } from "../review-polling-acquirer";
+import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -33,7 +34,7 @@ export interface FleetEventDeps {
       cwd: string;
       env: Record<string, string | undefined>;
     },
-  ) => Promise<boolean>;
+  ) => Promise<TaskExecutionResult>;
   /** CI-fix runner (injected for tests; defaults to the CLI subprocess). */
   runCiFix?: (
     repo: string,
@@ -48,16 +49,23 @@ export interface FleetEventDeps {
   coordinator?: RunCoordinator;
 }
 
-type AddressPr = (slug: string, prNumber: number) => Promise<boolean>;
+type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult>;
 
 /**
  * Serialize feedback handling per PR and collapse events received while a run
  * is active into one follow-up reconciliation. Relay, review polling, and
  * mention sweeping can all observe the same GitHub action; the follow-up run
  * re-fetches feedback after the active run has persisted its addressed marks.
+ *
+ * A `false` outcome from any run wins (a run did not complete cleanly);
+ * otherwise the last outcome is reported, so a follow-up run that succeeded
+ * clears an earlier `"deferred"`.
  */
 export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
-  const active = new Map<string, { rerunRequested: boolean; promise: Promise<boolean> }>();
+  const active = new Map<
+    string,
+    { rerunRequested: boolean; promise: Promise<TaskExecutionResult> }
+  >();
 
   return async (slug, prNumber) => {
     const key = `${slug.toLowerCase()}#${prNumber}`;
@@ -67,13 +75,21 @@ export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
       return existing.promise;
     }
 
-    const state = { rerunRequested: false, promise: Promise.resolve(false) };
+    const state = {
+      rerunRequested: false,
+      promise: Promise.resolve(false as TaskExecutionResult),
+    };
     state.promise = (async () => {
       try {
-        let ok = true;
+        let ok: TaskExecutionResult = true;
         do {
           state.rerunRequested = false;
-          ok = (await addressPr(slug, prNumber)) && ok;
+          const outcome = await addressPr(slug, prNumber);
+          if (outcome === false || ok === false) {
+            ok = false;
+          } else {
+            ok = outcome;
+          }
         } while (state.rerunRequested);
         return ok;
       } finally {

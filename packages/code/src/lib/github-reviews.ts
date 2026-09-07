@@ -77,14 +77,6 @@ export interface FileContent {
   sha: string;
 }
 
-export interface CheckRunSummary {
-  id: number;
-  name: string;
-  status: string;
-  conclusion: string | null;
-  details_url?: string;
-}
-
 export interface CombinedStatus {
   state: "error" | "failure" | "pending" | "success";
   total_count: number;
@@ -105,12 +97,10 @@ export interface ActionJob {
 
 export interface WorkflowRunSummary {
   id: number;
+  name?: string;
+  status: string;
   conclusion: string | null;
-}
-
-export interface CheckAnnotation {
-  path?: string;
-  message: string;
+  html_url?: string;
 }
 
 /**
@@ -709,23 +699,6 @@ export class GitHubReviewsClient {
     );
   }
 
-  /** Fetch check runs for a commit, conditionally by ETag. */
-  async getCheckRuns(
-    owner: string,
-    repo: string,
-    sha: string,
-    etag?: string,
-  ): Promise<{ data: CheckRunSummary[] | null; etag?: string; notModified: boolean }> {
-    const result = await this.conditionalGet<{
-      check_runs: CheckRunSummary[];
-    }>(`/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=100`, owner, repo, etag);
-    return {
-      data: result.data?.check_runs ?? null,
-      etag: result.etag,
-      notModified: result.notModified,
-    };
-  }
-
   /** Fetch classic commit statuses for a commit, conditionally by ETag. */
   async getCombinedStatus(
     owner: string,
@@ -749,7 +722,7 @@ export class GitHubReviewsClient {
   ): Promise<WorkflowRunSummary[]> {
     const data = await this.apiRequest<{ workflow_runs: WorkflowRunSummary[] }>(
       "GET",
-      `/repos/${owner}/${repo}/actions/runs?head_sha=${sha}&per_page=20`,
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
       owner,
       repo,
     );
@@ -784,20 +757,6 @@ export class GitHubReviewsClient {
       },
     );
     return response.ok ? response.text() : null;
-  }
-
-  /** Fetch annotations exposed by one check run. */
-  async getCheckRunAnnotations(
-    owner: string,
-    repo: string,
-    checkRunId: number,
-  ): Promise<CheckAnnotation[]> {
-    return this.apiRequest<CheckAnnotation[]>(
-      "GET",
-      `/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=100`,
-      owner,
-      repo,
-    );
   }
 
   /**

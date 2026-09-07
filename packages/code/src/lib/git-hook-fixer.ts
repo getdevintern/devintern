@@ -10,6 +10,7 @@ import {
   spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
+  UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
@@ -200,7 +201,7 @@ export async function runAgentHarnessToFixGitHook(
     displayName: harness.displayName,
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     (async () => {
       console.log(`\n🔧 Attempting to fix git hook errors with ${harness.displayName}...`);
 
@@ -341,8 +342,8 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           return;
         }
         if (usageLimited) {
-          console.error(`❌ ${harness.displayName} hit a usage limit while fixing the git hook`);
-          resolve(false);
+          const usage = detectUsageLimit(stdoutOutput, stderrOutput);
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {
@@ -423,6 +424,10 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         }
       });
     })().catch((error) => {
+      if (error instanceof UsageLimitError) {
+        reject(error);
+        return;
+      }
       console.error(
         `❌ Failed to run ${harness.displayName} for git hook fix: ${error instanceof Error ? error.message : String(error)}`,
       );

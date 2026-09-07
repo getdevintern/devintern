@@ -95,7 +95,6 @@ For interactive CLI use and the standard workspace path. When creating a GitHub 
 - **Pull requests**: Read and write
 - **Contents**: Read and write (needed for HTTPS branch pushes; SSH remotes may use your SSH key instead)
 - **Issues**: Read and write (only when `TASK_TRACKER=github`)
-- **Checks**: Read (when `[workspace].ci_failure_fix = true`)
 - **Actions**: Read (when `[workspace].ci_failure_fix = true`)
 - **Commit statuses**: Read (when `[workspace].ci_failure_fix = true`)
 
@@ -115,7 +114,6 @@ Only create a GitHub App when the hosted relay cannot be used—for example an a
 
 - **Contents**: Read (to check branches)
 - **Pull requests**: Read and write (to create PRs)
-- **Checks**: Read (when automatic CI failure fixes are enabled)
 - **Actions**: Read (when automatic CI failure fixes are enabled)
 - **Commit statuses**: Read (when automatic CI failure fixes are enabled)
 

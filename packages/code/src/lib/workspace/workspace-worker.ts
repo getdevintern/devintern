@@ -53,6 +53,7 @@ import { EstimationAcquirer } from "../estimation-acquirer";
 import { RunCoordinator } from "../run-coordinator";
 import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+import { startWorkerFailover } from "../worker-failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
@@ -188,7 +189,7 @@ export interface WorkspaceTaskAcquirerDeps {
     taskKey: string,
     extraArgs: string[],
     opts: { cwd: string; env: Record<string, string | undefined> },
-  ) => Promise<boolean>;
+  ) => Promise<TaskExecutionResult>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
   /** Process-level agent-run gate; only set when scheduled estimation exists. */
@@ -517,7 +518,7 @@ export function createFleetTaskExecutor(
         });
       const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
 
-      if (ok) {
+      if (ok === true) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
       } else {
         console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
@@ -718,6 +719,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   }
 
   const state = openWorkspaceState(workspaceDir);
+  startWorkerFailover({
+    queue: state.queue,
+    onPause: ({ untilMs, harness, resetHint }) => {
+      console.warn(
+        `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""} and no fallback harness is available. ` +
+          `Deferring new agent work until ${new Date(untilMs).toISOString()}.`,
+      );
+    },
+    onResume: () => {
+      console.log("▶️  Usage-limit windows elapsed — resuming agent work on the available harness");
+    },
+  });
   const repoManager = new RepoManager(workspaceDir);
   // Preserve the worker's existing concurrency when scheduled estimation is
   // absent or fully disabled. The account-global gate is needed only once an
@@ -1126,7 +1139,7 @@ export async function buildFleetEventAcquirers(options: {
     : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
   let github: import("../github-reviews").GitHubReviewsClient | undefined;
-  let addressPr: ((repo: string, prNumber: number) => Promise<boolean>) | undefined;
+  let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
     | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
     | undefined;
@@ -1239,8 +1252,21 @@ export async function buildFleetEventAcquirers(options: {
             throw error;
           }
         },
-        fetchCheckRuns: (repo, sha, etag) =>
-          gh.getCheckRuns(ownerOf(repo), nameOf(repo), sha, etag),
+        fetchWorkflowRuns: async (repo, sha, etag) => {
+          const result = await gh.conditionalGet<{
+            workflow_runs: import("../github-reviews").WorkflowRunSummary[];
+          }>(
+            `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
+            ownerOf(repo),
+            nameOf(repo),
+            etag,
+          );
+          return {
+            data: result.data?.workflow_runs ?? null,
+            etag: result.etag,
+            notModified: result.notModified,
+          };
+        },
         fetchCommitStatus: (repo, sha, etag) =>
           gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
         fetchFailingJobLogs: async (repo, sha) => {
@@ -1261,19 +1287,6 @@ export async function buildFleetEventAcquirers(options: {
             }
           }
           return chunks.length > 0 ? chunks.join("\n\n") : null;
-        },
-        fetchCheckRunDetails: async (repo, checkRunId) => {
-          const annotations = await gh
-            .getCheckRunAnnotations(ownerOf(repo), nameOf(repo), checkRunId)
-            .catch(() => []);
-          return annotations.length > 0
-            ? annotations
-                .map(
-                  (annotation) =>
-                    `${annotation.path ? `${annotation.path}: ` : ""}${annotation.message}`,
-                )
-                .join("\n")
-            : null;
         },
         postComment: (repo, n, body) =>
           gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
