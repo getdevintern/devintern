@@ -243,7 +243,7 @@ export function trackWorkerTaskRun(
 ): boolean {
   const runOrigin = env[RUN_ORIGIN_ENV];
   const workerTrigger: WorkerTaskTrigger | undefined =
-    runOrigin === "worker"
+    runOrigin === "worker" || runOrigin === "error_monitor"
       ? "task"
       : runOrigin === "scheduled"
         ? "scheduled"

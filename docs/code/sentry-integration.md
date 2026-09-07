@@ -97,13 +97,18 @@ serve teams and projects whose tokens differ.
 An error is eligible when it meets `min_occurrences` (default `5`) and includes
 a title plus a culprit, exception type, or filename. At most `max_per_tick`
 (default `3`) errors are dispatched per poll. `poll_interval` defaults to
-`[defaults].poll_interval`.
+`[defaults].poll_interval`. Because the watcher has already applied those
+actionability checks and supplied concrete runtime evidence, Sentry runs skip
+the generic task feasibility assessment and proceed directly to implementation.
 
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions
 between Sentry projects. A failed fix is not automatically repeated; a run
 deferred because the repo or agent capacity is busy is released and retried on
-a later poll.
+a later poll. Runs are recorded with an `error_monitor` origin rather than as
+tracker tasks. If the worker restarts during a run, startup recovery marks the
+interrupted run failed locally without trying to fetch its synthetic identifier
+from Jira or another task tracker.
 
 The provider contract is shared by all error monitors. Sentry is the first
 adapter; adding Datadog support does not require another polling, deduplication,

@@ -2,6 +2,7 @@ import type { RunOrigin } from "@/lib/api";
 
 export const RUN_ORIGIN_LABELS = {
   task: "Tracker task",
+  error_monitor: "Error monitor",
   pr_mention: "PR mention",
   ci_fix: "CI fix",
   conflict_resolution: "Conflict resolution",
