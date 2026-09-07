@@ -54,7 +54,9 @@ worker_task_args = "--create-pr"
 # pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
-default_branch = "main"
+# Omit default_branch to follow each repository's origin/HEAD. Set it here only
+# when the whole fleet intentionally uses the same branch name.
+# default_branch = "main"
 
 # Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
@@ -226,6 +228,8 @@ export function writeSentryErrorMonitor(
       normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
   );
   if (existing) {
+    const existingEnvPath = join(workspaceDir, existing.envFile ?? "");
+    if (existing.envFile && existsSync(existingEnvPath)) chmodSync(existingEnvPath, 0o600);
     return {
       id: existing.id,
       envFile: existing.envFile ?? `env/sentry-${existing.id}.env`,
@@ -305,8 +309,9 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
   writeFileSync(configPath, CONFIG_TEMPLATE);
   const envPath = workspaceEnvPath(workspaceDir);
   if (!existsSync(envPath)) {
-    writeFileSync(envPath, ENV_TEMPLATE);
+    writeFileSync(envPath, ENV_TEMPLATE, { mode: 0o600 });
   }
+  chmodSync(envPath, 0o600);
 
   log(`✅ Workspace created at ${workspaceDir}`);
   log(`   Config: ${configPath}`);
@@ -546,6 +551,7 @@ function mergeEnv(
     writeFileSync(envPath, existing + separator + additions.join("\n") + "\n");
     log(`   Merged ${additions.length} env key(s) into ${envPath}`);
   }
+  if (existsSync(envPath)) chmodSync(envPath, 0o600);
 
   return conflicts;
 }
