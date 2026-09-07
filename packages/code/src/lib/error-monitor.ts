@@ -115,7 +115,6 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
       let handled = 0;
       for (const issue of issues) {
         if (handled >= maxIssuesPerTick) break;
-        if (queue.hasProcessed(dedupeSource, issue.externalId)) continue;
 
         if (!Number.isFinite(issue.occurrenceCount) || issue.occurrenceCount < minOccurrences) {
           if (verbose) {
@@ -135,10 +134,10 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
           continue;
         }
 
-        // Claim before execution so overlapping ticks/process restarts cannot
-        // start the same fix twice. A capacity deferral is explicitly
+        // Claim atomically before execution so competing watcher processes
+        // cannot both submit the same issue. A capacity deferral is explicitly
         // unclaimed so it can run on a later tick.
-        queue.markProcessed(dedupeSource, issue.externalId);
+        if (!queue.tryMarkProcessed(dedupeSource, issue.externalId)) continue;
         console.log(`\n📌 [${this.name}] ${issue.displayId}: ${issue.title}`);
         const result = await this.options.executeTask(issue, provider.buildTaskMarkdown(issue));
         if (result === "deferred") {

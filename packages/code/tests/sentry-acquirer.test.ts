@@ -171,6 +171,20 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     expect(fixed).toHaveLength(1);
   });
 
+  test("only one competing acquirer submits an error group", async () => {
+    const competingQueue = new WebhookQueue({ dbPath });
+    try {
+      const first = makeAcquirer([issue()]);
+      const second = makeAcquirer([issue()], { queue: competingQueue });
+
+      await Promise.all([first.acquirer.tick(), second.acquirer.tick()]);
+
+      expect(first.fixed.length + second.fixed.length).toBe(1);
+    } finally {
+      competingQueue.close();
+    }
+  });
+
   test("skips invalid issues without marking them processed", async () => {
     const { acquirer, fixed } = makeAcquirer([issue({ count: "1", occurrenceCount: 1 })]);
     await acquirer.tick();

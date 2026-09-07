@@ -395,6 +395,24 @@ export class WebhookQueue {
     );
   }
 
+  /**
+   * Atomically claim a provider-issued event id for processing.
+   *
+   * Unlike a separate {@link hasProcessed} / {@link markProcessed} pair, this
+   * is safe when multiple queue connections race for the same event. Only the
+   * connection that inserts the row owns the claim and may dispatch work.
+   *
+   * @returns `true` when this call acquired the claim
+   */
+  tryMarkProcessed(source: string, externalId: string): boolean {
+    const result = this.db.run(
+      `INSERT INTO processed_events (source, external_id, processed_at) VALUES (?, ?, ?)
+       ON CONFLICT(source, external_id) DO NOTHING`,
+      [source, externalId, Date.now()],
+    );
+    return result.changes === 1;
+  }
+
   /** Release a provisional processed marker when work was deferred before execution. */
   unmarkProcessed(source: string, externalId: string): void {
     this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
