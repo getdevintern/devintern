@@ -10,7 +10,7 @@
  * as text, so hand-written comments in the existing config survive.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 
 import { findProjectRoot } from "@devintern/utils";
@@ -188,6 +188,100 @@ export function writeWorkspaceDefaults(
   const updated = upsertWorkspaceDefaults(readFileSync(configPath, "utf8"), defaults);
   parseWorkspaceConfig(updated, configPath);
   writeFileSync(configPath, updated);
+}
+
+export interface SentryMonitorInput {
+  authToken: string;
+  organization: string;
+  project: string;
+  repo: string;
+  baseUrl?: string;
+  query?: string;
+}
+
+export interface SentryMonitorWriteResult {
+  id: string;
+  envFile: string;
+  added: boolean;
+}
+
+/**
+ * Add one repo-bound Sentry monitor while preserving hand-written TOML.
+ * Re-running setup for the same Sentry project is idempotent.
+ */
+export function writeSentryErrorMonitor(
+  workspaceDir: string,
+  input: SentryMonitorInput,
+): SentryMonitorWriteResult {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const content = readFileSync(configPath, "utf8");
+  const config = parseWorkspaceConfig(content, configPath);
+  const normalizeBaseUrl = (value?: string) => (value ?? "https://sentry.io").replace(/\/+$/, "");
+  const existing = config.errorMonitors.find(
+    (monitor) =>
+      monitor.provider === "sentry" &&
+      monitor.organization === input.organization &&
+      monitor.project === input.project &&
+      monitor.repo === input.repo &&
+      normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
+  );
+  if (existing) {
+    return {
+      id: existing.id,
+      envFile: existing.envFile ?? `env/sentry-${existing.id}.env`,
+      added: false,
+    };
+  }
+
+  const stem = `sentry-${input.project}`
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "");
+  const usedIds = new Set(config.errorMonitors.map((monitor) => monitor.id.toLowerCase()));
+  let id = stem || "sentry-project";
+  for (
+    let suffix = 2;
+    usedIds.has(id.toLowerCase()) || existsSync(join(workspaceDir, "env", `${id}.env`));
+    suffix++
+  ) {
+    id = `${stem || "sentry-project"}-${suffix}`;
+  }
+  const envFile = `env/${id}.env`;
+  const lines = [
+    "",
+    "# Sentry auto-fixes — written by DevIntern worker setup",
+    "[[error_monitors]]",
+    `id = ${tomlString(id)}`,
+    'provider = "sentry"',
+    `repo = ${tomlString(input.repo)}`,
+    `organization = ${tomlString(input.organization)}`,
+    `project = ${tomlString(input.project)}`,
+  ];
+  if (input.baseUrl && normalizeBaseUrl(input.baseUrl) !== "https://sentry.io") {
+    lines.push(`base_url = ${tomlString(normalizeBaseUrl(input.baseUrl))}`);
+  }
+  if (input.query) lines.push(`query = ${tomlString(input.query)}`);
+  lines.push(`env_file = ${tomlString(envFile)}`, "");
+
+  const updated = `${content.trimEnd()}${lines.join("\n")}`;
+  parseWorkspaceConfig(updated, configPath);
+
+  // Write credentials first: if the later config write fails, the worker is
+  // left unchanged instead of gaining an enabled source with no token.
+  const envPath = join(workspaceDir, envFile);
+  mkdirSync(join(workspaceDir, "env"), { recursive: true });
+  writeFileSync(envPath, `SENTRY_AUTH_TOKEN=${input.authToken}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  chmodSync(envPath, 0o600);
+  try {
+    writeFileSync(configPath, updated);
+  } catch (error) {
+    unlinkSync(envPath);
+    throw error;
+  }
+  return { id, envFile, added: true };
 }
 
 export type WorkspaceLogFn = (message: string) => void;
@@ -376,7 +470,10 @@ export async function ensureWorkspaceAndAddRepo(
   cwd: string,
   log: WorkspaceLogFn = console.log,
   error: WorkspaceLogFn = console.error,
-): Promise<{ ok: true; workspaceDir: string; created: boolean } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; workspaceDir: string; created: boolean; repoName: string }
+  | { ok: false; error: string }
+> {
   const { workspaceDir, created } = ensureWorkspaceScaffold(log);
   if (!created) {
     log(`ℹ️  Using existing workspace at ${workspaceDir}`);
@@ -398,7 +495,14 @@ export async function ensureWorkspaceAndAddRepo(
   if (code !== 0) {
     return { ok: false, error: "Could not add this repo to the workspace." };
   }
-  return { ok: true, workspaceDir, created };
+  const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+  const repoName = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).repos.find(
+    (repo) => repo.remote === remoteResult.output.trim(),
+  )?.name;
+  if (!remoteResult.success || !repoName) {
+    return { ok: false, error: "Could not resolve this repo in the workspace." };
+  }
+  return { ok: true, workspaceDir, created, repoName };
 }
 
 function readRepoEnv(cwd: string): Record<string, string> {

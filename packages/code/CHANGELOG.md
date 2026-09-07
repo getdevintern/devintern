@@ -1,5 +1,9 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+- **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
+
 ## [2.9.0] - 2026-09-07
 
 Sentry-driven autonomy release: the worker now watches Sentry for production errors and fixes them automatically, fails over across agent harnesses when usage limits hit, and reports its own crashes to Sentry.

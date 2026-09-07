@@ -203,6 +203,8 @@ cd ~/code/backend
 devintern worker add-repo     # add this repo to the workspace
 cd ~/code/frontend
 devintern worker add-repo
+
+devintern worker connect sentry # add a Sentry auto-fix project
 ```
 
 `worker add-repo` reads the repo's origin remote and its `.devintern-code/.env`:

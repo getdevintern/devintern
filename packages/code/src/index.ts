@@ -632,8 +632,8 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
   (async () => {
-    // `devintern worker connect ...` — pair the configured fleet with the
-    // Mode 2 relay.
+    // `devintern worker connect ...` — configure relay-backed integrations or
+    // a directly polled Sentry error monitor.
     if (process.argv[3] === "connect") {
       const { runWorkerConnectCommand } = await import("./lib/worker-connect");
       const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
@@ -774,8 +774,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` pairs workspace repos with the DevIntern relay (Mode 2)");
-        console.log("so events arrive in seconds without webhook setup; see connect --help.");
+        console.log("`worker connect` configures relay integrations and Sentry auto-fixes;");
+        console.log("see `devintern worker connect --help` for targets and options.");
         console.log("");
         console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
         console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
@@ -784,10 +784,12 @@ if (process.argv[2] === "init") {
         console.log(
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
-        console.log("                      query (live dry run), and license check");
+        console.log(
+          "                      query (live dry run), optional Sentry, and license check",
+        );
         console.log("  scaffold            Create workspace.toml and the shared .env only");
         console.log("  add-repo            Add the current repository to the worker workspace");
-        console.log("  connect             Pair workspace repos or its tracker with the relay");
+        console.log("  connect             Configure relay integrations or Sentry auto-fixes");
         console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");

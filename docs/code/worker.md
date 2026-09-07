@@ -22,7 +22,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, optionally validates and adds a Sentry auto-fix project, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
 In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
 
@@ -45,7 +45,8 @@ Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspac
 ## Error-monitor auto-fixes
 
 `[[error_monitors]]` entries let the worker turn unresolved production errors
-into normal repo-scoped fix runs. Each Sentry project maps explicitly to one
+into normal repo-scoped fix runs. Add the first project during `worker init`, or
+run `devintern worker connect sentry` for an existing workspace. Each Sentry project maps explicitly to one
 `[[repos]]` entry and can inherit an optional `[[teams]]` environment, so one
 worker can safely serve multiple teams, repositories, and credentials. See
 [Sentry Auto-fixes](./sentry-integration.md) for the schema and setup.

@@ -174,8 +174,8 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: devintern worker connect");
     expect(result.stdout).toContain("--workspace <path>");
-    expect(result.stdout).not.toContain("--repo");
-    expect(result.stdout).not.toContain("current repository");
+    expect(result.stdout).toContain("sentry");
+    expect(result.stdout).toContain("--repo <name>");
   });
 
   test("should reject the removed top-level workspace namespace", async () => {
