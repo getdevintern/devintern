@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Guided worker operating policy**: `worker init` now asks when new tasks may be picked up, whether failing CI should be repaired automatically, and whether pull-request conflicts should be handled immediately, on a schedule, or manually. Existing values become the prompt defaults when the wizard is rerun
 - **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
 
 ## [2.9.0] - 2026-09-07

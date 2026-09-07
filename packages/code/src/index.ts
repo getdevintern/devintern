@@ -785,7 +785,7 @@ if (process.argv[2] === "init") {
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
         console.log(
-          "                      query (live dry run), optional Sentry, and license check",
+          "                      query, operating policy, optional Sentry, and license check",
         );
         console.log("  scaffold            Create workspace.toml and the shared .env only");
         console.log("  add-repo            Add the current repository to the worker workspace");

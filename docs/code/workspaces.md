@@ -11,7 +11,7 @@ dateModified: 2026-09-03
 
 Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe repositories once in `~/.devintern/workspace.toml`, then use either one default tracker query or several isolated team tracker sources.
 
-The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (add + `[defaults].task_query`) and you add more repos later with `devintern worker add-repo`.
+The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace, validates `[defaults].task_query`, and asks about task pickup hours, conflict handling, and automatic CI repair. Add more repos later with `devintern worker add-repo`.
 
 Workspace mode runs under the same automation license as the rest of the worker: any Supporter, Team, or Business key (or an active trial) covers it — one license spans all of your own repos in the fleet.
 
