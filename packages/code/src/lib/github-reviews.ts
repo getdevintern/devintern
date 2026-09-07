@@ -118,6 +118,37 @@ export function isGitHubNotFound(error: unknown): boolean {
 }
 
 /**
+ * Whether an error thrown by a GitHub API client call is an HTTP 401
+ * (`Bad credentials`) or a missing-credential failure: the credential is
+ * expired, revoked, or rejected. Unlike 5xx/429 responses this is not
+ * transient — every request with the same credential fails identically, so
+ * long-running callers treat it as a configuration problem (renew
+ * `GITHUB_TOKEN`) instead of re-reporting it as a per-tick failure forever.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("GitHub API error (401)") ||
+    message.includes("No GitHub authentication configured")
+  );
+}
+
+/** Build an API error message; 401s get actionable credential guidance. */
+function apiErrorMessage(status: number, detail: string): string {
+  const base = `GitHub API error (${status}): ${detail}`;
+  if (status === 401) {
+    return (
+      `${base}. The GitHub credential was rejected as expired or revoked. ` +
+      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials), " +
+      "then restart the worker."
+    );
+  }
+  return base;
+}
+
+/**
  * Client for interacting with GitHub's PR review APIs.
  */
 export class GitHubReviewsClient {
@@ -263,9 +294,7 @@ export class GitHubReviewsClient {
       const error = (await response.json().catch(() => ({
         message: "Unknown error",
       }))) as { message?: string };
-      throw new Error(
-        `GitHub API error (${response.status}): ${error.message || response.statusText}`,
-      );
+      throw new Error(apiErrorMessage(response.status, error.message || response.statusText));
     }
 
     return (await response.json()) as T;
@@ -312,9 +341,7 @@ export class GitHubReviewsClient {
       const error = (await response.json().catch(() => ({
         message: "Unknown error",
       }))) as { message?: string };
-      throw new Error(
-        `GitHub API error (${response.status}): ${error.message || response.statusText}`,
-      );
+      throw new Error(apiErrorMessage(response.status, error.message || response.statusText));
     }
 
     return {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { GitHubReviewsClient } from "../src/lib/github-reviews";
+import { GitHubReviewsClient, isGitHubAuthError } from "../src/lib/github-reviews";
 
 const originalFetch = globalThis.fetch;
 
@@ -144,5 +144,61 @@ describe("GitHubReviewsClient CI APIs", () => {
     const client = new GitHubReviewsClient({ token: "test-token" });
     expect(await client.getJobLogs("acme", "widgets", 399444496)).toBe("failing test output");
     expect(requested).toBe("https://api.github.com/repos/acme/widgets/actions/jobs/399444496/logs");
+  });
+});
+
+/**
+ * An expired/revoked `GITHUB_TOKEN` fails identically on every request.
+ * The client must surface the 401 with credential guidance so operators can
+ * renew the token (and so polling loops can stop re-reporting the same
+ * permanent failure as a fresh event on every tick).
+ */
+describe("GitHubReviewsClient auth failure path", () => {
+  test("an API 401 keeps the raw message and adds credential guidance", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(401, { message: "Bad credentials" }));
+
+    const client = new GitHubReviewsClient({ token: "expired-token" });
+    try {
+      await client.getPullRequest("acme", "widgets", 7);
+      throw new Error("expected getPullRequest to reject");
+    } catch (error) {
+      expect((error as Error).message).toMatch(/^GitHub API error \(401\): Bad credentials\./);
+      expect((error as Error).message).toContain("GITHUB_TOKEN");
+    }
+  });
+
+  test("a conditionalGet 401 is reported the same way", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(401, { message: "Bad credentials" }));
+
+    const client = new GitHubReviewsClient({ token: "expired-token" });
+    try {
+      await client.conditionalGet("/repos/acme/widgets/pulls/7", "acme", "widgets");
+      throw new Error("expected conditionalGet to reject");
+    } catch (error) {
+      expect((error as Error).message).toContain("GitHub API error (401): Bad credentials");
+      expect((error as Error).message).toContain("GITHUB_TOKEN");
+    }
+  });
+
+  test("isGitHubAuthError distinguishes credential failures from other API errors", () => {
+    expect(isGitHubAuthError(new Error("GitHub API error (401): Bad credentials. Renew ..."))).toBe(
+      true,
+    );
+    expect(isGitHubAuthError(new Error("No GitHub authentication configured."))).toBe(true);
+    expect(isGitHubAuthError(new Error("GitHub API error (404): Not Found"))).toBe(false);
+    expect(isGitHubAuthError(new Error("GitHub API error (500): Server Error"))).toBe(false);
+    expect(isGitHubAuthError(null)).toBe(false);
+  });
+
+  test("non-401 API errors keep the bare status message", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(404, { message: "Not Found" }));
+
+    const client = new GitHubReviewsClient({ token: "test-token" });
+    try {
+      await client.getPullRequest("acme", "widgets", 999);
+      throw new Error("expected getPullRequest to reject");
+    } catch (error) {
+      expect((error as Error).message).toBe("GitHub API error (404): Not Found");
+    }
   });
 });

@@ -1056,6 +1056,97 @@ describe("ReviewPollingAcquirer", () => {
     // the API cost of every tick.
     expect(prFetches).toBe(1);
   });
+
+  test("rejected credentials warn once per hour instead of failing every PR tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    // The shape of the error thrown by GitHubReviewsClient on a 401;
+    // sent verbatim so the test documents the contract.
+    const badCredentials = new Error(
+      "GitHub API error (401): Bad credentials. Renew GITHUB_TOKEN.",
+    );
+    let now = 1_750_000_000_000;
+    let warns = 0;
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns += 1;
+      expect(args.join(" ")).toContain("401");
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        now: () => now,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw badCredentials;
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => {
+          throw new Error("must not be addressed");
+        },
+      });
+
+      // Both PRs hit the same permanent credential failure, but only the
+      // first triggers a warning this hour.
+      await acquirer.tick();
+      expect(warns).toBe(1);
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toBe(1);
+
+      now += 60 * 60_000;
+      await acquirer.tick();
+      expect(warns).toBe(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("non-auth polling failures warn per PR as before", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw new Error("GitHub API error (429) ... showed as transient");
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("Github rejected"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });
 
 describe("runResolveConflictsViaCli", () => {
