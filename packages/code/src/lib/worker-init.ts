@@ -33,7 +33,6 @@ import {
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
-import { DEFAULT_SENTRY_BASE_URL, SentryClient } from "./sentry-client";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
@@ -48,6 +47,8 @@ import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
 import { workspaceConfigPath } from "./workspace/paths";
+import { runWorkerSentrySetup } from "./worker-sentry-setup";
+import type { SentryValidationOptions } from "./worker-sentry-setup";
 
 export type PromptFn = (question: string) => Promise<string>;
 export type LogFn = (message: string) => void;
@@ -219,13 +220,7 @@ export interface WorkerInitDeps {
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
   /** Validate Sentry credentials and project access; returns the current issue count. */
-  validateSentry?: (options: {
-    authToken: string;
-    organization: string;
-    project: string;
-    baseUrl: string;
-    query?: string;
-  }) => Promise<number>;
+  validateSentry?: (options: SentryValidationOptions) => Promise<number>;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -296,17 +291,6 @@ async function detectGitHubRepo(): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-async function defaultValidateSentry(options: {
-  authToken: string;
-  organization: string;
-  project: string;
-  baseUrl: string;
-  query?: string;
-}): Promise<number> {
-  const issues = await new SentryClient(options).fetchUnresolvedIssues();
-  return issues.length;
 }
 
 /** GitHub slugs already represented by a workspace, deduped in config order. */
@@ -474,69 +458,13 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       .trim()
       .toLowerCase();
     if (sentryAnswer === "y" || sentryAnswer === "yes") {
-      const baseUrl =
-        (await prompt(`Sentry URL [${DEFAULT_SENTRY_BASE_URL}]: `)).trim() ||
-        DEFAULT_SENTRY_BASE_URL;
-      const organization = (await prompt("Sentry organization slug: ")).trim();
-      const project = (await prompt("Sentry project slug: ")).trim();
-      const sentryQuery = (
-        await prompt("Sentry search filter (optional, e.g. environment:production): ")
-      ).trim();
-
-      if (!organization || !project) {
-        log("⚠️  Sentry setup skipped: organization and project slugs are required.");
-      } else {
-        const workspaceEnv = parseEnvContent(
-          existsSync(join(workspaceDir, ".env"))
-            ? readFileSync(join(workspaceDir, ".env"), "utf8")
-            : "",
-        );
-        const existingToken = process.env.SENTRY_AUTH_TOKEN || workspaceEnv.SENTRY_AUTH_TOKEN;
-        if (existingToken) log("   Using SENTRY_AUTH_TOKEN from the existing environment.");
-        log(
-          "   Create a token with event access: https://sentry.io/settings/account/api/auth-tokens/",
-        );
-        const authToken =
-          existingToken || (await prompt("Sentry auth token (input is visible): ")).trim();
-        if (!authToken) {
-          log("⚠️  Sentry setup skipped: an auth token is required.");
-        } else {
-          try {
-            const issueCount = await (deps.validateSentry ?? defaultValidateSentry)({
-              authToken,
-              organization,
-              project,
-              baseUrl,
-              query: sentryQuery || undefined,
-            });
-            log(`✅ Sentry access works: ${issueCount} unresolved issue(s) currently match.`);
-
-            const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-            const repo = workspace.repoName
-              ? config.repos.find((candidate) => candidate.name === workspace.repoName)
-              : config.repos[0];
-            if (!repo) throw new Error("the workspace has no repository for this monitor");
-            const monitor = writeSentryErrorMonitor(workspaceDir, {
-              authToken,
-              organization,
-              project,
-              repo: repo.name,
-              baseUrl,
-              query: sentryQuery || undefined,
-            });
-            if (monitor.added) {
-              const envPath = join(workspaceDir, monitor.envFile);
-              log(`💾 Added [[error_monitors]] "${monitor.id}" to workspace.toml.`);
-              log(`🔐 Stored its token in ${envPath} (mode 0600).`);
-            } else {
-              log(`   Sentry monitor "${monitor.id}" is already configured; no duplicate added.`);
-            }
-          } catch (error) {
-            log(`⚠️  Sentry setup skipped: ${(error as Error).message}`);
-            log("   No monitor or credential file was written.");
-          }
-        }
-      }
+      await runWorkerSentrySetup({
+        workspaceDir,
+        repoName: workspace.repoName,
+        prompt,
+        log,
+        validateSentry: deps.validateSentry,
+      });
     } else {
       log("   Sentry auto-fixes skipped; add [[error_monitors]] to workspace.toml later.");
     }

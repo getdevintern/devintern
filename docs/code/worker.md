@@ -45,7 +45,8 @@ Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspac
 ## Error-monitor auto-fixes
 
 `[[error_monitors]]` entries let the worker turn unresolved production errors
-into normal repo-scoped fix runs. Each Sentry project maps explicitly to one
+into normal repo-scoped fix runs. Add the first project during `worker init`, or
+run `devintern worker connect sentry` for an existing workspace. Each Sentry project maps explicitly to one
 `[[repos]]` entry and can inherit an optional `[[teams]]` environment, so one
 worker can safely serve multiple teams, repositories, and credentials. See
 [Sentry Auto-fixes](./sentry-integration.md) for the schema and setup.

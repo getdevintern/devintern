@@ -208,7 +208,13 @@ describe("runWorkerInit", () => {
       path.join(workspaceDir, "workspace.toml"),
       '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "other"\nremote = "git@github.com:acme/other.git"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
     );
-    const validations: Array<Record<string, string | undefined>> = [];
+    const validations: Array<{
+      authToken: string;
+      organization: string;
+      project: string;
+      baseUrl: string;
+      query?: string;
+    }> = [];
     const result = await runWorkerInit(
       deps(["status=todo", "y", "", "acme", "api", "environment:production", "sntrys_test"], {
         bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Guided Sentry setup in `worker init`**: the unattended-worker wizard can now validate and add an optional repo-bound Sentry auto-fix project, storing its API token in a source-specific owner-only env file. The step is default-off, never replaces the normal tracker/query setup, and does not persist an enabled monitor when validation fails
+- **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
 
 ## [2.9.0] - 2026-09-07
 

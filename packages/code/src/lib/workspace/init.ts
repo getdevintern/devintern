@@ -249,7 +249,7 @@ export function writeSentryErrorMonitor(
   const envFile = `env/${id}.env`;
   const lines = [
     "",
-    "# Sentry auto-fixes — written by 'devintern worker init'",
+    "# Sentry auto-fixes — written by DevIntern worker setup",
     "[[error_monitors]]",
     `id = ${tomlString(id)}`,
     'provider = "sentry"',
