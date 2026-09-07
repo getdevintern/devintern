@@ -20,7 +20,8 @@ import {
   logout,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense } from "@devintern/license-check";
+import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
+import type { LicenseCheckResult } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -516,6 +517,21 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
+/**
+ * Enforce a license result inside the CLI. `requireLicense` throws a
+ * `LicenseCheckError` on failure (library code must never kill the host
+ * process); the CLI converts that into its standard failed-check exit code 1
+ * after the failure details were already printed to stderr.
+ */
+function enforceLicenseOrExit(result: LicenseCheckResult): void {
+  try {
+    requireLicense(result);
+  } catch (error) {
+    if (error instanceof LicenseCheckError) process.exit(1);
+    throw error;
+  }
+}
+
 function printWebhookHelp(): void {
   console.log("Usage: devintern webhook <command>");
   console.log("");
@@ -576,7 +592,7 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
     supabaseConfig: loadSupabaseConfig(),
     requireAutomation: true,
   });
-  requireLicense(licenseResult);
+  enforceLicenseOrExit(licenseResult);
 
   const { startWebhookServer } = await import("./webhook-server");
   await startWebhookServer({ port, host });
@@ -814,7 +830,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    requireLicense(licenseResult);
+    enforceLicenseOrExit(licenseResult);
 
     const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
     await runWorkspaceWorker({
@@ -870,7 +886,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    requireLicense(licenseResult);
+    enforceLicenseOrExit(licenseResult);
 
     const { startDashboardServer } = await import("./dashboard-server");
     const server = startDashboardServer({ port, host });
@@ -2158,7 +2174,7 @@ async function main(): Promise<void> {
         supabaseConfig,
         requireAutomation: true,
       });
-      requireLicense(licenseResult);
+      enforceLicenseOrExit(licenseResult);
     }
 
     // Pull latest changes from remote (unless git is disabled)
