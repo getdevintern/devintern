@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Safer worker workspace bootstrap**: worker setup and repository imports now enforce owner-only permissions on the shared credential file and repair existing Sentry credential-file permissions when setup is rerun. Workspace repositories follow `origin/HEAD` unless an explicit per-repository override is configured; the fleet-wide `[defaults].default_branch` setting has been removed
 - **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
 
 ## [2.9.0] - 2026-09-07
