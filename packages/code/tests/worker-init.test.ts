@@ -425,13 +425,17 @@ describe("runWorkerInit", () => {
       deps(["status=todo", "n", "n", "n"], {
         platform: "linux",
         execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/bun/bin/bun",
+        environmentPath: "/opt/bun/bin:/usr/bin",
         writeFile: (file, content) => files.set(file, content),
       }),
     );
     expect(result.ok).toBe(true);
     const unit = files.get(path.join(workspaceDir, "devintern-worker.service"));
     expect(unit).toContain("WorkingDirectory=" + workspaceDir);
-    expect(unit).toContain("ExecStart=/usr/local/bin/devintern worker");
+    expect(unit).toContain("ExecStart=/opt/bun/bin/bun /usr/local/bin/devintern worker");
+    expect(unit).toContain('Environment="PATH=/opt/bun/bin:/usr/bin"');
+    expect(unit).toContain("WantedBy=default.target");
     const all = logs.join("\n");
     expect(all).toContain("systemctl --user enable --now devintern-worker");
     expect(all).toContain("loginctl enable-linger");
@@ -478,11 +482,20 @@ describe("runWorkerInit", () => {
       deps(["status=todo", "n", "n", ""], {
         platform: "linux",
         execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/bun/bin/bun",
+        environmentPath: "/opt/bun/bin:/usr/bin",
         homedir: tempDir,
         run: async (command, args) => {
           commands.push([command, ...args]);
           if (args.includes("is-active")) {
             return { status: enabled ? 0 : 3, stdout: enabled ? "active" : "inactive", stderr: "" };
+          }
+          if (args.includes("is-enabled")) {
+            return {
+              status: enabled ? 0 : 1,
+              stdout: enabled ? "enabled" : "disabled",
+              stderr: "",
+            };
           }
           if (args.includes("enable")) {
             enabled = true;
@@ -495,14 +508,15 @@ describe("runWorkerInit", () => {
     const unitPath = path.join(tempDir, ".config", "systemd", "user", "devintern-worker.service");
     const unit = readFileSync(unitPath, "utf8");
     expect(unit).toContain(`WorkingDirectory=${workspaceDir}`);
-    expect(unit).toContain("ExecStart=/usr/local/bin/devintern worker");
+    expect(unit).toContain("ExecStart=/opt/bun/bin/bun /usr/local/bin/devintern worker");
     expect(unit).not.toContain("StandardOutput=");
     expect(commands).toContainEqual(["systemctl", "--user", "daemon-reload"]);
     expect(commands).toContainEqual(["systemctl", "--user", "enable", "--now", "devintern-worker"]);
     const all = logs.join("\n");
     expect(all).toContain("devintern-worker service installed and running");
     expect(all).toContain("http://localhost:4400");
-    expect(all).toContain("loginctl enable-linger");
+    expect(commands).toContainEqual(["loginctl", "enable-linger"]);
+    expect(all).toContain("User lingering was enabled");
     expect(all).toContain("already running as your user service");
   });
 
@@ -536,7 +550,7 @@ describe("runWorkerInit", () => {
     mkdirSync(unitDir, { recursive: true });
     writeFileSync(
       path.join(unitDir, "devintern-worker.service"),
-      "[Service]\nWorkingDirectory=/old\n",
+      "# Managed by devintern worker init\n[Service]\nWorkingDirectory=/old\n",
       "utf8",
     );
     const commands: string[][] = [];
@@ -547,6 +561,9 @@ describe("runWorkerInit", () => {
         homedir: tempDir,
         run: async (command, args) => {
           commands.push([command, ...args]);
+          if (args.includes("is-enabled")) {
+            return { status: 0, stdout: "enabled", stderr: "" };
+          }
           return { status: 0, stdout: "active", stderr: "" };
         },
       }),
@@ -567,7 +584,7 @@ describe("runWorkerInit", () => {
     expect(all).not.toContain("installed and running");
   });
 
-  test("declining the update offer keeps the installed service and prints manual steps", async () => {
+  test("a custom installed service is preserved and gets manual comparison steps", async () => {
     const unitDir = path.join(tempDir, ".config", "systemd", "user");
     mkdirSync(unitDir, { recursive: true });
     writeFileSync(
@@ -593,6 +610,8 @@ describe("runWorkerInit", () => {
     expect(readFileSync(path.join(unitDir, "devintern-worker.service"), "utf8")).toContain(
       "WorkingDirectory=/old",
     );
+    expect(logs.join("\n")).toContain("custom settings and will not be overwritten");
+    expect(logs.join("\n")).toContain("already running as your user service");
     expect(logs.join("\n")).toContain("systemctl --user enable --now devintern-worker");
   });
 
@@ -611,7 +630,11 @@ describe("runWorkerInit", () => {
           if (args[0] === "print" && !existsSync(plistPath)) {
             return { status: 1, stdout: "", stderr: "Could not find service" };
           }
-          return { status: 0, stdout: "", stderr: "" };
+          return {
+            status: 0,
+            stdout: args[0] === "print" ? "state = running" : "",
+            stderr: "",
+          };
         },
       }),
     );

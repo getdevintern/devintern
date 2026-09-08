@@ -169,6 +169,10 @@ export interface WorkerInitDeps {
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
   execPath?: string;
+  /** Runtime executable used to launch the worker entrypoint (tests). */
+  runtimePath?: string;
+  /** PATH inherited by the background service (tests). */
+  environmentPath?: string;
   /** File writer override for tests. */
   writeFile?: (path: string, content: string) => void;
   /** Skip the background-service offer entirely (CLI `--no-service`). */
@@ -185,6 +189,8 @@ export interface WorkerInitDeps {
   installService?: (ctx: {
     workspaceDir: string;
     execPath: string;
+    runtimePath: string;
+    environmentPath: string;
     log: LogFn;
   }) => Promise<ServiceInstallResult>;
 }
@@ -703,7 +709,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     log("\n9️⃣  Background service (optional)");
     const platform = deps.platform ?? process.platform;
     const writeFile = deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
-    const execPath = deps.execPath ?? process.argv[1] ?? "devintern";
+    const execPath = deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern");
+    const runtimePath = deps.runtimePath ?? process.execPath;
+    const environmentPath = deps.environmentPath ?? process.env.PATH ?? "";
     let serviceRunning = false;
 
     const printManualServicePath = () => {
@@ -713,11 +721,17 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
       if (platform === "linux") {
         const unitPath = join(workspaceDir, SYSTEMD_UNIT_NAME);
-        writeFile(unitPath, renderSystemdUnit({ execPath, projectDir: workspaceDir }));
+        writeFile(
+          unitPath,
+          renderSystemdUnit({ execPath, projectDir: workspaceDir, runtimePath, environmentPath }),
+        );
         log(`💾 Wrote ${unitPath}`);
       } else {
         const plistPath = join(workspaceDir, LAUNCHD_PLIST_NAME);
-        writeFile(plistPath, renderLaunchdPlist({ execPath, workingDir: workspaceDir }));
+        writeFile(
+          plistPath,
+          renderLaunchdPlist({ execPath, workingDir: workspaceDir, runtimePath, environmentPath }),
+        );
         log(`💾 Wrote ${plistPath}`);
       }
       log("   Install it yourself with:");
@@ -740,27 +754,47 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       const state = deps.detectService
         ? await deps.detectService()
         : await detectWorkerService(serviceDeps);
-      let accepted: boolean;
-      if (state.installed) {
+      let accepted = false;
+      if (state.installed && !state.managed) {
+        serviceRunning = state.active;
+        log("⚠️  The installed service has custom settings and will not be overwritten.");
+        printManualServicePath();
+      } else if (state.installed) {
         const offer = state.active ? "restart and update" : "update";
+        const bootSuffix = platform === "linux" ? " and ensure it starts at boot" : "";
         const answer = (
-          await prompt(`A devintern-worker service is already installed. ${offer} it now? [Y/n]: `)
+          await prompt(
+            `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
+          )
         )
           .trim()
           .toLowerCase();
         accepted = answer !== "n" && answer !== "no";
       } else {
-        const answer = (await prompt("Install and start the background service now? [Y/n]: "))
-          .trim()
-          .toLowerCase();
+        const action =
+          platform === "linux"
+            ? "Install and start the background service at boot now? [Y/n]: "
+            : "Install and start the background service now? [Y/n]: ";
+        const answer = (await prompt(action)).trim().toLowerCase();
         accepted = answer !== "n" && answer !== "no";
       }
-      if (!accepted) {
+      if (state.installed && !state.managed) {
+        // Leave custom definitions and their running processes untouched.
+      } else if (!accepted) {
         printManualServicePath();
       } else {
         const result = deps.installService
-          ? await deps.installService({ workspaceDir, execPath, log })
-          : await installWorkerService({ workspaceDir, execPath }, serviceDeps);
+          ? await deps.installService({
+              workspaceDir,
+              execPath,
+              runtimePath,
+              environmentPath,
+              log,
+            })
+          : await installWorkerService(
+              { workspaceDir, execPath, runtimePath, environmentPath },
+              serviceDeps,
+            );
         if (result.ok) {
           serviceRunning = true;
           log(
@@ -769,9 +803,14 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
               : "✅ devintern-worker service installed and running.",
           );
           log("   Open http://localhost:4400 to verify worker status and runs.");
+          if (result.warning) {
+            log(`⚠️  ${result.warning}`);
+          }
           log(
             platform === "linux"
-              ? "   Tip: run `loginctl enable-linger` once so the service survives logout."
+              ? result.warning
+                ? "   Run `loginctl enable-linger` to start the worker at boot before login."
+                : "   User lingering was enabled so the service starts at boot and survives logout."
               : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
           );
         } else {

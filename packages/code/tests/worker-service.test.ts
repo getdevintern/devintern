@@ -8,6 +8,7 @@ import {
   manualServiceInstructions,
   renderLaunchdPlist,
   renderSystemdUnit,
+  SERVICE_MANAGED_MARKER,
   SYSTEMD_UNIT_NAME,
   systemdUnitPath,
 } from "../src/lib/worker-service";
@@ -27,13 +28,13 @@ function fakeServiceDeps(options: {
     options.run ??
     (async (command, args) => {
       commands.push([command, ...args]);
-      if (args[0] === "is-active") {
+      if (args.includes("is-active") || args.includes("is-enabled")) {
         return inactive;
       }
       // launchd reports the label as absent until an agent file exists.
       if (args[0] === "print") {
         const loaded = [...files.keys()].some((key) => key.endsWith(LAUNCHD_PLIST_NAME));
-        return loaded ? ok : inactive;
+        return loaded ? running : inactive;
       }
       return ok;
     });
@@ -64,8 +65,11 @@ function fakeServiceDeps(options: {
   };
 }
 
-const ok = { status: 0, stdout: "active", stderr: "" };
+const ok = { status: 0, stdout: "", stderr: "" };
+const running = { status: 0, stdout: "state = running", stderr: "" };
 const inactive = { status: 1, stdout: "", stderr: "" };
+const managedUnit = `# ${SERVICE_MANAGED_MARKER}\n[Service]\n`;
+const managedPlist = `<!-- ${SERVICE_MANAGED_MARKER} -->\n<plist/>`;
 
 describe("service paths", () => {
   test("uses the user-level systemd and LaunchAgents locations", () => {
@@ -86,7 +90,11 @@ describe("detectWorkerService", () => {
       files: { [unitPath]: "[Service]" },
       run: async () => inactive,
     });
-    expect(await detectWorkerService(deps)).toEqual({ installed: true, active: false });
+    expect(await detectWorkerService(deps)).toEqual({
+      installed: true,
+      active: false,
+      managed: false,
+    });
   });
 
   test("reports an active macOS agent via launchctl print", async () => {
@@ -98,15 +106,39 @@ describe("detectWorkerService", () => {
       run: async (command, args) => {
         expect(command).toBe("launchctl");
         expect(args).toEqual(["print", "gui/501/com.devintern.worker"]);
-        return ok;
+        return running;
       },
     });
-    expect(await detectWorkerService(deps)).toEqual({ installed: true, active: true });
+    expect(await detectWorkerService(deps)).toEqual({
+      installed: true,
+      active: true,
+      managed: false,
+    });
+  });
+
+  test("does not call a loaded but exited macOS agent active", async () => {
+    const agentPath = launchdAgentPath("/Users/tester");
+    const { deps } = fakeServiceDeps({
+      platform: "darwin",
+      homedir: "/Users/tester",
+      files: { [agentPath]: managedPlist },
+      uid: 501,
+      run: async () => ({ status: 0, stdout: "state = exited\nlast exit code = 1", stderr: "" }),
+    });
+    expect(await detectWorkerService(deps)).toEqual({
+      installed: true,
+      active: false,
+      managed: true,
+    });
   });
 
   test("treats other platforms as not installed", async () => {
     const { deps } = fakeServiceDeps({ platform: "win32" });
-    expect(await detectWorkerService(deps)).toEqual({ installed: false, active: false });
+    expect(await detectWorkerService(deps)).toEqual({
+      installed: false,
+      active: false,
+      managed: false,
+    });
   });
 });
 
@@ -121,6 +153,9 @@ describe("installWorkerService on Linux", () => {
         if (args.includes("is-active")) {
           return enabled ? ok : inactive;
         }
+        if (args.includes("is-enabled")) {
+          return inactive;
+        }
         if (args.includes("enable")) {
           enabled = true;
         }
@@ -128,20 +163,29 @@ describe("installWorkerService on Linux", () => {
       },
     });
     const result = await installWorkerService(
-      { workspaceDir: "/srv/workspace", execPath: "/usr/local/bin/devintern" },
+      {
+        workspaceDir: "/srv/workspace",
+        execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/bun/bin/bun",
+        environmentPath: "/opt/bun/bin:/usr/bin",
+      },
       deps,
     );
     expect(result).toEqual({ ok: true, updated: false });
     const unit = files.get(unitPath) ?? "";
     expect(unit).toContain("WorkingDirectory=/srv/workspace");
-    expect(unit).toContain("ExecStart=/usr/local/bin/devintern worker");
+    expect(unit).toContain('Environment="PATH=/opt/bun/bin:/usr/bin"');
+    expect(unit).toContain("ExecStart=/opt/bun/bin/bun /usr/local/bin/devintern worker");
+    expect(unit).toContain("WantedBy=default.target");
     expect(unit).toContain("Type=simple");
     expect(unit).not.toContain("StandardOutput=");
     expect(commands).toEqual([
       ["systemctl", "--user", "is-active", "devintern-worker"],
+      ["systemctl", "--user", "is-enabled", "devintern-worker"],
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", "devintern-worker"],
       ["systemctl", "--user", "is-active", "devintern-worker"],
+      ["loginctl", "enable-linger"],
     ]);
   });
 
@@ -149,7 +193,7 @@ describe("installWorkerService on Linux", () => {
     const unitPath = systemdUnitPath("/home/tester");
     const { deps, commands } = fakeServiceDeps({
       platform: "linux",
-      files: { [unitPath]: "old unit" },
+      files: { [unitPath]: managedUnit },
       run: async (command, args) => {
         commands.push([command, ...args]);
         return ok;
@@ -170,18 +214,59 @@ describe("installWorkerService on Linux", () => {
     ]);
   });
 
+  test("refuses to overwrite a custom systemd unit", async () => {
+    const unitPath = systemdUnitPath("/home/tester");
+    const { deps, files, commands } = fakeServiceDeps({
+      platform: "linux",
+      files: { [unitPath]: "[Service]\nEnvironment=KEEP_ME=yes\n" },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/srv/workspace", execPath: "devintern" },
+      deps,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("custom service definition");
+    expect(files.get(unitPath)).toContain("KEEP_ME=yes");
+    expect(commands).toEqual([]);
+  });
+
+  test("keeps the service but warns when lingering cannot be enabled", async () => {
+    let enabled = false;
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      run: async (command, args) => {
+        if (command === "loginctl") {
+          return { status: 1, stdout: "", stderr: "Access denied" };
+        }
+        if (args.includes("is-active")) return enabled ? ok : inactive;
+        if (args.includes("is-enabled")) return inactive;
+        if (args.includes("enable")) enabled = true;
+        return ok;
+      },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/srv/workspace", execPath: "devintern" },
+      deps,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("may stop at logout");
+  });
+
   test("removes a freshly written unit when the systemd user session fails (WSL)", async () => {
     const unitPath = systemdUnitPath("/home/tester");
+    const commands: string[][] = [];
     const { deps, files } = fakeServiceDeps({
       platform: "linux",
-      run: async (_command, args) =>
-        args.includes("daemon-reload")
+      run: async (command, args) => {
+        commands.push([command, ...args]);
+        return args.includes("daemon-reload")
           ? {
               status: 1,
               stdout: "",
               stderr: "System has not been booted with systemd as init system (PID 1).",
             }
-          : inactive,
+          : inactive;
+      },
     });
     const result = await installWorkerService(
       { workspaceDir: "/srv/workspace", execPath: "devintern" },
@@ -190,13 +275,14 @@ describe("installWorkerService on Linux", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("daemon-reload failed");
     expect(files.has(unitPath)).toBe(false);
+    expect(commands).toContainEqual(["systemctl", "--user", "disable", "devintern-worker"]);
   });
 
   test("restores the previous unit content when a restart fails", async () => {
     const unitPath = systemdUnitPath("/home/tester");
     const { deps, files } = fakeServiceDeps({
       platform: "linux",
-      files: { [unitPath]: "old unit" },
+      files: { [unitPath]: managedUnit },
       run: async (_command, args) => (args.includes("restart") ? { ...ok, status: 1 } : ok),
     });
     const result = await installWorkerService(
@@ -204,7 +290,7 @@ describe("installWorkerService on Linux", () => {
       deps,
     );
     expect(result.ok).toBe(false);
-    expect(files.get(unitPath)).toBe("old unit");
+    expect(files.get(unitPath)).toBe(managedUnit);
   });
 });
 
@@ -217,16 +303,24 @@ describe("installWorkerService on macOS", () => {
       uid: 501,
       run: async (command, args) => {
         commands.push([command, ...args]);
-        return files.has(plistPath) ? ok : inactive;
+        return files.has(plistPath) ? running : inactive;
       },
     });
     const result = await installWorkerService(
-      { workspaceDir: "/Users/tester/workspace", execPath: "/usr/local/bin/devintern" },
+      {
+        workspaceDir: "/Users/tester/workspace",
+        execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/homebrew/bin/bun",
+        environmentPath: "/opt/homebrew/bin:/usr/bin:/bin",
+      },
       deps,
     );
     expect(result).toEqual({ ok: true, updated: false });
     const plist = files.get(plistPath) ?? "";
     expect(plist).toContain("<string>/usr/local/bin/devintern</string>");
+    expect(plist).toContain("<string>/opt/homebrew/bin/bun</string>");
+    expect(plist).toContain("<key>EnvironmentVariables</key>");
+    expect(plist).toContain("<string>/opt/homebrew/bin:/usr/bin:/bin</string>");
     expect(plist).toContain("<string>worker</string>");
     expect(commands).toEqual([
       ["launchctl", "print", "gui/501/com.devintern.worker"],
@@ -242,7 +336,8 @@ describe("installWorkerService on macOS", () => {
       uid: 501,
       run: async (command, args) => {
         commands.push([command, ...args]);
-        return args[0] === "bootstrap" ? { ...ok, status: 1 } : ok;
+        if (args[0] === "bootstrap") return { ...ok, status: 1 };
+        return args[0] === "print" ? running : ok;
       },
     });
     const result = await installWorkerService(
@@ -259,10 +354,10 @@ describe("installWorkerService on macOS", () => {
       platform: "darwin",
       homedir: "/Users/tester",
       uid: 501,
-      files: { [plistPath]: "old plist" },
+      files: { [plistPath]: managedPlist },
       run: async (command, args) => {
         commands.push([command, ...args]);
-        return ok;
+        return args[0] === "print" ? running : ok;
       },
     });
     const result = await installWorkerService(
@@ -276,6 +371,45 @@ describe("installWorkerService on macOS", () => {
     expect(bootstrapAt).toBeGreaterThan(bootoutAt);
   });
 
+  test("does not overwrite an agent when bootout fails", async () => {
+    const plistPath = launchdAgentPath("/Users/tester");
+    const { deps, files } = fakeServiceDeps({
+      platform: "darwin",
+      homedir: "/Users/tester",
+      uid: 501,
+      files: { [plistPath]: managedPlist },
+      run: async (_command, args) =>
+        args[0] === "bootout"
+          ? { status: 1, stdout: "", stderr: "Operation not permitted" }
+          : running,
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/Users/tester/workspace", execPath: "devintern" },
+      deps,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("bootout failed");
+    expect(files.get(plistPath)).toBe(managedPlist);
+  });
+
+  test("refuses to overwrite a custom launchd agent", async () => {
+    const plistPath = launchdAgentPath("/Users/tester");
+    const { deps, files, commands } = fakeServiceDeps({
+      platform: "darwin",
+      homedir: "/Users/tester",
+      uid: 501,
+      files: { [plistPath]: "<plist><custom/></plist>" },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/Users/tester/workspace", execPath: "devintern" },
+      deps,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("custom service definition");
+    expect(files.get(plistPath)).toContain("<custom/>");
+    expect(commands).toEqual([]);
+  });
+
   test("a failed bootstrap restores the previous agent and reloads it", async () => {
     const plistPath = launchdAgentPath("/Users/tester");
     const target = "gui/501/com.devintern.worker";
@@ -283,16 +417,16 @@ describe("installWorkerService on macOS", () => {
       platform: "darwin",
       homedir: "/Users/tester",
       uid: 501,
-      files: { [plistPath]: "old plist" },
+      files: { [plistPath]: managedPlist },
       run: async (command, args) => {
         commands.push([command, ...args]);
         if (
           (args[0] === "bootstrap" || args[0] === "load") &&
-          files.get(plistPath) !== "old plist"
+          files.get(plistPath) !== managedPlist
         ) {
           return { status: 1, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
         }
-        return ok;
+        return args[0] === "print" ? running : ok;
       },
     });
     const result = await installWorkerService(
@@ -300,7 +434,7 @@ describe("installWorkerService on macOS", () => {
       deps,
     );
     expect(result.ok).toBe(false);
-    expect(files.get(plistPath)).toBe("old plist");
+    expect(files.get(plistPath)).toBe(managedPlist);
     expect(commands).toContainEqual(["launchctl", "bootout", target]);
     expect(commands.filter((c) => c[1] === "bootstrap").length).toBeGreaterThanOrEqual(2);
   });

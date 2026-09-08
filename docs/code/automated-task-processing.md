@@ -105,7 +105,7 @@ Instead of system units under `/etc/systemd/system` (which need `sudo`), you can
 loginctl enable-linger "$USER"
 ```
 
-`devintern worker init` installs and starts a user-level systemd unit (Linux) or launchd agent (macOS) for the resident worker when you accept its final offer; the manual steps above remain the fallback for hosts where the automatic install fails (WSL without a systemd user session, headless macOS, or a command error).
+`devintern worker init` installs and starts a user-level systemd unit (Linux) or launchd agent (macOS) for the resident worker when you accept its final offer. On Linux it also enables lingering so the worker starts at boot before login; if that last command is unavailable, the service stays running and the wizard prints the command for you. The manual steps above remain the fallback for hosts where the automatic install fails (WSL without a systemd user session, headless macOS, or a command error).
 
 #### Git push under automation
 
