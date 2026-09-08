@@ -39,6 +39,10 @@ import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import {
+  DEFAULT_AUTO_REVIEW_ITERATIONS,
+  resolveAutoReviewIterations,
+} from "./lib/auto-review-config";
+import {
   handlePingEvent,
   isGitHubIP,
   parseEventType,
@@ -63,7 +67,9 @@ const DEFAULT_CONFIG: WebhookServerConfig = {
   host: process.env.WEBHOOK_HOST || "0.0.0.0",
   webhookSecret: process.env.WEBHOOK_SECRET || "",
   autoReview: process.env.WEBHOOK_AUTO_REVIEW === "true",
-  autoReviewMaxIterations: parseInt(process.env.WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS || "5", 10),
+  // Placeholder replaced in startWebhookServer with the unified cap resolved
+  // from AUTO_REVIEW_ITERATIONS (or the deprecated webhook-only alias).
+  autoReviewMaxIterations: DEFAULT_AUTO_REVIEW_ITERATIONS,
   validateIp: process.env.WEBHOOK_VALIDATE_IP === "true",
   debug: process.env.WEBHOOK_DEBUG === "true",
 };
@@ -1488,9 +1494,26 @@ async function sendResponse(res: ServerResponse, response: Response): Promise<vo
 export async function startWebhookServer(
   config: Partial<WebhookServerConfig> = {},
 ): Promise<import("http").Server> {
+  // Unified auto-review iteration cap: explicit config override > the shared
+  // AUTO_REVIEW_ITERATIONS env var (with the deprecated WEBHOOK_* alias as a
+  // warned fallback) > the shared default. An invalid value stops startup
+  // instead of starting a misconfigured loop.
+  let autoReviewIterations: number;
+  try {
+    autoReviewIterations = resolveAutoReviewIterations(
+      config.autoReviewMaxIterations === undefined
+        ? undefined
+        : String(config.autoReviewMaxIterations),
+    );
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
+
   const finalConfig: WebhookServerConfig = {
     ...DEFAULT_CONFIG,
     ...config,
+    autoReviewMaxIterations: autoReviewIterations,
   };
 
   // Validate configuration

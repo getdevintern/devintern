@@ -60,6 +60,10 @@ import type { AnalyticsPropValue } from "./lib/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
+import {
+  DEFAULT_AUTO_REVIEW_ITERATIONS,
+  resolveAutoReviewIterations,
+} from "./lib/auto-review-config";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
@@ -222,7 +226,7 @@ interface ProgramOptions {
   createPr: boolean; // New option to create pull request
   prTargetBranch: string; // Target branch for PR
   autoReview: boolean; // New option to run automatic PR review loop
-  autoReviewIterations: string; // Max iterations for auto-review loop
+  autoReviewIterations?: string; // Max iterations for auto-review loop (unset → AUTO_REVIEW_ITERATIONS env or shared default)
   query?: string; // Generic query for batch processing
   jql?: string; // Deprecated alias for --query
   skipComments: boolean; // Skip posting comments to task tracker
@@ -1235,7 +1239,10 @@ program
     "main",
   )
   .option("--auto-review", "Run automatic PR review loop after creating PR (requires --create-pr)")
-  .option("--auto-review-iterations <number>", "Maximum iterations for auto-review loop", "5")
+  .option(
+    "--auto-review-iterations <number>",
+    "Maximum review-fix cycles for auto-review (default: 2; env: AUTO_REVIEW_ITERATIONS)",
+  )
   .option("--skip-comments", "Skip posting comments to the task tracker (for testing)")
   .option(
     "--force",
@@ -1371,6 +1378,22 @@ if (options.envFile) {
     console.log("   Searched upward from current directory, then home and package directories.");
   }
 }
+
+// Resolve the unified auto-review iteration cap up front so an invalid
+// --auto-review-iterations value or AUTO_REVIEW_ITERATIONS env var fails fast
+// with a clear error instead of starting agent runs the loop would then
+// abort. When auto-review is off the cap is unused and the env var is ignored.
+const autoReviewIterationCap: number | undefined = (() => {
+  if (options.autoReviewIterations === undefined && !options.autoReview) {
+    return undefined;
+  }
+  try {
+    return resolveAutoReviewIterations(options.autoReviewIterations);
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
+})();
 
 // Resolve the final agent harness
 const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
@@ -1997,7 +2020,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       projectSettings,
       gitAuthor,
       options.autoReview,
-      Number.parseInt(options.autoReviewIterations),
+      autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
     );
 
     // An incomplete-summary file written during this run means the agent
@@ -3412,7 +3435,8 @@ Now implement the solution. Write the actual code.`;
  * @param projectSettings - Per-project workflow settings
  * @param gitAuthor - Optional bot author for commits
  * @param autoReview - Run post-PR auto-review loop
- * @param autoReviewIterations - Max auto-review iterations
+ * @param autoReviewIterations - Max auto-review iterations, resolved once at
+ *   startup from the unified `--auto-review-iterations` arg / env var
  * @param isPlanRetry - Whether this run follows a plan-only retry
  */
 async function runAgentHarness(
@@ -3432,7 +3456,7 @@ async function runAgentHarness(
   projectSettings: ProjectSettings | null = null,
   gitAuthor?: { name: string; email: string },
   autoReview = false,
-  autoReviewIterations = 5,
+  autoReviewIterations: number = DEFAULT_AUTO_REVIEW_ITERATIONS,
   isPlanRetry = false,
 ): Promise<void> {
   // Wait out any in-progress CLI auto-update swap before spawning, so a

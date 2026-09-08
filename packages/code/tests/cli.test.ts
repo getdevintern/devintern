@@ -302,6 +302,48 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).toContain("Processing");
   });
 
+  test("should reject an invalid --auto-review-iterations value before any agent runs", async () => {
+    for (const value of ["abc", "0", "-1", "1.5"]) {
+      const result = await runCLI(["TEST-123", "--create-pr", "--auto-review-iterations", value]);
+      const output = result.stdout + result.stderr;
+      expect(result.exitCode).toBe(1);
+      expect(output).toContain(
+        "--auto-review-iterations must be a whole number of iterations >= 1",
+      );
+      expect(output).toContain(`(got "${value}")`);
+      expect(output).not.toContain("Processing");
+    }
+  });
+
+  test("should reject an invalid AUTO_REVIEW_ITERATIONS env var when auto-review is on", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      env: { AUTO_REVIEW_ITERATIONS: "0" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1");
+    expect(output).not.toContain("Processing");
+  });
+
+  test("should ignore an invalid AUTO_REVIEW_ITERATIONS env var when auto-review is off", async () => {
+    const result = await runCLI(["TEST-123"], {
+      env: { AUTO_REVIEW_ITERATIONS: "abc" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).not.toContain("AUTO_REVIEW_ITERATIONS");
+    expect(output).not.toContain("must be a whole number");
+    expect(result.stdout).toContain("Processing");
+  });
+
+  test("should accept a valid unified env var with --auto-review", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      env: { AUTO_REVIEW_ITERATIONS: "2" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).not.toContain("must be a whole number");
+    expect(result.stdout).toContain("Processing");
+  });
+
   test("should handle combination of options", async () => {
     const result = await runCLI([
       "TEST-123",
