@@ -106,6 +106,7 @@ import {
 } from "./lib/usage-limit-protocol";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
+import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
@@ -1823,6 +1824,17 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
         }
         process.exit(1);
       }
+    }
+
+    // Fleet worktrees are created at the repository's default branch, while
+    // the task may target another base branch. Install only after branch
+    // preparation so dependencies match the checkout the agent will inspect.
+    // This subprocess already carries the workspace/repo/team environment,
+    // including private-registry credentials. The same placement also makes
+    // persistent automation worktrees reinstall on every occurrence and keeps
+    // dependency directories out of the destructive pre-branch cleanup.
+    if (process.env[WORKSPACE_REPO_ENV]) {
+      await Utils.prepareWorktreeForAgent(process.cwd());
     }
 
     // Run clarity check first (unless skipped)

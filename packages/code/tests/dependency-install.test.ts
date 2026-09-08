@@ -2,7 +2,7 @@
  * Test suite for dependency installation in worktrees
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -89,6 +89,79 @@ describe("Dependency Installation", () => {
 
     // Should succeed (even if bun fails, we test the detection)
     expect(result.packageManager).toBe("bun");
+  });
+
+  test("should detect the bun.lock text lockfile and use bun", async () => {
+    const testWorkingDir = join(testDir, "bun-text-lock-project");
+    mkdirSync(testWorkingDir, { recursive: true });
+
+    // Bun writes a text `bun.lock` since 1.2 (instead of binary `bun.lockb`)
+    writeFileSync(
+      join(testWorkingDir, "package.json"),
+      JSON.stringify({ name: "test", version: "1.0.0", dependencies: {} }),
+      "utf8",
+    );
+    writeFileSync(
+      join(testWorkingDir, "bun.lock"),
+      '{\n  "lockfileVersion": 1,\n  "packages": {},\n}\n',
+      "utf8",
+    );
+
+    const result = await Utils.installDependencies(testWorkingDir, { verbose: false });
+
+    expect(result.packageManager).toBe("bun");
+  });
+
+  test("prepareWorktreeForAgent isolates hooks before installing dependencies", async () => {
+    let hooksPathDuringInstall: string | undefined;
+    const installSpy = spyOn(Utils, "installDependencies").mockImplementation(
+      async (workingDir) => {
+        hooksPathDuringInstall = execSync("git config core.hooksPath", {
+          cwd: workingDir,
+          encoding: "utf8",
+        }).trim();
+        return { success: true, packageManager: "test" };
+      },
+    );
+
+    let result: Awaited<ReturnType<typeof Utils.prepareWorktreeForAgent>>;
+    try {
+      result = await Utils.prepareWorktreeForAgent(repoDir);
+    } finally {
+      installSpy.mockRestore();
+    }
+
+    expect(result).toEqual({ success: true, packageManager: "test" });
+    const gitDir = execSync("git rev-parse --absolute-git-dir", {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
+    expect(hooksPathDuringInstall).toBe(join(gitDir, "hooks"));
+  });
+
+  test("prepareWorktreeForAgent warns but does not throw when install fails", async () => {
+    const installSpy = spyOn(Utils, "installDependencies").mockResolvedValue({
+      success: false,
+      packageManager: "test",
+      error: "deterministic install failure",
+    });
+    const warnSpy = spyOn(console, "warn");
+    let result: Awaited<ReturnType<typeof Utils.prepareWorktreeForAgent>>;
+    let warned: string[];
+    try {
+      result = await Utils.prepareWorktreeForAgent(repoDir);
+      warned = warnSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      installSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+
+    expect(result).toEqual({
+      success: false,
+      packageManager: "test",
+      error: "deterministic install failure",
+    });
+    expect(warned.some((message) => message.includes("Failed to install dependencies"))).toBe(true);
   });
 
   test("should detect pnpm-lock.yaml and use pnpm", async () => {

@@ -7,7 +7,10 @@
  * The pipeline's tree-mutating steps (`createFeatureBranch` does
  * `git reset --hard` + `git clean -fd`) are safe there because the tree is
  * throwaway: removed after a successful run, kept for debugging on failure,
- * and swept by TTL on worker start.
+ * and swept by TTL on worker start. Git hooks are isolated as soon as each
+ * worktree is created so later package installs cannot clobber the shared
+ * `.git/hooks`. Task dependencies are installed by the task subprocess only
+ * after it has checked out its final feature branch.
  *
  * Bare-clone gotcha: `git clone --bare` records `remote.origin.url` but NOT
  * a fetch refspec, so `git fetch origin` would never update
@@ -154,7 +157,9 @@ export class RepoManager {
    * Ensure the persistent base worktree (default branch) exists.
    *
    * Review and mention runs need a normal checkout to operate from; task
-   * runs use disposable worktrees instead.
+   * runs use disposable worktrees instead. Hooks are isolated on first
+   * creation; task subprocesses install dependencies after preparing their
+   * final branch, including every reuse by an automation.
    */
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
     const path = this.baseWorktreePath(repo.name);
@@ -168,6 +173,10 @@ export class RepoManager {
 
   /**
    * Create a disposable, detached worktree for one task run.
+   *
+   * Git hooks are isolated before the worktree is returned. The task
+   * subprocess installs dependencies after preparing its final branch, when
+   * the workspace's layered environment is active.
    *
    * @param repo - Workspace repo the task routed to
    * @param taskKey - Task key; used in the directory name for debuggability
@@ -227,6 +236,13 @@ export class RepoManager {
     return removed;
   }
 
+  /**
+   * Add a worktree at `path` and isolate its git hooks.
+   *
+   * This must happen before the task subprocess installs packages: postinstall
+   * tools such as lefthook would otherwise rewrite the shared bare-clone
+   * `.git/hooks`. Isolation is best-effort, matching review worktrees.
+   */
   private async addWorktree(repoName: string, path: string, ref: string): Promise<void> {
     const parent = this.repoWorktreesDir(repoName);
     if (!existsSync(parent)) {
@@ -238,5 +254,6 @@ export class RepoManager {
     if (!result.success) {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
+    await Utils.isolateWorktreeHooks(path);
   }
 }

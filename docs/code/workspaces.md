@@ -20,6 +20,7 @@ Workspace mode runs under the same automation license as the rest of the worker:
 - Without `[[teams]]`, the worker polls `[defaults].task_query`. With teams, it creates one isolated tracker client, query, cursor, and dedupe scope per team.
 - A team can set `repo` for a fixed destination. A team spanning repositories omits `repo` and uses routing rules. A task runs only when its applicable rules agree on one repository; unmatched or ambiguous work is recorded rather than guessed. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
+- Every task worktree is ready for the agent before it starts: git hooks are isolated when the worktree is created (so package postinstalls like lefthook cannot rewrite the shared `.git/hooks`), then dependencies are installed after the task's final branch is prepared by auto-detecting the package manager from the lockfile (bun/pnpm/yarn/npm, uv/poetry/pip, bundle, go, cargo, composer, maven, gradle). The install inherits the same layered workspace, repo, and team environment as the agent, including registry auth; if no lockfile is found or the install fails, the run continues with a warning — the agent can still set dependencies up itself.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
 - Runs are serialized: one task at a time, with a per-repository lock. One systemd unit (or one terminal) drives the whole fleet.
 
@@ -191,7 +192,7 @@ Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off
 
 The scheduling is identical; only where the work runs changes:
 
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`.
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. Dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
 - It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
 - Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 
