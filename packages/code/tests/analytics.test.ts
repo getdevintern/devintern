@@ -42,6 +42,18 @@ function makeConfigDir(withSettings?: object): string {
   return dir;
 }
 
+/** Config dir with `analytics.enabled: false` and an existing telemetry id. */
+function optedOutConfigDir(anonymousId: string): string {
+  const dir = makeConfigDir({ analytics: { enabled: false } });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "telemetry.json"),
+    `${JSON.stringify({ anonymousId }, null, 2)}\n`,
+    "utf8",
+  );
+  return dir;
+}
+
 /** Events collected by the injected capture seam. */
 interface RecordedEvent {
   distinctId?: string;
@@ -205,6 +217,28 @@ describe("settings opt-out reporting", () => {
     expect(recorded).toHaveLength(1);
   });
 
+  test("env kill-switch suppresses the opt-out acknowledgement", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env.DEVINTERN_TELEMETRY_DISABLED = "1";
+    const dir = makeConfigDir({ analytics: { enabled: false } });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "telemetry.json"),
+      `${JSON.stringify({ anonymousId: "11111111-2222-3333-4444-555555555555" }, null, 2)}\n`,
+      "utf8",
+    );
+    const recorded: RecordedEvent[] = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
+
+    await track("cli_run", {}, { configDir: dir });
+    expect(recorded).toHaveLength(0);
+    // The opt-out marker is untouched so a later run without the env var can
+    // still acknowledge the settings opt-out.
+    expect(JSON.parse(readFileSync(join(dir, "telemetry.json"), "utf8"))).toEqual({
+      anonymousId: "11111111-2222-3333-4444-555555555555",
+    });
+  });
+
   test("does not report when the settings opt-out is absent", async () => {
     process.env.POSTHOG_API_KEY = "phc_test";
     const dir = makeConfigDir();
@@ -223,6 +257,25 @@ describe("settings opt-out reporting", () => {
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
     await track("cli_run", {}, { configDir: makeConfigDir({ analytics: { enabled: false } }) });
     expect(recorded).toHaveLength(0);
+  });
+
+  test("restoring the test capture seam resets the one-time opt-out gate", async () => {
+    process.env.POSTHOG_API_KEY = "phc_test";
+
+    const first: RecordedEvent[] = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => first.push(payload) });
+    const dirOne = optedOutConfigDir("11111111-2222-3333-4444-555555555555");
+    await track("cli_run", {}, { configDir: dirOne });
+    expect(first.map((r) => r.event)).toEqual(["analytics_opt_out"]);
+
+    // Simulate a fresh test run: the undefined restore clears the process
+    // flag, so a later test still sees its own opt-out acknowledgement.
+    setAnalyticsCaptureForTests(undefined);
+    const second: RecordedEvent[] = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => second.push(payload) });
+    const dirTwo = optedOutConfigDir("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    await track("cli_run", {}, { configDir: dirTwo });
+    expect(second.map((r) => r.event)).toEqual(["analytics_opt_out"]);
   });
 });
 
@@ -259,8 +312,8 @@ describe("activation funnel events", () => {
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
 
     trackSetupStarted("rescue");
-    trackSetupDeclined("missing_tracker_credentials");
-    trackSetupFailed("scaffold_refused");
+    await trackSetupDeclined("missing_tracker_credentials");
+    await trackSetupFailed("scaffold_refused");
     trackSetupCompleted({
       tracker: "markdown",
       signedIn: "skipped",
@@ -312,8 +365,7 @@ describe("activation funnel events", () => {
       { id: "agent", label: "AI agent CLI", status: "fail" as const },
       { id: "tracker", label: "Task tracker", status: "ok" as const },
     ];
-    trackDoctorRun({ checks, hasFailures: true, hasWarnings: false });
-    await Promise.resolve();
+    await trackDoctorRun({ checks, hasFailures: true, hasWarnings: false });
 
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.event).toBe("doctor_run");
@@ -330,8 +382,7 @@ describe("activation funnel events", () => {
     process.env.POSTHOG_API_KEY = "phc_test";
     const recorded: RecordedEvent[] = [];
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
-    trackDoctorRun({ checks: [], hasFailures: false, hasWarnings: false });
-    await Promise.resolve();
+    await trackDoctorRun({ checks: [], hasFailures: false, hasWarnings: false });
     expect(recorded[0]!.properties).toMatchObject({ outcome: "ready" });
   });
 
@@ -340,9 +391,8 @@ describe("activation funnel events", () => {
     const recorded: RecordedEvent[] = [];
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
 
-    trackLoginResult({ outcome: "succeeded", method: "github" });
-    trackLoginResult({ outcome: "failed" });
-    await Promise.resolve();
+    await trackLoginResult({ outcome: "succeeded", method: "github" });
+    await trackLoginResult({ outcome: "failed" });
 
     expect(recorded[0]!.properties).toMatchObject({ outcome: "succeeded", method: "github" });
     expect(recorded[1]!.properties).toMatchObject({ outcome: "failed" });
@@ -354,13 +404,12 @@ describe("activation funnel events", () => {
     const recorded: RecordedEvent[] = [];
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
 
-    trackInteractiveTaskRun({
+    await trackInteractiveTaskRun({
       tracker: "linear",
       outcome: "succeeded",
       taskCount: 2,
       runMode: "tasks",
     });
-    await Promise.resolve();
 
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.properties).toEqual({
@@ -430,13 +479,12 @@ describe("worker init and connect events", () => {
     const recorded: RecordedEvent[] = [];
     setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
 
-    trackWorkerConnect({ target: "github", outcome: "succeeded" });
-    trackWorkerConnect({ target: "sentry", outcome: "failed" });
-    await Promise.resolve();
+    await trackWorkerConnect({ target: "github", outcome: "succeeded" });
+    await trackWorkerConnect({ target: "sentry", outcome: "failed" });
 
     expect(recorded).toHaveLength(2);
-    expect(recorded[0]!.properties).toMatchObject({ tracker: "github", outcome: "succeeded" });
-    expect(recorded[1]!.properties).toMatchObject({ tracker: "sentry", outcome: "failed" });
+    expect(recorded[0]!.properties).toMatchObject({ target: "github", outcome: "succeeded" });
+    expect(recorded[1]!.properties).toMatchObject({ target: "sentry", outcome: "failed" });
   });
 });
 

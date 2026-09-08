@@ -6,7 +6,8 @@
  * (see ALLOWED_PROP_KEYS). Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
  * `analytics.enabled: false` in .devintern-code/settings.json; the settings
  * opt-out is reported once as an anonymous `analytics_opt_out` event so the
- * funnel can exclude it going forward.
+ * funnel can exclude it going forward. The env kill-switch suppresses even
+ * that acknowledgement, guaranteeing zero outbound analytics traffic.
  */
 
 import { randomUUID } from "node:crypto";
@@ -95,6 +96,7 @@ const ALLOWED_PROP_KEYS = new Set([
   "arch",
   "ci",
   "tracker",
+  "target",
   "run_mode",
   "task_count",
   "create_pr",
@@ -142,15 +144,20 @@ export interface AnalyticsCapture {
 let client: AnalyticsCapture | null | undefined;
 /** Test override: `null` forces disabled capture; `undefined` uses the real lazy client. */
 let captureForTests: AnalyticsCapture | null | undefined;
+/** Set once the one-time opt-out event has been captured in this process. */
+let optOutCaptureAttempted = false;
 
 /**
  * Test override: `null` forces disabled capture; `undefined` restores the
- * real client.
+ * real client. Restoring also clears the one-time opt-out gate so test
+ * reordering or new tests that combine telemetry.json with
+ * `analytics.enabled: false` cannot silently suppress the acknowledgement.
  * @internal
  */
 export function setAnalyticsCaptureForTests(value: AnalyticsCapture | null | undefined): void {
   captureForTests = value;
   client = undefined;
+  if (value === undefined) optOutCaptureAttempted = false;
 }
 
 export function resolveApiKey(): string {
@@ -262,6 +269,12 @@ function getClient(): AnalyticsCapture | null {
     host: resolveHost(),
     disableGeoip: true,
     personProfiles: "never",
+    // CLI semantics: the library default batches (flushAt: 20 / 10s interval),
+    // which drops everything on any exit that does not flush. Send each capture
+    // immediately in the background instead, like the raw-fetch sender it
+    // replaced; explicit exits still flush for deterministic delivery.
+    flushAt: 1,
+    flushInterval: 0,
   });
   client = {
     capture: (payload) => posthog.capture(payload),
@@ -283,12 +296,18 @@ export function isAnonymousIdNewlyCreated(configDir?: string): boolean {
 /**
  * When `analytics.enabled: false` appears in settings.json for the first time,
  * emit one anonymous `analytics_opt_out` event (before the enabled gate stops
- * further capture) and remember it in telemetry.json so it is never re-sent.
+ * further capture), flush it, and only then mark it in telemetry.json so it is
+ * not re-sent on later runs. Marking before the send could permanently lose
+ * the event on exit paths that never flush.
  * Only the durable settings opt-out is reported; the env kill-switch is not.
+ * When the env kill-switch is set, no opt-out acknowledgement is sent either —
+ * users who disable telemetry via DEVINTERN_TELEMETRY_DISABLED get zero
+ * outbound analytics traffic.
  */
-function reportOptOutIfNewlyDisabled(configDir?: string): void {
+async function reportOptOutIfNewlyDisabled(configDir?: string): Promise<void> {
   try {
     if (readAnalyticsEnabledFromSettings(configDir) !== false) return;
+    if (isTelemetryDisabledByEnv()) return;
     if (!resolveApiKey()) return;
     const dir = analyticsConfigDir(configDir);
     const telemetryFile = join(dir, "telemetry.json");
@@ -300,19 +319,27 @@ function reportOptOutIfNewlyDisabled(configDir?: string): void {
       return;
     }
     if (!parsed.anonymousId || parsed.optOutReported) return;
-    const telemetry = `${JSON.stringify({ ...parsed, optOutReported: true }, null, 2)}\n`;
-    try {
-      writeFileSync(telemetryFile, telemetry, "utf8");
-    } catch {
-      // Read-only config dir: skip sending rather than risk re-sending per run.
-      return;
-    }
+    // At most one capture per process: only the marker write can fail, and
+    // retrying within the same run would duplicate the event.
+    if (optOutCaptureAttempted) return;
+    optOutCaptureAttempted = true;
     const capture = getClient();
-    capture?.capture({
+    if (!capture) return;
+    capture.capture({
       distinctId: parsed.anonymousId,
       event: "analytics_opt_out",
       properties: {},
     });
+    await flushAnalytics();
+    try {
+      writeFileSync(
+        telemetryFile,
+        `${JSON.stringify({ ...parsed, optOutReported: true }, null, 2)}\n`,
+        "utf8",
+      );
+    } catch {
+      // Read-only config dir: the event went out; it may re-send on later runs.
+    }
   } catch {
     // Swallow — opt-out reporting must never break the CLI.
   }
@@ -329,7 +356,7 @@ export async function track(
   options: { configDir?: string } = {},
 ): Promise<void> {
   try {
-    reportOptOutIfNewlyDisabled(options.configDir);
+    await reportOptOutIfNewlyDisabled(options.configDir);
     if (!isAnalyticsEnabled(options.configDir)) return;
     const capture = getClient();
     if (!capture) return;
@@ -376,23 +403,35 @@ export function trackSetupCompleted(props: {
   });
 }
 
-/** Emit when the first-run rescue offer is declined (setup never started). */
-export function trackSetupDeclined(reason: SetupFailureReason): void {
-  void track("setup_declined", { cli_version: CLI_VERSION, os: process.platform, reason });
+/**
+ * Emit when the first-run rescue offer is declined (setup never started).
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
+ */
+export function trackSetupDeclined(reason: SetupFailureReason): Promise<void> {
+  return track("setup_declined", { cli_version: CLI_VERSION, os: process.platform, reason });
 }
 
-/** Emit when guided setup ran but ended without usable configuration. */
-export function trackSetupFailed(reason: SetupFailureReason): void {
-  void track("setup_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
+/**
+ * Emit when guided setup ran but ended without usable configuration.
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
+ */
+export function trackSetupFailed(reason: SetupFailureReason): Promise<void> {
+  return track("setup_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
 }
 
-/** Emit the doctor (or init readiness summary) outcome and per-check statuses. */
+/**
+ * Emit the doctor (or init readiness summary) outcome and per-check statuses.
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
+ */
 export function trackDoctorRun(props: {
   checks: readonly ReadinessCheckLike[];
   hasFailures: boolean;
   hasWarnings: boolean;
-}): void {
-  void track("doctor_run", {
+}): Promise<void> {
+  return track("doctor_run", {
     cli_version: CLI_VERSION,
     os: process.platform,
     outcome: props.hasFailures ? "failures" : props.hasWarnings ? "warnings" : "ready",
@@ -400,9 +439,13 @@ export function trackDoctorRun(props: {
   });
 }
 
-/** Emit the outcome of `devintern login` (method is a provider enum, not PII). */
-export function trackLoginResult(props: { outcome: LoginOutcome; method?: string }): void {
-  void track("login_result", {
+/**
+ * Emit the outcome of `devintern login` (method is a provider enum, not PII).
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
+ */
+export function trackLoginResult(props: { outcome: LoginOutcome; method?: string }): Promise<void> {
+  return track("login_result", {
     cli_version: CLI_VERSION,
     os: process.platform,
     outcome: props.outcome,
@@ -413,14 +456,16 @@ export function trackLoginResult(props: { outcome: LoginOutcome; method?: string
 /**
  * Emit one outcome event for a completed interactive task run (never for
  * worker subprocesses, whose terminal outcomes go to `worker_task_run`).
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
  */
 export function trackInteractiveTaskRun(props: {
   tracker: string;
   outcome: "succeeded" | "partial" | "failed";
   taskCount: number;
   runMode: "tasks" | "query";
-}): void {
-  void track("task_run", {
+}): Promise<void> {
+  return track("task_run", {
     cli_version: CLI_VERSION,
     os: process.platform,
     tracker: props.tracker,
@@ -457,15 +502,19 @@ export function trackWorkerInitFailed(reason: SetupFailureReason): void {
   void track("worker_init_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
 }
 
-/** Emit the outcome of a standalone `devintern worker connect <target>`. */
+/**
+ * Emit the outcome of a standalone `devintern worker connect <target>`.
+ * Returns the capture promise so flush-then-exit sites can await it and
+ * guarantee the event is queued before `flushAnalytics` runs.
+ */
 export function trackWorkerConnect(props: {
   target: string;
   outcome: "succeeded" | "failed";
-}): void {
-  void track("worker_connect", {
+}): Promise<void> {
+  return track("worker_connect", {
     cli_version: CLI_VERSION,
     os: process.platform,
-    tracker: props.target,
+    target: props.target,
     outcome: props.outcome,
   });
 }
@@ -541,6 +590,11 @@ export function trackWorkerStarted(props: {
  */
 export async function flushAnalytics(timeoutMs = 3000): Promise<void> {
   try {
+    // Yield one microtask so fire-and-forget `track*()` calls made just before
+    // flushing finish enqueueing their capture. posthog-node defers its queue
+    // snapshot, so this is defense in depth for void call sites; deterministic
+    // sites await the track* promise instead.
+    await Promise.resolve();
     const capture = getClient();
     if (!capture?.flush) return;
     let timer: ReturnType<typeof setTimeout> | undefined;

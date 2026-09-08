@@ -81,7 +81,9 @@ export async function ensureTrackerEnvConfigured(
   const prompt = deps.prompt ?? defaultPrompt;
   const answer = await prompt("Run the guided setup now? Takes about a minute. [Y/n] ");
   if (answer.trim().toLowerCase() === "n") {
-    trackSetupDeclined("missing_tracker_credentials");
+    // Await the capture so the event is queued before the caller's exit path
+    // flushes analytics (the offer is followed by validateEnvironment()).
+    await trackSetupDeclined("missing_tracker_credentials");
     return "failed";
   }
 
@@ -98,7 +100,7 @@ export async function ensureTrackerEnvConfigured(
   // (dotenv merge) is visible here; tests mutate their snapshot instead.
   missing = missingTrackerEnv(env);
   if (missing.length > 0) {
-    trackSetupFailed("missing_tracker_credentials");
+    await trackSetupFailed("missing_tracker_credentials");
     return "failed";
   }
   return "ready";

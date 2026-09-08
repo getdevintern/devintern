@@ -299,7 +299,7 @@ Set this in your shell environment or in `.devintern-code/.env`.
 The CLI sends anonymous usage events to DevIntern's PostHog project (using the official PostHog Node SDK) so we can understand popularity, which features are used, and where setup gets stuck. It never sends task content, code, repository names, file paths, or credentials — only:
 
 - CLI version, OS, architecture, and whether the session runs in CI
-- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- Active tracker type (e.g. `jira`, `linear`), run mode (tasks / query / estimate), and the `worker connect` target (e.g. `github`, `sentry`)
 - Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
 - Low-cardinality outcome categories: setup/run results (`ok`, `warn`, `fail`, reasons like "missing tracker credentials" or "no agent CLI"), readiness check names and statuses (`bun`, `git`, `agent`, `tracker`, `auth`, `license`), and worker mode/connect outcomes
 
@@ -311,7 +311,7 @@ Events emitted along the activation path:
 - `login_result` — `devintern login` outcome (provider name only, e.g. `github`)
 - `worker_init_started` / `worker_init_completed` / `worker_init_failed` — worker wizard steps: relay connect (skipped/succeeded/partial/failed), service install, GitHub App
 - `worker_connect`, `worker_started`, `worker_task_run` — standalone connect runs, worker startup, and terminal worker task outcomes
-- `analytics_opt_out` — sent once, anonymously, the run after `analytics.enabled: false` is set (so opt-outs drop out of the funnel)
+- `analytics_opt_out` — sent once, anonymously, the run after `analytics.enabled: false` is set (so opt-outs drop out of the funnel); suppressed entirely when `DEVINTERN_TELEMETRY_DISABLED` is also set, so the env kill-switch guarantees zero outbound analytics traffic
 
 A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`; events never create person profiles. Analytics are disabled automatically when running from source (no build-time API key). To opt out, either:
 
@@ -328,7 +328,7 @@ or set in `.devintern-code/settings.json`:
 }
 ```
 
-The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above; setting `DEVINTERN_TELEMETRY_DISABLED` instead sends nothing at all. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
 
 ## Readiness Check
 
