@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+- **Guided worker operating policy**: `worker init` now asks when new tasks may be picked up, whether failing CI should be repaired automatically, and whether pull-request conflicts should be handled immediately, on a schedule, or manually. Existing values become the prompt defaults when the wizard is rerun
+- **Safer worker workspace bootstrap**: worker setup and repository imports now enforce owner-only permissions on the shared credential file and repair existing Sentry credential-file permissions when setup is rerun. Workspace repositories follow `origin/HEAD` unless an explicit per-repository override is configured; the fleet-wide `[defaults].default_branch` setting has been removed
+- **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
+
 ## [2.9.0] - 2026-09-07
 
 Sentry-driven autonomy release: the worker now watches Sentry for production errors and fixes them automatically, fails over across agent harnesses when usage limits hit, and reports its own crashes to Sentry.

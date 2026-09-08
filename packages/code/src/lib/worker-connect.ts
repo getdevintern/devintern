@@ -3,20 +3,22 @@
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 
+import { Utils } from "./utils";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
 import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./workspace/paths";
+import { runWorkerSentrySetup } from "./worker-sentry-setup";
+import type { SentrySetupPromptFn, SentryValidationOptions } from "./worker-sentry-setup";
 
 const TRACKER_TARGETS = new Set(["linear", "asana", "trello", "azure-devops", "jira"]);
 
 const WORKER_CONNECT_HELP = `Usage: devintern worker connect [target] [options]
 
-Connect the workspace worker to the DevIntern relay. GitHub connect verifies
-every unpaired repository and stores shared relay state under the workspace
-home.
+Connect an integration to the workspace worker. GitHub and tracker targets use
+the DevIntern relay; Sentry adds a directly polled error-monitor project.
 
 Targets:
   github (default)   Verify unpaired GitHub repositories through the App
@@ -25,11 +27,13 @@ Targets:
   trello             Register a Trello webhook
   azure-devops       Register Azure DevOps hooks
   jira                Print Jira's one-time webhook setup instructions
+  sentry              Add and validate a Sentry auto-fix project
   status              Show relay status and unverified workspace repositories
 
 Options:
   --workspace <path>   Use this workspace.toml
   --team <name>        Use one team's tracker credentials
+  --repo <name>        Repository that owns a Sentry project
   -h, --help           Display this help message
 
 Tracker targets use the selected team's env_file/inline env over the workspace
@@ -43,12 +47,16 @@ export interface WorkerConnectCommandDeps {
   runConnect?: typeof connectRelayTarget;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  cwd?: string;
+  prompt?: SentrySetupPromptFn;
+  validateSentry?: (options: SentryValidationOptions) => Promise<number>;
 }
 
 interface ParsedConnectArgs {
   target: string;
   workspacePath?: string;
   team?: string;
+  repo?: string;
   help: boolean;
   error?: string;
 }
@@ -58,6 +66,7 @@ function parseConnectArgs(args: string[]): ParsedConnectArgs {
   let workspacePath: string | undefined;
   let help = false;
   let team: string | undefined;
+  let repo: string | undefined;
   let targetSet = false;
 
   for (let index = 0; index < args.length; index++) {
@@ -67,28 +76,35 @@ function parseConnectArgs(args: string[]): ParsedConnectArgs {
     } else if (arg === "--workspace") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, team, help, error: "--workspace requires a value." };
+        return { target, workspacePath, team, repo, help, error: "--workspace requires a value." };
       }
       workspacePath = value;
       index++;
     } else if (arg === "--team") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, team, help, error: "--team requires a value." };
+        return { target, workspacePath, team, repo, help, error: "--team requires a value." };
       }
       team = value;
       index++;
+    } else if (arg === "--repo") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        return { target, workspacePath, team, repo, help, error: "--repo requires a value." };
+      }
+      repo = value;
+      index++;
     } else if (arg?.startsWith("-")) {
-      return { target, workspacePath, team, help, error: `Unknown option: ${arg}` };
+      return { target, workspacePath, team, repo, help, error: `Unknown option: ${arg}` };
     } else if (arg && !arg.startsWith("-")) {
       if (targetSet) {
-        return { target, workspacePath, team, help, error: `Unexpected argument: ${arg}` };
+        return { target, workspacePath, team, repo, help, error: `Unexpected argument: ${arg}` };
       }
       target = arg.toLowerCase();
       targetSet = true;
     }
   }
-  return { target, workspacePath, team, help };
+  return { target, workspacePath, team, repo, help };
 }
 
 /** GitHub slugs represented by the workspace, deduplicated in config order. */
@@ -128,17 +144,24 @@ export async function runWorkerConnectCommand(
   if (
     parsed.target !== "github" &&
     parsed.target !== "status" &&
+    parsed.target !== "sentry" &&
     !TRACKER_TARGETS.has(parsed.target)
   ) {
     console.error(
       `❌ Unsupported connect target '${parsed.target}'. ` +
-        "Available: github, linear, asana, trello, azure-devops, jira, status.",
+        "Available: github, linear, asana, trello, azure-devops, jira, sentry, status.",
     );
     return 1;
   }
-  const target = parsed.target as RelayConnectTarget;
-  if (parsed.team && (target === "github" || target === "status")) {
+  if (
+    parsed.team &&
+    (parsed.target === "github" || parsed.target === "status" || parsed.target === "sentry")
+  ) {
     console.error("❌ --team is only valid for tracker connect targets.");
+    return 1;
+  }
+  if (parsed.repo && parsed.target !== "sentry") {
+    console.error("❌ --repo is only valid for Sentry connect.");
     return 1;
   }
 
@@ -167,6 +190,31 @@ export async function runWorkerConnectCommand(
   for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
+
+  if (parsed.target === "sentry") {
+    if (!deps.prompt && !process.stdin.isTTY) {
+      console.error("❌ 'devintern worker connect sentry' is interactive; run it in a terminal.");
+      return 1;
+    }
+    let repoName = parsed.repo;
+    if (!repoName && config.repos.length > 1) {
+      const remote = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
+        cwd: deps.cwd ?? process.cwd(),
+      });
+      if (remote.success) {
+        repoName = config.repos.find((repo) => repo.remote === remote.output.trim())?.name;
+      }
+    }
+    const result = await runWorkerSentrySetup({
+      workspaceDir,
+      repoName,
+      prompt: deps.prompt,
+      validateSentry: deps.validateSentry,
+    });
+    return result.ok ? 0 : 1;
+  }
+
+  const target = parsed.target as RelayConnectTarget;
 
   let accessTokenPromise: Promise<string> | undefined;
   const connectDeps: WorkspaceRelayConnectDeps = {

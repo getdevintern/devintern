@@ -51,8 +51,6 @@ export interface WorkspaceDefaults {
   taskQuery?: string;
   /** Extra per-task CLI flags (default `--create-pr`). */
   workerTaskArgs?: string;
-  /** Fallback default branch for repos that do not set one. */
-  defaultBranch?: string;
   /** Labels applied to PRs created for repos that do not override them. */
   prLabels?: string[];
   /** Seconds between tracker poll ticks. */
@@ -87,7 +85,7 @@ export interface RepoConfig {
   name: string;
   /** Git remote URL the bare clone tracks. */
   remote: string;
-  /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
+  /** Default branch task worktrees start from; falls back to `origin/HEAD`. */
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
   prLabels?: string[];
@@ -430,11 +428,15 @@ export function parseWorkspaceConfig(
       "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
     );
   }
+  if (defaultsTable.default_branch !== undefined) {
+    errors.push(
+      "[defaults].default_branch is not supported; set default_branch on an individual [[repos]] entry instead.",
+    );
+  }
   const defaults: WorkspaceDefaults = {
     tracker: tracker ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
-    defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
     prLabels:
       defaultsTable.pr_labels === undefined
         ? undefined
@@ -491,7 +493,7 @@ export function parseWorkspaceConfig(
     repos.push({
       name,
       remote,
-      defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      defaultBranch: readString(table, "default_branch", label, errors),
       prLabels:
         table.pr_labels === undefined
           ? defaults.prLabels
