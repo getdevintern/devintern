@@ -2,7 +2,7 @@
  * Test suite for dependency installation in worktrees
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -89,6 +89,126 @@ describe("Dependency Installation", () => {
 
     // Should succeed (even if bun fails, we test the detection)
     expect(result.packageManager).toBe("bun");
+  });
+
+  test("should detect the bun.lock text lockfile and use bun", async () => {
+    const testWorkingDir = join(testDir, "bun-text-lock-project");
+    mkdirSync(testWorkingDir, { recursive: true });
+
+    // Bun writes a text `bun.lock` since 1.2 (instead of binary `bun.lockb`)
+    writeFileSync(
+      join(testWorkingDir, "package.json"),
+      JSON.stringify({ name: "test", version: "1.0.0", dependencies: {} }),
+      "utf8",
+    );
+    writeFileSync(
+      join(testWorkingDir, "bun.lock"),
+      '{\n  "lockfileVersion": 1,\n  "packages": {},\n}\n',
+      "utf8",
+    );
+
+    const result = await Utils.installDependencies(testWorkingDir, { verbose: false });
+
+    expect(result.packageManager).toBe("bun");
+  });
+
+  test("prepareWorktreeForAgent isolates hooks before installing dependencies", async () => {
+    // repoDir is a plain git repository (from beforeEach)
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({
+        name: "test",
+        version: "1.0.0",
+        dependencies: {},
+        scripts: { postinstall: "touch postinstall-marker" },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "bun.lock"),
+      '{\n  "lockfileVersion": 1,\n  "packages": {},\n}\n',
+      "utf8",
+    );
+
+    const result = await Utils.prepareWorktreeForAgent(repoDir);
+
+    expect(result.success).toBe(true);
+    expect(result.packageManager).toBe("bun");
+
+    // The install ran and produced its artifacts.
+    expect(existsSync(join(repoDir, "postinstall-marker"))).toBe(true);
+
+    // Hook isolation ran first: core.hooksPath now points at the repo's own
+    // hooks dir, so package postinstalls (lefthook) cannot clobber shared hooks.
+    const gitDir = execSync("git rev-parse --absolute-git-dir", {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
+    expect(execSync("git config core.hooksPath", { cwd: repoDir, encoding: "utf8" }).trim()).toBe(
+      join(gitDir, "hooks"),
+    );
+  });
+
+  test("createFeatureBranch keeps installed node_modules through its cleanup", async () => {
+    // Freshly installed, untracked node_modules in a repo that does not
+    // gitignore it — the hazard case for `git clean -fd`.
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({ name: "test", version: "1.0.0", dependencies: {} }),
+      "utf8",
+    );
+    mkdirSync(join(repoDir, "node_modules", "installed-pkg"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", "installed-pkg", "index.js"),
+      "module.exports = 1;",
+    );
+
+    const currentBranch = execSync("git branch --show-current", {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
+    const result = await Utils.createFeatureBranch("SURV-1", currentBranch, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    // The pre-branch cleanup (stash + `reset --hard` + `git clean -fd`) did
+    // not swallow the installed dependencies the agent still needs.
+    expect(existsSync(join(repoDir, "node_modules", "installed-pkg", "index.js"))).toBe(true);
+  });
+
+  test("prepareWorktreeForAgent warns but does not throw when install fails", async () => {
+    // `npm ci` rejects an out-of-sync lockfile before touching the network,
+    // so the install fails deterministically (as does a missing npm).
+    const testWorkingDir = join(testDir, "failing-install");
+    mkdirSync(testWorkingDir, { recursive: true });
+    writeFileSync(
+      join(testWorkingDir, "package.json"),
+      JSON.stringify({ name: "test", version: "1.0.0", dependencies: { left: "^1.3.0" } }),
+      "utf8",
+    );
+    writeFileSync(
+      join(testWorkingDir, "package-lock.json"),
+      JSON.stringify({
+        name: "test",
+        version: "1.0.0",
+        lockfileVersion: 3,
+        packages: { "": { name: "test", version: "1.0.0" } },
+      }),
+      "utf8",
+    );
+
+    const warnSpy = spyOn(console, "warn");
+    let result: Awaited<ReturnType<typeof Utils.prepareWorktreeForAgent>>;
+    let warned: string[];
+    try {
+      result = await Utils.prepareWorktreeForAgent(testWorkingDir);
+      warned = warnSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(warned.some((message) => message.includes("Failed to install dependencies"))).toBe(true);
   });
 
   test("should detect pnpm-lock.yaml and use pnpm", async () => {

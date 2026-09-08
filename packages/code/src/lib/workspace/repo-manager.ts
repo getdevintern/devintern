@@ -7,7 +7,10 @@
  * The pipeline's tree-mutating steps (`createFeatureBranch` does
  * `git reset --hard` + `git clean -fd`) are safe there because the tree is
  * throwaway: removed after a successful run, kept for debugging on failure,
- * and swept by TTL on worker start.
+ * and swept by TTL on worker start. Every worktree is also prepared for the
+ * agent before use: git hooks are isolated (so package postinstalls cannot
+ * clobber the shared `.git/hooks`) and dependencies are installed
+ * (`Utils.prepareWorktreeForAgent`), mirroring review worktrees.
  *
  * Bare-clone gotcha: `git clone --bare` records `remote.origin.url` but NOT
  * a fetch refspec, so `git fetch origin` would never update
@@ -154,7 +157,9 @@ export class RepoManager {
    * Ensure the persistent base worktree (default branch) exists.
    *
    * Review and mention runs need a normal checkout to operate from; task
-   * runs use disposable worktrees instead.
+   * runs use disposable worktrees instead. Dependencies are installed when
+   * the checkout is first created (via `addWorktree`) and are not reinstalled
+   * when an existing checkout is reused, since the tree is never reset.
    */
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
     const path = this.baseWorktreePath(repo.name);
@@ -168,6 +173,9 @@ export class RepoManager {
 
   /**
    * Create a disposable, detached worktree for one task run.
+   *
+   * The worktree is prepared for the agent before it is returned: git hooks
+   * are isolated and dependencies are installed (see `addWorktree`).
    *
    * @param repo - Workspace repo the task routed to
    * @param taskKey - Task key; used in the directory name for debuggability
@@ -227,6 +235,16 @@ export class RepoManager {
     return removed;
   }
 
+  /**
+   * Add a worktree at `path` and prepare it for the agent.
+   *
+   * Preparation mirrors the review-worktree path (`Utils.prepareReviewWorktree`):
+   * `isolateWorktreeHooks` runs first — before any package postinstall (e.g.
+   * lefthook) can rewrite the shared bare-clone `.git/hooks` — then
+   * `installDependencies` detects package managers and installs. Preparation
+   * is non-fatal: a missing package manager on PATH or a failed install only
+   * logs a warning, so the worktree (and the task using it) still proceeds.
+   */
   private async addWorktree(repoName: string, path: string, ref: string): Promise<void> {
     const parent = this.repoWorktreesDir(repoName);
     if (!existsSync(parent)) {
@@ -238,5 +256,6 @@ export class RepoManager {
     if (!result.success) {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
+    await Utils.prepareWorktreeForAgent(path);
   }
 }

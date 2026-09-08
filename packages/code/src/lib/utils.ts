@@ -11,8 +11,16 @@ import { basename, dirname, isAbsolute, join, resolve } from "path";
  * cursors) and is not gitignored in every project. Deleting it mid-run pulls
  * the database file — and its rollback journal directory — out from under an
  * open connection, so the next write fails with "disk I/O error".
+ *
+ * `node_modules` is excluded so worktrees that already had dependencies
+ * installed (see `prepareWorktreeForAgent`) keep them through the pipeline's
+ * `createFeatureBranch` cleanup. The pattern follows gitignore semantics, so
+ * it matches at any depth (monorepo workspaces included) and only ever
+ * preserves untracked files — tracked trees are unaffected either way, and
+ * projects that gitignore `node_modules` were never cleaned by `-fd` in the
+ * first place.
  */
-export const GIT_CLEAN_ARGS = ["clean", "-fd", "-e", ".devintern-code"];
+export const GIT_CLEAN_ARGS = ["clean", "-fd", "-e", ".devintern-code", "-e", "node_modules"];
 
 export class Utils {
   /**
@@ -423,6 +431,10 @@ export class Utils {
         // is relative to the cwd and a run started from a subdirectory would
         // still stash away the project's state directory.
         ":(top,exclude,glob)**/.devintern-code/**",
+        // Same for installed dependencies (see GIT_CLEAN_ARGS): the stash must
+        // not swallow freshly installed `node_modules`, or the agent would
+        // start without them even though `git clean` now preserves the dir.
+        ":(top,exclude,glob)**/node_modules/**",
       ],
       options,
     );
@@ -1801,20 +1813,7 @@ export class Utils {
                 console.log(`✅ Switched to branch ${branch}`);
               }
 
-              // Install dependencies
-              if (verbose) {
-                console.log(`📦 Installing dependencies...`);
-              }
-              // Confine hook rewrites by dependency postinstalls (lefthook)
-              // to this worktree, before `bun install` gets a chance to
-              // touch the shared `.git/hooks`.
-              await Utils.isolateWorktreeHooks(worktreePath, { verbose });
-              const installResult = await Utils.installDependencies(worktreePath, { verbose });
-
-              if (!installResult.success) {
-                console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
-                console.warn(`   Agent may not be able to run tests or build commands`);
-              }
+              await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
 
               return { success: true, path: worktreePath };
             }
@@ -1987,26 +1986,7 @@ export class Utils {
       }
 
       // Install dependencies to ensure Agent has everything needed
-      if (verbose) {
-        console.log(`📦 Installing dependencies...`);
-      }
-      // Confine hook rewrites by dependency postinstalls (lefthook) to this
-      // worktree, before `bun install` gets a chance to touch the shared
-      // `.git/hooks`.
-      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
-      const installResult = await Utils.installDependencies(worktreePath, {
-        verbose,
-      });
-
-      if (verbose) {
-        console.log(`   ✓ Dependency installation completed (success: ${installResult.success})`);
-      }
-
-      if (!installResult.success) {
-        // Log warning but don't fail - Agent can still work without dependencies in some cases
-        console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
-        console.warn(`   Agent may not be able to run tests or build commands`);
-      }
+      await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
 
       if (verbose) {
         console.log(`✅ Worktree preparation complete!`);
@@ -2263,6 +2243,55 @@ export class Utils {
   }
 
   /**
+   * Prepare a worktree for an agent run: isolate git hooks, then install
+   * dependencies.
+   *
+   * Shared by the review path (`prepareReviewWorktree`) and the fleet path
+   * (`RepoManager.addWorktree`) so the two cannot drift: hook isolation must
+   * always precede the install, because dependency postinstalls (lefthook)
+   * rewrite the shared `.git/hooks` otherwise.
+   *
+   * Both steps are non-fatal and this method never throws: a missing package
+   * manager on PATH or a failed install only logs a warning, so the agent
+   * still starts and can attempt setup itself.
+   */
+  static async prepareWorktreeForAgent(
+    worktreePath: string,
+    options?: { verbose?: boolean },
+  ): Promise<{ success: boolean; packageManager?: string; error?: string }> {
+    const verbose = options?.verbose ?? false;
+
+    try {
+      // Confine hook rewrites by dependency postinstalls (lefthook) to this
+      // worktree, before `bun install` gets a chance to touch the shared
+      // `.git/hooks`.
+      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
+
+      if (verbose) {
+        console.log(`📦 Installing dependencies...`);
+      }
+      const installResult = await Utils.installDependencies(worktreePath, { verbose });
+
+      if (verbose) {
+        console.log(`   ✓ Dependency installation completed (success: ${installResult.success})`);
+      }
+
+      if (!installResult.success) {
+        // Log warning but don't fail - Agent can still work without dependencies in some cases
+        console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
+        console.warn(`   Agent may not be able to run tests or build commands`);
+      }
+
+      return installResult;
+    } catch (error) {
+      const message = (error as Error).message;
+      console.warn(`⚠️  Dependency preparation failed: ${message}`);
+      console.warn(`   Agent may not be able to run tests or build commands`);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
    * Auto-detect package managers and install project dependencies in a worktree.
    *
    * @param workingDir - Repository root to inspect
@@ -2280,7 +2309,9 @@ export class Utils {
       {
         name: "bun",
         manifestFile: "package.json",
-        lockFile: "bun.lockb",
+        // Bun switched to a text `bun.lock` in 1.2; older repos still carry
+        // the binary `bun.lockb`.
+        lockFile: ["bun.lockb", "bun.lock"],
         command: "bun",
         args: ["install"],
       },
@@ -2403,7 +2434,8 @@ export class Utils {
       if (!manifestExists) return false;
 
       if (pm.lockFile) {
-        return existsSync(join(workingDir, pm.lockFile));
+        const lockFiles = Array.isArray(pm.lockFile) ? pm.lockFile : [pm.lockFile];
+        return lockFiles.some((lockFile) => existsSync(join(workingDir, lockFile)));
       }
 
       return false;

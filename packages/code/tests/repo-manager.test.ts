@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -10,6 +10,33 @@ import { Utils } from "../src/lib/utils";
 
 function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
+}
+
+/**
+ * Minimal text lockfile in the format Bun writes since 1.2. Contents don't
+ * matter for the fixtures (no dependencies); `bun install` succeeds offline
+ * and runs the root `postinstall` script.
+ */
+const BUN_LOCK = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "backend",
+      "dependencies": {},
+      "devDependencies": {},
+    },
+  },
+  "packages": {},
+}
+`;
+
+/** Commit fixture files into the origin repo on `main`. */
+function commitFiles(originDir: string, files: Record<string, string>): void {
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(originDir, name), content);
+  }
+  git(originDir, "add .");
+  git(originDir, 'commit -m "Fixture files"');
 }
 
 describe("RepoManager", () => {
@@ -101,6 +128,103 @@ describe("RepoManager", () => {
     await manager.removeTaskWorktree(repo.name, second);
     expect(existsSync(worktree)).toBe(false);
     expect(existsSync(second)).toBe(false);
+  });
+
+  test("createTaskWorktree isolates hooks and installs dependencies before the agent starts", async () => {
+    commitFiles(originDir, {
+      "package.json": JSON.stringify(
+        {
+          name: "backend",
+          version: "1.0.0",
+          dependencies: {},
+          scripts: {
+            // Stands in for a lefthook-style postinstall: resolves where git
+            // runs hooks from at install time and drops a marker there.
+            postinstall:
+              'mkdir -p "$(git rev-parse --git-path hooks)" && touch "$(git rev-parse --git-path hooks)/postinstall-hook" && touch postinstall-marker',
+          },
+        },
+        null,
+        2,
+      ),
+      "bun.lock": BUN_LOCK,
+    });
+    const clonePath = await manager.ensureBareClone(repo);
+
+    const worktree = await manager.createTaskWorktree(repo, "BACK-50");
+
+    // The install ran inside this worktree...
+    expect(existsSync(join(worktree, "node_modules"))).toBe(true);
+    expect(existsSync(join(worktree, "postinstall-marker"))).toBe(true);
+    // ...after hook isolation: the postinstall's hook rewrite landed in the
+    // worktree's private hooks dir, not in the shared bare-clone `.git/hooks`.
+    const worktreeGitDir = git(worktree, "rev-parse --absolute-git-dir");
+    expect(git(worktree, "config core.hooksPath")).toBe(join(worktreeGitDir, "hooks"));
+    expect(existsSync(join(worktreeGitDir, "hooks", "postinstall-hook"))).toBe(true);
+    expect(existsSync(join(clonePath, "hooks", "postinstall-hook"))).toBe(false);
+
+    await manager.removeTaskWorktree(repo.name, worktree);
+  });
+
+  test("createTaskWorktree still succeeds when dependency install fails", async () => {
+    // `npm ci` rejects an out-of-sync lockfile before touching the network,
+    // so the install fails deterministically (as does a missing npm).
+    commitFiles(originDir, {
+      "package.json": JSON.stringify({
+        name: "backend",
+        version: "1.0.0",
+        dependencies: { left: "^1.3.0" },
+      }),
+      "package-lock.json": JSON.stringify({
+        name: "backend",
+        version: "1.0.0",
+        lockfileVersion: 3,
+        packages: { "": { name: "backend", version: "1.0.0" } },
+      }),
+    });
+    await manager.ensureBareClone(repo);
+
+    const warnSpy = spyOn(console, "warn");
+    let worktree: string;
+    let warned: string[];
+    try {
+      worktree = await manager.createTaskWorktree(repo, "BACK-51");
+      warned = warnSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    // The worktree exists and is usable; the failed install only warned.
+    expect(existsSync(join(worktree, "README.md"))).toBe(true);
+    expect(git(worktree, "rev-parse HEAD")).toBe(git(originDir, "rev-parse main"));
+    expect(warned.some((message) => message.includes("Failed to install dependencies"))).toBe(true);
+
+    await manager.removeTaskWorktree(repo.name, worktree);
+  });
+
+  test("ensureBaseWorktree installs dependencies on first create but not on reuse", async () => {
+    commitFiles(originDir, {
+      "package.json": JSON.stringify({
+        name: "backend",
+        version: "1.0.0",
+        dependencies: {},
+        scripts: { postinstall: "touch postinstall-marker" },
+      }),
+      "bun.lock": BUN_LOCK,
+    });
+    await manager.ensureBareClone(repo);
+
+    const base = await manager.ensureBaseWorktree(repo);
+    const marker = join(base, "postinstall-marker");
+    expect(existsSync(marker)).toBe(true);
+
+    // Reuse returns the existing checkout without reinstalling: age the
+    // marker and confirm a second call leaves it aged.
+    const aged = new Date(Date.now() - 10 * 60 * 1000);
+    utimesSync(marker, aged, aged);
+
+    expect(await manager.ensureBaseWorktree(repo)).toBe(base);
+    expect(statSync(marker).mtimeMs).toBe(aged.getTime());
   });
 
   test("per-worktree config keeps worktrees from a bare clone non-bare", async () => {
