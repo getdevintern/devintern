@@ -113,101 +113,54 @@ describe("Dependency Installation", () => {
   });
 
   test("prepareWorktreeForAgent isolates hooks before installing dependencies", async () => {
-    // repoDir is a plain git repository (from beforeEach)
-    writeFileSync(
-      join(repoDir, "package.json"),
-      JSON.stringify({
-        name: "test",
-        version: "1.0.0",
-        dependencies: {},
-        scripts: { postinstall: "touch postinstall-marker" },
-      }),
-      "utf8",
-    );
-    writeFileSync(
-      join(repoDir, "bun.lock"),
-      '{\n  "lockfileVersion": 1,\n  "packages": {},\n}\n',
-      "utf8",
+    let hooksPathDuringInstall: string | undefined;
+    const installSpy = spyOn(Utils, "installDependencies").mockImplementation(
+      async (workingDir) => {
+        hooksPathDuringInstall = execSync("git config core.hooksPath", {
+          cwd: workingDir,
+          encoding: "utf8",
+        }).trim();
+        return { success: true, packageManager: "test" };
+      },
     );
 
-    const result = await Utils.prepareWorktreeForAgent(repoDir);
+    let result: Awaited<ReturnType<typeof Utils.prepareWorktreeForAgent>>;
+    try {
+      result = await Utils.prepareWorktreeForAgent(repoDir);
+    } finally {
+      installSpy.mockRestore();
+    }
 
-    expect(result.success).toBe(true);
-    expect(result.packageManager).toBe("bun");
-
-    // The install ran and produced its artifacts.
-    expect(existsSync(join(repoDir, "postinstall-marker"))).toBe(true);
-
-    // Hook isolation ran first: core.hooksPath now points at the repo's own
-    // hooks dir, so package postinstalls (lefthook) cannot clobber shared hooks.
+    expect(result).toEqual({ success: true, packageManager: "test" });
     const gitDir = execSync("git rev-parse --absolute-git-dir", {
       cwd: repoDir,
       encoding: "utf8",
     }).trim();
-    expect(execSync("git config core.hooksPath", { cwd: repoDir, encoding: "utf8" }).trim()).toBe(
-      join(gitDir, "hooks"),
-    );
-  });
-
-  test("createFeatureBranch keeps installed node_modules through its cleanup", async () => {
-    // Freshly installed, untracked node_modules in a repo that does not
-    // gitignore it — the hazard case for `git clean -fd`.
-    writeFileSync(
-      join(repoDir, "package.json"),
-      JSON.stringify({ name: "test", version: "1.0.0", dependencies: {} }),
-      "utf8",
-    );
-    mkdirSync(join(repoDir, "node_modules", "installed-pkg"), { recursive: true });
-    writeFileSync(
-      join(repoDir, "node_modules", "installed-pkg", "index.js"),
-      "module.exports = 1;",
-    );
-
-    const currentBranch = execSync("git branch --show-current", {
-      cwd: repoDir,
-      encoding: "utf8",
-    }).trim();
-    const result = await Utils.createFeatureBranch("SURV-1", currentBranch, { cwd: repoDir });
-
-    expect(result.success).toBe(true);
-    // The pre-branch cleanup (stash + `reset --hard` + `git clean -fd`) did
-    // not swallow the installed dependencies the agent still needs.
-    expect(existsSync(join(repoDir, "node_modules", "installed-pkg", "index.js"))).toBe(true);
+    expect(hooksPathDuringInstall).toBe(join(gitDir, "hooks"));
   });
 
   test("prepareWorktreeForAgent warns but does not throw when install fails", async () => {
-    // `npm ci` rejects an out-of-sync lockfile before touching the network,
-    // so the install fails deterministically (as does a missing npm).
-    const testWorkingDir = join(testDir, "failing-install");
-    mkdirSync(testWorkingDir, { recursive: true });
-    writeFileSync(
-      join(testWorkingDir, "package.json"),
-      JSON.stringify({ name: "test", version: "1.0.0", dependencies: { left: "^1.3.0" } }),
-      "utf8",
-    );
-    writeFileSync(
-      join(testWorkingDir, "package-lock.json"),
-      JSON.stringify({
-        name: "test",
-        version: "1.0.0",
-        lockfileVersion: 3,
-        packages: { "": { name: "test", version: "1.0.0" } },
-      }),
-      "utf8",
-    );
-
+    const installSpy = spyOn(Utils, "installDependencies").mockResolvedValue({
+      success: false,
+      packageManager: "test",
+      error: "deterministic install failure",
+    });
     const warnSpy = spyOn(console, "warn");
     let result: Awaited<ReturnType<typeof Utils.prepareWorktreeForAgent>>;
     let warned: string[];
     try {
-      result = await Utils.prepareWorktreeForAgent(testWorkingDir);
+      result = await Utils.prepareWorktreeForAgent(repoDir);
       warned = warnSpy.mock.calls.map((call) => String(call[0]));
     } finally {
+      installSpy.mockRestore();
       warnSpy.mockRestore();
     }
 
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
+    expect(result).toEqual({
+      success: false,
+      packageManager: "test",
+      error: "deterministic install failure",
+    });
     expect(warned.some((message) => message.includes("Failed to install dependencies"))).toBe(true);
   });
 

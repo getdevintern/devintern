@@ -11,16 +11,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "path";
  * cursors) and is not gitignored in every project. Deleting it mid-run pulls
  * the database file — and its rollback journal directory — out from under an
  * open connection, so the next write fails with "disk I/O error".
- *
- * `node_modules` is excluded so worktrees that already had dependencies
- * installed (see `prepareWorktreeForAgent`) keep them through the pipeline's
- * `createFeatureBranch` cleanup. The pattern follows gitignore semantics, so
- * it matches at any depth (monorepo workspaces included) and only ever
- * preserves untracked files — tracked trees are unaffected either way, and
- * projects that gitignore `node_modules` were never cleaned by `-fd` in the
- * first place.
  */
-export const GIT_CLEAN_ARGS = ["clean", "-fd", "-e", ".devintern-code", "-e", "node_modules"];
+export const GIT_CLEAN_ARGS = ["clean", "-fd", "-e", ".devintern-code"];
 
 export class Utils {
   /**
@@ -431,10 +423,6 @@ export class Utils {
         // is relative to the cwd and a run started from a subdirectory would
         // still stash away the project's state directory.
         ":(top,exclude,glob)**/.devintern-code/**",
-        // Same for installed dependencies (see GIT_CLEAN_ARGS): the stash must
-        // not swallow freshly installed `node_modules`, or the agent would
-        // start without them even though `git clean` now preserves the dir.
-        ":(top,exclude,glob)**/node_modules/**",
       ],
       options,
     );
