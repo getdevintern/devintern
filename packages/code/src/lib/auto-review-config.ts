@@ -68,21 +68,26 @@ export function parseAutoReviewIterations(raw: string, source: string): number {
  *
  * @param explicitValue - The raw `--auto-review-iterations` value when the
  *   flag was passed, `undefined` otherwise
+ * @param env - Environment to read the env vars from; defaults to
+ *   `process.env` (pass an explicit object to keep callers pure-testable)
  * @returns The validated iteration count for this run
  * @throws {@link InvalidAutoReviewIterationsError} when an explicitly
  *   provided value (CLI arg or env var) is invalid
  */
-export function resolveAutoReviewIterations(explicitValue?: string): number {
+export function resolveAutoReviewIterations(
+  explicitValue?: string,
+  env: Record<string, string | undefined> = process.env,
+): number {
   if (explicitValue !== undefined) {
     return parseAutoReviewIterations(explicitValue, AUTO_REVIEW_ITERATIONS_ARG);
   }
 
-  const unified = process.env[AUTO_REVIEW_ITERATIONS_ENV];
+  const unified = env[AUTO_REVIEW_ITERATIONS_ENV];
   if (unified !== undefined && unified.trim() !== "") {
     return parseAutoReviewIterations(unified, AUTO_REVIEW_ITERATIONS_ENV);
   }
 
-  const deprecated = process.env[AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV];
+  const deprecated = env[AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV];
   if (deprecated !== undefined && deprecated.trim() !== "") {
     process.stderr.write(
       `⚠️  ${AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV} is deprecated, use ${AUTO_REVIEW_ITERATIONS_ENV} instead\n`,
@@ -91,4 +96,40 @@ export function resolveAutoReviewIterations(explicitValue?: string): number {
   }
 
   return DEFAULT_AUTO_REVIEW_ITERATIONS;
+}
+
+/**
+ * Resolve the iteration cap for a host that only uses it when auto-review is
+ * enabled (the CLI run loop and the webhook server).
+ *
+ * Mirrors the CLI's gating: when auto-review is off and no explicit value was
+ * passed, the cap is unused and the env vars are not even read — a stray
+ * invalid `AUTO_REVIEW_ITERATIONS` in the environment must not block startup
+ * of a server that would never run the loop. An explicit value is always
+ * validated, exactly like the CLI validates `--auto-review-iterations`.
+ *
+ * @param explicitValue - Explicit override (CLI arg string, or a numeric
+ *   config value such as the webhook's `autoReviewMaxIterations`) when one
+ *   was provided, `undefined` otherwise
+ * @param autoReviewEnabled - Whether the host will actually run the
+ *   auto-review loop
+ * @param env - Environment to read the env vars from; defaults to
+ *   `process.env`
+ * @returns The validated iteration count
+ * @throws {@link InvalidAutoReviewIterationsError} when a value that will be
+ *   used (an explicit override, or an env var with auto-review enabled) is
+ *   invalid
+ */
+export function resolveAutoReviewIterationsIfEnabled(
+  explicitValue: string | number | undefined,
+  autoReviewEnabled: boolean,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  if (explicitValue === undefined && !autoReviewEnabled) {
+    return DEFAULT_AUTO_REVIEW_ITERATIONS;
+  }
+  return resolveAutoReviewIterations(
+    explicitValue === undefined ? undefined : String(explicitValue),
+    env,
+  );
 }

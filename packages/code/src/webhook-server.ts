@@ -40,7 +40,7 @@ import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
-  resolveAutoReviewIterations,
+  resolveAutoReviewIterationsIfEnabled,
 } from "./lib/auto-review-config";
 import {
   handlePingEvent,
@@ -68,7 +68,8 @@ const DEFAULT_CONFIG: WebhookServerConfig = {
   webhookSecret: process.env.WEBHOOK_SECRET || "",
   autoReview: process.env.WEBHOOK_AUTO_REVIEW === "true",
   // Placeholder replaced in startWebhookServer with the unified cap resolved
-  // from AUTO_REVIEW_ITERATIONS (or the deprecated webhook-only alias).
+  // from AUTO_REVIEW_ITERATIONS (or the deprecated webhook-only alias) when
+  // auto-review is enabled or an explicit override was provided.
   autoReviewMaxIterations: DEFAULT_AUTO_REVIEW_ITERATIONS,
   validateIp: process.env.WEBHOOK_VALIDATE_IP === "true",
   debug: process.env.WEBHOOK_DEBUG === "true",
@@ -1496,14 +1497,15 @@ export async function startWebhookServer(
 ): Promise<import("http").Server> {
   // Unified auto-review iteration cap: explicit config override > the shared
   // AUTO_REVIEW_ITERATIONS env var (with the deprecated WEBHOOK_* alias as a
-  // warned fallback) > the shared default. An invalid value stops startup
-  // instead of starting a misconfigured loop.
+  // warned fallback) > the shared default. Mirroring the CLI, resolution is
+  // gated on auto-review being enabled: an invalid value stops startup only
+  // when the loop would actually run (or an explicit override was passed);
+  // otherwise the cap is unused and env vars are ignored.
   let autoReviewIterations: number;
   try {
-    autoReviewIterations = resolveAutoReviewIterations(
-      config.autoReviewMaxIterations === undefined
-        ? undefined
-        : String(config.autoReviewMaxIterations),
+    autoReviewIterations = resolveAutoReviewIterationsIfEnabled(
+      config.autoReviewMaxIterations,
+      config.autoReview ?? DEFAULT_CONFIG.autoReview,
     );
   } catch (error) {
     console.error(`❌ ${(error as Error).message}`);

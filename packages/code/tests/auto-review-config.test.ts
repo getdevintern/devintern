@@ -7,6 +7,7 @@ import {
   InvalidAutoReviewIterationsError,
   parseAutoReviewIterations,
   resolveAutoReviewIterations,
+  resolveAutoReviewIterationsIfEnabled,
 } from "../src/lib/auto-review-config";
 
 const ENV_VARS = [AUTO_REVIEW_ITERATIONS_ENV, AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV] as const;
@@ -146,5 +147,123 @@ describe("resolveAutoReviewIterations", () => {
     expect(resolveAutoReviewIterations("1")).toBe(1);
     setEnv(AUTO_REVIEW_ITERATIONS_ENV, "1");
     expect(resolveAutoReviewIterations()).toBe(1);
+  });
+
+  test("reads env vars from the provided environment object, not process.env", () => {
+    setEnv(AUTO_REVIEW_ITERATIONS_ENV, "9");
+    expect(resolveAutoReviewIterations(undefined, { [AUTO_REVIEW_ITERATIONS_ENV]: "4" })).toBe(4);
+    expect(resolveAutoReviewIterations(undefined, {})).toBe(DEFAULT_AUTO_REVIEW_ITERATIONS);
+  });
+});
+
+describe("resolveAutoReviewIterationsIfEnabled", () => {
+  // Pure env fixtures: no process.env mutation, so these tests exercise the
+  // webhook server's resolution without spawning a server.
+  const autoReviewOn = { WEBHOOK_AUTO_REVIEW: "true" } as Record<string, string | undefined>;
+
+  function captureStderr(fn: () => void): string {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      fn();
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    return writes.join("");
+  }
+
+  test("applies the unified env var when auto-review is enabled", () => {
+    const env = { ...autoReviewOn, [AUTO_REVIEW_ITERATIONS_ENV]: "4" };
+    expect(resolveAutoReviewIterationsIfEnabled(undefined, true, env)).toBe(4);
+  });
+
+  test("unified env var wins over the deprecated fallback when auto-review is enabled", () => {
+    const env = {
+      ...autoReviewOn,
+      [AUTO_REVIEW_ITERATIONS_ENV]: "3",
+      [AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV]: "5",
+    };
+    expect(resolveAutoReviewIterationsIfEnabled(undefined, true, env)).toBe(3);
+  });
+
+  test("honors the deprecated webhook env var with a warning when auto-review is enabled", () => {
+    const env = {
+      ...autoReviewOn,
+      [AUTO_REVIEW_ITERATIONS_ENV]: undefined,
+      [AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV]: "5",
+    };
+    let output = "";
+    let resolved: number | undefined;
+    expect(() => {
+      output = captureStderr(() => {
+        resolved = resolveAutoReviewIterationsIfEnabled(undefined, true, env);
+      });
+    }).not.toThrow();
+    expect(resolved).toBe(5);
+    expect(output).toContain(
+      "WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS is deprecated, use AUTO_REVIEW_ITERATIONS instead",
+    );
+  });
+
+  test("falls back to the shared default when auto-review is enabled and no env var is set", () => {
+    const env = { ...autoReviewOn, [AUTO_REVIEW_ITERATIONS_ENV]: "" };
+    expect(resolveAutoReviewIterationsIfEnabled(undefined, true, env)).toBe(
+      DEFAULT_AUTO_REVIEW_ITERATIONS,
+    );
+  });
+
+  test("aborts startup with a clear error when an invalid env var meets enabled auto-review", () => {
+    const env = { ...autoReviewOn, [AUTO_REVIEW_ITERATIONS_ENV]: "abc" };
+    expect(() => resolveAutoReviewIterationsIfEnabled(undefined, true, env)).toThrow(
+      /AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1 \(got "abc"\)/,
+    );
+    const deprecatedEnv = {
+      [AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV]: "0",
+    } as Record<string, string | undefined>;
+    expect(() => resolveAutoReviewIterationsIfEnabled(undefined, true, deprecatedEnv)).toThrow(
+      /WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS must be a whole number of iterations >= 1 \(got "0"\)/,
+    );
+  });
+
+  test("ignores env vars entirely when auto-review is off and no explicit value is given", () => {
+    // Mirrors the CLI: the cap is unused, so even an invalid value must not
+    // block startup (and a valid one is simply not consulted).
+    const invalid = { [AUTO_REVIEW_ITERATIONS_ENV]: "abc" } as Record<string, string | undefined>;
+    expect(resolveAutoReviewIterationsIfEnabled(undefined, false, invalid)).toBe(
+      DEFAULT_AUTO_REVIEW_ITERATIONS,
+    );
+    const valid = { [AUTO_REVIEW_ITERATIONS_ENV]: "4" } as Record<string, string | undefined>;
+    expect(resolveAutoReviewIterationsIfEnabled(undefined, false, valid)).toBe(
+      DEFAULT_AUTO_REVIEW_ITERATIONS,
+    );
+    const deprecatedOnly = {
+      [AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV]: "5",
+    } as Record<string, string | undefined>;
+    const output = captureStderr(() => {
+      expect(resolveAutoReviewIterationsIfEnabled(undefined, false, deprecatedOnly)).toBe(
+        DEFAULT_AUTO_REVIEW_ITERATIONS,
+      );
+    });
+    expect(output).toBe("");
+  });
+
+  test("bridges a numeric explicit config value via String() and validates it", () => {
+    expect(resolveAutoReviewIterationsIfEnabled(4, false, {})).toBe(4);
+    expect(() => resolveAutoReviewIterationsIfEnabled(0, false, {})).toThrow(
+      InvalidAutoReviewIterationsError,
+    );
+  });
+
+  test("explicit value wins over the env var, even with auto-review off", () => {
+    const env = { ...autoReviewOn, [AUTO_REVIEW_ITERATIONS_ENV]: "4" };
+    expect(resolveAutoReviewIterationsIfEnabled("3", true, env)).toBe(3);
+    expect(resolveAutoReviewIterationsIfEnabled(3, false, env)).toBe(3);
+    expect(() => resolveAutoReviewIterationsIfEnabled("abc", false, env)).toThrow(
+      InvalidAutoReviewIterationsError,
+    );
   });
 });
