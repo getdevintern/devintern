@@ -608,6 +608,10 @@ export interface RunWorkspaceWorkerOptions {
   verbose?: boolean;
   /** CLI release attached to anonymous worker startup analytics. */
   cliVersion?: string;
+  /** Activate an eligible Worker Pilot after validation, before sources acquire work. */
+  beforeAcquirersStart?: () => Promise<void>;
+  /** Revalidate paid or trial automation access while the daemon remains alive. */
+  accessCheck?: () => Promise<{ valid: boolean; message: string }>;
 }
 
 /** One tracker source served by the workspace worker. */
@@ -1091,6 +1095,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
+      beforeAcquirersStart: options.beforeAcquirersStart,
+      accessCheck: options.accessCheck,
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",

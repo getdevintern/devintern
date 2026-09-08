@@ -27,6 +27,7 @@ import { HarnessFailover } from "./harness-failover";
 import type { FailoverOutcome } from "./harness-failover";
 import type { WebhookQueue } from "./webhook-queue";
 import {
+  AUTOMATION_ACCESS_EXIT_CODE,
   RATE_LIMIT_FALLBACK_MS,
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
@@ -275,6 +276,7 @@ export async function runWithFailover(
   const failover = getWorkerFailover();
   if (!failover) {
     const code = await spawnOnce(baseEnv);
+    if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
     return code === 0 ? "ok" : "failed";
   }
 
@@ -287,6 +289,7 @@ export async function runWithFailover(
     const hintPath = join(hintDir, "hint.json");
     try {
       const code = await spawnOnce(failover.childEnv(baseEnv, hintPath));
+      if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
       if (code !== USAGE_LIMIT_EXIT_CODE) {
         return code === 0 ? "ok" : "failed";
       }

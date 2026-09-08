@@ -11,6 +11,7 @@ import {
   startWorkerFailover,
 } from "../src/lib/worker-failover";
 import {
+  AUTOMATION_ACCESS_EXIT_CODE,
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
@@ -22,6 +23,17 @@ afterEach(() => {
 });
 
 describe("runWithFailover", () => {
+  test("defers an access-denied child without trying another harness", async () => {
+    startWorkerFailover({ checkInstalled: false, raw: "codex,grok", log: () => {} });
+    let calls = 0;
+    const result = await runWithFailover(async () => {
+      calls++;
+      return AUTOMATION_ACCESS_EXIT_CODE;
+    });
+    expect(result).toBe("deferred");
+    expect(calls).toBe(1);
+  });
+
   test("without a worker controller, a usage-limit exit is a plain failure", async () => {
     const result = await runWithFailover(async () => USAGE_LIMIT_EXIT_CODE);
     expect(result).toBe("failed");

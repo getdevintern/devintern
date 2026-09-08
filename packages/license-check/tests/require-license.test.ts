@@ -93,4 +93,19 @@ describe("requireLicense failure path", () => {
       "⚠️  License server unreachable; honoring cached entitlement.\n",
     );
   });
+
+  test("reports active Worker Pilot access", () => {
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    expect(() =>
+      requireLicense({
+        valid: true,
+        source: "trial",
+        message: "Free Worker Pilot active until 2026-09-22, 9 task(s) remaining.",
+      }),
+    ).not.toThrow();
+    expect(logSpy).toHaveBeenCalledWith(
+      "⏳ Free Worker Pilot active until 2026-09-22, 9 task(s) remaining.\n",
+    );
+  });
 });

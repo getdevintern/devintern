@@ -87,7 +87,7 @@ bun install -g @getdevintern/code
 devintern init
 devintern ./tasks/my-task.md --create-pr   # or: devintern PROJ-123 --create-pr
 
-# 2. Leave it running (automation license)
+# 2. Leave it running (free Worker Pilot or automation license)
 devintern worker init
 devintern worker
 ```
@@ -142,7 +142,7 @@ prompt = """Pick one outdated dependency and upgrade it within the same major ve
 
 For teams this changes what "keeping the repo healthy" costs: maintenance tickets stop rotting in the backlog, review cycles close themselves while reviewers stay in the loop where their input actually matters, and recurring chores run like cron jobs whose output arrives as reviewed pull requests rather than good intentions.
 
-Unattended automation uses the paid automation tier (one-time Supporter license or Team/Business subscription) — interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
+Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days or 10 new tasks, whichever comes first. Continued use requires the paid automation tier (one-time Supporter license or Team/Business subscription); interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
 
 <!-- Optional: secondary visuals (feasibility comment on a ticket, self-review, worker dashboard)
 <p align="center">
@@ -176,6 +176,7 @@ When a ticket is too vague to implement responsibly, the agent posts clarifying 
 Source is under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
 - **Interactive use** → free forever
+- **Worker Pilot** → 14 days or 10 new tasks, no card required; `devintern login` required
 - **Worker (unattended)** → Supporter ($99 once for one person's own repos) or a Team/Business subscription
 
 Details: [devintern.com/pricing](https://devintern.com/pricing/)

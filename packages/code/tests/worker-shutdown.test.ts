@@ -1,6 +1,51 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { createWorkerShutdownHandler } from "../src/worker";
+import { createWorkerShutdownHandler, startWorkerAccessMonitor } from "../src/worker";
+
+describe("startWorkerAccessMonitor", () => {
+  test("pauses sources after expiry and resumes after a license is added", async () => {
+    let tick: (() => void) | undefined;
+    let allowed = false;
+    const events: string[] = [];
+    const warn = console.warn;
+    const log = console.log;
+    console.warn = () => undefined;
+    console.log = () => undefined;
+    try {
+      const monitor = startWorkerAccessMonitor({
+        acquirers: [
+          {
+            name: "poll:test",
+            start: () => {
+              events.push("start");
+            },
+            stop: () => {
+              events.push("stop");
+            },
+          },
+        ],
+        check: async () => ({ valid: allowed, message: allowed ? "paid" : "trial expired" }),
+        setInterval: ((callback: () => void) => {
+          tick = callback;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }) as typeof setInterval,
+        clearInterval: (() => undefined) as typeof clearInterval,
+      });
+
+      tick?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(events).toEqual(["stop"]);
+
+      allowed = true;
+      await monitor.checkNow();
+      expect(events).toEqual(["stop", "start"]);
+      monitor.stop();
+    } finally {
+      console.warn = warn;
+      console.log = log;
+    }
+  });
+});
 
 describe("createWorkerShutdownHandler", () => {
   const originalLog = console.log;
