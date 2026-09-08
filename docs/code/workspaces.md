@@ -4,7 +4,7 @@ sidebarLabel: "Multiple Repositories"
 description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
 section: "Automation"
 order: 2
-dateModified: 2026-09-03
+dateModified: 2026-09-07
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -247,7 +247,7 @@ The worker watches `workspace.toml` and reloads it automatically a moment after 
 - **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
 - **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.
 
-`devintern worker init` can generate a user-level systemd unit on Linux or launchd agent on macOS. One service runs the whole workspace. For a hand-written Linux unit:
+`devintern worker init` can install and start a user-level systemd unit on Linux or launchd agent on macOS (declining keeps it manual and prints the commands). One service runs the whole workspace. For a hand-written Linux unit:
 
 ```ini
 [Unit]
