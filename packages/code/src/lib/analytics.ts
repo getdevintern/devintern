@@ -1,34 +1,88 @@
 /**
- * Anonymous product analytics for the CLI (PostHog).
+ * Anonymous product analytics for the CLI (PostHog via `posthog-node`).
  *
- * Sends one fire-and-forget event per run. Never sends task keys, prompts,
+ * Fire-and-forget events with flush-on-exit. Never sends task keys, prompts,
  * repo names, paths, or credentials — only allowlisted enum/bool/number props
  * (see ALLOWED_PROP_KEYS). Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
- * `analytics.enabled: false` in .devintern-code/settings.json.
+ * `analytics.enabled: false` in .devintern-code/settings.json; the settings
+ * opt-out is reported once as an anonymous `analytics_opt_out` event so the
+ * funnel can exclude it going forward.
  */
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { PostHog } from "posthog-node";
 import { resolveConfigDir } from "@devintern/utils";
 
 // Injected at build time via --define; absent when running from source,
 // which permanently disables analytics in dev builds.
 declare const __POSTHOG_API_KEY__: string;
 declare const __POSTHOG_HOST__: string;
+declare const __VERSION__: string;
 
 const CONFIG_DIR_NAME = ".devintern-code";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
+const CLI_VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
+
 export type AnalyticsPropValue = string | boolean | number;
 
 /** Curated event names — keep in sync with privacy copy. */
-export type AnalyticsEvent = "cli_run" | "worker_started" | "worker_task_run" | "analytics_opt_out";
+export type AnalyticsEvent =
+  | "cli_run"
+  | "task_run"
+  | "setup_started"
+  | "setup_completed"
+  | "setup_failed"
+  | "setup_declined"
+  | "doctor_run"
+  | "login_result"
+  | "worker_init_started"
+  | "worker_init_completed"
+  | "worker_init_failed"
+  | "worker_connect"
+  | "worker_started"
+  | "worker_task_run"
+  | "analytics_opt_out";
 
 export type WorkerTaskOutcome = "succeeded" | "failed" | "deferred" | "escalated" | "abandoned";
 
 export type WorkerTaskTrigger = "task" | "scheduled" | "estimate" | "manual";
 export type WorkerMode = "polling" | "relay" | "hybrid" | "scheduled";
+
+/** Which entry point started guided setup. */
+export type SetupSource = "init" | "rescue";
+/** Sign-in result recorded as part of `devintern init`. */
+export type SetupSignInStatus = "success" | "skipped" | "failed";
+/** Allowlisted, low-cardinality reasons for setup/worker-init failures. */
+export type SetupFailureReason =
+  | "missing_tracker_credentials"
+  | "scaffold_refused"
+  | "tracker_setup_incomplete"
+  | "tracker_not_pollable"
+  | "workspace_error"
+  | "workspace_tracker_mismatch";
+
+/** Readiness check outcomes reported by doctor and the init summary. */
+export type ReadinessCheckStatus = "ok" | "warn" | "fail";
+/** A structural subset of readiness.ts's ReadinessCheck (no import cycle). */
+export interface ReadinessCheckLike {
+  id: string;
+  status: ReadinessCheckStatus;
+}
+
+export type RelayConnectOutcome = "succeeded" | "partial" | "failed" | "skipped";
+export type ServiceInstallOutcome =
+  | "installed"
+  | "updated"
+  | "declined"
+  | "failed"
+  | "skipped"
+  | "existing"
+  | "unavailable";
+export type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
+export type LoginOutcome = "succeeded" | "failed";
 
 /** Internal marker inherited only by task subprocesses launched by the worker. */
 export const RUN_ORIGIN_ENV = "DEVINTERN_RUN_ORIGIN";
@@ -50,28 +104,53 @@ const ALLOWED_PROP_KEYS = new Set([
   "outcome",
   "worker_trigger",
   "worker_mode",
+  "source",
+  "signed_in",
+  "reason",
+  "method",
+  "relay_connect",
+  "service_install",
+  "github_app",
+  "check_bun",
+  "check_git",
+  "check_agent",
+  "check_tracker",
+  "check_auth",
+  "check_license",
 ]);
 
-/** Minimal send surface so tests can inject a mock without network access. */
-export interface AnalyticsSender {
-  send(payload: {
-    api_key: string;
+/** Doctor/init readiness check ids → allowlisted property names. */
+const CHECK_PROP_BY_ID: Record<string, string> = {
+  runtime: "check_bun",
+  git: "check_git",
+  agent: "check_agent",
+  tracker: "check_tracker",
+  auth: "check_auth",
+  license: "check_license",
+};
+
+/** Minimal capture surface so tests can inject a mock without PostHog. */
+export interface AnalyticsCapture {
+  capture(payload: {
+    distinctId: string;
     event: string;
-    distinct_id: string;
-    properties: Record<string, AnalyticsPropValue>;
-    timestamp: string;
-  }): Promise<void>;
+    properties?: Record<string, AnalyticsPropValue>;
+  }): void;
+  flush?: () => Promise<void>;
 }
 
-type RealSender = AnalyticsSender & { inflight: Promise<void>[] };
+let client: AnalyticsCapture | null | undefined;
+/** Test override: `null` forces disabled capture; `undefined` uses the real lazy client. */
+let captureForTests: AnalyticsCapture | null | undefined;
 
-let senderForTests: AnalyticsSender | null | undefined;
-let realSender: RealSender | undefined;
-
-/** @internal Test override: `null` forces disabled capture; `undefined` restores the real sender. */
-export function setAnalyticsSenderForTests(value: AnalyticsSender | null | undefined): void {
-  senderForTests = value;
-  realSender = undefined;
+/**
+ * Test override: `null` forces disabled capture; `undefined` restores the
+ * real client.
+ * @internal
+ */
+export function setAnalyticsCaptureForTests(value: AnalyticsCapture | null | undefined): void {
+  captureForTests = value;
+  client = undefined;
 }
 
 export function resolveApiKey(): string {
@@ -153,7 +232,9 @@ function getOrCreateAnonymousId(configDir?: string): string {
   const telemetryFile = join(dir, "telemetry.json");
   try {
     if (existsSync(telemetryFile)) {
-      const parsed = JSON.parse(readFileSync(telemetryFile, "utf8")) as { anonymousId?: string };
+      const parsed = JSON.parse(readFileSync(telemetryFile, "utf8")) as {
+        anonymousId?: string;
+      };
       if (parsed.anonymousId) return parsed.anonymousId;
     }
   } catch {
@@ -169,26 +250,24 @@ function getOrCreateAnonymousId(configDir?: string): string {
   return id;
 }
 
-function getSender(): AnalyticsSender | null {
-  if (senderForTests !== undefined) return senderForTests ?? null;
-  if (!realSender) {
-    realSender = {
-      inflight: [],
-      async send(payload) {
-        const request = fetch(`${resolveHost()}/i/v0/e/`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        }).then(
-          () => {},
-          () => {},
-        );
-        this.inflight.push(request);
-        await request;
-      },
-    };
+function getClient(): AnalyticsCapture | null {
+  if (captureForTests !== undefined) return captureForTests;
+  if (client !== undefined) return client;
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    client = null;
+    return null;
   }
-  return realSender;
+  const posthog = new PostHog(apiKey, {
+    host: resolveHost(),
+    disableGeoip: true,
+    personProfiles: "never",
+  });
+  client = {
+    capture: (payload) => posthog.capture(payload),
+    flush: () => posthog.flush(),
+  };
+  return client;
 }
 
 /** True when this is the first run that created telemetry.json (for disclosure). */
@@ -202,8 +281,46 @@ export function isAnonymousIdNewlyCreated(configDir?: string): boolean {
 }
 
 /**
+ * When `analytics.enabled: false` appears in settings.json for the first time,
+ * emit one anonymous `analytics_opt_out` event (before the enabled gate stops
+ * further capture) and remember it in telemetry.json so it is never re-sent.
+ * Only the durable settings opt-out is reported; the env kill-switch is not.
+ */
+function reportOptOutIfNewlyDisabled(configDir?: string): void {
+  try {
+    if (readAnalyticsEnabledFromSettings(configDir) !== false) return;
+    if (!resolveApiKey()) return;
+    const dir = analyticsConfigDir(configDir);
+    const telemetryFile = join(dir, "telemetry.json");
+    if (!existsSync(telemetryFile)) return;
+    let parsed: { anonymousId?: string; optOutReported?: boolean };
+    try {
+      parsed = JSON.parse(readFileSync(telemetryFile, "utf8")) as typeof parsed;
+    } catch {
+      return;
+    }
+    if (!parsed.anonymousId || parsed.optOutReported) return;
+    const telemetry = `${JSON.stringify({ ...parsed, optOutReported: true }, null, 2)}\n`;
+    try {
+      writeFileSync(telemetryFile, telemetry, "utf8");
+    } catch {
+      // Read-only config dir: skip sending rather than risk re-sending per run.
+      return;
+    }
+    const capture = getClient();
+    capture?.capture({
+      distinctId: parsed.anonymousId,
+      event: "analytics_opt_out",
+      properties: {},
+    });
+  } catch {
+    // Swallow — opt-out reporting must never break the CLI.
+  }
+}
+
+/**
  * Capture a product event without blocking or ever throwing. The returned
- * promise resolves once the payload is handed to the network layer (or
+ * promise resolves once the payload is handed to the queueing layer (or
  * immediately when analytics is disabled).
  */
 export async function track(
@@ -212,19 +329,145 @@ export async function track(
   options: { configDir?: string } = {},
 ): Promise<void> {
   try {
+    reportOptOutIfNewlyDisabled(options.configDir);
     if (!isAnalyticsEnabled(options.configDir)) return;
-    const sender = getSender();
-    if (!sender) return;
-    await sender.send({
-      api_key: resolveApiKey(),
+    const capture = getClient();
+    if (!capture) return;
+    capture.capture({
+      distinctId: getOrCreateAnonymousId(options.configDir),
       event,
-      distinct_id: getOrCreateAnonymousId(options.configDir),
       properties: scrubProps(props),
-      timestamp: new Date().toISOString(),
     });
   } catch {
     // Swallow — product use must not fail because of analytics.
   }
+}
+
+/** Allowlisted per-check props (check_bun, check_git, ...) from readiness checks. */
+export function readinessCheckProps(
+  checks: readonly ReadinessCheckLike[],
+): Record<string, AnalyticsPropValue> {
+  const props: Record<string, AnalyticsPropValue> = {};
+  for (const check of checks) {
+    const propKey = CHECK_PROP_BY_ID[check.id];
+    if (!propKey) continue;
+    props[propKey] = check.status;
+  }
+  return props;
+}
+
+/** Emit when the guided setup wizard opens (`devintern init` or first-run rescue). */
+export function trackSetupStarted(source: SetupSource): void {
+  void track("setup_started", { cli_version: CLI_VERSION, os: process.platform, source });
+}
+
+/** Emit after the wizard scaffolded config and ran the readiness summary. */
+export function trackSetupCompleted(props: {
+  tracker?: string;
+  signedIn: SetupSignInStatus;
+  checks?: readonly ReadinessCheckLike[];
+}): void {
+  void track("setup_completed", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    tracker: props.tracker,
+    signed_in: props.signedIn,
+    ...readinessCheckProps(props.checks ?? []),
+  });
+}
+
+/** Emit when the first-run rescue offer is declined (setup never started). */
+export function trackSetupDeclined(reason: SetupFailureReason): void {
+  void track("setup_declined", { cli_version: CLI_VERSION, os: process.platform, reason });
+}
+
+/** Emit when guided setup ran but ended without usable configuration. */
+export function trackSetupFailed(reason: SetupFailureReason): void {
+  void track("setup_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
+}
+
+/** Emit the doctor (or init readiness summary) outcome and per-check statuses. */
+export function trackDoctorRun(props: {
+  checks: readonly ReadinessCheckLike[];
+  hasFailures: boolean;
+  hasWarnings: boolean;
+}): void {
+  void track("doctor_run", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    outcome: props.hasFailures ? "failures" : props.hasWarnings ? "warnings" : "ready",
+    ...readinessCheckProps(props.checks),
+  });
+}
+
+/** Emit the outcome of `devintern login` (method is a provider enum, not PII). */
+export function trackLoginResult(props: { outcome: LoginOutcome; method?: string }): void {
+  void track("login_result", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    outcome: props.outcome,
+    method: props.method,
+  });
+}
+
+/**
+ * Emit one outcome event for a completed interactive task run (never for
+ * worker subprocesses, whose terminal outcomes go to `worker_task_run`).
+ */
+export function trackInteractiveTaskRun(props: {
+  tracker: string;
+  outcome: "succeeded" | "partial" | "failed";
+  taskCount: number;
+  runMode: "tasks" | "query";
+}): void {
+  void track("task_run", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    tracker: props.tracker,
+    outcome: props.outcome,
+    task_count: props.taskCount,
+    run_mode: props.runMode,
+  });
+}
+
+/** Emit when `devintern worker init` starts. */
+export function trackWorkerInitStarted(): void {
+  void track("worker_init_started", { cli_version: CLI_VERSION, os: process.platform });
+}
+
+/** Emit when the worker wizard finishes, with per-step outcome categories. */
+export function trackWorkerInitCompleted(props: {
+  tracker: string;
+  relayConnect: RelayConnectOutcome;
+  serviceInstall: ServiceInstallOutcome;
+  githubApp: GitHubAppOutcome;
+}): void {
+  void track("worker_init_completed", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    tracker: props.tracker,
+    relay_connect: props.relayConnect,
+    service_install: props.serviceInstall,
+    github_app: props.githubApp,
+  });
+}
+
+/** Emit when `devintern worker init` aborts before completing. */
+export function trackWorkerInitFailed(reason: SetupFailureReason): void {
+  void track("worker_init_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
+}
+
+/** Emit the outcome of a standalone `devintern worker connect <target>`. */
+export function trackWorkerConnect(props: {
+  target: string;
+  outcome: "succeeded" | "failed";
+}): void {
+  void track("worker_connect", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    tracker: props.target,
+    outcome: props.outcome,
+  });
 }
 
 /**
@@ -292,17 +535,18 @@ export function trackWorkerStarted(props: {
 }
 
 /**
- * Await pending sends so short-lived runs do not drop their event before
- * exit. Bounded by `timeoutMs`; never throws.
+ * Flush queued events so short-lived runs do not drop them before exit.
+ * Bounded by `timeoutMs`; never throws and never destroys the client, so the
+ * long-lived worker daemon can keep capturing afterwards.
  */
-export async function flushAnalytics(timeoutMs = 1500): Promise<void> {
+export async function flushAnalytics(timeoutMs = 3000): Promise<void> {
   try {
-    const sender = getSender();
-    if (!sender || !("inflight" in sender)) return;
+    const capture = getClient();
+    if (!capture?.flush) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.all((sender as RealSender).inflight.splice(0)),
+        capture.flush(),
         new Promise((resolve) => {
           timer = setTimeout(resolve, timeoutMs);
         }),

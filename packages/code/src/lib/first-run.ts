@@ -10,6 +10,7 @@
  */
 
 import type { LogFn } from "@devintern/task-trackers";
+import { trackSetupDeclined, trackSetupFailed } from "./analytics";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 
 /** Outcome of the first-run configuration check. */
@@ -80,6 +81,7 @@ export async function ensureTrackerEnvConfigured(
   const prompt = deps.prompt ?? defaultPrompt;
   const answer = await prompt("Run the guided setup now? Takes about a minute. [Y/n] ");
   if (answer.trim().toLowerCase() === "n") {
+    trackSetupDeclined("missing_tracker_credentials");
     return "failed";
   }
 
@@ -87,7 +89,7 @@ export async function ensureTrackerEnvConfigured(
     deps.runWizard ??
     (async () => {
       const { runInitWizard } = await import("./init-wizard");
-      await runInitWizard();
+      await runInitWizard({ source: "rescue" });
     });
   await runWizard();
 
@@ -95,5 +97,9 @@ export async function ensureTrackerEnvConfigured(
   // In production `env` is `process.env` by reference, so the reload above
   // (dotenv merge) is visible here; tests mutate their snapshot instead.
   missing = missingTrackerEnv(env);
-  return missing.length === 0 ? "ready" : "failed";
+  if (missing.length > 0) {
+    trackSetupFailed("missing_tracker_credentials");
+    return "failed";
+  }
+  return "ready";
 }
