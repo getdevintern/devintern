@@ -110,6 +110,10 @@ a title plus a culprit, exception type, or filename. At most `max_per_tick`
 actionability checks and supplied concrete runtime evidence, Sentry runs skip
 the generic task feasibility assessment and proceed directly to implementation.
 
+Polling stays quiet while issues sit below `min_occurrences`: skipped issues
+are only explained with `--verbose` output. When an issue is picked up, the
+worker logs the project, issue id, and occurrence count once.
+
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions
 between Sentry projects. A failed fix is not automatically repeated; a run
