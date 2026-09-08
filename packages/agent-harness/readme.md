@@ -65,7 +65,7 @@ See [`AgentHarness`](src/types.ts) for full semantics. Quick decision table:
 | [`supportedModes`](src/modes.ts) | List only plan/readonly modes the CLI can **natively enforce** via flags. If you cannot enforce them, leave empty (or omit) — requests fail closed via `assertModeSupported` inside `buildArgs`. Never fake a mode by ignoring it. |
 | `supportsMaxTurns` | Set `true` only if the CLI accepts a turn-limit flag *and* emits a recognizable diagnostic on exhaustion. Callers skip transcript scanning when this is false/unset, so tool output cannot be mistaken for a turn-limit error. |
 | [`supportsStructuredOutput`](src/structured-output.ts) | Set `true` only if the CLI has a documented JSON output mode (verify upstream docs — don't assume). Supporting harnesses emit the flag in `buildArgs` when `options.structuredOutput` is set; runners fail closed with `UnsupportedStructuredOutputError` when it is false/unset. See the per-CLI flag table in [Structured (JSON) output](#structured-json-output). |
-| [`supportsEffort`](src/effort.ts) | Set `true` only if the CLI can apply a reasoning-effort level — as a dedicated flag/config override (Codex `-c model_reasoning_effort="…"`) or composed into the model string (pi `<id>:<thinking>`). Supporting harnesses consume `options.effort` in `buildArgs`; the rest ignore it and runners print a one-line warning (no fail-closed) so failover chains mixing capable and incapable harnesses keep working. See [Reasoning effort](#reasoning-effort). |
+| [`supportsEffort`](src/effort.ts) | Set `true` only if the CLI can apply a reasoning-effort level per run — as a dedicated flag (Claude Code / Grok / `agy` / Reasonix `--effort`), a differently named flag (Cline `--thinking <level>`, Opencode/Kilo `--variant <level>`), a config override (Codex `-c model_reasoning_effort="…"`), or composed into the model string (pi `<id>:<thinking>`). Supporting harnesses consume `options.effort` in `buildArgs`; the rest ignore it and runners print a one-line warning (no fail-closed) so failover chains mixing capable and incapable harnesses keep working. See [Reasoning effort](#reasoning-effort). |
 | `constrainedModeAllowsExternalTools` | Set `true` only if your constrained mode still permits network + MCP tools. No built-in harness sets it today (Codex's read-only sandbox disables network; Claude's plan mode denies non-annotated MCP tools, which aborts headless runs). Callers whose agents need web/MCP access skip constrained modes unless this is true. |
 | `promptFlag` | Set when the prompt must arrive as a flag value (`kimi --prompt "..."`). Omit for positional prompts (`codex exec "..."`). Prefer argv over stdin — see below. |
 | `imageInput` / `buildImageArgs` | `"path"` (default): images go into the prompt as markdown paths only. `"native"`: also emit CLI flags via `buildImageArgs(paths)` after the prompt (Codex `-i`). Runners call [`preparePromptWithAttachments`](src/attachments.ts); paths should also appear in `attachmentPaths`. |
@@ -91,18 +91,34 @@ capable and incapable harnesses.
   `InvalidAgentEffortError` (listing the accepted values) otherwise.
 - **Composition vs. flags.** Where a CLI takes effort as its own argument,
   emit it in `buildArgs` (Codex's `-c model_reasoning_effort="…"` config
-  override). Where effort is encoded in the model string, compose rather than
-  emit a separate flag (pi's `<id>:<thinking>` suffix — see
-  `composePiModelWithEffort`; an explicit suffix already present in the model
-  string wins, and effort without a model is ignored with a one-line warning
-  because pi has nothing to attach the thinking level to).
+  override, Claude Code / Grok / `agy` / Reasonix `--effort`, Cline's
+  `--thinking <level>` reasoning-effort flag, Opencode/Kilo's `--variant`
+  reasoning-effort variant). Where effort is encoded in the model string,
+  compose rather than emit a separate flag (pi's `<id>:<thinking>` suffix —
+  see `composePiModelWithEffort`; an explicit suffix already present in the
+  model string wins, and effort without a model is ignored with a one-line
+  warning because pi has nothing to attach the thinking level to).
 - **Per-harness behavior** (verified against upstream docs):
 
   | Harness | Mechanism |
   | --- | --- |
+  | antigravity (agy, v1.1.5+) | `--effort <low\|medium\|high>` |
+  | claude-code | `--effort <level>` (session flag; clamped per model) |
+  | cline | `--thinking <level>` (reasoning effort: `none\|low\|medium\|high\|xhigh`) |
   | codex | `-c model_reasoning_effort="<effort>"` config override |
+  | deepseek (reasonix) | `--effort <level>` |
+  | grok | `--effort <level>` (alias `--reasoning-effort`) |
+  | kilo-code | `--variant <effort>` (provider-specific reasoning-effort variant) |
+  | opencode | `--variant <effort>` (provider-specific reasoning-effort variant) |
   | pi | composed into the model string: `--model <model>:<effort>` |
-  | all others | ignored (runner warns when the option is requested) |
+  | cursor, goose, kimi, qwen | ignored (runner warns when the option is requested) |
+
+  Ignored-on-purpose notes: Cursor exposes effort only via model-string
+  bracket params (`model[effort=high]`), which the CLI `--model` flag does
+  not support; Goose reads thinking effort from `GOOSE_THINKING_EFFORT`
+  config/env (no `goose run` flag); Qwen exposes `/effort` and a
+  `model.reasoningEffort` setting but no headless CLI flag; Kimi's
+  `--thinking` is a boolean toggle without levels.
 
 - **Default unchanged.** When `effort` is unset, no effort-related args are
   emitted and the warning never fires — existing callers are unaffected.

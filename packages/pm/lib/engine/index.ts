@@ -173,7 +173,7 @@ export interface CreateEngineOptions {
   model?: string;
   /**
    * Reasoning-effort override passed to every agent call alongside `model`.
-   * Emitted only by harnesses that support it (codex, pi); others ignore it.
+   * Emitted by harnesses that support it; others ignore it with a warning.
    */
   effort?: AgentEffort;
   /**

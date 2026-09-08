@@ -104,9 +104,11 @@ Options:
                         - pm: Focuses on user stories and acceptance criteria
                         - technical: Includes Technical Considerations section
   --model, -m <model>  Model to use (agent-specific, e.g., "sonnet", "opus", or provider/model)
-  --effort <level>     Reasoning effort for harnesses that support it: low, medium, or high.
-                        Overrides the AGENT_EFFORT environment variable; ignored by harnesses
-                        without effort support (with a warning).
+  --effort <level>     Reasoning effort for agent runs: low, medium, or high.
+                        Overrides the AGENT_EFFORT environment variable; emitted by
+                        harnesses that support reasoning effort (claude-code, grok,
+                        antigravity, deepseek, cline, opencode, kilo-code, codex, pi),
+                        ignored by the others (with a warning).
   --harness <name>     AI agent harness to use (e.g., "claude-code", "opencode", "codex")
   --decompose          Decompose the story into subtasks (default: off)
   --confirm            Interactively confirm each subtask before creating

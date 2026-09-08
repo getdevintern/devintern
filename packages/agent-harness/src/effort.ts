@@ -2,9 +2,12 @@
  * Reasoning-effort support for agent harnesses.
  *
  * Several wrapped CLIs expose a reasoning-effort style control alongside the
- * model (Codex's `model_reasoning_effort` config override, pi's
- * `<model>:<thinking>` suffix). {@link AgentRunOptions.effort} flows through
- * the same path as `model`; harnesses declare support with the
+ * model — as a dedicated flag (Claude Code `--effort`, Grok/`agy`/Reasonix
+ * `--effort`), a flag under a different name (Cline `--thinking <level>`,
+ * Opencode/Kilo `--variant <level>`), a config override (Codex's
+ * `model_reasoning_effort`), or a model-string suffix (pi's
+ * `<model>:<thinking>`). {@link AgentRunOptions.effort} flows through the
+ * same path as `model`; harnesses declare support with the
  * `AgentHarness.supportsEffort` capability flag, mirroring
  * `supportsStructuredOutput`. Supporting harnesses emit (or compose) the
  * value in `buildArgs`; the rest ignore it — runners print a one-line
@@ -81,7 +84,7 @@ export function warnEffortUnsupported(harness: AgentHarness, options: AgentRunOp
     console.warn(
       `⚠️  ${harness.displayName} (${harness.name}) does not support reasoning effort; ` +
         `ignoring effort "${options.effort}". ` +
-        `Supported harnesses: codex, pi.`,
+        `Supported harnesses: antigravity, cline, claude-code, codex, deepseek, grok, kilo-code, opencode, pi.`,
     );
   }
 }

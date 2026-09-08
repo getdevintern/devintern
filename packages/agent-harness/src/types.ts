@@ -18,7 +18,7 @@ export type AgentRunMode = "default" | "plan" | "readonly";
 
 /**
  * Reasoning-effort levels shared by harnesses that expose the concept
- * (e.g. Codex `model_reasoning_effort`, pi's `<model>:<thinking>` suffix).
+ * (e.g. a dedicated CLI flag, a config override, or a model-string suffix).
  * Validate raw config input with {@link parseAgentEffort} in `src/effort.ts`.
  */
 export type AgentEffort = "low" | "medium" | "high";
@@ -167,9 +167,11 @@ export interface AgentHarness {
    */
   readonly supportsStructuredOutput?: boolean;
   /**
-   * Whether this harness can apply {@link AgentRunOptions.effort} — either as
-   * a dedicated CLI flag / config override (Codex `-c
-   * model_reasoning_effort="…"`) or by composing it into the model string
+   * Whether this harness can apply {@link AgentRunOptions.effort} — via a
+   * dedicated CLI flag (Claude Code / Grok / `agy` / Reasonix `--effort`), a
+   * differently named flag (Cline `--thinking <level>`, Opencode/Kilo
+   * `--variant <level>`), a config override (Codex `-c
+   * model_reasoning_effort="…"`), or by composing it into the model string
    * (pi `<id>:<thinking>`). Omitted / false means the option is ignored:
    * runners emit a one-line warning instead of failing, so a failover chain
    * mixing capable and incapable harnesses degrades cleanly.
