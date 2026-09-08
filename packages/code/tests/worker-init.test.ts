@@ -233,6 +233,28 @@ describe("runWorkerInit", () => {
     expect(logs.join("\n")).toContain("devintern.com/pricing");
   });
 
+  test("offers workspace-scoped sign-in for a free Worker Pilot", async () => {
+    const checked: string[] = [];
+    const signedIn: string[] = [];
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", ""], {
+        checkAutomationLicense: async (dir) => {
+          checked.push(dir);
+          return checked.length === 1 ? "No automation license found." : null;
+        },
+        signIn: async (dir) => {
+          signedIn.push(dir);
+          return { id: "user-1", email: "pilot@example.com" };
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(checked).toEqual([workspaceDir, workspaceDir]);
+    expect(signedIn).toEqual([workspaceDir]);
+    expect(logs.join("\n")).toContain("Free Worker Pilot available");
+  });
+
   test("validates and adds an opt-in Sentry monitor with a protected token file", async () => {
     writeFileSync(
       path.join(workspaceDir, "workspace.toml"),

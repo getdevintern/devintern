@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { homedir } from "os";
 import { fileURLToPath } from "url";
 import {
   createDefaultSupabaseAuthConfig,
@@ -20,7 +21,13 @@ import {
   logout,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
+import {
+  activateWorkerTrial,
+  checkLicense,
+  claimWorkerTrialTask,
+  LicenseCheckError,
+  requireLicense,
+} from "@devintern/license-check";
 import type { LicenseCheckResult } from "@devintern/license-check";
 import {
   buildPromptArgs,
@@ -99,6 +106,7 @@ import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { reportTaskFailure } from "./lib/failure-feedback";
 import {
+  AUTOMATION_ACCESS_EXIT_CODE,
   exitIfWorkerUsageLimit,
   isWorkerChild,
   USAGE_LIMIT_EXIT_CODE,
@@ -111,6 +119,8 @@ import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
+
+const AUTH_SESSION_FILE_ENV = "DEVINTERN_AUTH_SESSION_FILE";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
 declare const __VERSION__: string;
@@ -516,10 +526,16 @@ function loadEnvironmentInner(envFile?: string): string | null {
   return null;
 }
 
-/** Build Supabase auth config pointing at the project session file. */
+/** Build auth config, preferring the persistent worker workspace when configured. */
 function loadSupabaseConfig() {
   const configDir = resolveConfigDir({ configDirName: ".devintern-code" });
-  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
+  const workspaceDir = process.env.DEVINTERN_WORKSPACE_DIR?.trim() || join(homedir(), ".devintern");
+  const workspaceSession = existsSync(join(workspaceDir, "workspace.toml"))
+    ? join(workspaceDir, ".devintern-code", ".auth-session.json")
+    : undefined;
+  return createDefaultSupabaseAuthConfig(
+    process.env[AUTH_SESSION_FILE_ENV] || workspaceSession || join(configDir, ".auth-session.json"),
+  );
 }
 
 /**
@@ -528,11 +544,11 @@ function loadSupabaseConfig() {
  * process); the CLI converts that into its standard failed-check exit code 1
  * after the failure details were already printed to stderr.
  */
-function enforceLicenseOrExit(result: LicenseCheckResult): void {
+function enforceLicenseOrExit(result: LicenseCheckResult, exitCode = 1): void {
   try {
     requireLicense(result);
   } catch (error) {
-    if (error instanceof LicenseCheckError) process.exit(1);
+    if (error instanceof LicenseCheckError) process.exit(exitCode);
     throw error;
   }
 }
@@ -727,11 +743,14 @@ if (process.argv[2] === "init") {
           const result = await trackerManager.getClient().searchTasks(query);
           return result.tasks.length;
         },
-        checkAutomationLicense: async () => {
+        checkAutomationLicense: async (workspaceDir) => {
           const license = await checkLicense({
             productKey: "devintern/code",
-            supabaseConfig: loadSupabaseConfig(),
+            supabaseConfig: createDefaultSupabaseAuthConfig(
+              join(workspaceDir, ".devintern-code", ".auth-session.json"),
+            ),
             requireAutomation: true,
+            allowTrial: true,
           });
           return license.valid ? null : license.message;
         },
@@ -837,19 +856,49 @@ if (process.argv[2] === "init") {
 
     // License check — the worker is unattended automation, so it always
     // requires an automation entitlement.
-    const supabaseConfig = loadSupabaseConfig();
+    const supabaseConfig = createDefaultSupabaseAuthConfig(
+      join(selectedWorkspaceDir, ".devintern-code", ".auth-session.json"),
+    );
+    process.env[AUTH_SESSION_FILE_ENV] = supabaseConfig.sessionFilePath;
     const licenseResult = await checkLicense({
       productKey: "devintern/code",
       supabaseConfig,
       requireAutomation: true,
+      allowTrial: true,
     });
     enforceLicenseOrExit(licenseResult);
+    if (licenseResult.source === "trial") {
+      process.env.DEVINTERN_WORKER_TRIAL = "1";
+    }
 
     const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
     await runWorkspaceWorker({
       workspacePath,
       verbose,
       cliVersion: VERSION,
+      beforeAcquirersStart: licenseResult.trialAvailable
+        ? async () => {
+            const activated = await activateWorkerTrial({
+              productKey: "devintern/code",
+              supabaseConfig,
+            });
+            requireLicense(activated);
+          }
+        : undefined,
+      accessCheck: async () => {
+        let access = await checkLicense({
+          productKey: "devintern/code",
+          supabaseConfig,
+          requireAutomation: true,
+          allowTrial: true,
+        });
+        if (access.trialAvailable) {
+          access = await activateWorkerTrial({ productKey: "devintern/code", supabaseConfig });
+        }
+        if (access.source === "trial") process.env.DEVINTERN_WORKER_TRIAL = "1";
+        else delete process.env.DEVINTERN_WORKER_TRIAL;
+        return access;
+      },
     });
     return;
   })();
@@ -898,7 +947,13 @@ if (process.argv[2] === "init") {
       productKey: "devintern/code",
       supabaseConfig,
       requireAutomation: true,
+      allowTrial: true,
     });
+    if (licenseResult.trialAvailable) {
+      licenseResult.valid = false;
+      licenseResult.source = "none";
+      licenseResult.message = "Start `devintern worker` once to activate the free Worker Pilot.";
+    }
     enforceLicenseOrExit(licenseResult);
 
     const { startDashboardServer } = await import("./dashboard-server");
@@ -2204,8 +2259,17 @@ async function main(): Promise<void> {
         productKey: "devintern/code",
         supabaseConfig,
         requireAutomation: true,
+        allowTrial: process.env.DEVINTERN_WORKER_TRIAL === "1",
       });
-      enforceLicenseOrExit(licenseResult);
+      enforceLicenseOrExit(licenseResult, AUTOMATION_ACCESS_EXIT_CODE);
+      if (licenseResult.source === "trial" && taskKeys[0]) {
+        const claim = await claimWorkerTrialTask({
+          productKey: "devintern/code",
+          supabaseConfig,
+          taskId: `${process.env[RUN_ORIGIN_ENV] ?? "worker"}:${taskKeys[0]}`,
+        });
+        enforceLicenseOrExit(claim, AUTOMATION_ACCESS_EXIT_CODE);
+      }
     }
 
     // Pull latest changes from remote (unless git is disabled)

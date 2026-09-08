@@ -135,8 +135,8 @@ export interface WorkerInitDeps {
   cwd?: string;
   /** Evaluate the ready-tasks query; returns the number of matching tasks. */
   dryRunQuery?: (query: string) => Promise<number>;
-  /** Automation license check; returns a human-readable failure, or null when entitled. */
-  checkAutomationLicense?: () => Promise<string | null>;
+  /** Automation license/trial check in the persistent workspace auth context. */
+  checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */
   ensureTracker?: (ctx: { cwd: string; prompt: PromptFn; log: LogFn }) => Promise<string | null>;
   /** Override workspace write. */
@@ -567,14 +567,35 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     if (deps.checkAutomationLicense) {
       log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
       try {
-        const failure = await deps.checkAutomationLicense();
+        let failure = await deps.checkAutomationLicense(workspaceDir);
         if (failure === null) {
           log("✅ Automation license OK.");
         } else {
           log(`⚠️  ${failure}`);
-          log("   The worker will refuse to start until this is fixed:");
-          log("   get a Supporter, Team, or Business key at https://devintern.com/pricing");
-          log("   and set LICENSE_KEY in .devintern-code/.env (or sign in).");
+          const loginAnswer = (
+            await prompt("Sign in now to start a free Worker Pilot (no card required)? [Y/n]: ")
+          )
+            .trim()
+            .toLowerCase();
+          if (loginAnswer !== "n" && loginAnswer !== "no") {
+            try {
+              const signIn = deps.signIn ?? defaultSignIn;
+              const user = await signIn(workspaceDir);
+              if (user) {
+                log(`✅ Signed in as ${user.email || user.id}.`);
+                failure = await deps.checkAutomationLicense(workspaceDir);
+              }
+            } catch (error) {
+              log(`⚠️  Sign-in failed: ${(error as Error).message}`);
+            }
+          }
+          if (failure === null) {
+            log("✅ Free Worker Pilot available. It starts when the worker is ready.");
+          } else {
+            log("   The worker will refuse to start until this is fixed:");
+            log("   sign in for a free Worker Pilot, or get an automation license at");
+            log("   https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.");
+          }
         }
       } catch (error) {
         log(
@@ -597,7 +618,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       const signIn = deps.signIn ?? defaultSignIn;
       let user: InitUserLike | null = null;
       try {
-        user = await getUser(projectRoot);
+        user = await getUser(workspaceDir);
       } catch {
         user = null;
       }
@@ -608,7 +629,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
           .toLowerCase();
         if (loginAnswer !== "n" && loginAnswer !== "no") {
           try {
-            user = await signIn(projectRoot);
+            user = await signIn(workspaceDir);
             if (user) {
               log(`✅ Signed in as ${user.email || user.id}.`);
             }
@@ -624,7 +645,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         const connectRelay = deps.connectRelay ?? defaultConnectRelay;
         try {
           const connected = await connectRelay({
-            projectRoot,
+            projectRoot: workspaceDir,
             workspaceDir,
             trackerType,
             log,

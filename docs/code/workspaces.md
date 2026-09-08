@@ -4,7 +4,7 @@ sidebarLabel: "Multiple Repositories"
 description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
 section: "Automation"
 order: 2
-dateModified: 2026-09-07
+dateModified: 2026-09-08
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -13,7 +13,7 @@ Workspace mode lets one `devintern worker` process serve every repository you au
 
 The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace, validates `[defaults].task_query`, and asks about task pickup hours, conflict handling, and automatic CI repair. Add more repos later with `devintern worker add-repo`.
 
-Workspace mode runs under the same automation license as the rest of the worker: any Supporter, Team, or Business key (or an active trial) covers it — one license spans all of your own repos in the fleet.
+Workspace mode runs under the same automation access as the rest of the worker: any Supporter, Team, or Business key covers it, and a signed-in user can first use the no-card Worker Pilot for 14 days or 10 new tasks. One entitlement spans all applicable repositories in the fleet.
 
 ## How it works
 

@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
 order: 1
-dateModified: 2026-09-07
+dateModified: 2026-09-08
 ---
 
 # Worker Daemon
@@ -21,7 +21,7 @@ The fastest way to set up the worker is the guided setup:
 devintern worker init
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, configures task pickup hours plus conflict/CI repair policy, optionally validates and adds a Sentry auto-fix project, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and then offers to install and start the background service for you — a user-level systemd unit on Linux or a launchd agent on macOS — so setup finishes with the worker already running and auto-restarting. Declining keeps it manual and writes the definition plus exact install commands into the workspace home; `--no-service` skips service setup entirely. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, configures task pickup hours plus conflict/CI repair policy, optionally validates and adds a Sentry auto-fix project, and checks automation access. Without a paid license, it offers sign-in for the no-card Worker Pilot. It then offers zero-port relay setup plus the central DevIntern App and can install and start a user-level systemd unit on Linux or launchd agent on macOS. Declining keeps it manual and writes the definition plus exact install commands into the workspace home; `--no-service` skips service setup entirely. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
 In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
 
@@ -348,6 +348,8 @@ loginctl enable-linger
 
 Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
-## License
+## Worker Pilot and licenses
 
-The worker is unattended automation and requires an automation license (Supporter, Team, or Business). Interactive runs stay free under the FSL license.
+The no-card **Worker Pilot** lets a signed-in user evaluate the unattended product for 14 days or 10 new tasks, whichever comes first. It begins only after workspace validation succeeds and the worker is ready to start its event sources. Run `devintern login`, then `devintern worker`; creating an account or using the free interactive CLI does not consume trial time.
+
+After the pilot, the worker requires an automation license (Supporter, Team, or Business). It revalidates access while running. If access expires, in-flight work may finish but event sources pause before acquiring more work; adding a license lets them resume on the next check. Paid `LICENSE_KEY` use does not require login, and interactive runs stay free under the FSL license.

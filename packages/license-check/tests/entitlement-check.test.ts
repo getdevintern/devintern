@@ -4,14 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
+let authenticated = true;
 
 mock.module("@devintern/auth", () => ({
-  getAuthenticatedUser: async () => ({
-    id: "user-1",
-    email: "test@example.com",
-    createdAt: new Date().toISOString(),
-    accessToken: "test-access-token",
-  }),
+  getAuthenticatedUser: async () =>
+    authenticated
+      ? {
+          id: "user-1",
+          email: "test@example.com",
+          createdAt: new Date().toISOString(),
+          accessToken: "test-access-token",
+        }
+      : null,
 }));
 
 function freshSupabaseConfig() {
@@ -25,6 +29,7 @@ function freshSupabaseConfig() {
 
 describe("checkLicense entitlement API", () => {
   beforeEach(() => {
+    authenticated = true;
     process.env.DEVINTERN_SKIP_LICENSE_CHECK = "0";
     delete process.env.LICENSE_KEY;
     process.env.DEVINTERN_API_BASE = "https://license.test";
@@ -243,5 +248,116 @@ describe("checkLicense entitlement API", () => {
     expect(result.source).toBe("none");
 
     warnSpy.mockRestore();
+  });
+
+  test("returns a server-authoritative Worker Pilot only when explicitly allowed", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      urls.push(String(input));
+      return Response.json({
+        entitled: true,
+        source: "worker-trial",
+        trial: { status: "available", tasksRemaining: 10 },
+      });
+    }) as typeof fetch;
+
+    const { checkLicense } = await import(`../src/index.ts?trial-preview=${Date.now()}`);
+    const result = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+      allowTrial: true,
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      source: "trial",
+      trialAvailable: true,
+      trialTasksRemaining: 10,
+    });
+    expect(urls[0]).toContain("trial=1");
+  });
+
+  test("requires login before offering a Worker Pilot", async () => {
+    authenticated = false;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return Response.json({ entitled: true });
+    }) as typeof fetch;
+
+    const { checkLicense } = await import(`../src/index.ts?trial-login=${Date.now()}`);
+    const result = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+      allowTrial: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.message).toContain("devintern login");
+    expect(result.message).toContain("no card is required");
+    expect(calls).toBe(0);
+  });
+
+  test("activates the Worker Pilot with the signed-in user's token", async () => {
+    let request: { url: string; init?: RequestInit } | undefined;
+    globalThis.fetch = (async (input, init) => {
+      request = { url: String(input), init };
+      return Response.json({
+        entitled: true,
+        source: "worker-trial",
+        trial: {
+          status: "active",
+          endsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+          tasksRemaining: 10,
+        },
+      });
+    }) as typeof fetch;
+
+    const { activateWorkerTrial } = await import(`../src/index.ts?trial-activate=${Date.now()}`);
+    const result = await activateWorkerTrial({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      source: "trial",
+      trialAvailable: false,
+      trialTasksRemaining: 10,
+    });
+    expect(request?.url).toEndWith("/api/license/trial");
+    expect(request?.init?.method).toBe("POST");
+    expect(request?.init?.headers).toMatchObject({ Authorization: "Bearer test-access-token" });
+  });
+
+  test("claims a trial task with an idempotent task identity", async () => {
+    let body = "";
+    globalThis.fetch = (async (_input, init) => {
+      body = String(init?.body);
+      return Response.json({
+        entitled: true,
+        source: "worker-trial",
+        trial: {
+          status: "active",
+          endsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+          tasksRemaining: 9,
+        },
+      });
+    }) as typeof fetch;
+
+    const { claimWorkerTrialTask } = await import(`../src/index.ts?trial-claim=${Date.now()}`);
+    const result = await claimWorkerTrialTask({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      taskId: "worker:DEV-42",
+    });
+
+    expect(JSON.parse(body)).toEqual({
+      productKey: "devintern/code",
+      taskFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(result.trialTasksRemaining).toBe(9);
   });
 });

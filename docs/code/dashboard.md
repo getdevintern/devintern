@@ -5,7 +5,7 @@ description: "See what the worker is doing, inspect failed runs, and retry work 
 section: "Automation"
 order: 2
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-09-08
 ---
 
 # Worker Dashboard
@@ -51,7 +51,7 @@ The command reads the local history without changing it. Use `--port <number>` i
 
 The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet.
 
-Run history lives in the worker's workspace, alongside its other local state. The dashboard is included with the same automation license or active trial required by the worker.
+Run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
 To disable the dashboard or change its port, edit the workspace settings:
 

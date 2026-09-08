@@ -4,7 +4,7 @@ description: "Choose when the worker picks up tasks and keep unattended runs hea
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-09-07
+dateModified: 2026-09-08
 ---
 
 # Running the Worker Unattended
@@ -20,9 +20,9 @@ devintern worker
 
 Keep the worker running and use [working windows](#working-windows-quiet-hours) when you want to control when it may pick up new tasks.
 
-## Requires an automation license
+## Free Worker Pilot or automation license
 
-Unattended execution (the worker or any CI environment) requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds no matching license, the run fails immediately with:
+Signed-in users can evaluate the worker without a card for 14 days or 10 new tasks, whichever comes first. Continued unattended execution requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds neither an active Worker Pilot nor a matching license, the run fails immediately with:
 
 ```
 ❌ License check failed
@@ -30,7 +30,7 @@ Unattended execution (the worker or any CI environment) requires an **automation
    automation license was found.
 ```
 
-Set `LICENSE_KEY` in the workspace `.env` (or as an `Environment=` entry in a unit file) to an automation license key from [devintern.com/account](https://devintern.com/account). Interactive runs (`devintern PROJ-123` from your terminal) are unaffected and do **not** require a license. @devintern/code is free to use interactively under the FSL license.
+Run `devintern login` to use the Worker Pilot, or set `LICENSE_KEY` in the workspace `.env` to a key from [devintern.com/account](https://devintern.com/account). Interactive runs (`devintern PROJ-123` from your terminal) remain free and require neither login nor a license.
 
 ## Working windows (quiet hours)
 
