@@ -27,12 +27,18 @@ export class DeepSeekHarness implements AgentHarness {
   readonly supportedModes = [] as const;
   /** `--output-format json` emits one final result object (verified in docs/CLI.md). */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via the dedicated `--effort <level>` flag ("Override
+   * reasoning effort for this session"), accepted by `reasonix run`.
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `reasonix run` flags for non-interactive execution.
    *
-   * @param options - Supports `model` and `structuredOutput`. `skipPermissions`
-   *   and `maxTurns` are not exposed as CLI flags for `reasonix run`.
+   * @param options - Supports `model`, `effort` (`--effort`), and
+   *   `structuredOutput`. `skipPermissions` and `maxTurns` are not exposed as
+   *   CLI flags for `reasonix run`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -44,6 +50,10 @@ export class DeepSeekHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--effort", options.effort);
     }
 
     if (options.structuredOutput) {

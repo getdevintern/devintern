@@ -1,5 +1,10 @@
 import { describe, expect, test, mock } from "bun:test";
-import { extractHarnessFlags, parseArgs, validateHarnessName } from "./parse-args";
+import {
+  extractHarnessFlags,
+  parseArgs,
+  parseEffortValue,
+  validateHarnessName,
+} from "./parse-args";
 
 /**
  * parseArgs() and validateHarnessName() exit the process on error. To test
@@ -54,6 +59,52 @@ describe("parseArgs", () => {
     });
   });
 
+  describe("--effort flag", () => {
+    test("accepts each documented effort value", () => {
+      for (const level of ["low", "medium", "high"] as const) {
+        const result = parseArgs(["--prompt", "Add login", "--effort", level]);
+        expect(
+          result && typeof result === "object" && "effort" in result ? result.effort : null,
+        ).toBe(level);
+      }
+    });
+
+    test("trims surrounding whitespace in the value", () => {
+      const result = parseArgs(["--prompt", "Add login", "--effort", " high "]);
+      expect(
+        result && typeof result === "object" && "effort" in result ? result.effort : null,
+      ).toBe("high");
+    });
+
+    test("defaults to undefined when --effort is absent", () => {
+      const result = parseArgs(["--prompt", "Add login"]);
+      expect(
+        result && typeof result === "object" && "effort" in result ? result.effort : null,
+      ).toBeUndefined();
+    });
+
+    test("exits with a clear error for an invalid effort value", () => {
+      withExitAndErrorSpies((exitSpy, errSpy) => {
+        expect(() => parseArgs(["--prompt", "Add login", "--effort", "ultra"])).toThrow(
+          "__process_exit__",
+        );
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+        expect(errMessage).toContain('Invalid agent effort "ultra"');
+        expect(errMessage).toContain("Valid values: low, medium, high");
+      });
+    });
+
+    test("exits when --effort is the last argument (missing value)", () => {
+      withExitAndErrorSpies((exitSpy, errSpy) => {
+        expect(() => parseArgs(["--prompt", "Add login", "--effort"])).toThrow("__process_exit__");
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+        expect(errMessage).toContain("--effort requires a value");
+      });
+    });
+  });
+
   describe("interactive / command sentinels", () => {
     test("returns null for --interactive", () => {
       expect(parseArgs(["--interactive"])).toBeNull();
@@ -84,6 +135,31 @@ describe("parseArgs", () => {
         const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
         expect(errMessage).toContain("Source is required");
       });
+    });
+  });
+});
+
+describe("parseEffortValue", () => {
+  test("returns the validated value at the given index", () => {
+    expect(parseEffortValue(["--effort", "high"], 0)).toBe("high");
+    expect(parseEffortValue(["--prompt", "x", "--effort", " low "], 2)).toBe("low");
+  });
+
+  test("exits when --effort is the last argument (missing value)", () => {
+    withExitAndErrorSpies((exitSpy, errSpy) => {
+      expect(() => parseEffortValue(["--effort"], 0)).toThrow("__process_exit__");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+      expect(errMessage).toContain("--effort requires a value");
+    });
+  });
+
+  test("exits for an invalid effort value", () => {
+    withExitAndErrorSpies((exitSpy, errSpy) => {
+      expect(() => parseEffortValue(["--effort", "ultra"], 0)).toThrow("__process_exit__");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      const errMessage = String(errSpy.mock.calls[0]?.[0] ?? "");
+      expect(errMessage).toContain('Invalid agent effort "ultra"');
     });
   });
 });

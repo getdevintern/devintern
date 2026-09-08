@@ -12,6 +12,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } fro
 import { dirname, join, resolve } from "path";
 
 import { findConfigDir } from "@devintern/utils";
+import { configureSqliteConnection } from "./sqlite";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -172,7 +173,7 @@ export class WebhookQueue {
 
     if (config.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
@@ -181,6 +182,7 @@ export class WebhookQueue {
     this.migrateLegacyDb(dbPath, config.legacyDbPath);
 
     this.db = new Database(dbPath);
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 
@@ -315,6 +317,57 @@ export class WebhookQueue {
     return Number.isFinite(ms) ? ms : null;
   }
 
+  /** Every persisted per-harness rate-limit window, keyed by harness name. */
+  getAllRateLimits(): Record<string, number> {
+    const rows = this.db
+      .query(`SELECT key, value FROM webhook_meta WHERE key LIKE 'rate_limit:%'`)
+      .all() as { key: string; value: string }[];
+    const result: Record<string, number> = {};
+    for (const row of rows) {
+      const ms = Number(row.value);
+      if (Number.isFinite(ms)) {
+        result[row.key.slice("rate_limit:".length)] = ms;
+      }
+    }
+    return result;
+  }
+
+  /** Meta key for the failover chain's active harness. */
+  private activeHarnessKey(): string {
+    return "failover:active_harness";
+  }
+
+  /**
+   * Persist the failover chain's active harness so a worker restart resumes
+   * on it instead of snapping back to the primary mid-window.
+   *
+   * @param harness - Canonical harness name (e.g. `codex`)
+   */
+  setActiveHarness(harness: string): void {
+    this.db.run(
+      `INSERT INTO webhook_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [this.activeHarnessKey(), harness],
+    );
+  }
+
+  /** Forget the persisted active harness (e.g. when the chain changed). */
+  clearActiveHarness(): void {
+    this.db.run(`DELETE FROM webhook_meta WHERE key = ?`, [this.activeHarnessKey()]);
+  }
+
+  /**
+   * Read the persisted active harness of the failover chain.
+   *
+   * @returns Canonical harness name, or `null` when none was persisted.
+   */
+  getActiveHarness(): string | null {
+    const row = this.db
+      .query(`SELECT value FROM webhook_meta WHERE key = ?`)
+      .get(this.activeHarnessKey()) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
   /**
    * Check whether a provider-issued event id was already handled.
    *
@@ -340,6 +393,24 @@ export class WebhookQueue {
        ON CONFLICT(source, external_id) DO NOTHING`,
       [source, externalId, Date.now()],
     );
+  }
+
+  /**
+   * Atomically claim a provider-issued event id for processing.
+   *
+   * Unlike a separate {@link hasProcessed} / {@link markProcessed} pair, this
+   * is safe when multiple queue connections race for the same event. Only the
+   * connection that inserts the row owns the claim and may dispatch work.
+   *
+   * @returns `true` when this call acquired the claim
+   */
+  tryMarkProcessed(source: string, externalId: string): boolean {
+    const result = this.db.run(
+      `INSERT INTO processed_events (source, external_id, processed_at) VALUES (?, ?, ?)
+       ON CONFLICT(source, external_id) DO NOTHING`,
+      [source, externalId, Date.now()],
+    );
+    return result.changes === 1;
   }
 
   /** Release a provisional processed marker when work was deferred before execution. */

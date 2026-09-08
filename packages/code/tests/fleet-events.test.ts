@@ -8,6 +8,7 @@ import type { RepoConfig } from "../src/lib/workspace/config";
 import {
   coalescePrFeedbackRuns,
   createFleetAddressPr,
+  createFleetCiFix,
   createFleetMentionHandler,
   createFleetResolveConflicts,
   createFleetTaskEvaluator,
@@ -103,6 +104,7 @@ describe("fleet event handlers", () => {
     env: Record<string, string | undefined>;
   }>;
   let pushAccess: boolean | Error;
+  const ciFixes: Array<{ slug: string; prNumber: number; feedbackPath: string; cwd: string }> = [];
   const resolutions: Array<{
     slug: string;
     prNumber: number;
@@ -127,6 +129,15 @@ describe("fleet event handlers", () => {
       opts: { cwd: string; env: Record<string, string | undefined> },
     ) => {
       reviews.push({ slug, prNumber, cwd: opts.cwd, env: opts.env });
+      return true;
+    },
+    runCiFix: async (
+      slug: string,
+      prNumber: number,
+      feedbackPath: string,
+      opts: { cwd: string },
+    ) => {
+      ciFixes.push({ slug, prNumber, feedbackPath, cwd: opts.cwd });
       return true;
     },
     runResolve: async (
@@ -157,6 +168,7 @@ describe("fleet event handlers", () => {
     reviews = [];
     pushAccess = true;
     resolutions.length = 0;
+    ciFixes.length = 0;
   });
 
   afterEach(() => {
@@ -178,6 +190,19 @@ describe("fleet event handlers", () => {
     const addressPr = createFleetAddressPr(deps());
     expect(await addressPr("acme/unknown", 7)).toBe(false);
     expect(reviews).toHaveLength(0);
+  });
+
+  test("CI fixes run from the matching repo base worktree", async () => {
+    const fix = createFleetCiFix(deps());
+    expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe(true);
+    expect(ciFixes).toEqual([
+      {
+        slug: "acme/backend",
+        prNumber: 42,
+        feedbackPath: "/tmp/ci-feedback.json",
+        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+      },
+    ]);
   });
 
   test("coalesces overlapping feedback events into one follow-up reconciliation", async () => {

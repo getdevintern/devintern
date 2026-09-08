@@ -42,12 +42,21 @@ export class OpencodeHarness implements AgentHarness {
    * error. Verified `opencode run -- "<prompt>"` executes normally.
    */
   readonly endOfOptionsMarker = "--";
+  /**
+   * Effort applies via `--variant <level>` — opencode's documented
+   * "model variant (provider-specific reasoning effort)" flag. Variant names
+   * are model-specific: standard effort variants (`low`/`medium`/`high`)
+   * exist on reasoning models; on models without them the CLI ignores the
+   * unknown variant (or fails model resolution on v2), mirroring the
+   * degrade-with-warning contract used here.
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `opencode run` flags for non-interactive execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`,
-   *   `structuredOutput`, and `workingDir`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`, `effort`
+   *   (`--variant`), `structuredOutput`, and `workingDir`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -71,6 +80,10 @@ export class OpencodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--variant", options.effort);
     }
 
     if (options.structuredOutput) {

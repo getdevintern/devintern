@@ -34,7 +34,9 @@ const STATUS_FILTERS: (RunStatus | "all")[] = [
 const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "all",
   "task",
+  "error_monitor",
   "pr_mention",
+  "ci_fix",
   "conflict_resolution",
   "scheduled",
   "estimate",

@@ -77,6 +77,32 @@ export interface FileContent {
   sha: string;
 }
 
+export interface CombinedStatus {
+  state: "error" | "failure" | "pending" | "success";
+  total_count: number;
+  statuses: Array<{
+    id: number;
+    state: string;
+    context?: string;
+    target_url?: string | null;
+  }>;
+}
+
+export interface ActionJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+}
+
+export interface WorkflowRunSummary {
+  id: number;
+  name?: string;
+  status: string;
+  conclusion: string | null;
+  html_url?: string;
+}
+
 /**
  * Whether an error thrown by a GitHub API client call is an HTTP 404
  * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
@@ -89,6 +115,37 @@ export interface FileContent {
 export function isGitHubNotFound(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("GitHub API error (404)");
+}
+
+/**
+ * Whether an error thrown by a GitHub API client call is an HTTP 401
+ * (`Bad credentials`) or a missing-credential failure: the credential is
+ * expired, revoked, or rejected. Unlike 5xx/429 responses this is not
+ * transient — every request with the same credential fails identically, so
+ * long-running callers treat it as a configuration problem (renew
+ * `GITHUB_TOKEN`) instead of re-reporting it as a per-tick failure forever.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("GitHub API error (401)") ||
+    message.includes("No GitHub authentication configured")
+  );
+}
+
+/** Build an API error message; 401s get actionable credential guidance. */
+function apiErrorMessage(status: number, detail: string): string {
+  const base = `GitHub API error (${status}): ${detail}`;
+  if (status === 401) {
+    return (
+      `${base}. The GitHub credential was rejected as expired or revoked. ` +
+      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials), " +
+      "then restart the worker."
+    );
+  }
+  return base;
 }
 
 /**
@@ -237,9 +294,7 @@ export class GitHubReviewsClient {
       const error = (await response.json().catch(() => ({
         message: "Unknown error",
       }))) as { message?: string };
-      throw new Error(
-        `GitHub API error (${response.status}): ${error.message || response.statusText}`,
-      );
+      throw new Error(apiErrorMessage(response.status, error.message || response.statusText));
     }
 
     return (await response.json()) as T;
@@ -286,9 +341,7 @@ export class GitHubReviewsClient {
       const error = (await response.json().catch(() => ({
         message: "Unknown error",
       }))) as { message?: string };
-      throw new Error(
-        `GitHub API error (${response.status}): ${error.message || response.statusText}`,
-      );
+      throw new Error(apiErrorMessage(response.status, error.message || response.statusText));
     }
 
     return {
@@ -671,6 +724,66 @@ export class GitHubReviewsClient {
       repo,
       { reviewers },
     );
+  }
+
+  /** Fetch classic commit statuses for a commit, conditionally by ETag. */
+  async getCombinedStatus(
+    owner: string,
+    repo: string,
+    sha: string,
+    etag?: string,
+  ): Promise<{ data: CombinedStatus | null; etag?: string; notModified: boolean }> {
+    return this.conditionalGet<CombinedStatus>(
+      `/repos/${owner}/${repo}/commits/${sha}/status`,
+      owner,
+      repo,
+      etag,
+    );
+  }
+
+  /** List workflow runs for a specific head SHA. */
+  async getWorkflowRunsForSha(
+    owner: string,
+    repo: string,
+    sha: string,
+  ): Promise<WorkflowRunSummary[]> {
+    const data = await this.apiRequest<{ workflow_runs: WorkflowRunSummary[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
+      owner,
+      repo,
+    );
+    return data.workflow_runs;
+  }
+
+  /** List the jobs in one Actions workflow run. */
+  async getWorkflowRunJobs(owner: string, repo: string, runId: number): Promise<ActionJob[]> {
+    const data = await this.apiRequest<{ jobs: ActionJob[] }>(
+      "GET",
+      `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+      owner,
+      repo,
+    );
+    return data.jobs;
+  }
+
+  /** Download a workflow job's plain-text log using its job ID. */
+  async getJobLogs(owner: string, repo: string, jobId: number): Promise<string | null> {
+    const token = await this.getToken(owner, repo).catch(() => null);
+    if (!token) return null;
+    const response = await Utils.fetchWithRetry(
+      `${this.baseUrl}/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`,
+      {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "devintern",
+        },
+      },
+    );
+    return response.ok ? response.text() : null;
   }
 
   /**

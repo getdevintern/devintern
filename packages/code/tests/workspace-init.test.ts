@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import {
-  runWorkspaceImport,
-  runWorkspaceInit,
+  runWorkerAddRepo,
+  runWorkerScaffold,
+  upsertWorkerOperatingPolicy,
   upsertWorkspaceDefaults,
+  writeSentryErrorMonitor,
 } from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
@@ -16,7 +26,7 @@ function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
 }
 
-describe("workspace init/import", () => {
+describe("worker scaffold/add-repo", () => {
   let rootDir: string;
   let workspaceDir: string;
   let repoDir: string;
@@ -65,23 +75,24 @@ describe("workspace init/import", () => {
     rmSync(rootDir, { recursive: true, force: true });
   });
 
-  test("init scaffolds a valid config and refuses to overwrite", () => {
-    expect(runWorkspaceInit()).toBe(0);
+  test("scaffold creates a valid config and refuses to overwrite", () => {
+    expect(runWorkerScaffold()).toBe(0);
     expect(existsSync(workspaceConfigPath())).toBe(true);
     expect(existsSync(workspaceEnvPath())).toBe(true);
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.defaults.tracker).toBe("jira");
     expect(config.repos).toEqual([]);
 
-    expect(runWorkspaceInit()).toBe(1); // second run refuses
+    expect(runWorkerScaffold()).toBe(1); // second run refuses
   });
 
   test("scaffold has no bare # comment lines (Bun.TOML redefinition bug)", () => {
     // Bun 1.3.2's TOML parser mis-attributes keys to the previous table when
     // a "#"-only comment line precedes an [[array.of.tables]] header, failing
     // with "Cannot redefine key". Keep whitespace after every "#" in templates.
-    expect(runWorkspaceInit()).toBe(0);
+    expect(runWorkerScaffold()).toBe(0);
     const text = readFileSync(workspaceConfigPath(), "utf8");
     expect(text).not.toMatch(/^#$/m);
 
@@ -94,9 +105,9 @@ describe("workspace init/import", () => {
     Bun.TOML.parse(withAutomation);
   });
 
-  test("import adds the repo, merges env, and seeds a routing rule", async () => {
-    runWorkspaceInit();
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+  test("add-repo adds the repo, merges env, and seeds a routing rule", async () => {
+    runWorkerScaffold();
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.repos).toHaveLength(1);
@@ -110,32 +121,43 @@ describe("workspace init/import", () => {
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("GITHUB_TOKEN=repo-token");
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
   });
 
-  test("import from a package subdirectory still merges the repo-root .env", async () => {
-    runWorkspaceInit();
+  test("does not pin the repository's current origin/HEAD", async () => {
+    runWorkerScaffold();
+
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
+
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.repos[0]?.defaultBranch).toBeUndefined();
+    expect(readFileSync(workspaceConfigPath(), "utf8")).not.toMatch(/^default_branch\s*=/m);
+  });
+
+  test("add-repo from a package subdirectory still merges the repo-root .env", async () => {
+    runWorkerScaffold();
     const nested = join(repoDir, "packages", "code");
     mkdirSync(nested, { recursive: true });
 
-    expect(await runWorkspaceImport(nested)).toBe(0);
+    expect(await runWorkerAddRepo(nested)).toBe(0);
 
     const env = readFileSync(workspaceEnvPath(), "utf8");
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("GITHUB_TOKEN=repo-token");
   });
 
-  test("import is idempotent and demotes conflicting env values to [repos.env]", async () => {
-    runWorkspaceInit();
+  test("add-repo is idempotent and demotes conflicting env values to [repos.env]", async () => {
+    runWorkerScaffold();
     // Pre-seed a conflicting shared value.
     writeFileSync(workspaceEnvPath(), "GITHUB_TOKEN=shared-token\n");
 
-    expect(await runWorkspaceImport(repoDir)).toBe(0);
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.repos[0].env).toEqual({ GITHUB_TOKEN: "repo-token" });
     // Shared value untouched.
     expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("GITHUB_TOKEN=shared-token");
 
-    // Second import: no duplicate entry, config identical. Missing workspace
+    // Second add: no duplicate entry, config identical. Missing workspace
     // keys still merge (re-running worker init from a subdirectory).
     const nested = join(repoDir, "packages", "code");
     mkdirSync(nested, { recursive: true });
@@ -143,33 +165,35 @@ describe("workspace init/import", () => {
       flag: "a",
     });
     const before = readFileSync(workspaceConfigPath(), "utf8");
-    expect(await runWorkspaceImport(nested)).toBe(0);
+    expect(await runWorkerAddRepo(nested)).toBe(0);
     expect(readFileSync(workspaceConfigPath(), "utf8")).toBe(before);
     expect(loadWorkspaceConfig(workspaceConfigPath()).repos).toHaveLength(1);
     expect(readFileSync(workspaceEnvPath(), "utf8")).toContain("JIRA_EMAIL=dev@acme.test");
   });
 
-  test("import preserves hand-written comments in the existing config", async () => {
-    runWorkspaceInit();
+  test("add-repo preserves hand-written comments in the existing config", async () => {
+    runWorkerScaffold();
     const configPath = workspaceConfigPath();
     const withComment = readFileSync(configPath, "utf8") + "\n# my custom note\n";
     writeFileSync(configPath, withComment);
 
-    await runWorkspaceImport(repoDir);
+    await runWorkerAddRepo(repoDir);
     expect(readFileSync(configPath, "utf8")).toContain("# my custom note");
   });
 
   test("upsertWorkspaceDefaults uncomments task_query and sets tracker", () => {
-    runWorkspaceInit();
+    runWorkerScaffold();
     const before = readFileSync(workspaceConfigPath(), "utf8");
     const updated = upsertWorkspaceDefaults(before, {
       tracker: "markdown",
       taskQuery: "project = PROJ AND status = 'To Do'",
     });
     expect(updated).toContain('tracker = "markdown"');
-    expect(updated).not.toContain('tracker = "jira"');
+    expect(updated).not.toMatch(/^tracker = "jira"$/m);
     expect(updated).toContain(`task_query = "project = PROJ AND status = 'To Do'"`);
-    expect(updated).not.toMatch(/^\s*#\s*task_query/m);
+    expect(updated).not.toContain(
+      '# task_query = "sprint in openSprints() AND labels = devintern"',
+    );
     expect(updated).toContain("# Days before a leftover");
   });
 
@@ -192,13 +216,105 @@ remote = "git@github.com:acme/app.git"
     expect(updated).toContain('  task_query = "leave-me-alone"');
   });
 
-  test("import fails cleanly without a workspace or origin remote", async () => {
-    expect(await runWorkspaceImport(repoDir)).toBe(1); // no workspace yet
+  test("upsertWorkerOperatingPolicy preserves unrelated workspace settings", () => {
+    const updated = upsertWorkerOperatingPolicy(
+      `[workspace]
+dashboard = false
+ci_failure_fix = false
+# conflict_resolution = "scheduled"
 
-    runWorkspaceInit();
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`,
+      {
+        ciFailureFix: true,
+        conflictResolution: "scheduled",
+        conflictResolutionInterval: "1d",
+        activeWindows: ["22:00-06:00"],
+        timezone: "Asia/Ho_Chi_Minh",
+      },
+    );
+    const config = parseWorkspaceConfig(updated);
+    expect(config.workspace.dashboard).toBe(false);
+    expect(config.workspace.ciFailureFix).toBe(true);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule?.interval).toBe("1d");
+    expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["22:00-06:00"]);
+    expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
+  });
+
+  test("writeSentryErrorMonitor appends once and chooses a unique stable id", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+
+    const first = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "environment:production",
+    });
+    const firstEnvPath = join(workspaceDir, first.envFile);
+    chmodSync(firstEnvPath, 0o644);
+    const duplicate = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "a changed query does not create a duplicate",
+    });
+    const secondProject = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-2",
+      organization: "other-org",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(first).toEqual({ id: "sentry-api", envFile: "env/sentry-api.env", added: true });
+    expect(duplicate).toEqual({
+      id: "sentry-api",
+      envFile: "env/sentry-api.env",
+      added: false,
+    });
+    expect(statSync(firstEnvPath).mode & 0o777).toBe(0o600);
+    expect(secondProject.id).toBe("sentry-api-2");
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.errorMonitors).toHaveLength(2);
+    expect(config.errorMonitors[0]?.query).toBe("environment:production");
+  });
+
+  test("writeSentryErrorMonitor never overwrites an unrelated credential file", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    const occupiedPath = join(workspaceDir, "env", "sentry-api.env");
+    writeFileSync(occupiedPath, "KEEP_ME=1\n");
+
+    const result = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "new-token",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(result.id).toBe("sentry-api-2");
+    expect(readFileSync(occupiedPath, "utf8")).toBe("KEEP_ME=1\n");
+    expect(readFileSync(join(workspaceDir, result.envFile), "utf8")).toBe(
+      "SENTRY_AUTH_TOKEN=new-token\n",
+    );
+  });
+
+  test("add-repo fails cleanly without a workspace or origin remote", async () => {
+    expect(await runWorkerAddRepo(repoDir)).toBe(1); // no workspace yet
+
+    runWorkerScaffold();
     const bareDir = join(rootDir, "no-remote");
     mkdirSync(bareDir, { recursive: true });
     git(bareDir, "init -b main");
-    expect(await runWorkspaceImport(bareDir)).toBe(1); // no origin remote
+    expect(await runWorkerAddRepo(bareDir)).toBe(1); // no origin remote
   });
 });

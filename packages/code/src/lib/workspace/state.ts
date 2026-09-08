@@ -20,6 +20,7 @@ import { dirname, join } from "path";
 
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
+import { configureSqliteConnection } from "../sqlite";
 import { WebhookQueue } from "../webhook-queue";
 import { WorkerState } from "../worker-state";
 import { locksDir, resolveWorkspaceDir, workspaceDbPath } from "./paths";
@@ -32,6 +33,8 @@ export interface RoutingSkip {
   reason: RoutingSkipReason;
   /** Repo names that matched (empty for `unrouted`). */
   candidates: string[];
+  /** Team that acquired the task (multi-team workspaces; empty otherwise). */
+  team?: string;
   /** Task `updated` stamp the skip was recorded at. */
   taskUpdated?: string;
   createdAt: number;
@@ -114,17 +117,25 @@ export class RoutingSkipStore {
       mkdirSync(dir, { recursive: true });
     }
     this.db = new Database(dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS routing_skips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_key TEXT NOT NULL,
         reason TEXT NOT NULL,
         candidates TEXT NOT NULL DEFAULT '[]',
+        team TEXT NOT NULL DEFAULT '',
         task_updated TEXT,
         created_at INTEGER NOT NULL
       )
     `);
+    // Workspaces created before multi-team support lack the team column.
+    const columns = this.db.query("PRAGMA table_info(routing_skips)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "team")) {
+      this.db.run("ALTER TABLE routing_skips ADD COLUMN team TEXT NOT NULL DEFAULT ''");
+    }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_routing_skips_task ON routing_skips(task_key)");
   }
 
@@ -132,13 +143,14 @@ export class RoutingSkipStore {
   record(skip: Omit<RoutingSkip, "createdAt">): void {
     this.db
       .query(
-        `INSERT INTO routing_skips (task_key, reason, candidates, task_updated, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO routing_skips (task_key, reason, candidates, team, task_updated, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(
         skip.taskKey,
         skip.reason,
         JSON.stringify(skip.candidates),
+        skip.team ?? "",
         skip.taskUpdated ?? null,
         Date.now(),
       );
@@ -148,13 +160,14 @@ export class RoutingSkipStore {
   list(limit = 100): RoutingSkip[] {
     const rows = this.db
       .query(
-        `SELECT task_key, reason, candidates, task_updated, created_at
+        `SELECT task_key, reason, candidates, team, task_updated, created_at
          FROM routing_skips ORDER BY created_at DESC, id DESC LIMIT ?`,
       )
       .all(limit) as Array<{
       task_key: string;
       reason: string;
       candidates: string;
+      team: string | null;
       task_updated: string | null;
       created_at: number;
     }>;
@@ -162,6 +175,7 @@ export class RoutingSkipStore {
       taskKey: row.task_key,
       reason: row.reason as RoutingSkipReason,
       candidates: JSON.parse(row.candidates) as string[],
+      team: row.team || undefined,
       taskUpdated: row.task_updated ?? undefined,
       createdAt: row.created_at,
     }));

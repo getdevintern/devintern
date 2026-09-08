@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   listConfiguredTrackersForProject,
+  persistActiveEffort,
   persistActiveHarness,
   persistActiveModel,
   persistActiveProject,
@@ -266,6 +267,59 @@ describe("project-env", () => {
       expect(process.env.AGENT_MODEL).toBe("");
       const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
       expect(raw.split("\n")).toContain("AGENT_MODEL=");
+    });
+  });
+
+  describe("persistActiveEffort", () => {
+    afterEach(() => {
+      delete process.env.AGENT_EFFORT;
+    });
+
+    test("writes AGENT_EFFORT and syncs process.env", async () => {
+      const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+      await persistActiveEffort(dir, "high");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_EFFORT).toBe("high");
+      expect(process.env.AGENT_EFFORT).toBe("high");
+      const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
+      expect(raw).toContain("AGENT_EFFORT=high");
+    });
+
+    test("accepts each documented effort value", async () => {
+      for (const level of ["low", "medium", "high"]) {
+        const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+        await persistActiveEffort(dir, level);
+        const { env } = await readProjectEnv(dir);
+        expect(env.AGENT_EFFORT).toBe(level);
+      }
+    });
+
+    test("trims whitespace around the value", async () => {
+      const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+      await persistActiveEffort(dir, "  medium  ");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_EFFORT).toBe("medium");
+    });
+
+    test("an empty value clears the override (empty in .env, falsy for engine)", async () => {
+      const dir = await writeEnv(
+        "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\nAGENT_EFFORT=high\n",
+      );
+      await persistActiveEffort(dir, "");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_EFFORT).toBe("");
+      expect(process.env.AGENT_EFFORT).toBe("");
+      const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
+      expect(raw.split("\n")).toContain("AGENT_EFFORT=");
+    });
+
+    test("rejects an invalid effort value without writing .env", async () => {
+      const dir = await writeEnv("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\n");
+      await expect(persistActiveEffort(dir, "ultra")).rejects.toThrow(
+        /Invalid agent effort "ultra". Valid values: low, medium, high/,
+      );
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_EFFORT).toBeUndefined();
     });
   });
 

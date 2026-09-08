@@ -103,6 +103,41 @@ describe("query-based change detectors", () => {
     expect(createChangeDetector("jira", searchTasks)?.source).toBe("jira");
     expect(createChangeDetector("linear", searchTasks)?.source).toBe("linear");
     expect(createChangeDetector("github", searchTasks)?.source).toBe("github");
+    expect(createChangeDetector("gitlab", searchTasks)?.source).toBe("gitlab");
     expect(createChangeDetector("azure-devops", searchTasks)?.source).toBe("azure-devops");
+  });
+});
+
+describe("namespaced detector sources (multi-team workspaces)", () => {
+  test("two boards of the same tracker type get distinct sources and cursors", async () => {
+    const platform = createJiraChangeDetector(stubSearch(0).searchTasks, {
+      source: "jira:platform",
+    });
+    const growth = createJiraChangeDetector(stubSearch(0).searchTasks, {
+      source: "jira:growth",
+    });
+
+    expect(platform.source).toBe("jira:platform");
+    expect(growth.source).toBe("jira:growth");
+
+    await platform.changesSince(null);
+    await growth.changesSince(null);
+    // Each source keeps its own cursor stream.
+    const platformCursor = (await platform.changesSince("100")).nextCursor;
+    expect(Number(platformCursor)).toBeGreaterThan(100);
+  });
+
+  test("registry accepts explicit env maps without process.env", () => {
+    const { searchTasks } = stubSearch(0);
+    // Trello needs board credentials; they come from the map, not the shell.
+    expect(createChangeDetector("trello")).toBeNull();
+    const detector = createChangeDetector("trello", searchTasks, {
+      env: { TRELLO_API_KEY: "k", TRELLO_API_TOKEN: "t", TRELLO_DEFAULT_BOARD_ID: "board" },
+      source: "trello:growth-board",
+    });
+    expect(detector?.source).toBe("trello:growth-board");
+    expect(createChangeDetector("gitlab", searchTasks, { source: "gitlab:platform" })?.source).toBe(
+      "gitlab:platform",
+    );
   });
 });

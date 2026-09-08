@@ -7,8 +7,10 @@
  */
 
 import { join } from "node:path";
+import { parseAgentEffort } from "@devintern/agent-harness";
+import type { AgentEffort } from "@devintern/agent-harness";
 import { resolveConfigDir } from "@devintern/utils";
-import { checkLicense, requireLicense } from "@devintern/license-check";
+import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
 import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "../config.js";
 import { createEngine } from "../engine/index.js";
 import { createChatBot } from "./bot.js";
@@ -24,6 +26,8 @@ export interface ServeOptions {
   platforms?: ChatPlatform[];
   /** Model override passed to every agent call. */
   model?: string;
+  /** Reasoning-effort override passed to every agent call (where supported). */
+  effort?: AgentEffort;
 }
 
 function log(line: string): void {
@@ -45,7 +49,14 @@ export async function runServe(options: ServeOptions = {}): Promise<void> {
     productKey: "devintern/pm",
     supabaseConfig: loadSupabaseConfig(),
   });
-  requireLicense(licenseResult);
+  try {
+    requireLicense(licenseResult);
+  } catch (error) {
+    // The CLI surface exits with code 1 on a failed license check; the
+    // failure details were already printed to stderr by requireLicense.
+    if (error instanceof LicenseCheckError) process.exit(1);
+    throw error;
+  }
 
   const tokens = detectChatTokens(process.env, options.platforms);
   if (!tokens.slack && !tokens.telegram) {
@@ -56,9 +67,12 @@ export async function runServe(options: ServeOptions = {}): Promise<void> {
   }
 
   // loadConfig() has loaded .devintern-pm/.env into process.env, so
-  // AGENT_MODEL from the project config is visible here. The --model flag wins.
+  // AGENT_MODEL / AGENT_EFFORT from the project config are visible here.
+  // The --model / --effort flags win over the environment.
   const engine = await createEngine(config, {
     model: options.model ?? process.env.AGENT_MODEL,
+    // Throws a clear error on an invalid AGENT_EFFORT value.
+    effort: options.effort ?? parseAgentEffort(process.env.AGENT_EFFORT),
   });
   const configDir = resolveConfigDir({ configDirName: ".devintern-pm" });
   const store = await createFileSessionStore(join(configDir, "chat-sessions.json"));

@@ -12,6 +12,7 @@
 
 // Types
 export type {
+  AgentEffort,
   AgentHarness,
   AgentRunMode,
   AgentRunOptions,
@@ -32,8 +33,33 @@ export {
   type ConstrainedAgentRunMode,
 } from "./modes.js";
 
+// Reasoning-effort validation and per-run capability warning
+export {
+  AGENT_EFFORTS,
+  InvalidAgentEffortError,
+  isAgentEffort,
+  parseAgentEffort,
+  warnEffortUnsupported,
+} from "./effort.js";
+
 // Registry
-export { registerHarness, getHarness, listHarnesses, HARNESS_ALIASES } from "./registry.js";
+export {
+  registerHarness,
+  getHarness,
+  listHarnesses,
+  HARNESS_ALIASES,
+  DEFAULT_HARNESS_NAME,
+} from "./registry.js";
+
+// Harness chain (comma-separated AGENT_HARNESS failover lists)
+export {
+  parseHarnessList,
+  resolveHarnessChain,
+  type HarnessChainEntry,
+  type HarnessChainIssue,
+  type HarnessChainOptions,
+  type ResolvedHarnessChain,
+} from "./harness-chain.js";
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";

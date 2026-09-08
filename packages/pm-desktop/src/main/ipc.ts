@@ -67,6 +67,7 @@ import {
   loadProject,
   requireSession,
   switchContext,
+  switchEffort,
   switchHarness,
   switchModel,
   switchProjectKey,
@@ -697,6 +698,10 @@ export function registerIpcHandlers(options?: {
 
   handle(IPC_CHANNELS.switchModel, async (_event, model: string) => {
     return switchModel(model);
+  });
+
+  handle(IPC_CHANNELS.switchEffort, async (_event, effort: string) => {
+    return switchEffort(effort);
   });
 
   handle(IPC_CHANNELS.updateProjectFromRemote, async () => {

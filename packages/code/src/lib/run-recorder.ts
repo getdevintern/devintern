@@ -13,11 +13,14 @@
  */
 
 import { Database } from "bun:sqlite";
+import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export type RunOrigin =
   | "task"
+  | "error_monitor"
   | "pr_mention"
+  | "ci_fix"
   | "conflict_resolution"
   | "scheduled"
   | "estimate"
@@ -52,6 +55,8 @@ export interface RunMeta {
   origin: RunOrigin;
   taskKey?: string; // null for pr_mention runs
   tracker?: string;
+  /** Workspace team that acquired this task, when multi-team mode is active. */
+  team?: string;
   harness?: string;
   branch?: string;
   repo?: string;
@@ -173,15 +178,14 @@ export class RunStore {
   constructor(dbPath: string = resolveQueueDbPath(), options: { readonly?: boolean } = {}) {
     if (options.readonly) {
       this.db = new Database(dbPath, { readonly: true });
-      this.db.run("PRAGMA busy_timeout = 5000");
+      configureSqliteConnection(this.db, { readonly: true });
       return;
     }
 
     prepareQueueDbDirectory(dbPath);
 
     this.db = new Database(dbPath);
-    // The webhook queue / worker state may hold connections to the same file.
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.initializeSchema();
   }
 
@@ -193,6 +197,7 @@ export class RunStore {
         origin TEXT NOT NULL,
         task_key TEXT,
         tracker TEXT,
+        team TEXT,
         harness TEXT,
         branch TEXT,
         repo TEXT,
@@ -214,6 +219,9 @@ export class RunStore {
     const columns = this.db.query("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === "attempt")) {
       this.db.run("ALTER TABLE runs ADD COLUMN attempt INTEGER");
+    }
+    if (!columns.some((c) => c.name === "team")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN team TEXT");
     }
     if (!columns.some((c) => c.name === "automation_id")) {
       this.db.run("ALTER TABLE runs ADD COLUMN automation_id TEXT");
@@ -259,13 +267,14 @@ export class RunStore {
   createRun(meta: RunMeta): number {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
-      `INSERT INTO runs (origin, task_key, tracker, harness, branch, repo, pr_number, pr_url,
+      `INSERT INTO runs (origin, task_key, tracker, team, harness, branch, repo, pr_number, pr_url,
        automation_id, ticket_key, ticket_url, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
         meta.tracker ?? null,
+        meta.team ?? null,
         meta.harness ?? null,
         meta.branch ?? null,
         meta.repo ?? null,
@@ -551,7 +560,9 @@ export class RunStore {
     };
     const byOrigin: Record<RunOrigin, number> = {
       task: 0,
+      error_monitor: 0,
       pr_mention: 0,
+      ci_fix: 0,
       conflict_resolution: 0,
       scheduled: 0,
       estimate: 0,
@@ -640,6 +651,7 @@ export class RunStore {
       origin: row.origin as RunOrigin,
       taskKey: (row.task_key as string | null) ?? undefined,
       tracker: (row.tracker as string | null) ?? undefined,
+      team: (row.team as string | null) ?? undefined,
       harness: (row.harness as string | null) ?? undefined,
       branch: (row.branch as string | null) ?? undefined,
       repo: (row.repo as string | null) ?? undefined,

@@ -26,6 +26,8 @@ describe("RunStore", () => {
       origin: "task",
       taskKey: "PROJ-1",
       tracker: "jira",
+      team: "platform",
+      repo: "api",
       harness: "claude-code",
     });
 
@@ -33,6 +35,8 @@ describe("RunStore", () => {
     expect(run?.origin).toBe("task");
     expect(run?.taskKey).toBe("PROJ-1");
     expect(run?.tracker).toBe("jira");
+    expect(run?.team).toBe("platform");
+    expect(run?.repo).toBe("api");
     expect(run?.status).toBe("in_progress");
     expect(run?.finishedAt).toBeUndefined();
   });
@@ -103,6 +107,17 @@ describe("RunStore", () => {
     const stats = store.getStats(null).byOrigin;
     expect(stats.estimate).toBe(1);
     expect(stats.scheduled).toBe(0);
+  });
+
+  test("error-monitor runs have a distinct non-ticket origin", () => {
+    const id = store.createRun({
+      origin: "error_monitor",
+      taskKey: "devintern-public-devintern-a",
+      tracker: "sentry",
+    });
+
+    expect(store.getRun(id)).toMatchObject({ origin: "error_monitor", tracker: "sentry" });
+    expect(store.getStats(null).byOrigin.error_monitor).toBe(1);
   });
 
   test("stages accumulate in order with structured detail", () => {

@@ -17,6 +17,7 @@ import { basename } from "path";
 
 import type { RunRecord, RunStatus } from "./run-recorder";
 import { prepareQueueDbDirectory } from "./webhook-queue";
+import { configureSqliteConnection } from "./sqlite";
 
 /** Terminal, non-success statuses a support engineer can re-run. */
 export const RETRIABLE_RUN_STATUSES: readonly RunStatus[] = ["failed", "escalated", "abandoned"];
@@ -153,7 +154,7 @@ export class RunRetryAuditStore {
     }
     prepareQueueDbDirectory(this.dbPath);
     this.db = new Database(this.dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS run_retry_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,7 +222,7 @@ export class RunRetryAuditStore {
 
   private openReadonly(): Database {
     const conn = new Database(this.dbPath, { readonly: true });
-    conn.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(conn, { readonly: true });
     return conn;
   }
 
@@ -242,6 +243,8 @@ export interface ScheduledRetry {
   id: number;
   taskKey: string;
   runId?: number;
+  team?: string;
+  repo?: string;
   actor: string;
   status: "pending" | "running" | "done" | "failed";
   message?: string;
@@ -254,6 +257,8 @@ interface ScheduledRetryRow {
   id: number;
   task_key: string;
   run_id: number | null;
+  team: string | null;
+  repo: string | null;
   actor: string;
   status: string;
   message: string | null;
@@ -267,6 +272,8 @@ function rowToScheduledRetry(row: ScheduledRetryRow): ScheduledRetry {
     id: row.id,
     taskKey: row.task_key,
     runId: row.run_id ?? undefined,
+    team: row.team ?? undefined,
+    repo: row.repo ?? undefined,
     actor: row.actor,
     status: row.status as ScheduledRetry["status"],
     message: row.message ?? undefined,
@@ -294,12 +301,14 @@ export class ScheduledRetryStore {
     }
     prepareQueueDbDirectory(this.dbPath);
     this.db = new Database(this.dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS scheduled_retries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_key TEXT NOT NULL,
         run_id INTEGER,
+        team TEXT,
+        repo TEXT,
         actor TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         message TEXT,
@@ -308,6 +317,15 @@ export class ScheduledRetryStore {
         finished_at INTEGER
       )
     `);
+    const columns = this.db.query("PRAGMA table_info(scheduled_retries)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "team")) {
+      this.db.run("ALTER TABLE scheduled_retries ADD COLUMN team TEXT");
+    }
+    if (!columns.some((column) => column.name === "repo")) {
+      this.db.run("ALTER TABLE scheduled_retries ADD COLUMN repo TEXT");
+    }
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_scheduled_retries_status ON scheduled_retries(status)",
     );
@@ -321,30 +339,44 @@ export class ScheduledRetryStore {
    * Schedule a retry; refuses while an active (pending/running) row already
    * exists for the task, so double-clicks cannot double-run.
    */
-  schedule(entry: { taskKey: string; runId?: number; actor: string; createdAt?: number }): {
+  schedule(entry: {
+    taskKey: string;
+    runId?: number;
+    team?: string;
+    repo?: string;
+    actor: string;
+    createdAt?: number;
+  }): {
     scheduled: boolean;
     reason?: string;
   } {
     const db = this.ensureDb();
-    if (this.hasActive(entry.taskKey)) {
+    if (this.hasActive(entry.taskKey, entry.team)) {
       return { scheduled: false, reason: "a retry is already scheduled or running" };
     }
     db.run(
-      `INSERT INTO scheduled_retries (task_key, run_id, actor, status, created_at)
-       VALUES (?, ?, ?, 'pending', ?)`,
-      [entry.taskKey, entry.runId ?? null, entry.actor, entry.createdAt ?? Date.now()],
+      `INSERT INTO scheduled_retries (task_key, run_id, team, repo, actor, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      [
+        entry.taskKey,
+        entry.runId ?? null,
+        entry.team ?? null,
+        entry.repo ?? null,
+        entry.actor,
+        entry.createdAt ?? Date.now(),
+      ],
     );
     return { scheduled: true };
   }
 
   /** Whether a pending or running retry exists for the task. */
-  hasActive(taskKey: string): boolean {
+  hasActive(taskKey: string, team?: string): boolean {
     try {
       const row = this.ensureDb()
         .query(
-          "SELECT 1 AS one FROM scheduled_retries WHERE task_key = ? AND status IN ('pending', 'running') LIMIT 1",
+          "SELECT 1 AS one FROM scheduled_retries WHERE task_key = ? AND COALESCE(team, '') = ? AND status IN ('pending', 'running') LIMIT 1",
         )
-        .get(taskKey);
+        .get(taskKey, team ?? "");
       return row !== null;
     } catch {
       return false;

@@ -7,7 +7,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type RunOrigin =
   | "task"
+  | "error_monitor"
   | "pr_mention"
+  | "ci_fix"
   | "conflict_resolution"
   | "scheduled"
   | "estimate"

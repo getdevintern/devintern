@@ -1,7 +1,7 @@
 /**
  * Codex CLI harness.
  *
- * CLI: codex exec --skip-git-repo-check [--sandbox workspace-write -c 'approval_policy="never"' <network config>] [--model <model>] [prompt]
+ * CLI: codex exec --skip-git-repo-check [--sandbox workspace-write -c 'approval_policy="never"' <network config>] [--model <model>] [-c 'model_reasoning_effort="…"'] [prompt]
  *
  * Uses `codex exec` (non-interactive mode) so the agent runs without
  * launching the TUI.
@@ -21,7 +21,7 @@
  */
 
 import { effectiveSkipPermissions, isConstrainedMode, assertModeSupported } from "../modes.js";
-import type { AgentHarness, AgentRunOptions } from "../types.js";
+import type { AgentEffort, AgentHarness, AgentRunOptions } from "../types.js";
 
 export type CodexNetworkPolicy = "open" | { allowedDomains: readonly string[] };
 
@@ -87,6 +87,21 @@ export function applyCodexNetworkArgs(
   return filtered;
 }
 
+/**
+ * Build the Codex `-c model_reasoning_effort="…"` config override for an
+ * effort requested via {@link AgentRunOptions.effort}.
+ *
+ * Applies to the reasoning-capable models in the Codex/OpenAI lineup; Codex
+ * ignores the override for models without reasoning, so no per-model
+ * gating here.
+ *
+ * @param effort - Validated effort level.
+ * @returns Config-override args appended to `codex exec`.
+ */
+export function buildCodexEffortArgs(effort: AgentEffort): string[] {
+  return ["-c", `model_reasoning_effort="${effort}"`];
+}
+
 export class CodexHarness implements AgentHarness {
   readonly name = "codex";
   readonly displayName = "Codex";
@@ -94,8 +109,15 @@ export class CodexHarness implements AgentHarness {
   readonly supportedModes = ["plan", "readonly"] as const;
   /** Codex `exec` accepts images via `-i` after the prompt. */
   readonly imageInput = "native" as const;
-  /** `--json` prints stdout as newline-delimited JSON events (thread/turn/item). */
+  /**
+   * `--json` prints stdout as newline-delimited JSON events (thread/turn/item).
+   */
   readonly supportsStructuredOutput = true;
+  /**
+   * Reasoning effort applies via the `-c` config-override mechanism
+   * (`model_reasoning_effort`); see {@link buildCodexEffortArgs}.
+   */
+  readonly supportsEffort = true;
   /**
    * The prompt is a positional argument parsed by clap; without this marker a
    * prompt starting with `-` (e.g. markdown frontmatter) fails with a usage
@@ -124,7 +146,8 @@ export class CodexHarness implements AgentHarness {
    * Build `codex exec` flags for non-interactive execution.
    *
    * @param options - Supports `mode`, `skipPermissions` (sandbox + approval),
-   *   `model`, and `structuredOutput` (`--json`).
+   *   `model`, `effort` (`-c model_reasoning_effort="…"`), and
+   *   `structuredOutput` (`--json`).
    * @returns Args starting with `exec`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -150,6 +173,10 @@ export class CodexHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push(...buildCodexEffortArgs(options.effort));
     }
 
     if (options.structuredOutput) {

@@ -78,6 +78,27 @@ export function ruleMatches(task: RoutableTask, rule: RoutingRule): boolean {
 }
 
 /**
+ * Routing rules that apply to tasks acquired by a source.
+ *
+ * In multi-team workspaces each task is routed within the scope of the team
+ * that acquired it ("never guess" stays per-team): rules naming that team
+ * always apply, unscoped rules apply to every team, and rules naming another
+ * team never match. Without teams every rule applies.
+ *
+ * @param config - Workspace config providing the routing rules.
+ * @param team - Acquiring team's name, or undefined in single-defaults mode.
+ */
+export function effectiveRoutingRules(
+  config: Pick<WorkspaceConfig, "routing">,
+  team?: string,
+): RoutingRule[] {
+  if (!team) {
+    return config.routing;
+  }
+  return config.routing.filter((rule) => !rule.team || rule.team.toLowerCase() === norm(team));
+}
+
+/**
  * Decide which repo a task belongs to.
  *
  * @param task - Routing projection (see {@link toRoutableTask}).
@@ -87,7 +108,23 @@ export function ruleMatches(task: RoutableTask, rule: RoutingRule): boolean {
  *          `unrouted` when nothing matches. Never guesses.
  */
 export function routeTask(task: RoutableTask, config: WorkspaceConfig): RoutingDecision {
-  const matchedRules = config.routing.filter((rule) => ruleMatches(task, rule));
+  return routeTaskWithRules(
+    task,
+    config.routing,
+    config.repos.length === 1 ? config.repos[0]!.name : undefined,
+  );
+}
+
+/**
+ * Like {@link routeTask}, but against an explicit rule list — the team-
+ * scoped slice from {@link effectiveRoutingRules}.
+ */
+export function routeTaskWithRules(
+  task: RoutableTask,
+  rules: RoutingRule[],
+  onlyRepo?: string,
+): RoutingDecision {
+  const matchedRules = rules.filter((rule) => ruleMatches(task, rule));
   const repos = [...new Set(matchedRules.map((rule) => rule.repo))].sort();
 
   if (repos.length === 1) {
@@ -98,8 +135,8 @@ export function routeTask(task: RoutableTask, config: WorkspaceConfig): RoutingD
   }
   // A 1-repo workspace needs no routing rules: N=1 already implies the only
   // checkout (the same policy automations already use).
-  if (config.repos.length === 1) {
-    return { kind: "routed", repo: config.repos[0]!.name, matchedRules: [] };
+  if (onlyRepo) {
+    return { kind: "routed", repo: onlyRepo, matchedRules: [] };
   }
   return { kind: "unrouted" };
 }

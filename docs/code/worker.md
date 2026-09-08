@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
 order: 1
-dateModified: 2026-09-01
+dateModified: 2026-09-07
 ---
 
 # Worker Daemon
@@ -19,24 +19,36 @@ The fastest way to set up the worker is the guided setup:
 
 ```bash
 devintern worker init
-devintern worker
 ```
 
-`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and can generate a native user service for Linux or macOS. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
+`worker init` reuses tracker config from `devintern init` (or runs that subset if missing), writes a 1-repo [workspace](./workspaces.md), validates and stores the ready-tasks query, configures task pickup hours plus conflict/CI repair policy, optionally validates and adds a Sentry auto-fix project, checks any automation license (Supporter or Team/Business), offers zero-port relay setup plus the central DevIntern App, and then offers to install and start the background service for you — a user-level systemd unit on Linux or a launchd agent on macOS — so setup finishes with the worker already running and auto-restarting. Declining keeps it manual and writes the definition plus exact install commands into the workspace home; `--no-service` skips service setup entirely. Polling provides fallback acquisition when the relay is unavailable. The repo-local direct webhook server is an advanced, separate service and is not part of this wizard.
 
-In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; later imports can be registered by running `devintern worker connect github --repo owner/name` from the repository. The CLI saves the connection into its fleet workspace automatically.
+In the standard path, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the repositories in your workspace. Its private key stays on DevIntern infrastructure and events arrive as reference-only relay envelopes. Your local `GITHUB_TOKEN` fetches PR data, checks permissions, replies, and creates PRs. `worker init` registers every GitHub repository already listed in `workspace.toml`; after adding repositories, `devintern worker connect` verifies every workspace repo still awaiting pairing.
 
 If the relay is intentionally unavailable, the wizard does not offer the hosted App. Polling and the worker's own PRs still work with `GITHUB_TOKEN`; air-gapped mention handling uses the advanced customer-owned App setup in [GitHub authentication](./configuration.md#advanced-customer-owned-github-app).
 
 Or configure by hand and start directly:
 
 ```bash
-# After a workspace exists (worker init, or workspace init + import)
+# After a workspace exists (`worker init`, or `worker scaffold` + `worker add-repo`)
 devintern worker
 
 # Advanced: run the repo-local GitHub webhook listener separately
 devintern webhook serve
 ```
+
+## Agent failover
+
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work. Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+
+## Error-monitor auto-fixes
+
+`[[error_monitors]]` entries let the worker turn unresolved production errors
+into normal repo-scoped fix runs. Add the first project during `worker init`, or
+run `devintern worker connect sentry` for an existing workspace. Each Sentry project maps explicitly to one
+`[[repos]]` entry and can inherit an optional `[[teams]]` environment, so one
+worker can safely serve multiple teams, repositories, and credentials. See
+[Sentry Auto-fixes](./sentry-integration.md) for the schema and setup.
 
 ## Recurring automations
 
@@ -229,6 +241,7 @@ The daemon itself takes almost no flags. Durable settings live in `workspace.tom
 [workspace]
 dashboard = true          # false disables the embedded dashboard
 dashboard_port = 4400     # optional; default 4400
+ci_failure_fix = false    # opt in to automatic CI repair on agent PRs
 
 [defaults]
 task_query = "status=todo"
@@ -277,6 +290,18 @@ The setting applies to the whole workspace and live-reloads with `workspace.toml
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
 
+## CI failures on the agent's PRs
+
+Set `[workspace].ci_failure_fix = true` to watch GitHub Actions and commit statuses on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.
+
+The watch is continuous while the worker and PR remain open, not just when the PR is created. It runs once at worker startup and then every `[defaults].poll_interval` seconds, survives restarts through the workspace database, and stops when the PR closes, its repository leaves the workspace, or the setting is disabled. Only PRs recorded in the local `agent_prs` registry are watched; similarly named PRs created elsewhere are not discovered automatically.
+
+Only completed `failure` and `timed_out` workflow runs, plus failed legacy commit statuses, trigger repair. The worker waits while any workflow is pending before declaring CI green, deduplicates successful repair runs by head SHA and workflow-run or status ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Failing Actions job logs are reduced to an error-focused excerpt.
+
+Pending, failing, and not-yet-reported CI is checked at the configured workspace poll interval. Once a PR's CI is terminal green and remains unchanged, the watcher progressively backs off that PR to 5, 15, and then 30 minutes. An observed PR or CI change returns it to the configured interval, and a worker restart performs an immediate reconciliation. The worker continues checking green PRs while they remain open so delayed reruns and newly added workflows are still detected.
+
+Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
+
 ## Mention the bot on any PR
 
 The worker also reacts to mentions on pull requests it did not create. When a teammate writes a comment like `@devintern address the review feedback` on any PR in the repository, the worker picks it up on the next poll and handles it through the same pipeline. Detection is a repository-wide sweep of new comments (two requests per interval, regardless of how many PRs are open), so mentions work without any webhook setup.
@@ -300,7 +325,7 @@ In the standard setup, pair the workspace with the relay and install the central
 
 ## Instant events with the relay
 
-Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). While relay long-polls are healthy, review and mention acquisition yields to relay and runs only a 30-minute safety sweep; PR lifecycle and conflict reconciliation continue at the normal polling interval. If relay delivery stops, normal feedback polling resumes after a short grace period. Events from different acquisition paths for the same PR are serialized and collapsed into one follow-up check, so fallback coverage cannot start overlapping agent runs. The standalone `worker connect` commands remain available for adding or rotating individual registrations.
+Polling reacts within one interval (about a minute). On its default path, `worker init` offers to sign in and pair the workspace with the [DevIntern relay](./relay.md), including GitHub and the active tracker. Events then reach the worker within seconds as reference envelopes (never code or comment content). Multi-team polling uses isolated clients and cursors; use `worker connect <tracker> --team <name>` when one team owns that tracker type. Multiple teams using the same tracker type remain polling-only until relay envelopes carry team registration identity. While relay long-polls are healthy, review and mention acquisition yields to relay and runs only a 30-minute safety sweep; PR lifecycle and conflict reconciliation continue at the normal polling interval. If relay delivery stops, normal feedback polling resumes after a short grace period. Events from different acquisition paths for the same PR are serialized and collapsed into one follow-up check, so fallback coverage cannot start overlapping agent runs. Run `worker connect` after adding repositories or to add or rotate tracker registrations.
 
 ## Seeing what the worker did
 
@@ -308,7 +333,20 @@ Every run is recorded stage by stage in the local database. The worker serves th
 
 ## Running as a service
 
-The worker runs identically on a laptop, VM, or container. `devintern worker init` can write a user-level systemd unit on Linux or a launchd agent on macOS into the workspace home, then prints explicit installation commands. It never installs or starts the service without you running those commands. Running `devintern worker` in a terminal remains fully supported. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
+The worker runs identically on a laptop, VM, or container. When `devintern worker init` reaches its final step, it offers to install and start the service for you:
+
+- **Linux**: the unit is installed into `~/.config/systemd/user/`, then `systemctl --user daemon-reload` plus `systemctl --user enable --now devintern-worker` run automatically. The unit uses the user manager's `default.target`, records the current executable `PATH`, invokes the Bun runtime directly, and enables user lingering so it starts after reboot without waiting for login. If lingering cannot be enabled, the running service is kept and the wizard prints the remaining command.
+- **macOS**: the agent is installed into `~/Library/LaunchAgents/` and started with `launchctl bootstrap gui/$(id -u)` (with a `launchctl load -w` fallback on older hosts). It records the current executable `PATH`, invokes Bun directly, and is accepted as healthy only when launchd reports a running process.
+
+If any step fails — a missing systemd user session (WSL, some containers), a headless host without launchd, or a command error — the wizard reports the error, restores the previous state (a freshly written definition is removed; an existing one is put back and reloaded), and prints the manual install commands so nothing is left half-installed. Declining the offer prints the same manual path. Pass `--no-service` to skip the step entirely.
+
+Re-running `worker init` detects an existing DevIntern-managed service and offers to update and restart it in place instead of installing a duplicate. A hand-written definition is never overwritten; the wizard leaves it running and writes the proposed definition into the workspace for manual comparison. On Linux, the automatic setup enables lingering; if the host rejects that step, run once:
+
+```bash
+loginctl enable-linger
+```
+
+Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## License
 

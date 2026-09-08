@@ -8,7 +8,7 @@
 
 import { runAgent as defaultRunAgent } from "../agent.js";
 import { dumpAgentOutput } from "../agent-debug.js";
-import type { AgentRunResult } from "@devintern/agent-harness";
+import type { AgentEffort, AgentRunResult } from "@devintern/agent-harness";
 import {
   attachmentsGuidanceBlurb,
   cleanupAttachmentStaging,
@@ -173,6 +173,11 @@ export interface CreateEngineOptions {
   /** Model override passed to every agent call. */
   model?: string;
   /**
+   * Reasoning-effort override passed to every agent call alongside `model`.
+   * Emitted by harnesses that support it; others ignore it with a warning.
+   */
+  effort?: AgentEffort;
+  /**
    * Base directory for resolving relative backend paths (markdown tasks dir).
    * Defaults to cwd; desktop hosts pass the project directory.
    */
@@ -218,6 +223,7 @@ export async function createEngine(
    * the capability keep the plain-text path unchanged.
    */
   const structuredMode = config.agent.harness.supportsStructuredOutput === true;
+  const effort = options.effort;
 
   const defaultProjectKey =
     config.jira?.defaultProjectKey ||
@@ -276,6 +282,7 @@ export async function createEngine(
         maxTurns: 100,
         skipPermissions: true,
         model,
+        effort,
         silent: true,
         structuredOutput: structuredMode,
         attachmentPaths: agentFiles?.attachmentPaths,

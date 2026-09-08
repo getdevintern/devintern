@@ -25,6 +25,8 @@ export interface WorkspaceSettings {
   dashboard: boolean;
   /** Dashboard listen port; unset follows DASHBOARD_PORT / 4400. */
   dashboardPort?: number;
+  /** Automatically ask the agent to repair failing CI on its own open PRs. */
+  ciFailureFix: boolean;
   /**
    * `auto` (default) resolves merge conflicts on the agent's PRs as soon as
    * they are detected; `scheduled` queues them during polling and resolves
@@ -49,12 +51,32 @@ export interface WorkspaceDefaults {
   taskQuery?: string;
   /** Extra per-task CLI flags (default `--create-pr`). */
   workerTaskArgs?: string;
-  /** Fallback default branch for repos that do not set one. */
-  defaultBranch?: string;
   /** Labels applied to PRs created for repos that do not override them. */
   prLabels?: string[];
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
+}
+
+/**
+ * One team's tracker source from a `[[teams]]` entry.
+ *
+ * Teams let one fleet worker poll several boards/trackers (even several
+ * boards of the same tracker type), each with its own credentials, query,
+ * and cursor. Omitting `[[teams]]` keeps the single `[defaults]` behavior.
+ */
+export interface TeamConfig {
+  /** Unique team name; namespaces cursors, dedupe, and skips (`jira:platform`). */
+  name: string;
+  /** Tracker driving this team's query (must support polling). */
+  tracker: string;
+  /** Tracker query the worker polls with for this team. */
+  taskQuery?: string;
+  /** Fixed destination repo. Omit when this team routes across several repos. */
+  repo?: string;
+  /** Optional env file with this team's credentials, relative to the workspace directory. */
+  envFile?: string;
+  /** Inline env overrides (highest precedence within the team). */
+  env: Record<string, string>;
 }
 
 /** One managed repository from a `[[repos]]` entry. */
@@ -63,7 +85,7 @@ export interface RepoConfig {
   name: string;
   /** Git remote URL the bare clone tracks. */
   remote: string;
-  /** Default branch task worktrees start from; falls back to `defaults.default_branch`, then `origin/HEAD`. */
+  /** Default branch task worktrees start from; falls back to `origin/HEAD`. */
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
   prLabels?: string[];
@@ -73,10 +95,44 @@ export interface RepoConfig {
   env: Record<string, string>;
 }
 
+/** Provider-neutral base configuration for one error-monitoring project. */
+export interface ErrorMonitorConfigBase {
+  /** Stable source name; namespaces dedupe and worker logs. */
+  id: string;
+  /** Adapter discriminator. */
+  provider: string;
+  enabled: boolean;
+  /** Repository where fixes for this monitoring project are implemented. */
+  repo: string;
+  /** Optional owning team, used for credentials and task execution context. */
+  team?: string;
+  query?: string;
+  intervalSeconds: number;
+  minOccurrences: number;
+  maxIssuesPerTick: number;
+  /** Leave a best-effort provider comment after terminal runs. */
+  commentOnAction: boolean;
+  envFile?: string;
+  env: Record<string, string>;
+}
+
+/** Sentry-specific source settings layered on the provider-neutral base. */
+export interface SentryErrorMonitorConfig extends ErrorMonitorConfigBase {
+  provider: "sentry";
+  organization: string;
+  project: string;
+  baseUrl?: string;
+}
+
+/** Discriminated union extended by each supported monitoring adapter. */
+export type ErrorMonitorConfig = SentryErrorMonitorConfig;
+
 /** One routing rule from a `[[routing.rules]]` entry. Set criteria are AND-ed; list values match any-of. */
 export interface RoutingRule {
   /** Name of the repo tasks matching this rule route to. */
   repo: string;
+  /** Restrict the rule to tasks acquired by this team (multi-team workspaces). */
+  team?: string;
   /** Tracker project key (e.g. Jira key prefix, Linear team key). */
   project?: string;
   /** Task must carry at least one of these components. */
@@ -99,7 +155,11 @@ export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   worker: WorkerSettings;
   defaults: WorkspaceDefaults;
+  /** Team tracker sources; empty means the single `[defaults]` fleet query. */
+  teams: TeamConfig[];
   repos: RepoConfig[];
+  /** Error-monitoring projects, each explicitly mapped to a repo. */
+  errorMonitors: ErrorMonitorConfig[];
   routing: RoutingRule[];
   automations: AutomationConfig[];
   estimations: EstimationConfig[];
@@ -108,6 +168,7 @@ export interface WorkspaceConfig {
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
+export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 
 /** Repo names double as directory names; keep them filesystem-safe. */
@@ -277,6 +338,9 @@ export function parseWorkspaceConfig(
       message: "[workspace].dashboard_port must be an integer between 1 and 65535.",
     },
   );
+  const ciFailureFix =
+    readOptionalBoolean(workspaceTable, "ci_failure_fix", "[workspace]", errors) ??
+    DEFAULT_CI_FAILURE_FIX;
 
   const conflictResolutionRaw = readString(
     workspaceTable,
@@ -312,6 +376,47 @@ export function parseWorkspaceConfig(
 
   const defaultsTable = asTable(document.defaults, "[defaults]", errors);
   const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
+  const errorMonitorTables = asTableArray(document.error_monitors, "[[error_monitors]]", errors);
+
+  const teams: TeamConfig[] = [];
+  const teamNames = new Set<string>();
+  for (const [index, table] of asTableArray(document.teams, "[[teams]]", errors).entries()) {
+    const label = `[[teams]][${index}]`;
+    const name = readString(table, "name", label, errors);
+    if (!name) {
+      errors.push(`${label}.name is required.`);
+    } else if (!REPO_NAME_PATTERN.test(name)) {
+      errors.push(
+        `${label}.name "${name}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (teamNames.has(name.toLowerCase())) {
+      errors.push(`Duplicate team name "${name}". Team names must be unique.`);
+    } else {
+      teamNames.add(name.toLowerCase());
+    }
+    const teamTracker = readString(table, "tracker", label, errors);
+    if (teamTracker && !supportsPolling(teamTracker)) {
+      errors.push(
+        `${label}.tracker "${teamTracker}" does not support polling. ` +
+          `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+      );
+    }
+    teams.push({
+      name: name ?? "",
+      tracker: teamTracker ?? "",
+      taskQuery: readString(table, "task_query", label, errors),
+      repo: readString(table, "repo", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
+  // brings its own (a [defaults].tracker alongside teams is still honored
+  // for any team that omits one).
+  if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
+    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+  }
   if (tracker && !supportsPolling(tracker)) {
     errors.push(
       `[defaults].tracker "${tracker}" does not support polling. ` +
@@ -323,11 +428,15 @@ export function parseWorkspaceConfig(
       "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
     );
   }
+  if (defaultsTable.default_branch !== undefined) {
+    errors.push(
+      "[defaults].default_branch is not supported; set default_branch on an individual [[repos]] entry instead.",
+    );
+  }
   const defaults: WorkspaceDefaults = {
     tracker: tracker ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
-    defaultBranch: readString(defaultsTable, "default_branch", "[defaults]", errors),
     prLabels:
       defaultsTable.pr_labels === undefined
         ? undefined
@@ -338,8 +447,24 @@ export function parseWorkspaceConfig(
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
   };
-  if (!tracker) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+
+  for (const team of teams) {
+    if (!team.tracker) {
+      team.tracker = defaults.tracker;
+    }
+    if (!team.tracker && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a tracker: set its own tracker or [defaults].tracker.`,
+      );
+    }
+    if (!team.taskQuery) {
+      team.taskQuery = defaults.taskQuery;
+    }
+    if (!team.taskQuery && team.name) {
+      errors.push(
+        `[[teams]] "${team.name}" needs a task_query: set its own or [defaults].task_query.`,
+      );
+    }
   }
 
   const repos: RepoConfig[] = [];
@@ -368,11 +493,85 @@ export function parseWorkspaceConfig(
     repos.push({
       name,
       remote,
-      defaultBranch: readString(table, "default_branch", label, errors) ?? defaults.defaultBranch,
+      defaultBranch: readString(table, "default_branch", label, errors),
       prLabels:
         table.pr_labels === undefined
           ? defaults.prLabels
           : readStringList(table, "pr_labels", label, errors),
+      envFile: readString(table, "env_file", label, errors),
+      env: readEnvTable(table, label, errors),
+    });
+  }
+
+  for (const team of teams) {
+    if (team.repo && !repoNames.has(team.repo)) {
+      errors.push(
+        `[[teams]] "${team.name}".repo "${team.repo}" does not match any [[repos]] name.`,
+      );
+    }
+  }
+
+  const errorMonitors: ErrorMonitorConfig[] = [];
+  const errorMonitorIds = new Set<string>();
+  for (const [index, table] of errorMonitorTables.entries()) {
+    const label = `[[error_monitors]][${index}]`;
+    const id = readString(table, "id", label, errors);
+    const provider = readString(table, "provider", label, errors);
+    const requestedRepo = readString(table, "repo", label, errors);
+    const repo = requestedRepo ?? (repos.length === 1 ? repos[0]?.name : undefined);
+    const team = readString(table, "team", label, errors);
+    const organization = readString(table, "organization", label, errors);
+    const project = readString(table, "project", label, errors);
+
+    if (!id) {
+      errors.push(`${label}.id is required.`);
+    } else if (!REPO_NAME_PATTERN.test(id)) {
+      errors.push(
+        `${label}.id "${id}" must contain only letters, digits, ".", "_" or "-" and not start with a separator.`,
+      );
+    } else if (errorMonitorIds.has(id.toLowerCase())) {
+      errors.push(`Duplicate error monitor id "${id}". IDs must be unique.`);
+    } else {
+      errorMonitorIds.add(id.toLowerCase());
+    }
+    if (provider !== "sentry") errors.push(`${label}.provider must be "sentry".`);
+    if (!repo) {
+      errors.push(`${label}.repo is required in a workspace with multiple repositories.`);
+    } else if (!repoNames.has(repo)) {
+      errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
+    }
+    if (team && !teamNames.has(team.toLowerCase())) {
+      errors.push(`${label}.team "${team}" does not match any [[teams]] name.`);
+    }
+    if (!organization) errors.push(`${label}.organization is required for Sentry.`);
+    if (!project) errors.push(`${label}.project is required for Sentry.`);
+
+    errorMonitors.push({
+      id: id ?? "",
+      provider: "sentry",
+      enabled: readOptionalBoolean(table, "enabled", label, errors) ?? true,
+      repo: repo ?? "",
+      team,
+      organization: organization ?? "",
+      project: project ?? "",
+      baseUrl: readString(table, "base_url", label, errors),
+      query: readString(table, "query", label, errors),
+      intervalSeconds:
+        readOptionalInteger(table, "poll_interval", label, errors, {
+          min: 1,
+          message: `${label}.poll_interval must be a positive integer (seconds).`,
+        }) ?? defaults.pollIntervalSeconds,
+      minOccurrences:
+        readOptionalInteger(table, "min_occurrences", label, errors, {
+          min: 1,
+          message: `${label}.min_occurrences must be a positive integer.`,
+        }) ?? 5,
+      maxIssuesPerTick:
+        readOptionalInteger(table, "max_per_tick", label, errors, {
+          min: 1,
+          message: `${label}.max_per_tick must be a positive integer.`,
+        }) ?? 3,
+      commentOnAction: readOptionalBoolean(table, "comment_on_action", label, errors) ?? false,
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -394,8 +593,17 @@ export function parseWorkspaceConfig(
     if (!repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
+    const team = readString(table, "team", label, errors);
+    if (team && !teamNames.has(team.toLowerCase())) {
+      errors.push(
+        teamNames.size > 0
+          ? `${label}.team "${team}" does not match any [[teams]] name.`
+          : `${label}.team "${team}" is set but no [[teams]] are configured.`,
+      );
+    }
     const rule: RoutingRule = {
       repo,
+      team,
       project: readString(table, "project", label, errors),
       components: readStringList(table, "components", label, errors),
       labels: readStringList(table, "labels", label, errors),
@@ -404,6 +612,25 @@ export function parseWorkspaceConfig(
       errors.push(`${label} must set at least one criterion (project, components, or labels).`);
     }
     routing.push(rule);
+  }
+
+  for (const team of teams) {
+    if (team.repo && routing.some((rule) => rule.team?.toLowerCase() === team.name.toLowerCase())) {
+      errors.push(
+        `[[teams]] "${team.name}" sets repo and cannot also have team-scoped routing rules. ` +
+          "Remove repo when the team spans multiple repositories.",
+      );
+    }
+    if (
+      !team.repo &&
+      repos.length > 1 &&
+      !routing.some((rule) => !rule.team || rule.team.toLowerCase() === team.name.toLowerCase())
+    ) {
+      errors.push(
+        `[[teams]] "${team.name}" spans a multi-repo workspace but has no applicable routing rules. ` +
+          "Set repo for a fixed destination or add [[routing.rules]].",
+      );
+    }
   }
 
   const automationResult = parseAutomationEntries(document.automations, {
@@ -420,7 +647,11 @@ export function parseWorkspaceConfig(
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
   // with estimate support can serve them; fail the job at startup otherwise.
-  if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
+  if (estimationResult.estimations.length > 0 && !tracker) {
+    errors.push(
+      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace.",
+    );
+  } else if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
     for (const estimation of estimationResult.estimations) {
       errors.push(
         `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
@@ -435,10 +666,19 @@ export function parseWorkspaceConfig(
   }
 
   return {
-    workspace: { worktreesTtlDays, dashboard, dashboardPort, conflictResolution, conflictSchedule },
+    workspace: {
+      worktreesTtlDays,
+      dashboard,
+      dashboardPort,
+      ciFailureFix,
+      conflictResolution,
+      conflictSchedule,
+    },
     worker: { schedule: schedule.config },
     defaults,
+    teams,
     repos,
+    errorMonitors,
     routing,
     automations: automationResult.automations,
     estimations: estimationResult.estimations,
@@ -459,7 +699,7 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
   } catch (error) {
     throw new Error(
       `Cannot read workspace config at ${path}: ${error instanceof Error ? error.message : String(error)}\n` +
-        "Run `devintern workspace init` to create one.",
+        "Run `devintern worker scaffold` to create one.",
     );
   }
   return parseWorkspaceConfig(text, path);
@@ -472,4 +712,13 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
  */
 export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | undefined {
   return config.repos.find((repo) => repo.name === name);
+}
+
+/**
+ * Look up a team by name.
+ *
+ * @returns The matching {@link TeamConfig}, or undefined.
+ */
+export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
+  return config.teams.find((team) => team.name === name);
 }

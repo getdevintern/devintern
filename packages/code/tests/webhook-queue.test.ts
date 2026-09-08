@@ -112,6 +112,11 @@ describe("WebhookQueue", () => {
       expect(queue.hasProcessed("github", "delivery-1")).toBe(true);
     });
 
+    test("tryMarkProcessed grants a claim only once", () => {
+      expect(queue.tryMarkProcessed("github", "delivery-claim")).toBe(true);
+      expect(queue.tryMarkProcessed("github", "delivery-claim")).toBe(false);
+    });
+
     test("ids are scoped per source", () => {
       queue.markProcessed("github", "id-1");
       expect(queue.hasProcessed("linear", "id-1")).toBe(false);

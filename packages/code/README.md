@@ -11,6 +11,7 @@
 - **Trackers:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · markdown files
 - **Agents:** Claude Code · Codex · Cursor · OpenCode · Grok Build · and others
 - **Repositories:** one worker can route tickets across a multi-repo workspace
+- **Sentry:** optional watcher turns recurring Sentry error groups into bugfix pull requests
 - **BYOK:** your model keys, billed on your existing provider contract
 
 **Also useful:** feasibility questions go back on the ticket instead of becoming a wrong PR; optional auto-review checks the diff before you see it; reviewer feedback returns to the same worker as commits on the existing branch.

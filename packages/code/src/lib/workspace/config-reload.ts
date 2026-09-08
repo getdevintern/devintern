@@ -36,6 +36,7 @@ export const DEFAULT_RELOAD_DEBOUNCE_MS = 300;
 export function applyWorkspaceConfig(target: WorkspaceConfig, next: WorkspaceConfig): void {
   target.workspace = next.workspace;
   target.defaults = next.defaults;
+  target.teams = next.teams;
   target.repos = next.repos;
   target.routing = next.routing;
   target.automations = next.automations;
@@ -172,7 +173,8 @@ export class WorkspaceConfigReloader {
     applyWorkspaceConfig(this.options.current, next);
     console.log(
       `🔄 [config] Reloaded ${this.options.configPath} ` +
-        `(${next.repos.length} repo(s), ${next.routing.length} routing rule(s), ` +
+        `(${next.teams.length} team(s), ${next.repos.length} repo(s), ` +
+        `${next.routing.length} routing rule(s), ` +
         `${next.automations.length} automation(s), ${next.estimations.length} estimation(s))`,
     );
     this.options.onApplied?.(this.options.current);

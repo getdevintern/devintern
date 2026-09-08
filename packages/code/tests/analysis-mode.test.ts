@@ -28,6 +28,7 @@ const defaultOnlyHarness: AgentHarness = {
 afterEach(() => {
   delete process.env.AGENT_ANALYSIS_ALLOWED_TOOLS;
   delete process.env.AGENT_MODEL;
+  delete process.env.AGENT_EFFORT;
 });
 
 describe("analysisRunOptions", () => {
@@ -60,6 +61,17 @@ describe("analysisRunOptions", () => {
   test("omits model when AGENT_MODEL is unset", () => {
     const options = defaultAnalysisRunOptions(10);
     expect(options.model).toBeUndefined();
+  });
+
+  test("includes AGENT_EFFORT in unattended options when set", () => {
+    process.env.AGENT_EFFORT = "high";
+    const options = defaultAnalysisRunOptions(10);
+    expect(options.effort).toBe("high");
+  });
+
+  test("omits effort when AGENT_EFFORT is unset", () => {
+    const options = defaultAnalysisRunOptions(10);
+    expect(options.effort).toBeUndefined();
   });
 });
 

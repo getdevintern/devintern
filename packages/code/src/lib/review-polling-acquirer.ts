@@ -27,6 +27,8 @@
 import { spawn } from "child_process";
 import { captureError } from "@devintern/utils";
 
+import { parseHarnessList } from "@devintern/agent-harness";
+
 import {
   agentPrKey,
   agentPrStateCursorSource,
@@ -34,11 +36,14 @@ import {
   reconcileOpenAgentPrs,
 } from "./agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
+import { isGitHubAuthError } from "./github-reviews";
 import { nextScheduleOccurrence } from "./automation-config";
 import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";
 import type { RunStore } from "./run-recorder";
+import type { TaskExecutionResult } from "./task-polling-acquirer";
 import type { WebhookQueue } from "./webhook-queue";
+import { cliResultToTaskResult, runWithFailover } from "./worker-failover";
 import type { WorkerState } from "./worker-state";
 import type { ConflictResolutionMode } from "./workspace/config";
 import type { Acquirer } from "../worker";
@@ -89,7 +94,7 @@ export interface ReviewPollingAcquirerOptions {
   queue: WebhookQueue;
   github: ReviewPollingGitHub;
   /** Handle feedback on one PR; returns success (injected for tests). */
-  addressPr: (repo: string, prNumber: number) => Promise<boolean>;
+  addressPr: (repo: string, prNumber: number) => Promise<TaskExecutionResult>;
   /**
    * Resolve merge conflicts on one of the agent's own PRs (injected for
    * tests). Omit to disable automatic conflict resolution.
@@ -223,7 +228,7 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
 }
 
 /** Serialize automatic pipelines that target the same PR worktree. */
-async function serializePrRun<T>(
+export async function serializePrRun<T>(
   repo: string,
   prNumber: number,
   run: () => Promise<T>,
@@ -262,7 +267,7 @@ export function runAddressReviewViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
   } = {},
-): Promise<boolean> {
+): Promise<TaskExecutionResult> {
   return serializePrRun(repo, prNumber, () =>
     runSubcommandViaCli("address-review", repo, prNumber, opts),
   );
@@ -309,6 +314,53 @@ function runResolveSubcommand(
     outputStdio?: "inherit" | "ignore";
   },
 ): Promise<AutomaticResolveResult> {
+  return runResolveWithFailover(repo, prNumber, extraArgs, opts);
+}
+
+async function runResolveWithFailover(
+  repo: string,
+  prNumber: number,
+  extraArgs: string[],
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    timeoutMs?: number;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
+  },
+): Promise<AutomaticResolveResult> {
+  let last: AutomaticResolveResult | null = null;
+  const status = await runWithFailover(async (env) => {
+    const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
+    last = spawned.result;
+    return spawned.code;
+  }, opts.env ?? process.env);
+  if (status === "deferred") {
+    return {
+      outcome: "deferred",
+      message: "agent usage limit; waiting for a harness to become available",
+    };
+  }
+  return (
+    last ?? {
+      outcome: status === "ok" ? "skipped" : "failed",
+      message: status === "ok" ? "resolver completed" : "resolver exited with a non-zero code",
+    }
+  );
+}
+
+function spawnResolveOnce(
+  repo: string,
+  prNumber: number,
+  extraArgs: string[],
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    timeoutMs?: number;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
+  },
+): Promise<{ code: number; result: AutomaticResolveResult }> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     let result: AutomaticResolveResult | null = null;
@@ -351,7 +403,10 @@ function runResolveSubcommand(
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
       if (timedOut) {
-        resolve({ outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` });
+        resolve({
+          code: 1,
+          result: { outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` },
+        });
         return;
       }
       if (!resultOverflow) {
@@ -371,8 +426,9 @@ function runResolveSubcommand(
           }
         }
       }
-      resolve(
-        result ?? {
+      resolve({
+        code: code ?? 1,
+        result: result ?? {
           outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
           message:
             code === 0
@@ -381,16 +437,19 @@ function runResolveSubcommand(
                 ? "resolver deferred"
                 : `resolver exited with code ${code}`,
         },
-      );
+      });
     });
     child.on("error", (error) => {
       if (timer) clearTimeout(timer);
-      resolve({ outcome: "failed", message: `failed to spawn resolver: ${error.message}` });
+      resolve({
+        code: 1,
+        result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },
+      });
     });
   });
 }
 
-function runSubcommandViaCli(
+async function runSubcommandViaCli(
   subcommand: string,
   repo: string,
   prNumber: number,
@@ -398,21 +457,26 @@ function runSubcommandViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
   } = {},
-): Promise<boolean> {
+): Promise<TaskExecutionResult> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
-      stdio: ["inherit", "inherit", "inherit"],
-      cwd: opts.cwd,
-      env: opts.env ?? process.env,
-    });
-    child.on("close", (code) => resolve(code === 0));
-    child.on("error", (error) => {
-      captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
-      console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
-      resolve(false);
-    });
-  });
+  const status = await runWithFailover(
+    (env) =>
+      new Promise<number>((resolve) => {
+        const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
+          stdio: ["inherit", "inherit", "inherit"],
+          cwd: opts.cwd,
+          env,
+        });
+        child.on("close", (code) => resolve(code ?? 1));
+        child.on("error", (error) => {
+          captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
+          console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
+          resolve(1);
+        });
+      }),
+    opts.env ?? process.env,
+  );
+  return cliResultToTaskResult(status);
 }
 
 /**
@@ -429,6 +493,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
+  /** Last time a rejected-credential warning was printed (rate-limited). */
+  private lastAuthWarnAt = 0;
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -560,6 +626,13 @@ export class ReviewPollingAcquirer implements Acquirer {
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
           );
         } catch (error) {
+          if (isGitHubAuthError(error)) {
+            // A rejected credential fails identically on every request, so
+            // re-reporting it per PR per tick floods error tracking with
+            // duplicates. Warn the operator throttled and keep polling.
+            this.warnAuthFailure(error as Error);
+            continue;
+          }
           captureError(error, {
             acquirer: this.name,
             repo: pr.repo,
@@ -574,6 +647,21 @@ export class ReviewPollingAcquirer implements Acquirer {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One auth-related warning per hour, not one per PR per tick. */
+  private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+  private warnAuthFailure(error: Error): void {
+    const now = this.now();
+    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) {
+      return;
+    }
+    this.lastAuthWarnAt = now;
+    console.warn(
+      `⚠️  [${this.name}] ${error.message} Renew GITHUB_TOKEN ` +
+        "(or reconnect the workspace's GitHub credentials); polling continues.",
+    );
   }
 
   /** Poll a single PR; triggers at most one address-review run. */
@@ -673,11 +761,17 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
     const ok = await addressPr(repo, prNumber);
-    console.log(
-      ok
-        ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
-        : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
-    );
+    if (ok === "deferred") {
+      console.log(
+        `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
+      );
+    } else {
+      console.log(
+        ok
+          ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
+          : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
+      );
+    }
   }
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
@@ -781,7 +875,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           prNumber,
           prUrl: `https://github.com/${repo}/pull/${prNumber}`,
           branch: fresh.head.ref,
-          harness: this.options.harness ?? process.env.AGENT_HARNESS ?? "claude-code",
+          harness: this.options.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
           attempt,
         }) ?? null;
     } catch (error) {

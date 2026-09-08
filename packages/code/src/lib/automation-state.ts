@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 
 import type { AutomationConfig } from "./automation-config";
+import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 
 export interface AutomationScheduleState {
@@ -19,8 +20,7 @@ export class AutomationStateStore {
   constructor(dbPath: string) {
     prepareQueueDbDirectory(dbPath);
     this.db = new Database(dbPath);
-    this.db.run("PRAGMA busy_timeout = 5000");
-    this.db.run("PRAGMA journal_mode = WAL");
+    configureSqliteConnection(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS automation_schedules (
         automation_id TEXT PRIMARY KEY,

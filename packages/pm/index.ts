@@ -15,15 +15,22 @@ import type { PmEngine, SourceInput, StoryDraft } from "./lib/engine";
 import { runInteractiveMode } from "./lib/components/interactive";
 import { initializeProject } from "./lib/init";
 import { isInteractive, runPmInitWizard } from "./lib/init-wizard";
-import { extractHarnessFlags, parseArgs, validateHarnessName } from "./lib/parse-args";
+import {
+  extractHarnessFlags,
+  parseArgs,
+  parseEffortValue,
+  validateHarnessName,
+} from "./lib/parse-args";
 import type { CLIArgs } from "./lib/parse-args";
 import { runConnect } from "./lib/chat/connect";
 import { runServe } from "./lib/chat/serve";
 import {
   listInstalledHarnesses,
+  parseAgentEffort,
   resolveExecutablePathStrict,
   resolveHarness,
 } from "@devintern/agent-harness";
+import type { AgentEffort } from "@devintern/agent-harness";
 import { getAuthenticatedUser, login, logout, resolveLogin } from "@devintern/auth";
 import {
   captureError,
@@ -71,6 +78,17 @@ function lastStderrLine(chunk: string): string | undefined {
     .map((line) => line.trim())
     .filter(Boolean);
   return lines.at(-1);
+}
+
+/**
+ * Read AGENT_EFFORT from the environment (`.devintern-pm/.env` is loaded into
+ * process.env by loadConfig() before this runs).
+ *
+ * @throws {InvalidAgentEffortError} on invalid values, so misconfiguration
+ *   fails fast instead of silently ignoring the setting during agent runs.
+ */
+function resolveEnvEffort(): AgentEffort | undefined {
+  return parseAgentEffort(process.env.AGENT_EFFORT);
 }
 
 /**
@@ -162,12 +180,18 @@ async function main() {
   if (parsedArgs === "serve") {
     const platformFlag = args[args.indexOf("--platform") + 1];
     const modelFlag = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
+    let effortFlag: AgentEffort | undefined;
+    const effortIndex = args.indexOf("--effort");
+    if (effortIndex !== -1) {
+      effortFlag = parseEffortValue(args, effortIndex);
+    }
     await runServe({
       platforms:
         args.includes("--platform") && (platformFlag === "slack" || platformFlag === "telegram")
           ? [platformFlag]
           : undefined,
       model: modelFlag,
+      effort: effortFlag,
     });
     return;
   }
@@ -230,9 +254,10 @@ async function main() {
 
     const engine: PmEngine = await createEngine(configForInteractive, {
       // loadConfig() has already loaded .devintern-pm/.env into process.env,
-      // so AGENT_MODEL from the project config is visible here. The --model
-      // flag wins over the environment.
+      // so AGENT_MODEL / AGENT_EFFORT from the project config are visible
+      // here. The --model / --effort flags win over the environment.
       model: parsedArgs?.model ?? process.env.AGENT_MODEL,
+      effort: parsedArgs?.effort ?? resolveEnvEffort(),
     });
 
     if (parsedArgs === null) {

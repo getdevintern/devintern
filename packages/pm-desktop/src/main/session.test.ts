@@ -15,6 +15,7 @@ import {
   loadProject,
   setSessionGitExecForTests,
   switchContext,
+  switchEffort,
   switchHarness,
   switchModel,
   switchProjectKey,
@@ -635,6 +636,11 @@ describe("context switches while an agent is running", () => {
   test("switchModel rejects while an agent request is in flight", async () => {
     beginAgentRequest("test-request");
     await expect(switchModel("sonnet")).rejects.toThrow(/Unavailable while an agent is running/);
+  });
+
+  test("switchEffort rejects while an agent request is in flight", async () => {
+    beginAgentRequest("test-request");
+    await expect(switchEffort("high")).rejects.toThrow(/Unavailable while an agent is running/);
   });
 
   test("loadProject rejects while an agent request is in flight", async () => {

@@ -1,9 +1,10 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { TaskTrackerManager } from "../src/lib/task-tracker-manager";
+import { TaskTrackerManager, createTrackerClient } from "../src/lib/task-tracker-manager";
 import { JiraTaskTrackerClient } from "../src/lib/trackers/jira/jira-task-tracker-client";
 import { AsanaTaskTrackerClient } from "../src/lib/trackers/asana/asana-task-tracker-client";
 import { AzureDevOpsTaskTrackerClient } from "../src/lib/trackers/azure-devops/azure-devops-task-tracker-client";
 import { GitHubTaskTrackerClient } from "../src/lib/trackers/github/github-task-tracker-client";
+import { GitLabTaskTrackerClient } from "../src/lib/trackers/gitlab/gitlab-task-tracker-client";
 import { LinearTaskTrackerClient } from "../src/lib/trackers/linear/linear-task-tracker-client";
 import { TrelloTaskTrackerClient } from "../src/lib/trackers/trello/trello-task-tracker-client";
 
@@ -198,5 +199,55 @@ describe("TaskTrackerManager", () => {
     manager.reset();
     const client2 = manager.getClient();
     expect(client1).not.toBe(client2);
+  });
+});
+
+describe("createTrackerClient (explicit env)", () => {
+  test("builds clients from an env map without reading process.env", () => {
+    const jira = createTrackerClient("jira", {
+      JIRA_BASE_URL: "https://platform.atlassian.net",
+      JIRA_EMAIL: "plat@example.com",
+      JIRA_API_TOKEN: "plat-token",
+    });
+    const trello = createTrackerClient("trello", {
+      TRELLO_API_KEY: "key-b",
+      TRELLO_API_TOKEN: "token-b",
+      TRELLO_DEFAULT_BOARD_ID: "board-b",
+    });
+
+    expect(jira instanceof JiraTaskTrackerClient).toBe(true);
+    expect(trello instanceof TrelloTaskTrackerClient).toBe(true);
+  });
+
+  test("isolated env maps produce isolated clients (multi-team boards)", () => {
+    const boardA = createTrackerClient("trello", {
+      TRELLO_API_KEY: "key-a",
+      TRELLO_API_TOKEN: "token-a",
+      TRELLO_DEFAULT_BOARD_ID: "board-a",
+    });
+    const boardB = createTrackerClient("trello", {
+      TRELLO_API_KEY: "key-b",
+      TRELLO_API_TOKEN: "token-b",
+      TRELLO_DEFAULT_BOARD_ID: "board-b",
+    });
+
+    expect(boardA).not.toBe(boardB);
+  });
+
+  test("preserves GitLab support for explicit team environments", () => {
+    const client = createTrackerClient("gitlab", {
+      GITLAB_TOKEN: "glpat-team",
+      GITLAB_PROJECT: "acme/platform/api",
+      GITLAB_BASE_URL: "https://gitlab.example.com",
+    });
+    expect(client instanceof GitLabTaskTrackerClient).toBe(true);
+  });
+
+  test("throws on missing credentials in the provided map only", () => {
+    expect(() => createTrackerClient("linear", {})).toThrow(/LINEAR_API_KEY/);
+  });
+
+  test("rejects unknown tracker types", () => {
+    expect(() => createTrackerClient("fossil", {})).toThrow(/Unsupported task tracker/);
   });
 });

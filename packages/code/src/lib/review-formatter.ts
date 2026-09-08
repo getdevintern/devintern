@@ -314,3 +314,64 @@ export function formatSingleCommentPrompt(
 
   return lines.join("\n");
 }
+
+/** Structured CI-failure feedback handed to {@link formatCiFixPrompt}. */
+export interface CiFailureFeedback {
+  repository: string;
+  prNumber: number;
+  prTitle?: string;
+  branch?: string;
+  failures: Array<{
+    name: string;
+    conclusion: string | null;
+    detailsUrl?: string;
+  }>;
+  /** Failure-relevant excerpt, or null when GitHub did not expose logs. */
+  logs: string | null;
+}
+
+/** Format failing CI metadata and logs into an implementation prompt. */
+export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
+  const lines = [
+    "# CI Failure - Fix Failing Checks",
+    "",
+    "## PR Information",
+    "",
+    `- **Repository:** ${feedback.repository}`,
+    `- **PR #${feedback.prNumber}:** ${feedback.prTitle ?? ""}`.trimEnd(),
+  ];
+  if (feedback.branch) lines.push(`- **Branch:** \`${feedback.branch}\``);
+  lines.push("", "## Failing Checks", "");
+  for (const failure of feedback.failures) {
+    const details = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
+    lines.push(`- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`);
+  }
+  lines.push("");
+  if (feedback.logs?.trim()) {
+    lines.push("## Failure Logs (excerpt)", "", "```", feedback.logs.trimEnd(), "```", "");
+  } else {
+    lines.push(
+      "## Failure Logs",
+      "",
+      "> Job logs were not available. Reproduce the failures locally by running",
+      "> the project's test/lint/build pipeline for the affected checks.",
+      "",
+    );
+  }
+  lines.push(
+    "## Instructions",
+    "",
+    "Fix the code so every failing check above passes without regressing the rest of the suite.",
+    "",
+    "**Guidelines:**",
+    "1. Identify the root cause from the log excerpt before editing",
+    "2. Make minimal, focused changes that fix the failure",
+    "3. Treat flaky infrastructure as such instead of masking it",
+    "4. Run the relevant tests to verify the fix",
+    "",
+    "**IMPORTANT:**",
+    "- Commit the changes with a descriptive message",
+    "- Do NOT push to the remote - that will be done automatically",
+  );
+  return lines.join("\n");
+}

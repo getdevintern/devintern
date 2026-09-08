@@ -114,13 +114,14 @@ Once it's running, the worker:
 - **Resolves merge conflicts itself** — merges the base branch tip into a lagging PR branch and asks the agent to fix conflicts semantically, never force-pushing over human work.
 - **Takes orders by @mention** — comment `@devintern address the review feedback` on _any_ PR in the repo and it handles it (only users with push access can direct the bot).
 - **Runs scheduled chores** — automations turn a cron schedule plus a prompt into the full ticket→PR pipeline, like dependency upgrades or flaky-test triage on Monday mornings. The prompt is the task: nothing needs to exist in your tracker.
+- **Fixes production errors from Sentry** — add a Sentry project during `worker init`, or run `worker connect sentry` for an existing workspace. The worker watches recurring error groups, turns valid ones into bugfix tasks, and ships the fix through the same pipeline as a reviewed pull request.
 - **Survives reality** — accepted work persists to a local SQLite queue across restarts, retries are capped, and rate limits pause rather than break runs.
 - **Shows its work** — every run is recorded stage-by-stage in a built-in dashboard at `http://localhost:4400`; routing rules and automations span a whole fleet of repositories from one `workspace.toml`.
 
 Set it up once:
 
 ```bash
-devintern worker init    # guided setup: reuses tracker config, checks license, pairs relay, can install systemd/launchd service
+devintern worker init    # guided setup: query, operating policy, optional integrations + service
 devintern worker         # keeps running: polling, reviews, automations, dashboard
 ```
 

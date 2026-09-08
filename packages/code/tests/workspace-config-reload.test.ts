@@ -126,6 +126,24 @@ describe("WorkspaceConfigReloader", () => {
     expect(current.estimations.map((item) => item.id)).toEqual(["groom"]);
   });
 
+  test("copies live team query and fixed-repo changes into the shared config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(V1);
+    next.teams = [
+      {
+        name: "platform",
+        tracker: "jira",
+        taskQuery: "project = PLAT",
+        repo: "backend",
+        env: {},
+      },
+    ];
+
+    applyWorkspaceConfig(current, next);
+    expect(current.teams[0]?.taskQuery).toBe("project = PLAT");
+    expect(current.teams[0]?.repo).toBe("backend");
+  });
+
   test("rejects runtime-incompatible changes before mutating active config", () => {
     const dir = freshDir();
     const path = join(dir, "workspace.toml");

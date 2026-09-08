@@ -175,6 +175,19 @@ The model string is harness-specific — see your harness's CLI docs for accepte
 
 In the DevIntern PM desktop app, set the same override per project from **Settings → Agent model**; it persists to `.devintern-pm/.env` (same file the CLI reads) and applies to new agent runs immediately.
 
+### Reasoning effort
+
+Alongside the model you can tune how deeply the agent reasons with `AGENT_EFFORT` in `.devintern-pm/.env`:
+
+```bash
+# .devintern-pm/.env
+AGENT_EFFORT=medium
+```
+
+Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply. For a single run, override it with `--effort <level>`; the flag wins over the environment. Harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. When unset, no extra flags are emitted and behavior is unchanged.
+
+In the DevIntern PM desktop app, set the same override per project from **Settings → Agent effort**; it persists to `.devintern-pm/.env` and applies to new agent runs immediately.
+
 **Advanced spawn tuning** (rarely needed):
 
 ```bash
