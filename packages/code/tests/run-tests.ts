@@ -14,6 +14,10 @@ const gitCeilingDirectories = [resolve(tmpdir()), existingCeilings]
 // has to exist before that too — otherwise such children could fall back to a
 // developer's real .devintern-code/queue.db if their cwd sits inside a
 // configured project tree.
+//
+// SENTRY_DISABLED is pinned for the same reason (guard-sentry.ts re-pins it in
+// each test process): test-spawned CLI subprocesses must never report events
+// to the baked-in production Sentry DSN (DEVINTERN-7).
 const queueDbTempDir = mkdtempSync(join(tmpdir(), "devintern-test-state-"));
 process.on("exit", () => {
   try {
@@ -29,6 +33,7 @@ const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice
     ...process.env,
     GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
     WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
+    SENTRY_DISABLED: "1",
   },
   stdin: "inherit",
   stdout: "inherit",

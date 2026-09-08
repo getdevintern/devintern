@@ -383,6 +383,8 @@ Add these permissions to your GitHub App:
 3. Under **Repository permissions**, add:
    - **Pull request review comments**: Read and write
    - **Issue comments**: Read and write (for top-level PR comments)
+   - **Actions**: Read (to download failing job logs)
+   - **Commit statuses**: Read (for non-Actions CI providers)
 4. Under **Subscribe to events**, enable:
    - Pull request review
    - Pull request review comment

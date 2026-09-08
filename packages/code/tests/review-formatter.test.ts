@@ -3,6 +3,7 @@ import {
   formatReviewPrompt,
   formatReplyMessage,
   formatSingleCommentPrompt,
+  formatCiFixPrompt,
 } from "../src/lib/review-formatter";
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../src/types/github-webhooks";
 
@@ -240,6 +241,32 @@ describe("Review Formatter", () => {
       const prompt = formatSingleCommentPrompt(comment, "owner/repo", "main");
 
       expect(prompt).not.toContain("Line:");
+    });
+  });
+
+  describe("formatCiFixPrompt", () => {
+    test("includes failing checks, logs, and no-push instructions", () => {
+      const prompt = formatCiFixPrompt({
+        repository: "acme/widgets",
+        prNumber: 42,
+        prTitle: "Improve widgets",
+        branch: "feature/widgets",
+        failures: [{ name: "verify", conclusion: "failure", detailsUrl: "https://ci/42" }],
+        logs: "error: expected true",
+      });
+      expect(prompt).toContain("verify");
+      expect(prompt).toContain("error: expected true");
+      expect(prompt).toContain("Do NOT push");
+    });
+
+    test("explains how to proceed without logs", () => {
+      const prompt = formatCiFixPrompt({
+        repository: "acme/widgets",
+        prNumber: 42,
+        failures: [{ name: "verify", conclusion: "timed_out" }],
+        logs: null,
+      });
+      expect(prompt).toContain("Reproduce the failures locally");
     });
   });
 });

@@ -132,7 +132,7 @@ GITHUB_TOKEN=your-github-token
 ```
 
 - **Classic token**: Requires `repo` scope
-- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. Add `Issues: Read and write` when `TASK_TRACKER=github`
+- **Fine-grained token** (recommended): Requires `Pull requests: Read and write` and `Contents: Read and write` permissions. When `[workspace].ci_failure_fix = true`, also grant `Actions: Read` and `Commit statuses: Read`. Add `Issues: Read and write` when `TASK_TRACKER=github`
 - Create at: [https://github.com/settings/tokens](https://github.com/settings/tokens)
 
 > **`Contents` must be _Read and write_, not Read.** Branch pushes go through the same credential as everything else, and a Contents-readonly token passes every API check (task fetch, PR reads) while `git push` fails with `403 ... denied to <login>`. If your setup delegates pushing to an SSH remote instead (`git@github.com:owner/repo.git`), the PAT does not need `Contents: Write` for pushes.
@@ -173,6 +173,8 @@ Both the ID and a private key are required.
    - **Contents:** Read and write
    - **Pull requests:** Read and write
    - **Issues:** Read and write
+   - **Actions:** Read (when automatic CI failure fixes are enabled)
+   - **Commit statuses:** Read (when automatic CI failure fixes are enabled)
 3. Generate and save a private key
 4. Install the App on your repositories
 
@@ -391,6 +393,32 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
 **Qwen note:** Qwen Code accepts a model via its `--model` flag (e.g. `qwen3-coder-plus`) — set it with `AGENT_MODEL`; you can also keep the model in `~/.qwen/settings.json`.
+
+### Failover across multiple harnesses
+
+`AGENT_HARNESS` accepts a comma-separated, priority-ordered list so the unattended worker keeps processing when an agent hits its usage limit:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=claude-code,codex
+```
+
+The first entry is your preferred harness; later entries are fallbacks in priority order. A single value behaves exactly as before.
+
+**Failover behavior (worker mode):**
+
+Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
+
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`).
+- When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
+- When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
+- If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
+- Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
+
+Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
+
+**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. `AGENT_MODEL` applies to whichever harness is active (the string is harness-specific).
 
 ### Model selection
 

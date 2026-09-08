@@ -3,9 +3,9 @@
  *
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
  * `.env`, dry-runs the ready-tasks query, checks any automation license,
- * offers relay pairing plus the central DevIntern App (@mention events), and
- * can emit a native service definition. Polling is always on; direct webhooks
- * run as a separate advanced service.
+ * offers Sentry auto-fixes, relay pairing plus the central DevIntern App
+ * (@mention events), and can emit a native service definition. Polling is
+ * always on; direct webhooks run as a separate advanced service.
  *
  * Prompt-loop mechanics come from `@devintern/task-trackers` (shared with
  * `devintern init`); everything effectful is injectable for tests.
@@ -33,16 +33,24 @@ import {
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./pr-client";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
+import { parseCronOrIntervalSchedule } from "./automation-config";
+import { isValidTimeZone, parseTimeWindowSpec } from "./schedule";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
   trackersSupportingPolling,
 } from "./tracker-capabilities";
-import { ensureWorkspaceAndAddRepo, writeWorkspaceDefaults } from "./workspace/init";
+import {
+  ensureWorkspaceAndAddRepo,
+  writeWorkerOperatingPolicy,
+  writeWorkspaceDefaults,
+} from "./workspace/init";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
 import { workspaceConfigPath } from "./workspace/paths";
+import { runWorkerSentrySetup } from "./worker-sentry-setup";
+import type { SentryValidationOptions } from "./worker-sentry-setup";
 
 export type PromptFn = (question: string) => Promise<string>;
 export type LogFn = (message: string) => void;
@@ -199,7 +207,7 @@ export interface WorkerInitDeps {
   bootstrapWorkspace?: (opts: {
     cwd: string;
     log: LogFn;
-  }) => Promise<{ workspaceDir: string; created?: boolean } | { error: string }>;
+  }) => Promise<{ workspaceDir: string; created?: boolean; repoName?: string } | { error: string }>;
   /** Signed-in user lookup for relay onboarding. */
   getUser?: (projectRoot: string) => Promise<InitUserLike | null>;
   /** Interactive login for relay onboarding. */
@@ -213,6 +221,14 @@ export interface WorkerInitDeps {
   }) => Promise<boolean>;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
+  /** Validate Sentry credentials and project access; returns the current issue count. */
+  validateSentry?: (options: SentryValidationOptions) => Promise<number>;
+  /** Override the guided workspace operating-policy step. */
+  configureOperatingPolicy?: (ctx: {
+    workspaceDir: string;
+    prompt: PromptFn;
+    log: LogFn;
+  }) => Promise<void>;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -224,6 +240,124 @@ export interface WorkerInitDeps {
 interface InitUserLike {
   id: string;
   email: string | null;
+}
+
+export async function configureWorkerOperatingPolicy(ctx: {
+  workspaceDir: string;
+  prompt: PromptFn;
+  log: LogFn;
+}): Promise<void> {
+  const current = loadWorkspaceConfig(workspaceConfigPath(ctx.workspaceDir));
+  const yesNo = async (question: string, fallback: boolean): Promise<boolean> => {
+    for (;;) {
+      const answer = (await ctx.prompt(question)).trim().toLowerCase();
+      if (!answer) return fallback;
+      if (answer === "y" || answer === "yes") return true;
+      if (answer === "n" || answer === "no") return false;
+      ctx.log("   Enter y or n.");
+    }
+  };
+
+  const ciFailureFix = await yesNo(
+    `Automatically repair failing CI on worker-created PRs? [${current.workspace.ciFailureFix ? "Y/n" : "y/N"}]: `,
+    current.workspace.ciFailureFix,
+  );
+
+  let conflictResolution = current.workspace.conflictResolution;
+  for (;;) {
+    const answer = (
+      await ctx.prompt(
+        `Conflict handling [auto/scheduled/disabled] [${current.workspace.conflictResolution}]: `,
+      )
+    )
+      .trim()
+      .toLowerCase();
+    if (!answer) break;
+    if (answer === "auto" || answer === "scheduled" || answer === "disabled") {
+      conflictResolution = answer;
+      break;
+    }
+    ctx.log("   Choose auto, scheduled, or disabled.");
+  }
+
+  let conflictResolutionCron: string | undefined;
+  let conflictResolutionInterval: string | undefined;
+  if (conflictResolution === "scheduled") {
+    const existingSchedule =
+      current.workspace.conflictSchedule?.cron ??
+      current.workspace.conflictSchedule?.interval ??
+      "0 3 * * *";
+    for (;;) {
+      const value =
+        (
+          await ctx.prompt(
+            `Conflict-resolution schedule (cron or interval) [${existingSchedule}]: `,
+          )
+        ).trim() || existingSchedule;
+      const errors: string[] = [];
+      const isCron = value.split(/\s+/).length > 1;
+      const parsed = parseCronOrIntervalSchedule(
+        isCron ? { cron: value } : { interval: value },
+        { label: "Conflict schedule" },
+        errors,
+      );
+      if (parsed) {
+        conflictResolutionCron = parsed.cron;
+        conflictResolutionInterval = parsed.interval;
+        break;
+      }
+      ctx.log(`   ${errors.join(" ")}`);
+    }
+  }
+
+  const currentSchedule = current.worker.schedule;
+  const limitPickup = await yesNo(
+    `Limit new-task pickup to active hours? [${currentSchedule ? "Y/n" : "y/N"}]: `,
+    currentSchedule !== null,
+  );
+  let activeWindows: string[] = [];
+  let blockedWindows: string[] = [];
+  let timezone = "";
+  if (limitPickup) {
+    const existingWindows =
+      currentSchedule?.active.map((window) => window.spec).join(",") || "22:00-06:00";
+    for (;;) {
+      activeWindows = (
+        (await ctx.prompt(`Active windows, comma-separated [${existingWindows}]: `)).trim() ||
+        existingWindows
+      )
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      try {
+        activeWindows.forEach(parseTimeWindowSpec);
+        break;
+      } catch (error) {
+        ctx.log(`   ${(error as Error).message}`);
+      }
+    }
+    blockedWindows = currentSchedule?.blocked.map((window) => window.spec) ?? [];
+    const existingTimezone = currentSchedule?.timezone ?? "";
+    for (;;) {
+      timezone =
+        (await ctx.prompt(`Timezone [${existingTimezone || "worker machine local"}]: `)).trim() ||
+        existingTimezone;
+      if (!timezone || isValidTimeZone(timezone)) break;
+      ctx.log(`   "${timezone}" is not a valid IANA timezone.`);
+    }
+  }
+
+  writeWorkerOperatingPolicy(ctx.workspaceDir, {
+    ciFailureFix,
+    conflictResolution,
+    conflictResolutionCron,
+    conflictResolutionInterval,
+    activeWindows,
+    blockedWindows,
+    timezone,
+    catchUpMissed: currentSchedule?.catchUpMissed ?? true,
+  });
+  ctx.log("💾 Wrote worker operating policy to workspace.toml.");
 }
 
 function applyEnvFile(envPath: string): Record<string, string> {
@@ -380,7 +514,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         if (!result.ok) {
           return { error: result.error };
         }
-        return { workspaceDir: result.workspaceDir, created: result.created };
+        return {
+          workspaceDir: result.workspaceDir,
+          created: result.created,
+          repoName: result.repoName,
+        };
       });
     const workspace = await bootstrap({ cwd, log });
     if ("error" in workspace) {
@@ -436,9 +574,40 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     writeWorkspaceDefaults(workspaceDir, { tracker: trackerType, taskQuery: query });
     log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
 
-    // 4. Automation license — any SKU; do not special-case workspace.
+    // 4. Make consequential unattended behavior explicit instead of silently
+    // accepting token-spending defaults.
+    log("\n4️⃣  Worker operating policy");
+    log("   Choose when new tasks run and how the worker maintains its pull requests.");
+    await (deps.configureOperatingPolicy ?? configureWorkerOperatingPolicy)({
+      workspaceDir,
+      prompt,
+      log,
+    });
+
+    // 5. Optional production-error source. Tracker tasks remain the worker's
+    // primary input; this adds a repo-pinned Sentry project alongside them.
+    log("\n5️⃣  Sentry auto-fixes (optional)");
+    log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
+    const sentryAnswer = (
+      await prompt("Watch a Sentry project and create fixes for recurring errors? [y/N]: ")
+    )
+      .trim()
+      .toLowerCase();
+    if (sentryAnswer === "y" || sentryAnswer === "yes") {
+      await runWorkerSentrySetup({
+        workspaceDir,
+        repoName: workspace.repoName,
+        prompt,
+        log,
+        validateSentry: deps.validateSentry,
+      });
+    } else {
+      log("   Sentry auto-fixes skipped; add [[error_monitors]] to workspace.toml later.");
+    }
+
+    // 6. Automation license — any SKU; do not special-case workspace.
     if (deps.checkAutomationLicense) {
-      log("\n4️⃣  Checking your automation license (the worker runs unattended)...");
+      log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
       try {
         const failure = await deps.checkAutomationLicense();
         if (failure === null) {
@@ -456,10 +625,10 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
     }
 
-    // 5. Relay: polling remains the correctness layer, while a signed-in
+    // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
     let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
-    log("\n5️⃣  Instant events (optional; polling always stays on)");
+    log("\n7️⃣  Instant events (optional; polling always stays on)");
     const relayAnswer = (
       await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
     )
@@ -521,7 +690,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
     }
 
-    // 6. GitHub App: relay-backed workspaces install the central App and keep
+    // 8. GitHub App: relay-backed workspaces install the central App and keep
     // GitHub API access local through GITHUB_TOKEN. A customer-owned App is an
     // advanced, no-relay path for air-gapped/direct installations only.
     let githubAppOutcome: "connected" | "existing" | "skipped" | "unavailable" = "unavailable";
@@ -534,10 +703,10 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     }
 
     if (!githubRepo) {
-      log("\n6️⃣  GitHub App (@mentions)");
+      log("\n8️⃣  GitHub App (@mentions)");
       log("   No GitHub remote detected; skipping the GitHub App step.");
     } else if (!relayConnected) {
-      log(`\n6️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+      log(`\n8️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
       if (hasGitHubAppCredentials()) {
         githubAppOutcome = "existing";
         log("✅ Customer-owned GitHub App credentials found in the environment.");
@@ -552,7 +721,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         log("   with GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY_PATH/BASE64.");
       }
     } else {
-      log(`\n6️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+      log(`\n8️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
       log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
       log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
       log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
@@ -575,9 +744,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
     }
 
-    // 7. Write, but do not install, the native user-service definition. The
+    // 9. Write, but do not install, the native user-service definition. The
     // foreground command remains an honest supported path on every platform.
-    log("\n7️⃣  Background service (optional)");
+    log("\n9️⃣  Background service (optional)");
     const serviceAnswer = (await prompt("Write a background service definition? [Y/n]: "))
       .trim()
       .toLowerCase();

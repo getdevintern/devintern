@@ -24,6 +24,12 @@ function cliTrackerTestEnv(extra: Record<string, string> = {}): NodeJS.ProcessEn
     DEVINTERN_FETCH_MAX_RETRIES: "0",
     DEVINTERN_SKIP_LICENSE_CHECK: "1",
     DEVINTERN_NO_UPDATE: "1",
+    // The spawned CLI initializes Sentry with the baked-in production DSN;
+    // without this, the expected connection failure against the closed port
+    // ("Unable to connect. Is the computer able to access the url?" thrown by
+    // fetchWithRetry) is captured by the CLI's error handlers and shipped to
+    // Sentry from CI (see DEVINTERN-6).
+    SENTRY_DISABLED: "1",
     ...extra,
   };
 }
@@ -80,6 +86,19 @@ async function runCLI(
 }
 
 describe.concurrent("CLI Argument Handling", () => {
+  test("spawn env must disable Sentry for CLI subprocesses (DEVINTERN-6)", () => {
+    // These tests spawn the real CLI against a closed tracker port. The
+    // fetch failure surfaces as fetchWithRetry's TypeError ("Unable to
+    // connect. Is the computer able to access the url?") and is captured by
+    // the CLI's top-level error handlers; SENTRY_DISABLED=1 keeps those
+    // expected failures from shipping to the baked-in production Sentry DSN
+    // from CI (515 error-level events under DEVINTERN-6).
+    const env = cliTrackerTestEnv();
+    expect(env.SENTRY_DISABLED).toBe("1");
+    expect(env.JIRA_BASE_URL).toBe(CLI_UNREACHABLE_TRACKER_URL);
+    expect(env.DEVINTERN_FETCH_MAX_RETRIES).toBe("0");
+  });
+
   test("should show help with --help", async () => {
     const result = await runCLI(["--help"]);
     expect(result.stdout).toContain("devintern");
@@ -155,8 +174,8 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: devintern worker connect");
     expect(result.stdout).toContain("--workspace <path>");
-    expect(result.stdout).not.toContain("--repo");
-    expect(result.stdout).not.toContain("current repository");
+    expect(result.stdout).toContain("sentry");
+    expect(result.stdout).toContain("--repo <name>");
   });
 
   test("should reject the removed top-level workspace namespace", async () => {

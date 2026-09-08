@@ -8,7 +8,7 @@
 
 import { join } from "node:path";
 import { resolveConfigDir } from "@devintern/utils";
-import { checkLicense, requireLicense } from "@devintern/license-check";
+import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
 import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "../config.js";
 import { createEngine } from "../engine/index.js";
 import { createChatBot } from "./bot.js";
@@ -45,7 +45,14 @@ export async function runServe(options: ServeOptions = {}): Promise<void> {
     productKey: "devintern/pm",
     supabaseConfig: loadSupabaseConfig(),
   });
-  requireLicense(licenseResult);
+  try {
+    requireLicense(licenseResult);
+  } catch (error) {
+    // The CLI surface exits with code 1 on a failed license check; the
+    // failure details were already printed to stderr by requireLicense.
+    if (error instanceof LicenseCheckError) process.exit(1);
+    throw error;
+  }
 
   const tokens = detectChatTokens(process.env, options.platforms);
   if (!tokens.slack && !tokens.telegram) {

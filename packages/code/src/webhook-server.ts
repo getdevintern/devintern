@@ -16,13 +16,12 @@ import {
   detectMaxTurnsReached,
   findMaxTurnsReachedLine,
   detectUsageLimit,
-  resetHintToMs,
-  resolveHarness,
   spawnAgent,
   reapTree,
   resolveExecutablePathWithRetry,
   UsageLimitError,
 } from "@devintern/agent-harness";
+import type { ResolvedHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
 import { parseEnvInteger } from "./lib/env-integer";
 import { resolveAgentModel } from "./lib/agent-model";
@@ -32,6 +31,8 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubAppAuth } from "./lib/github-app-auth";
 import { GitHubReviewsClient } from "./lib/github-reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
+import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover";
+import type { WorkerFailover } from "./lib/worker-failover";
 import { WorkerState } from "./lib/worker-state";
 import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
@@ -76,71 +77,61 @@ const reviewQueue = new PQueue({ concurrency: 1 });
 // Persistent webhook queue (initialized in startWebhookServer)
 let webhookQueue: WebhookQueue | null = null;
 
-// Fallback cooldown when a usage-limit reset hint can't be parsed.
-const RATE_LIMIT_FALLBACK_MS = 60 * 60 * 1000; // 1 hour
-
-// In-memory mirror of the active rate-limit window for the current harness.
-let rateLimitedUntil: number | null = null;
-let rateLimitResumeTimer: ReturnType<typeof setTimeout> | null = null;
+// Failover chain state lives in WorkerFailover (shared with the fleet worker).
+// Assigned in `startWebhookServer` (lazily via `ensureFailover` for tests).
+let failover: WorkerFailover | null = null;
 
 // Cleanup rate limiter periodically
 setInterval(() => rateLimiter.cleanup(), 60000);
 // Note: We use a single reusable worktree, so no periodic cleanup needed
 
-/** Name of the agent harness this server drives (e.g. `claude-code`). */
+/**
+ * Lazily build the failover state from the `AGENT_HARNESS` chain.
+ *
+ * Startup always initializes with installability checks; this fallback covers
+ * direct module use before `startWebhookServer` runs (e.g. in tests).
+ */
+function ensureFailover(): WorkerFailover {
+  if (failover) {
+    return failover;
+  }
+  failover = ensureWorkerFailover();
+  return failover;
+}
+
+/** Name of the agent harness currently driving this server (e.g. `claude-code`). */
 function currentHarnessName(): string {
-  return resolveHarness().harness.name;
+  return ensureFailover().activeName;
 }
 
 /**
- * Pause the review queue until the current harness's usage limit resets.
+ * Resolve the active harness and its executable path for an agent spawn.
  *
- * Idempotent: extends the window if a later reset arrives. The persisted state
- * is keyed by harness so a restart with a different `AGENT_HARNESS` is not
- * wrongly blocked.
+ * Per-harness env overrides (`<HARNESS>_CLI_PATH`) were already applied when
+ * the chain was resolved, so every spawn uses the right CLI for whichever
+ * harness failover selected. `AGENT_MODEL` is read at spawn time and applies
+ * to the active harness (the string is harness-specific by nature).
+ *
+ * @returns The resolved harness and executable path to spawn.
+ */
+function resolveActiveHarness(): ResolvedHarness {
+  return ensureFailover().resolvedHarness();
+}
+
+/**
+ * Handle a usage-limit report from the active harness.
+ *
+ * With a multi-harness `AGENT_HARNESS` chain, fail over to the highest-priority
+ * harness whose limit window has elapsed and keep processing — the queue only
+ * pauses when every harness in the chain is limited (which is also the exact
+ * behavior of a single-harness configuration). The window is persisted per
+ * harness and the failback timer armed, so the worker returns to the primary
+ * harness as soon as its window ends.
  *
  * @param resetHint - Human-readable reset hint from the agent output
  */
-function enterRateLimitPause(resetHint?: string): void {
-  const harness = currentHarnessName();
-  const until = resetHintToMs(resetHint, Date.now()) ?? Date.now() + RATE_LIMIT_FALLBACK_MS;
-
-  // Keep the latest (furthest) reset if one is already active.
-  rateLimitedUntil = Math.max(rateLimitedUntil ?? 0, until);
-  webhookQueue?.setRateLimit(harness, rateLimitedUntil);
-
-  if (!reviewQueue.isPaused) {
-    reviewQueue.pause();
-  }
-
-  const waitMs = Math.max(0, rateLimitedUntil - Date.now());
-  const resetAtIso = new Date(rateLimitedUntil).toISOString();
-  console.warn(
-    `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""}. ` +
-      `Pausing webhook queue until ${resetAtIso} (~${Math.round(waitMs / 60000)} min). ` +
-      `Queued and incoming events will wait and drain on resume.`,
-  );
-
-  scheduleRateLimitResume();
-}
-
-/** (Re)arm the timer that resumes the queue when the rate-limit window ends. */
-function scheduleRateLimitResume(): void {
-  if (rateLimitResumeTimer) {
-    clearTimeout(rateLimitResumeTimer);
-  }
-  if (rateLimitedUntil === null) {
-    return;
-  }
-  const waitMs = Math.max(0, rateLimitedUntil - Date.now());
-  rateLimitResumeTimer = setTimeout(() => {
-    const harness = currentHarnessName();
-    rateLimitedUntil = null;
-    rateLimitResumeTimer = null;
-    webhookQueue?.clearRateLimit(harness);
-    console.log(`▶️  Usage limit window elapsed for ${harness} — resuming webhook queue`);
-    reviewQueue.start();
-  }, waitMs);
+function handleUsageLimit(resetHint?: string): void {
+  ensureFailover().reportFromHint({ resetsAt: resetHint });
 }
 
 /**
@@ -492,9 +483,10 @@ async function processReviewWithPersistence(
     }
   } catch (error) {
     if (error instanceof UsageLimitError) {
-      // Deferred by an account-global usage limit — pause and re-queue for
-      // after reset instead of counting a failure.
-      enterRateLimitPause(error.resetHint);
+      // Deferred by an account-global usage limit — fail over to the next
+      // harness (or pause and re-queue for after reset) instead of counting
+      // a failure.
+      handleUsageLimit(error.resetHint);
       if (eventId && webhookQueue) {
         webhookQueue.requeuePending(eventId);
       }
@@ -535,7 +527,7 @@ async function processIssueCommentWithPersistence(
     }
   } catch (error) {
     if (error instanceof UsageLimitError) {
-      enterRateLimitPause(error.resetHint);
+      handleUsageLimit(error.resetHint);
       if (eventId && webhookQueue) {
         webhookQueue.requeuePending(eventId);
       }
@@ -823,7 +815,7 @@ async function processReviewAsync(
 
       const autoReviewOutputDir = `/tmp/devintern-auto-review-${prNumber}`;
       const baseBranch = event.pull_request.base.ref;
-      const { harness: reviewHarness, path: reviewPath } = resolveHarness();
+      const { harness: reviewHarness, path: reviewPath } = resolveActiveHarness();
       try {
         const autoReviewResult = await runAutoReviewLoop({
           repository: `${owner}/${repo}`,
@@ -879,7 +871,8 @@ async function processReviewAsync(
     const hitMaxTurns = agentResult.maxTurnsReached === true;
 
     // A usage limit is account-global: don't burn this event as a failure —
-    // signal the wrapper to pause the queue and re-queue it for after reset.
+    // signal the wrapper to fail over to the next harness (or pause the queue
+    // and re-queue the event for after reset).
     if (agentResult.usageLimited) {
       throw new UsageLimitError(agentResult.usageResetHint);
     }
@@ -895,7 +888,7 @@ async function processReviewAsync(
 
     // Get hook retries configuration
     const hookRetries = parseInt(process.env.HOOK_RETRIES || "10", 10);
-    const { harness, path: executablePath } = resolveHarness();
+    const { harness, path: executablePath } = resolveActiveHarness();
     const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
     // Verify Agent didn't switch branches during execution (e.g., checking out main for comparison)
@@ -1098,7 +1091,7 @@ async function processReviewAsync(
         console.log("\n🔄 Running auto-review loop (without pushing)...");
         const autoReviewOutputDir = `/tmp/devintern-auto-review-${prNumber}`;
         const baseBranchForReview = event.pull_request.base.ref;
-        const { harness: reviewHarness2, path: reviewPath2 } = resolveHarness();
+        const { harness: reviewHarness2, path: reviewPath2 } = resolveActiveHarness();
         try {
           const autoReviewResult = await runAutoReviewLoop({
             repository: `${owner}/${repo}`,
@@ -1209,6 +1202,12 @@ async function processReviewAsync(
 
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
   } catch (error) {
+    if (error instanceof UsageLimitError) {
+      // Account-global usage limit: propagate to the persistence wrapper so
+      // it can fail over to the next harness (or pause + re-queue until the
+      // window resets) without burning the event as a failure.
+      throw error;
+    }
     console.error(`❌ Error processing review: ${(error as Error).message}`);
     if (config.debug) {
       console.error((error as Error).stack);
@@ -1274,7 +1273,7 @@ async function runAgentHarnessForReview(
   usageLimited?: boolean;
   usageResetHint?: string;
 }> {
-  const { harness, path: executablePath } = resolveHarness();
+  const { harness, path: executablePath } = resolveActiveHarness();
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the review.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -1430,18 +1429,24 @@ async function runAgentHarnessForReview(
   });
 }
 
-/** Return JSON health payload including webhook queue stats. */
+/** Return JSON health payload including webhook queue stats and failover state. */
 function handleHealthCheck(): Response {
   const queueStats = webhookQueue?.getStats() || {
     pending: 0,
     processing: 0,
     failed: 0,
   };
+  const manager = failover;
   return jsonResponse({
     status: "ok",
     timestamp: new Date().toISOString(),
     version: "1.0.0",
     queue: queueStats,
+    harness: {
+      active: manager?.activeName ?? currentHarnessName(),
+      chain: manager?.describeChain() ?? currentHarnessName(),
+      rateLimitedUntil: manager?.windows() ?? {},
+    },
   });
 }
 
@@ -1539,21 +1544,31 @@ export async function startWebhookServer(
     );
   }
 
-  // Re-apply a usage-limit pause if the current harness is still rate-limited
-  // from before a restart. Keyed by harness so switching AGENT_HARNESS clears it.
-  const harness = currentHarnessName();
-  const persistedLimit = webhookQueue.getRateLimit(harness);
-  if (persistedLimit && persistedLimit > Date.now()) {
-    rateLimitedUntil = persistedLimit;
+  // Shared failover controller: same chain, windows, and failback timers the
+  // fleet worker uses. Persist through the queue DB so a restart resumes on
+  // the right harness.
+  failover = startWorkerFailover({
+    queue: webhookQueue,
+    onPause: ({ untilMs, harness, resetHint }) => {
+      if (!reviewQueue.isPaused) {
+        reviewQueue.pause();
+      }
+      const waitMs = Math.max(0, untilMs - Date.now());
+      console.warn(
+        `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""} and no fallback harness is available. ` +
+          `Pausing webhook queue until ${new Date(untilMs).toISOString()} (~${Math.round(waitMs / 60000)} min). ` +
+          `Queued and incoming events will wait and drain on resume.`,
+      );
+    },
+    onResume: () => {
+      if (reviewQueue.isPaused) {
+        console.log(`▶️  Usage-limit windows elapsed — resuming webhook queue`);
+        reviewQueue.start();
+      }
+    },
+  });
+  if (failover.allLimited() && !reviewQueue.isPaused) {
     reviewQueue.pause();
-    scheduleRateLimitResume();
-    console.warn(
-      `⏳ ${harness} is still rate-limited until ${new Date(persistedLimit).toISOString()} ` +
-        `— webhook queue starts paused; recovered events will wait.`,
-    );
-  } else if (persistedLimit) {
-    // Stale window (already elapsed) — clear it.
-    webhookQueue.clearRateLimit(harness);
   }
 
   // Recover pending/processing events from previous runs

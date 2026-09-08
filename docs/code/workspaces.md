@@ -11,7 +11,7 @@ dateModified: 2026-09-03
 
 Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe repositories once in `~/.devintern/workspace.toml`, then use either one default tracker query or several isolated team tracker sources.
 
-The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace (add + `[defaults].task_query`) and you add more repos later with `devintern worker add-repo`.
+The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace, validates `[defaults].task_query`, and asks about task pickup hours, conflict handling, and automatic CI repair. Add more repos later with `devintern worker add-repo`.
 
 Workspace mode runs under the same automation license as the rest of the worker: any Supporter, Team, or Business key (or an active trial) covers it — one license spans all of your own repos in the fleet.
 
@@ -41,7 +41,6 @@ tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
 poll_interval = 60
-default_branch = "main"
 # pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
@@ -89,11 +88,13 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+- `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
 ### Multiple teams and tracker boards
 
@@ -206,6 +207,8 @@ cd ~/code/backend
 devintern worker add-repo     # add this repo to the workspace
 cd ~/code/frontend
 devintern worker add-repo
+
+devintern worker connect sentry # add a Sentry auto-fix project
 ```
 
 `worker add-repo` reads the repo's origin remote and its `.devintern-code/.env`:
@@ -218,7 +221,7 @@ devintern worker add-repo
 
 ## Environment
 
-Secrets live in one shared `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
+Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Worker setup and repository imports enforce mode `0600`. Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
 
 1. Shared workspace `.env`
 2. The repo's `env_file` (if set)
@@ -233,7 +236,7 @@ devintern worker            # auto-detects ~/.devintern/workspace.toml
 devintern worker --workspace /path/to/workspace.toml
 ```
 
-The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations or estimations can omit the defaults query and run as a schedules-only worker. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus the task-polling timestamp used for missed-window catch-up, live in the central workspace database.
+The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations, estimations, or an enabled error monitor can omit the defaults query. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus task-polling and error-monitor deduplication state, live in the central workspace database.
 
 While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 
@@ -243,6 +246,7 @@ The worker watches `workspace.toml` and reloads it automatically a moment after 
 
 - **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
+- **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
 - **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
 - **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.
@@ -267,7 +271,7 @@ WantedBy=multi-user.target
 
 With GitHub credentials in the workspace `.env`, the fleet worker also reacts to PR activity across every GitHub repo in the workspace:
 
-- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. Entries for repos no longer in `workspace.toml` are unwatched at startup.
+- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. With `[workspace].ci_failure_fix = true`, it also repairs failing CI. Entries for repos no longer in `workspace.toml` are unwatched at startup.
 - **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
 - **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored under the workspace home and starts automatically with the worker. GitHub envelopes carry the repository and route directly. Tracker events re-run the applicable defaults/team query and then use the same fixed mapping or routing rules as polling. A tracker type used by several teams stays polling-only because current relay envelopes do not identify the team registration; the worker fails closed instead of guessing. Events for repositories not in the workspace are ignored.
 

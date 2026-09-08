@@ -46,7 +46,9 @@ const RUN_STATUSES: RunStatus[] = [
 ];
 const RUN_ORIGINS: RunOrigin[] = [
   "task",
+  "error_monitor",
   "pr_mention",
+  "ci_fix",
   "conflict_resolution",
   "scheduled",
   "estimate",

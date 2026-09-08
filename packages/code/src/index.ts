@@ -20,7 +20,8 @@ import {
   logout,
   resolveLogin,
 } from "@devintern/auth";
-import { checkLicense, requireLicense } from "@devintern/license-check";
+import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
+import type { LicenseCheckResult } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
@@ -97,6 +98,12 @@ import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/r
 import { shouldSkipRetry } from "./lib/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { reportTaskFailure } from "./lib/failure-feedback";
+import {
+  exitIfWorkerUsageLimit,
+  isWorkerChild,
+  USAGE_LIMIT_EXIT_CODE,
+  writeUsageLimitHint,
+} from "./lib/usage-limit-protocol";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -158,7 +165,11 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 function isWorkerTaskProcess(): boolean {
   const origin = process.env[RUN_ORIGIN_ENV];
   return (
-    origin === "worker" || origin === "scheduled" || origin === "estimate" || origin === "manual"
+    origin === "worker" ||
+    origin === "error_monitor" ||
+    origin === "scheduled" ||
+    origin === "estimate" ||
+    origin === "manual"
   );
 }
 
@@ -510,6 +521,21 @@ function loadSupabaseConfig() {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
+/**
+ * Enforce a license result inside the CLI. `requireLicense` throws a
+ * `LicenseCheckError` on failure (library code must never kill the host
+ * process); the CLI converts that into its standard failed-check exit code 1
+ * after the failure details were already printed to stderr.
+ */
+function enforceLicenseOrExit(result: LicenseCheckResult): void {
+  try {
+    requireLicense(result);
+  } catch (error) {
+    if (error instanceof LicenseCheckError) process.exit(1);
+    throw error;
+  }
+}
+
 function printWebhookHelp(): void {
   console.log("Usage: devintern webhook <command>");
   console.log("");
@@ -570,7 +596,7 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
     supabaseConfig: loadSupabaseConfig(),
     requireAutomation: true,
   });
-  requireLicense(licenseResult);
+  enforceLicenseOrExit(licenseResult);
 
   const { startWebhookServer } = await import("./webhook-server");
   await startWebhookServer({ port, host });
@@ -606,8 +632,8 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
   (async () => {
-    // `devintern worker connect ...` — pair the configured fleet with the
-    // Mode 2 relay.
+    // `devintern worker connect ...` — configure relay-backed integrations or
+    // a directly polled Sentry error monitor.
     if (process.argv[3] === "connect") {
       const { runWorkerConnectCommand } = await import("./lib/worker-connect");
       const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
@@ -748,8 +774,8 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
         console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` pairs workspace repos with the DevIntern relay (Mode 2)");
-        console.log("so events arrive in seconds without webhook setup; see connect --help.");
+        console.log("`worker connect` configures relay integrations and Sentry auto-fixes;");
+        console.log("see `devintern worker connect --help` for targets and options.");
         console.log("");
         console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
         console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
@@ -758,10 +784,12 @@ if (process.argv[2] === "init") {
         console.log(
           "  init                Guided unattended setup: tracker, workspace, ready-tasks",
         );
-        console.log("                      query (live dry run), and license check");
+        console.log(
+          "                      query, operating policy, optional Sentry, and license check",
+        );
         console.log("  scaffold            Create workspace.toml and the shared .env only");
         console.log("  add-repo            Add the current repository to the worker workspace");
-        console.log("  connect             Pair workspace repos or its tracker with the relay");
+        console.log("  connect             Configure relay integrations or Sentry auto-fixes");
         console.log("  run-now             One immediate drain, ignoring working windows");
         console.log("");
         console.log("Options:");
@@ -808,7 +836,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    requireLicense(licenseResult);
+    enforceLicenseOrExit(licenseResult);
 
     const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
     await runWorkspaceWorker({
@@ -864,7 +892,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    requireLicense(licenseResult);
+    enforceLicenseOrExit(licenseResult);
 
     const { startDashboardServer } = await import("./dashboard-server");
     const server = startDashboardServer({ port, host });
@@ -904,6 +932,7 @@ if (process.argv[2] === "init") {
     let noPush = false;
     let noReply = false;
     let verbose = false;
+    let ciFeedbackPath: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
@@ -912,6 +941,15 @@ if (process.argv[2] === "init") {
         noReply = true;
       } else if (args[i] === "-v" || args[i] === "--verbose") {
         verbose = true;
+      } else if (args[i] === "--ci-feedback") {
+        const feedbackPath = args[i + 1];
+        if (!feedbackPath || feedbackPath.startsWith("-")) {
+          console.error("Error: --ci-feedback requires a file path");
+          process.exitCode = 1;
+          return;
+        }
+        ciFeedbackPath = feedbackPath;
+        i++;
       } else if (args[i] === "--help" || args[i] === "-h") {
         console.log("Usage: devintern address-review <pr-url> [options]");
         console.log("");
@@ -948,8 +986,11 @@ if (process.argv[2] === "init") {
     // Import and run address-review
     const { addressReview } = await import("./lib/address-review");
     try {
-      await addressReview(prUrl, { noPush, noReply, verbose });
+      await addressReview(prUrl, { noPush, noReply, verbose, ciFeedbackPath });
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       // Close any run record addressReview opened before it failed (no-op
       // when none is active — addressReview also ends runs it completes).
@@ -1041,6 +1082,9 @@ if (process.argv[2] === "init") {
       }
       process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
     } catch (error) {
+      if (exitIfWorkerUsageLimit(error)) {
+        return;
+      }
       console.error(`❌ Error: ${(error as Error).message}`);
       // Thrown (unexpected) resolution errors are user actions that failed —
       // reported like address-review; `failed`/`deferred` outcomes above are
@@ -1490,10 +1534,17 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     const trackerName = process.env.TASK_TRACKER || "jira";
     const isManualAutomationRun =
       scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
+    const isErrorMonitorRun = process.env[RUN_ORIGIN_ENV] === "error_monitor";
     beginRun({
-      origin: scheduledAutomationId ? (isManualAutomationRun ? "manual" : "scheduled") : "task",
+      origin: scheduledAutomationId
+        ? isManualAutomationRun
+          ? "manual"
+          : "scheduled"
+        : isErrorMonitorRun
+          ? "error_monitor"
+          : "task",
       taskKey: workflowKey,
-      tracker: trackerName,
+      tracker: isErrorMonitorRun ? "sentry" : trackerName,
       team: process.env.DEVINTERN_WORKSPACE_TEAM,
       repo: process.env.DEVINTERN_WORKSPACE_REPO,
       // The harness that will implement this run (resolved at startup).
@@ -1828,6 +1879,12 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           /* ignore */
         }
       } catch (clarityError) {
+        // Account-global usage limits must abort the run so the worker can
+        // fail over. Swallowing them here used to launch implementation on
+        // the same exhausted harness (Grok 402 during the clarity check).
+        if (clarityError instanceof UsageLimitError) {
+          throw clarityError;
+        }
         recordRunStage("feasibility", {
           status: "failed",
           summary: `assessment errored: ${(clarityError as Error).message}`,
@@ -1977,6 +2034,30 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
     if (error instanceof UsageLimitError) {
       await finishTaskRun("deferred", error.message);
+      if (isWorkerChild()) {
+        console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+        // Hand the ticket back to To Do without a failure comment so the
+        // incomplete-attempt gate cannot strand it, and the parent can retry
+        // on the next harness (or pick it up again once a window elapses).
+        if (activeTaskContext?.movedToInProgress) {
+          try {
+            const todoStatus = getTodoStatusForProject(
+              activeTaskContext.projectKey,
+              loadProjectSettings(),
+            );
+            if (todoStatus?.trim()) {
+              await activeTaskContext.tracker.transitionStatus(taskKey, todoStatus.trim());
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        if (lockManager) {
+          lockManager.release();
+        }
+        writeUsageLimitHint(error);
+        process.exit(USAGE_LIMIT_EXIT_CODE);
+      }
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       // The ticket may already be "In Progress": leave feedback and move it
       // back so the deferred retry can actually pick it up.
@@ -2106,7 +2187,7 @@ async function main(): Promise<void> {
         supabaseConfig,
         requireAutomation: true,
       });
-      requireLicense(licenseResult);
+      enforceLicenseOrExit(licenseResult);
     }
 
     // Pull latest changes from remote (unless git is disabled)
@@ -2313,6 +2394,14 @@ async function main(): Promise<void> {
           // batch and exit 0 so the scheduler retries next window.
           if (error instanceof UsageLimitError) {
             await finishTaskRun("deferred", error.message);
+            if (isWorkerChild()) {
+              console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
+              if (lockManager) {
+                lockManager.release();
+              }
+              writeUsageLimitHint(error);
+              process.exit(USAGE_LIMIT_EXIT_CODE);
+            }
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
@@ -2386,6 +2475,13 @@ async function main(): Promise<void> {
         // hammering tasks that would all fail. Exit 0 so the scheduler retries
         // next window without marking the run failed.
         if (error instanceof UsageLimitError) {
+          if (isWorkerChild()) {
+            if (lockManager) {
+              lockManager.release();
+            }
+            writeUsageLimitHint(error);
+            process.exit(USAGE_LIMIT_EXIT_CODE);
+          }
           const remaining = tasksToProcess.length - i - 1;
           console.warn(
             `\n⏳ ${error.message}. Aborting batch — ${remaining} task(s) left, ` +
@@ -2586,8 +2682,9 @@ async function runClarityCheck(
           );
           return;
         }
-        if (usageLimit?.limited) {
-          reject(new UsageLimitError(usageLimit.resetsAt));
+        const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
+        if (usage.limited) {
+          reject(new UsageLimitError(usage.resetsAt));
           return;
         }
         if (code === 0) {

@@ -10,7 +10,7 @@
  * as text, so hand-written comments in the existing config survive.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 
 import { findProjectRoot } from "@devintern/utils";
@@ -29,6 +29,9 @@ worktrees_ttl_days = 7
 # Local observability dashboard (http://localhost:4400). Set false to disable.
 dashboard = true
 # dashboard_port = 4400
+# Ask the agent to repair failing CI on its own open PRs. This can spend
+# tokens and push commits, so it is opt-in. Changes apply without a restart.
+ci_failure_fix = false
 # When automatic merge-conflict resolution runs on the agent's PRs.
 # "auto" (default) resolves as soon as a conflict is detected; "scheduled"
 # queues conflicts during polling and resolves them in one off-peak window
@@ -51,7 +54,6 @@ worker_task_args = "--create-pr"
 # pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.
 poll_interval = 60
-default_branch = "main"
 
 # Add repos with \`devintern worker add-repo\` (run inside each repo), or by
 # hand:
@@ -59,6 +61,7 @@ default_branch = "main"
 # [[repos]]
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
+# default_branch = "main"    # optional; otherwise follows origin/HEAD
 # ----
 # [[routing.rules]]
 # repo = "backend"
@@ -88,6 +91,22 @@ default_branch = "main"
 # team = "growth"
 # repo = "web"
 # labels = ["frontend"]
+
+# Error-monitoring projects map explicitly to their owning repository. Add one
+# entry per Sentry project; source-local env files allow different tokens.
+# ----
+# [[error_monitors]]
+# id = "backend-production"
+# provider = "sentry"
+# repo = "backend"             # required when multiple repos are configured
+# team = "platform"            # optional [[teams]] owner
+# organization = "acme"
+# project = "backend"
+# query = "environment:production"
+# min_occurrences = 5
+# max_per_tick = 3
+# comment_on_action = true      # best-effort Sentry comment after terminal runs
+# env_file = "env/sentry-backend.env" # contains SENTRY_AUTH_TOKEN
 
 # Recurring work is hot-reloaded: edits apply to the running worker without a
 # restart. Each occurrence runs the prompt through the normal task pipeline as
@@ -171,6 +190,192 @@ export function writeWorkspaceDefaults(
   writeFileSync(configPath, updated);
 }
 
+export interface WorkerOperatingPolicy {
+  ciFailureFix: boolean;
+  conflictResolution: "auto" | "scheduled" | "disabled";
+  conflictResolutionCron?: string;
+  conflictResolutionInterval?: string;
+  activeWindows: string[];
+  blockedWindows?: string[];
+  timezone?: string;
+  catchUpMissed?: boolean;
+}
+
+function replaceTomlSection(
+  content: string,
+  header: string,
+  transform: (body: string) => string,
+): string {
+  const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escapedHeader}\\s*$`, "m").exec(content);
+  if (!match) {
+    const suffix = content.endsWith("\n") ? "" : "\n";
+    return `${content}${suffix}\n${header}\n${transform("")}`;
+  }
+  const bodyStart = content.indexOf("\n", match.index) + 1;
+  const remainder = content.slice(bodyStart);
+  const nextHeader = remainder.search(/^\s*\[[^\n]*\]\s*$/m);
+  const bodyEnd = nextHeader === -1 ? content.length : bodyStart + nextHeader;
+  return (
+    content.slice(0, bodyStart) +
+    transform(content.slice(bodyStart, bodyEnd)) +
+    content.slice(bodyEnd)
+  );
+}
+
+function replaceTomlKeys(body: string, values: Record<string, string | undefined>): string {
+  let next = body;
+  for (const [key, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*.*(?:\\n|$)`, "gm");
+    next = next.replace(pattern, "");
+    if (value !== undefined) {
+      const separator = next.length > 0 && !next.endsWith("\n") ? "\n" : "";
+      next += `${separator}${key} = ${value}\n`;
+    }
+  }
+  return next;
+}
+
+/** Update the worker's consequential operating choices while preserving unrelated TOML. */
+export function upsertWorkerOperatingPolicy(
+  content: string,
+  policy: WorkerOperatingPolicy,
+): string {
+  let next = replaceTomlSection(content, "[workspace]", (body) =>
+    replaceTomlKeys(body, {
+      ci_failure_fix: String(policy.ciFailureFix),
+      conflict_resolution: tomlString(policy.conflictResolution),
+      conflict_resolution_cron:
+        policy.conflictResolution === "scheduled"
+          ? policy.conflictResolutionCron === undefined
+            ? undefined
+            : tomlString(policy.conflictResolutionCron)
+          : undefined,
+      conflict_resolution_interval:
+        policy.conflictResolution === "scheduled" && policy.conflictResolutionInterval
+          ? tomlString(policy.conflictResolutionInterval)
+          : undefined,
+    }),
+  );
+
+  next = replaceTomlSection(next, "[worker.schedule]", (body) =>
+    replaceTomlKeys(body, {
+      active: `[${policy.activeWindows.map(tomlString).join(", ")}]`,
+      blocked: `[${(policy.blockedWindows ?? []).map(tomlString).join(", ")}]`,
+      timezone: tomlString(policy.timezone ?? ""),
+      catch_up_missed: String(policy.catchUpMissed ?? true),
+    }),
+  );
+  return next;
+}
+
+/** Validate and persist guided worker operating-policy choices. */
+export function writeWorkerOperatingPolicy(
+  workspaceDir: string,
+  policy: WorkerOperatingPolicy,
+): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const updated = upsertWorkerOperatingPolicy(readFileSync(configPath, "utf8"), policy);
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
+export interface SentryMonitorInput {
+  authToken: string;
+  organization: string;
+  project: string;
+  repo: string;
+  baseUrl?: string;
+  query?: string;
+}
+
+export interface SentryMonitorWriteResult {
+  id: string;
+  envFile: string;
+  added: boolean;
+}
+
+/**
+ * Add one repo-bound Sentry monitor while preserving hand-written TOML.
+ * Re-running setup for the same Sentry project is idempotent.
+ */
+export function writeSentryErrorMonitor(
+  workspaceDir: string,
+  input: SentryMonitorInput,
+): SentryMonitorWriteResult {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const content = readFileSync(configPath, "utf8");
+  const config = parseWorkspaceConfig(content, configPath);
+  const normalizeBaseUrl = (value?: string) => (value ?? "https://sentry.io").replace(/\/+$/, "");
+  const existing = config.errorMonitors.find(
+    (monitor) =>
+      monitor.provider === "sentry" &&
+      monitor.organization === input.organization &&
+      monitor.project === input.project &&
+      monitor.repo === input.repo &&
+      normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
+  );
+  if (existing) {
+    const existingEnvPath = join(workspaceDir, existing.envFile ?? "");
+    if (existing.envFile && existsSync(existingEnvPath)) chmodSync(existingEnvPath, 0o600);
+    return {
+      id: existing.id,
+      envFile: existing.envFile ?? `env/sentry-${existing.id}.env`,
+      added: false,
+    };
+  }
+
+  const stem = `sentry-${input.project}`
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "");
+  const usedIds = new Set(config.errorMonitors.map((monitor) => monitor.id.toLowerCase()));
+  let id = stem || "sentry-project";
+  for (
+    let suffix = 2;
+    usedIds.has(id.toLowerCase()) || existsSync(join(workspaceDir, "env", `${id}.env`));
+    suffix++
+  ) {
+    id = `${stem || "sentry-project"}-${suffix}`;
+  }
+  const envFile = `env/${id}.env`;
+  const lines = [
+    "",
+    "# Sentry auto-fixes — written by DevIntern worker setup",
+    "[[error_monitors]]",
+    `id = ${tomlString(id)}`,
+    'provider = "sentry"',
+    `repo = ${tomlString(input.repo)}`,
+    `organization = ${tomlString(input.organization)}`,
+    `project = ${tomlString(input.project)}`,
+  ];
+  if (input.baseUrl && normalizeBaseUrl(input.baseUrl) !== "https://sentry.io") {
+    lines.push(`base_url = ${tomlString(normalizeBaseUrl(input.baseUrl))}`);
+  }
+  if (input.query) lines.push(`query = ${tomlString(input.query)}`);
+  lines.push(`env_file = ${tomlString(envFile)}`, "");
+
+  const updated = `${content.trimEnd()}${lines.join("\n")}`;
+  parseWorkspaceConfig(updated, configPath);
+
+  // Write credentials first: if the later config write fails, the worker is
+  // left unchanged instead of gaining an enabled source with no token.
+  const envPath = join(workspaceDir, envFile);
+  mkdirSync(join(workspaceDir, "env"), { recursive: true });
+  writeFileSync(envPath, `SENTRY_AUTH_TOKEN=${input.authToken}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  chmodSync(envPath, 0o600);
+  try {
+    writeFileSync(configPath, updated);
+  } catch (error) {
+    unlinkSync(envPath);
+    throw error;
+  }
+  return { id, envFile, added: true };
+}
+
 export type WorkspaceLogFn = (message: string) => void;
 
 /**
@@ -192,8 +397,9 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
   writeFileSync(configPath, CONFIG_TEMPLATE);
   const envPath = workspaceEnvPath(workspaceDir);
   if (!existsSync(envPath)) {
-    writeFileSync(envPath, ENV_TEMPLATE);
+    writeFileSync(envPath, ENV_TEMPLATE, { mode: 0o600 });
   }
+  chmodSync(envPath, 0o600);
 
   log(`✅ Workspace created at ${workspaceDir}`);
   log(`   Config: ${configPath}`);
@@ -277,27 +483,11 @@ export async function runWorkerAddRepo(
     name = `${rawName}-${suffix++}`;
   }
 
-  // Default branch from origin/HEAD when it differs from the workspace default.
-  let defaultBranch: string | undefined;
-  const head = await Utils.executeGitCommand(
-    ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-    { cwd },
-  );
-  if (head.success && head.output.trim()) {
-    const branch = head.output.trim().replace(/^origin\//, "");
-    if (branch !== (config.defaults.defaultBranch ?? "")) {
-      defaultBranch = branch;
-    }
-  }
-
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
   const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
 
   let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
-  if (defaultBranch) {
-    block += `default_branch = ${tomlString(defaultBranch)}\n`;
-  }
   if (Object.keys(conflicts).length > 0) {
     block += "  [repos.env]\n";
     for (const [key, value] of Object.entries(conflicts)) {
@@ -324,9 +514,6 @@ export async function runWorkerAddRepo(
   loadWorkspaceConfig(configPath);
 
   log(`✅ Added ${remote} as "${name}"`);
-  if (defaultBranch) {
-    log(`   default_branch: ${defaultBranch}`);
-  }
   if (Object.keys(conflicts).length > 0) {
     log(
       `   ${Object.keys(conflicts).length} env value(s) differed from the workspace .env and were kept in [repos.env]: ` +
@@ -357,7 +544,10 @@ export async function ensureWorkspaceAndAddRepo(
   cwd: string,
   log: WorkspaceLogFn = console.log,
   error: WorkspaceLogFn = console.error,
-): Promise<{ ok: true; workspaceDir: string; created: boolean } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; workspaceDir: string; created: boolean; repoName: string }
+  | { ok: false; error: string }
+> {
   const { workspaceDir, created } = ensureWorkspaceScaffold(log);
   if (!created) {
     log(`ℹ️  Using existing workspace at ${workspaceDir}`);
@@ -379,7 +569,14 @@ export async function ensureWorkspaceAndAddRepo(
   if (code !== 0) {
     return { ok: false, error: "Could not add this repo to the workspace." };
   }
-  return { ok: true, workspaceDir, created };
+  const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+  const repoName = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).repos.find(
+    (repo) => repo.remote === remoteResult.output.trim(),
+  )?.name;
+  if (!remoteResult.success || !repoName) {
+    return { ok: false, error: "Could not resolve this repo in the workspace." };
+  }
+  return { ok: true, workspaceDir, created, repoName };
 }
 
 function readRepoEnv(cwd: string): Record<string, string> {
@@ -423,6 +620,7 @@ function mergeEnv(
     writeFileSync(envPath, existing + separator + additions.join("\n") + "\n");
     log(`   Merged ${additions.length} env key(s) into ${envPath}`);
   }
+  if (existsSync(envPath)) chmodSync(envPath, 0o600);
 
   return conflicts;
 }

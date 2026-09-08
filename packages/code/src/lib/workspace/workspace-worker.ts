@@ -8,7 +8,7 @@
  * in the central workspace DB.
  */
 
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { LockManager } from "../lock-manager";
@@ -31,7 +31,13 @@ import { ScheduledRetryStore } from "../run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamEnv, buildTeamTaskEnv, parseEnvFile } from "./env";
+import {
+  buildErrorMonitorEnv,
+  buildRepoEnv,
+  buildTeamEnv,
+  buildTeamTaskEnv,
+  parseEnvFile,
+} from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -53,6 +59,7 @@ import { EstimationAcquirer } from "../estimation-acquirer";
 import { RunCoordinator } from "../run-coordinator";
 import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+import { startWorkerFailover } from "../worker-failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
@@ -188,7 +195,7 @@ export interface WorkspaceTaskAcquirerDeps {
     taskKey: string,
     extraArgs: string[],
     opts: { cwd: string; env: Record<string, string | undefined> },
-  ) => Promise<boolean>;
+  ) => Promise<TaskExecutionResult>;
   /** Repo run lock factory (injected for tests). */
   repoLock?: (repoName: string) => LockManager;
   /** Process-level agent-run gate; only set when scheduled estimation exists. */
@@ -272,6 +279,12 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
     return raw.trim().split(/\s+/);
   }
   return workerTaskArgs();
+}
+
+/** Error groups are pre-qualified by the monitor, so skip the generic feasibility agent pass. */
+export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
+  const args = fleetTaskArgs(config);
+  return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
 }
 
 const PUSH_PERMISSION_HINT =
@@ -440,7 +453,11 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-  options: { extraArgs?: string[] | (() => string[]); repo?: string } = {},
+  options: {
+    extraArgs?: string[] | (() => string[]);
+    repo?: string;
+    runOrigin?: "worker" | "error_monitor";
+  } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
@@ -512,12 +529,12 @@ export function createFleetTaskExecutor(
             ...(team
               ? buildTeamTaskEnv(repo, team, workspaceDir)
               : buildRepoEnv(repo, workspaceDir)),
-            [RUN_ORIGIN_ENV]: "worker",
+            [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
           },
         });
       const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
 
-      if (ok) {
+      if (ok === true) {
         await repoManager.removeTaskWorktree(repo.name, worktree);
       } else {
         console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
@@ -703,7 +720,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     !multiTeam &&
     !initialQuery &&
     config.automations.length === 0 &&
-    config.estimations.length === 0
+    config.estimations.length === 0 &&
+    !config.errorMonitors.some((source) => source.enabled)
   ) {
     if (retryQueue.hasPending()) {
       console.warn(
@@ -718,6 +736,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   }
 
   const state = openWorkspaceState(workspaceDir);
+  startWorkerFailover({
+    queue: state.queue,
+    onPause: ({ untilMs, harness, resetHint }) => {
+      console.warn(
+        `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""} and no fallback harness is available. ` +
+          `Deferring new agent work until ${new Date(untilMs).toISOString()}.`,
+      );
+    },
+    onResume: () => {
+      console.log("▶️  Usage-limit windows elapsed — resuming agent work on the available harness");
+    },
+  });
   const repoManager = new RepoManager(workspaceDir);
   // Preserve the worker's existing concurrency when scheduled estimation is
   // absent or fully disabled. The account-global gate is needed only once an
@@ -816,6 +846,55 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       ),
   });
   acquirers.push(estimationAcquirer);
+
+  // Error-monitor adapters share one provider-neutral acquirer. Each source
+  // is pinned to a repo (and optionally a team), so projects with different
+  // credentials cannot be dispatched into the wrong codebase.
+  const { ErrorMonitorAcquirer, createErrorMonitorProvider } = await import("../error-monitor");
+  const errorTaskDir = join(workspaceDir, "error-fixes");
+  for (const source of config.errorMonitors) {
+    if (!source.enabled) continue;
+    const repo = findRepo(config, source.repo);
+    if (!repo) throw new Error(`Error monitor "${source.id}" references unknown repo.`);
+    const team = source.team ? findTeam(config, source.team) : undefined;
+    const env = buildErrorMonitorEnv(source, repo, team, workspaceDir);
+
+    const provider = createErrorMonitorProvider(source, env);
+    const execute = createFleetTaskExecutor(
+      {
+        config,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        team,
+        coordinator,
+      },
+      {
+        repo: repo.name,
+        runOrigin: "error_monitor",
+        extraArgs: () => errorMonitorTaskArgs(config),
+      },
+    );
+    acquirers.push(
+      new ErrorMonitorAcquirer({
+        sourceId: source.id,
+        intervalSeconds: source.intervalSeconds,
+        minOccurrences: source.minOccurrences,
+        maxIssuesPerTick: source.maxIssuesPerTick,
+        commentOnAction: source.commentOnAction,
+        queue: state.queue,
+        provider,
+        verbose: options.verbose,
+        executeTask: async (issue, markdown) => {
+          mkdirSync(errorTaskDir, { recursive: true });
+          const safeId = `${source.id}-${issue.displayId}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
+          const taskFile = join(errorTaskDir, `${safeId}.md`);
+          writeFileSync(taskFile, markdown);
+          return execute(taskFile, { key: issue.externalId, labels: [], components: [] });
+        },
+      }),
+    );
+  }
 
   // Tracker identities and credentials are startup-only. Queries and fixed
   // team repo mappings stay live through lookups against the shared config.
@@ -952,6 +1031,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
           "Team names, trackers, env_file, and inline env are startup-only; restart the worker to change them.",
         );
       }
+      if (JSON.stringify(next.errorMonitors) !== JSON.stringify(current.errorMonitors)) {
+        throw new Error("[[error_monitors]] is startup-only; restart the worker to change it.");
+      }
       if (!multiTeam && next.defaults.taskQuery && sources.length === 0) {
         throw new Error(
           `task_query cannot be enabled live because the ${current.defaults.tracker} change detector ` +
@@ -1072,6 +1154,7 @@ export async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetCiFix,
     coalescePrFeedbackRuns,
     createFleetResolveConflicts,
     createFleetMentionHandler,
@@ -1125,7 +1208,7 @@ export async function buildFleetEventAcquirers(options: {
     : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
   let github: import("../github-reviews").GitHubReviewsClient | undefined;
-  let addressPr: ((repo: string, prNumber: number) => Promise<boolean>) | undefined;
+  let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
     | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
     | undefined;
@@ -1212,6 +1295,76 @@ export async function buildFleetEventAcquirers(options: {
       verbose,
     });
     acquirers.push(reviewAcquirer);
+
+    // CI failure repair uses the same durable agent-PR registry, repo
+    // worktree, per-PR lock, and process-level run coordinator as reviews.
+    const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
+    const fixPr = createFleetCiFix(eventDeps);
+    const ciWatcher = new CiFailureWatcherAcquirer({
+      intervalSeconds,
+      enabled: () => config.workspace.ciFailureFix,
+      workerState: state.workerState,
+      queue: state.queue,
+      github: {
+        fetchPr: async (repo, n, etag) => {
+          try {
+            return await gh.conditionalGet(
+              `/repos/${repo}/pulls/${n}`,
+              ownerOf(repo),
+              nameOf(repo),
+              etag,
+            );
+          } catch (error) {
+            if (isGitHubNotFound(error)) {
+              return { data: null, notModified: false, gone: true };
+            }
+            throw error;
+          }
+        },
+        fetchWorkflowRuns: async (repo, sha, etag) => {
+          const result = await gh.conditionalGet<{
+            workflow_runs: import("../github-reviews").WorkflowRunSummary[];
+          }>(
+            `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
+            ownerOf(repo),
+            nameOf(repo),
+            etag,
+          );
+          return {
+            data: result.data?.workflow_runs ?? null,
+            etag: result.etag,
+            notModified: result.notModified,
+          };
+        },
+        fetchCommitStatus: (repo, sha, etag) =>
+          gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+        fetchFailingJobLogs: async (repo, sha) => {
+          const owner = ownerOf(repo);
+          const name = nameOf(repo);
+          const runs = await gh.getWorkflowRunsForSha(owner, name, sha).catch(() => []);
+          const chunks: string[] = [];
+          for (const run of runs.slice(0, 3)) {
+            const jobs = await gh.getWorkflowRunJobs(owner, name, run.id).catch(() => []);
+            for (const job of jobs
+              .filter(
+                (candidate) =>
+                  candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
+              )
+              .slice(0, 5)) {
+              const log = await gh.getJobLogs(owner, name, job.id).catch(() => null);
+              if (log) chunks.push(`## Job: ${job.name}\n${log}`);
+            }
+          }
+          return chunks.length > 0 ? chunks.join("\n\n") : null;
+        },
+        postComment: (repo, n, body) =>
+          gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
+      },
+      fixPr,
+      verbose,
+    });
+    acquirers.push(ciWatcher);
+    intervalUpdaters.push((seconds) => ciWatcher.updateInterval(seconds));
 
     // Tier 2: one mention sweep per GitHub repo (cursor sources are already
     // namespaced by slug). The permission gate runs in the fleet handler.

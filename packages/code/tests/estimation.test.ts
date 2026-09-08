@@ -15,6 +15,24 @@ const CLI_PATH = join(__dirname, "..", "src", "index.ts");
 /** Closed local port: argument-parse tests must not hang on a live tracker host. */
 const CLI_UNREACHABLE_TRACKER_URL = "http://127.0.0.1:1";
 
+function cliTrackerTestEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
+    JIRA_EMAIL: "test@example.com",
+    JIRA_API_TOKEN: "test-token",
+    DEVINTERN_FETCH_MAX_RETRIES: "0",
+    DEVINTERN_SKIP_LICENSE_CHECK: "1",
+    DEVINTERN_NO_UPDATE: "1",
+    // The spawned CLI initializes Sentry with the baked-in production DSN;
+    // without this, the expected connection failure against the closed port
+    // ("Unable to connect. Is the computer able to access the url?" thrown by
+    // fetchWithRetry) is captured by the CLI's error handlers and shipped to
+    // Sentry from CI (see DEVINTERN-6).
+    SENTRY_DISABLED: "1",
+  };
+}
+
 // Helper to run the CLI in an isolated directory.
 // Async so tests in describe.concurrent can overlap their subprocesses.
 async function runCLI(args: string[]): Promise<{
@@ -32,15 +50,7 @@ async function runCLI(args: string[]): Promise<{
     const proc = Bun.spawn({
       cmd: ["bun", CLI_PATH, ...args],
       cwd: testDir,
-      env: {
-        ...process.env,
-        JIRA_BASE_URL: CLI_UNREACHABLE_TRACKER_URL,
-        JIRA_EMAIL: "test@example.com",
-        JIRA_API_TOKEN: "test-token",
-        DEVINTERN_FETCH_MAX_RETRIES: "0",
-        DEVINTERN_SKIP_LICENSE_CHECK: "1",
-        DEVINTERN_NO_UPDATE: "1",
-      },
+      env: cliTrackerTestEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -820,6 +830,17 @@ describe("Settings - storyPointsField", () => {
 });
 
 describe.concurrent("CLI - --estimate option", () => {
+  test("spawn env must disable Sentry for CLI subprocesses (DEVINTERN-6)", () => {
+    // The --estimate runs fail to reach the closed tracker port and the CLI
+    // reports the fetchWithRetry TypeError through its error handlers;
+    // SENTRY_DISABLED=1 keeps those expected failures from shipping to the
+    // baked-in production Sentry DSN from CI (see DEVINTERN-6).
+    const env = cliTrackerTestEnv();
+    expect(env.SENTRY_DISABLED).toBe("1");
+    expect(env.JIRA_BASE_URL).toBe(CLI_UNREACHABLE_TRACKER_URL);
+    expect(env.DEVINTERN_FETCH_MAX_RETRIES).toBe("0");
+  });
+
   test("should accept --estimate option", async () => {
     const result = await runCLI(["--help"]);
     expect(result.stdout).toContain("--estimate");

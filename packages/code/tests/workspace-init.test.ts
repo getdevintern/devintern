@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import {
   runWorkerAddRepo,
   runWorkerScaffold,
+  upsertWorkerOperatingPolicy,
   upsertWorkspaceDefaults,
+  writeSentryErrorMonitor,
 } from "../src/lib/workspace/init";
 import { workspaceConfigPath, workspaceEnvPath } from "../src/lib/workspace/paths";
 
@@ -69,6 +79,7 @@ describe("worker scaffold/add-repo", () => {
     expect(runWorkerScaffold()).toBe(0);
     expect(existsSync(workspaceConfigPath())).toBe(true);
     expect(existsSync(workspaceEnvPath())).toBe(true);
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
 
     const config = loadWorkspaceConfig(workspaceConfigPath());
     expect(config.defaults.tracker).toBe("jira");
@@ -110,6 +121,17 @@ describe("worker scaffold/add-repo", () => {
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("GITHUB_TOKEN=repo-token");
     expect(env).not.toContain("WEBHOOK_QUEUE_DB");
+    expect(statSync(workspaceEnvPath()).mode & 0o777).toBe(0o600);
+  });
+
+  test("does not pin the repository's current origin/HEAD", async () => {
+    runWorkerScaffold();
+
+    expect(await runWorkerAddRepo(repoDir)).toBe(0);
+
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.repos[0]?.defaultBranch).toBeUndefined();
+    expect(readFileSync(workspaceConfigPath(), "utf8")).not.toMatch(/^default_branch\s*=/m);
   });
 
   test("add-repo from a package subdirectory still merges the repo-root .env", async () => {
@@ -192,6 +214,98 @@ remote = "git@github.com:acme/app.git"
     expect(updated).toContain('[defaults]\ntracker = "linear"\ntask_query = "status = Todo"');
     expect(updated).toContain('  tracker = "repo-specific"');
     expect(updated).toContain('  task_query = "leave-me-alone"');
+  });
+
+  test("upsertWorkerOperatingPolicy preserves unrelated workspace settings", () => {
+    const updated = upsertWorkerOperatingPolicy(
+      `[workspace]
+dashboard = false
+ci_failure_fix = false
+# conflict_resolution = "scheduled"
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`,
+      {
+        ciFailureFix: true,
+        conflictResolution: "scheduled",
+        conflictResolutionInterval: "1d",
+        activeWindows: ["22:00-06:00"],
+        timezone: "Asia/Ho_Chi_Minh",
+      },
+    );
+    const config = parseWorkspaceConfig(updated);
+    expect(config.workspace.dashboard).toBe(false);
+    expect(config.workspace.ciFailureFix).toBe(true);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule?.interval).toBe("1d");
+    expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["22:00-06:00"]);
+    expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
+  });
+
+  test("writeSentryErrorMonitor appends once and chooses a unique stable id", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+
+    const first = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "environment:production",
+    });
+    const firstEnvPath = join(workspaceDir, first.envFile);
+    chmodSync(firstEnvPath, 0o644);
+    const duplicate = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-1",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+      query: "a changed query does not create a duplicate",
+    });
+    const secondProject = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "token-2",
+      organization: "other-org",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(first).toEqual({ id: "sentry-api", envFile: "env/sentry-api.env", added: true });
+    expect(duplicate).toEqual({
+      id: "sentry-api",
+      envFile: "env/sentry-api.env",
+      added: false,
+    });
+    expect(statSync(firstEnvPath).mode & 0o777).toBe(0o600);
+    expect(secondProject.id).toBe("sentry-api-2");
+    const config = loadWorkspaceConfig(workspaceConfigPath());
+    expect(config.errorMonitors).toHaveLength(2);
+    expect(config.errorMonitors[0]?.query).toBe("environment:production");
+  });
+
+  test("writeSentryErrorMonitor never overwrites an unrelated credential file", async () => {
+    runWorkerScaffold();
+    await runWorkerAddRepo(repoDir);
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    const occupiedPath = join(workspaceDir, "env", "sentry-api.env");
+    writeFileSync(occupiedPath, "KEEP_ME=1\n");
+
+    const result = writeSentryErrorMonitor(workspaceDir, {
+      authToken: "new-token",
+      organization: "acme",
+      project: "api",
+      repo: "origin",
+    });
+
+    expect(result.id).toBe("sentry-api-2");
+    expect(readFileSync(occupiedPath, "utf8")).toBe("KEEP_ME=1\n");
+    expect(readFileSync(join(workspaceDir, result.envFile), "utf8")).toBe(
+      "SENTRY_AUTH_TOKEN=new-token\n",
+    );
   });
 
   test("add-repo fails cleanly without a workspace or origin remote", async () => {

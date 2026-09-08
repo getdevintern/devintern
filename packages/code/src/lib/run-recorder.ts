@@ -18,7 +18,9 @@ import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export type RunOrigin =
   | "task"
+  | "error_monitor"
   | "pr_mention"
+  | "ci_fix"
   | "conflict_resolution"
   | "scheduled"
   | "estimate"
@@ -558,7 +560,9 @@ export class RunStore {
     };
     const byOrigin: Record<RunOrigin, number> = {
       task: 0,
+      error_monitor: 0,
       pr_mention: 0,
+      ci_fix: 0,
       conflict_resolution: 0,
       scheduled: 0,
       estimate: 0,

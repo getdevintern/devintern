@@ -9,7 +9,7 @@ dateModified: 2026-09-04
 
 # Relay (Instant Events)
 
-`devintern worker connect` pairs your worker with the DevIntern relay. Source webhooks (GitHub, Linear, Asana, Trello, Azure DevOps, Jira) reach DevIntern's ingest, are stripped down to reference envelopes, and your worker picks them up within seconds instead of waiting for the next poll. No public endpoint on your side, no tunnels.
+`devintern worker connect` pairs your worker with the DevIntern relay. Source webhooks (GitHub, Linear, Asana, Trello, Azure DevOps, Jira) reach DevIntern's ingest, are stripped down to reference envelopes, and your worker picks them up within seconds instead of waiting for the next poll. No public endpoint on your side, no tunnels. The `worker connect sentry` target shares this integration command namespace but configures a direct local Sentry poller; it does not send Sentry data through the relay.
 
 ## What the relay sees (and what it never sees)
 
@@ -94,14 +94,15 @@ For multi-team tracker routing, deploy the team-aware relay control plane before
 
 ## Commands
 
-| Command                                 | Description                                                              |
-| --------------------------------------- | ------------------------------------------------------------------------ |
-| `devintern worker connect`              | Verify every unpaired GitHub repository in the workspace                 |
-| `devintern worker connect linear`       | Self-register a Linear webhook for Issue events                          |
-| `devintern worker connect asana`        | Self-register an Asana webhook for task events                           |
-| `devintern worker connect trello`       | Self-register a Trello webhook for card events                           |
-| `devintern worker connect azure-devops` | Self-register work item service hooks                                    |
-| `devintern worker connect jira`         | Print the one-time Jira admin webhook setup with your private ingest URL |
+| Command                                 | Description                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `devintern worker connect`              | Verify every unpaired GitHub repository in the workspace                  |
+| `devintern worker connect linear`       | Self-register a Linear webhook for Issue events                           |
+| `devintern worker connect asana`        | Self-register an Asana webhook for task events                            |
+| `devintern worker connect trello`       | Self-register a Trello webhook for card events                            |
+| `devintern worker connect azure-devops` | Self-register work item service hooks                                     |
+| `devintern worker connect jira`         | Print the one-time Jira admin webhook setup with your private ingest URL  |
+| `devintern worker connect sentry`       | Add a directly polled Sentry auto-fix project to the workspace            |
 | `devintern worker connect status`       | Show relay status and workspace repositories still awaiting verification |
 
 In a multi-team workspace, `devintern worker connect linear --team growth` selects that team's credential layers and registers the source under that stable team name. If exactly one team uses the requested tracker, `--team` is optional and the CLI selects it automatically. When several teams use the tracker, `--team` is required and each team receives a distinct, idempotent ingest URL. The flag is invalid for GitHub and status because those targets are workspace-wide.

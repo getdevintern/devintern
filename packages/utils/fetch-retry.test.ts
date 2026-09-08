@@ -116,6 +116,48 @@ describe("fetchWithRetry", () => {
     }
   });
 
+  test("retries Bun's 'Unable to connect' TypeError from unreachable hosts", async () => {
+    // Exact error from DEVINTERN-6: Bun's fetch rejects with this TypeError
+    // when a TCP connection fails (closed port, firewall, VPN), so it must
+    // be classified as transient.
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new TypeError("Unable to connect. Is the computer able to access the url?");
+      }
+      return new Response("ok", { status: 200 });
+    };
+
+    const response = await fetchWithRetry(
+      "http://127.0.0.1:1/unreachable",
+      {},
+      { maxRetries: 2, baseDelay: 1, jitter: false },
+    );
+
+    expect(response.status).toBe(200);
+    expect(attempts).toBe(2);
+  });
+
+  test("rethrows Bun's 'Unable to connect' TypeError after retries are exhausted", async () => {
+    // This is the failure path that reaches the CLI's top-level error
+    // handlers (and, without SENTRY_DISABLED, production Sentry).
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts++;
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    };
+
+    await expect(
+      fetchWithRetry(
+        "http://127.0.0.1:1/unreachable",
+        {},
+        { maxRetries: 1, baseDelay: 1, jitter: false },
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(attempts).toBe(2);
+  });
+
   test("throws immediately on non-retryable network errors", async () => {
     globalThis.fetch = async () => {
       throw new Error("invalid url format");

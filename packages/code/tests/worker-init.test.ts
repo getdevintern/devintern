@@ -1,11 +1,12 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
 import {
+  configureWorkerOperatingPolicy,
   generateWebhookSecret,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -115,6 +116,7 @@ describe("runWorkerInit", () => {
   let logs: string[];
   const savedTracker = process.env.TASK_TRACKER;
   const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
+  const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-worker-init-"));
@@ -122,9 +124,13 @@ describe("runWorkerInit", () => {
     mkdirSync(path.join(tempDir, ".devintern-code"), { recursive: true });
     mkdirSync(workspaceDir, { recursive: true });
     writeFileSync(path.join(tempDir, ".devintern-code", ".env"), "TASK_TRACKER=markdown\n", "utf8");
-    writeFileSync(path.join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "markdown"\n');
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+    );
     process.env.TASK_TRACKER = "markdown";
     process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
+    delete process.env.SENTRY_AUTH_TOKEN;
     logs = [];
   });
 
@@ -133,6 +139,8 @@ describe("runWorkerInit", () => {
     else process.env.TASK_TRACKER = savedTracker;
     if (savedWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
     else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspace;
+    if (savedSentryToken === undefined) delete process.env.SENTRY_AUTH_TOKEN;
+    else process.env.SENTRY_AUTH_TOKEN = savedSentryToken;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -144,6 +152,7 @@ describe("runWorkerInit", () => {
       prompt: async () => queued.shift() ?? "n",
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
+      configureOperatingPolicy: async () => {},
       // Detection is real otherwise: PRManager inspects the *runner's* cwd.
       detectGithubRepo: async () => null,
       ...overrides,
@@ -166,6 +175,22 @@ describe("runWorkerInit", () => {
     expect(env).not.toContain("WORKER_TASK_QUERY");
     expect(logs.join("\n")).toContain("3 task(s) match");
     expect(logs.join("\n")).not.toContain("webhook listener");
+  });
+
+  test("configures task hours and pull-request maintenance policy", async () => {
+    const answers = ["y", "scheduled", "1d", "y", "09:00-17:00", "Asia/Ho_Chi_Minh"];
+    await configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async () => answers.shift() ?? "",
+      log: (message) => logs.push(message),
+    });
+
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.workspace.ciFailureFix).toBe(true);
+    expect(config.workspace.conflictResolution).toBe("scheduled");
+    expect(config.workspace.conflictSchedule?.interval).toBe("1d");
+    expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["09:00-17:00"]);
+    expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
   });
 
   test("failing dry run offers a retry then accepts the corrected query", async () => {
@@ -196,6 +221,72 @@ describe("runWorkerInit", () => {
     expect(logs.join("\n")).toContain("devintern.com/pricing");
   });
 
+  test("validates and adds an opt-in Sentry monitor with a protected token file", async () => {
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "other"\nremote = "git@github.com:acme/other.git"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+    );
+    const validations: Array<{
+      authToken: string;
+      organization: string;
+      project: string;
+      baseUrl: string;
+      query?: string;
+    }> = [];
+    const result = await runWorkerInit(
+      deps(["status=todo", "y", "", "acme", "api", "environment:production", "sntrys_test"], {
+        bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+        validateSentry: async (options) => {
+          validations.push(options);
+          return 4;
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(validations).toEqual([
+      {
+        authToken: "sntrys_test",
+        organization: "acme",
+        project: "api",
+        baseUrl: "https://sentry.io",
+        query: "environment:production",
+      },
+    ]);
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.errorMonitors).toMatchObject([
+      {
+        id: "sentry-api",
+        repo: "app",
+        organization: "acme",
+        project: "api",
+        query: "environment:production",
+        envFile: "env/sentry-api.env",
+      },
+    ]);
+    const envPath = path.join(workspaceDir, "env", "sentry-api.env");
+    expect(readFileSync(envPath, "utf8")).toBe("SENTRY_AUTH_TOKEN=sntrys_test\n");
+    expect(statSync(envPath).mode & 0o777).toBe(0o600);
+    expect(logs.join("\n")).toContain("4 unresolved issue(s)");
+  });
+
+  test("does not persist Sentry configuration when validation fails", async () => {
+    const result = await runWorkerInit(
+      deps(["status=todo", "y", "", "acme", "api", "", "bad-token"], {
+        validateSentry: async () => {
+          throw new Error("Sentry rejected the auth token (HTTP 401)");
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml")).errorMonitors).toEqual(
+      [],
+    );
+    expect(logs.join("\n")).toContain("Sentry setup skipped");
+    expect(logs.join("\n")).toContain("No monitor or credential file was written");
+  });
+
   test("refuses trackers without polling support", async () => {
     const result = await runWorkerInit(deps([], { ensureTracker: async () => "not-a-tracker" }));
     expect(result.ok).toBe(false);
@@ -205,7 +296,7 @@ describe("runWorkerInit", () => {
   test("connects signed-in users and stores relay state in the workspace", async () => {
     const calls: Array<{ workspaceDir: string; trackerType: string }> = [];
     const result = await runWorkerInit(
-      deps(["status=todo", "", "n"], {
+      deps(["status=todo", "n", "", "n"], {
         getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
         connectRelay: async ({ workspaceDir: dir, trackerType }) => {
           calls.push({ workspaceDir: dir, trackerType });
@@ -253,7 +344,7 @@ describe("runWorkerInit", () => {
 
     test("an unverified repository points to the relay pairing command", async () => {
       const result = await runWorkerInit(
-        deps(["status=todo", "", "n"], {
+        deps(["status=todo", "n", "", "n"], {
           ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
@@ -269,7 +360,7 @@ describe("runWorkerInit", () => {
     test("does not trust a legacy press-Enter marker without verified GitHub ids", async () => {
       saveGitHubAppRecord({ repo: "acme/web", enabled: true }, workspaceDir);
       const result = await runWorkerInit(
-        deps(["status=todo", "", "n"], {
+        deps(["status=todo", "n", "", "n"], {
           ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
@@ -290,7 +381,7 @@ describe("runWorkerInit", () => {
         workspaceDir,
       );
       const result = await runWorkerInit(
-        deps(["status=todo", "", "n"], {
+        deps(["status=todo", "n", "", "n"], {
           ...relayDeps,
           detectGithubRepo: async () => "acme/web",
         }),
@@ -319,7 +410,7 @@ describe("runWorkerInit", () => {
   test("writes a Linux user service definition", async () => {
     const files = new Map<string, string>();
     const result = await runWorkerInit(
-      deps(["status=todo", "n", ""], {
+      deps(["status=todo", "n", "n", ""], {
         platform: "linux",
         execPath: "/usr/local/bin/devintern",
         writeFile: (file, content) => files.set(file, content),
@@ -334,7 +425,7 @@ describe("runWorkerInit", () => {
   test("writes a macOS launchd agent", async () => {
     const files = new Map<string, string>();
     const result = await runWorkerInit(
-      deps(["status=todo", "n", ""], {
+      deps(["status=todo", "n", "n", ""], {
         platform: "darwin",
         execPath: "/usr/local/bin/devintern",
         writeFile: (file, content) => files.set(file, content),

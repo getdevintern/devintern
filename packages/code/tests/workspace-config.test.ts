@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import {
   DEFAULT_DASHBOARD,
+  DEFAULT_CI_FAILURE_FIX,
   DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
   findRepo,
@@ -30,7 +31,6 @@ worktrees_ttl_days = 3
 tracker = "jira"
 task_query = "labels = devintern"
 worker_task_args = "--create-pr"
-default_branch = "main"
 pr_labels = ["devintern", "auto-pr"]
 
 [[repos]]
@@ -63,6 +63,7 @@ describe("parseWorkspaceConfig", () => {
     expect(config.workspace.worktreesTtlDays).toBe(3);
     expect(config.workspace.dashboard).toBe(true);
     expect(config.workspace.dashboardPort).toBeUndefined();
+    expect(config.workspace.ciFailureFix).toBe(DEFAULT_CI_FAILURE_FIX);
     expect(config.defaults.tracker).toBe("jira");
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
@@ -76,9 +77,9 @@ describe("parseWorkspaceConfig", () => {
     expect(backend?.envFile).toBe("env/backend.env");
     expect(backend?.env).toEqual({ GITHUB_REPO: "acme/backend" });
 
-    // frontend has no default_branch of its own: inherits [defaults].
+    // frontend has no override and will resolve the remote's origin/HEAD.
     const frontend = findRepo(config, "frontend");
-    expect(frontend?.defaultBranch).toBe("main");
+    expect(frontend?.defaultBranch).toBeUndefined();
     expect(frontend?.prLabels).toEqual(["devintern", "auto-pr"]);
     expect(frontend?.env).toEqual({});
 
@@ -109,6 +110,7 @@ tracker = "markdown"
 [workspace]
 dashboard = false
 dashboard_port = 4410
+ci_failure_fix = true
 
 [defaults]
 tracker = "markdown"
@@ -116,6 +118,7 @@ poll_interval = 15
 `);
     expect(config.workspace.dashboard).toBe(false);
     expect(config.workspace.dashboardPort).toBe(4410);
+    expect(config.workspace.ciFailureFix).toBe(true);
     expect(config.defaults.pollIntervalSeconds).toBe(15);
   });
 
@@ -319,6 +322,16 @@ pr_labels = [""]
 tracker = "fossil"
 `),
     ).toThrow(/does not support polling/);
+  });
+
+  test("rejects [defaults].default_branch", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+default_branch = "main"
+`),
+    ).toThrow(/\[defaults\]\.default_branch is not supported/);
   });
 
   describe("[[estimations]]", () => {
@@ -702,6 +715,88 @@ query = "project = PLAT"
 interval = "1d"
 `),
     ).toThrow(/\[\[estimations\]\] uses \[defaults\]\.tracker/);
+  });
+
+  test("parses repo- and team-scoped Sentry monitors with independent credentials", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+poll_interval = 90
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "project = PLAT"
+repo = "api"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[error_monitors]]
+id = "api-production"
+provider = "sentry"
+repo = "api"
+team = "platform"
+organization = "acme"
+project = "api"
+env_file = "env/sentry-api.env"
+min_occurrences = 10
+max_per_tick = 2
+comment_on_action = true
+  [error_monitors.env]
+  SENTRY_AUTH_TOKEN = "api-token"
+
+[[error_monitors]]
+id = "web-production"
+provider = "sentry"
+repo = "web"
+organization = "acme"
+project = "web"
+poll_interval = 30
+`);
+
+    expect(config.errorMonitors).toHaveLength(2);
+    expect(config.errorMonitors[0]).toMatchObject({
+      id: "api-production",
+      repo: "api",
+      team: "platform",
+      intervalSeconds: 90,
+      minOccurrences: 10,
+      maxIssuesPerTick: 2,
+      commentOnAction: true,
+      env: { SENTRY_AUTH_TOKEN: "api-token" },
+    });
+    expect(config.errorMonitors[1]).toMatchObject({
+      id: "web-production",
+      repo: "web",
+      intervalSeconds: 30,
+      commentOnAction: false,
+    });
+  });
+
+  test("requires explicit monitor routing in multi-repo workspaces", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[error_monitors]]
+id = "production"
+provider = "sentry"
+organization = "acme"
+project = "web"
+`),
+    ).toThrow(/repo is required in a workspace with multiple repositories/);
   });
 });
 

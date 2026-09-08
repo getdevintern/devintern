@@ -109,6 +109,17 @@ describe("RunStore", () => {
     expect(stats.scheduled).toBe(0);
   });
 
+  test("error-monitor runs have a distinct non-ticket origin", () => {
+    const id = store.createRun({
+      origin: "error_monitor",
+      taskKey: "devintern-public-devintern-a",
+      tracker: "sentry",
+    });
+
+    expect(store.getRun(id)).toMatchObject({ origin: "error_monitor", tracker: "sentry" });
+    expect(store.getStats(null).byOrigin.error_monitor).toBe(1);
+  });
+
   test("stages accumulate in order with structured detail", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-2" });
     store.addStage(id, "feasibility", "succeeded", "clear enough", '{"clarityScore":8}');
