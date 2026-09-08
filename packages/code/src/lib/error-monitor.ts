@@ -21,6 +21,8 @@ export interface ErrorMonitorIssue {
   displayId: string;
   title: string;
   occurrenceCount: number;
+  /** Source project identifier (for example the Sentry slug) shown in pickup logs. */
+  projectSlug?: string;
 }
 
 export interface IssueValidity {
@@ -147,7 +149,11 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
         // cannot both submit the same issue. A capacity deferral is explicitly
         // unclaimed so it can run on a later tick.
         if (!queue.tryMarkProcessed(dedupeSource, issue.externalId)) continue;
-        console.log(`\n📌 [${this.name}] ${issue.displayId}: ${issue.title}`);
+        const projectLabel = issue.projectSlug ? `${issue.projectSlug} ` : "";
+        console.log(
+          `\n📌 [${this.name}] ${projectLabel}${issue.displayId} picked up ` +
+            `(${issue.occurrenceCount} occurrences): ${issue.title}`,
+        );
         const result = await this.options.executeTask(issue, provider.buildTaskMarkdown(issue));
         if (result === "deferred") {
           queue.unmarkProcessed(dedupeSource, issue.externalId);

@@ -229,6 +229,66 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
   });
 
+  test("stays quiet while an issue is below the occurrence threshold", async () => {
+    const { acquirer, fixed } = makeAcquirer([issue({ count: "1", occurrenceCount: 1 })]);
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(fixed).toHaveLength(0);
+    expect(logs.some((line) => line.includes("skipping"))).toBe(false);
+    expect(logs.some((line) => line.includes("APP-1"))).toBe(false);
+  });
+
+  test("surfaces the skip reason in verbose mode", async () => {
+    const { acquirer, fixed } = makeAcquirer([issue({ count: "1", occurrenceCount: 1 })], {
+      verbose: true,
+    });
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(fixed).toHaveLength(0);
+    expect(
+      logs.some(
+        (line) => line.includes("skipping APP-1") && line.includes("only 1 occurrence(s); need 5"),
+      ),
+    ).toBe(true);
+  });
+
+  test("logs the pickup with project, issue id, and occurrence count once", async () => {
+    const { acquirer, fixed } = makeAcquirer([issue({ projectSlug: "webapp" })]);
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(fixed).toHaveLength(1);
+    const pickups = logs.filter((line) => line.includes("📌"));
+    expect(pickups).toHaveLength(1);
+    expect(pickups[0]).toContain("webapp APP-1");
+    expect(pickups[0]).toContain("12 occurrences");
+  });
+
   test("marks before executing so failing runs do not loop every tick", async () => {
     let attempts = 0;
     const provider = {
