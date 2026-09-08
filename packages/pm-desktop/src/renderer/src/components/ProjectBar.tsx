@@ -44,6 +44,8 @@ interface ProjectBarProps {
   onSwitchHarness: (harnessName: string) => void;
   /** Persist `AGENT_MODEL` for the project; resolves with an error or null. */
   onSwitchModel?: (model: string) => Promise<string | null>;
+  /** Persist `AGENT_EFFORT` for the project; resolves with an error or null. */
+  onSwitchEffort?: (effort: string) => Promise<string | null>;
   /**
    * Open the in-app wizard in update mode so the user can add a new tracker or
    * reconfigure credentials for an existing one (post-init PM settings).
@@ -95,6 +97,7 @@ export function ProjectBar({
   onSwitchProjectKey,
   onSwitchHarness,
   onSwitchModel,
+  onSwitchEffort,
   onChangeTrackerSettings,
   onUpdateFromRemote,
   onProjectRemoved,
@@ -497,6 +500,8 @@ export function ProjectBar({
           updatingFromRemote={updatingFromRemote}
           activeModel={status.activeModel}
           onSwitchModel={onSwitchModel}
+          activeEffort={status.activeEffort}
+          onSwitchEffort={onSwitchEffort}
         />
       </span>
     </header>

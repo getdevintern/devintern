@@ -376,6 +376,9 @@ AGENT_HARNESS=claude-code
 
 # Optional: model the harness runs with (harness-specific string)
 # AGENT_MODEL=sonnet
+
+# Optional: reasoning effort for agent runs (low | medium | high)
+# AGENT_EFFORT=medium
 ```
 
 You usually only need `AGENT_HARNESS`. By default devintern uses the harness's standard command (for example `claude` for `claude-code`) and finds it on your `PATH` automatically, so `AGENT_CLI_PATH` can be left unset.
@@ -430,6 +433,17 @@ AGENT_MODEL=sonnet
 ```
 
 The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes). A few harnesses have no model flag and ignore the setting.
+
+### Reasoning effort
+
+Alongside the model you can tune how deeply the agent reasons per run with `AGENT_EFFORT` in `.devintern-code/.env`:
+
+```bash
+# .devintern-code/.env
+AGENT_EFFORT=medium
+```
+
+Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply — useful for hard analysis tasks, while routine work can stay at the default (unset). The setting applies to every agent spawn, mirroring `AGENT_MODEL`, and degrades cleanly in failover chains: harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. When `AGENT_EFFORT` is unset no extra flags are emitted and behavior is unchanged.
 
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 

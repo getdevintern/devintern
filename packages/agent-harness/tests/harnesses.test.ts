@@ -12,7 +12,7 @@ import { GrokHarness } from "../src/harnesses/grok.js";
 import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
-import { PiHarness } from "../src/harnesses/pi.js";
+import { PiHarness, composePiModelWithEffort } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
 
 describe("ClaudeCodeHarness", () => {
@@ -25,6 +25,7 @@ describe("ClaudeCodeHarness", () => {
     expect(h.promptFlag).toBe("-p");
     expect(h.supportsMaxTurns).toBe(true);
     expect(h.supportsStructuredOutput).toBe(true);
+    expect(h.supportsEffort).toBe(true);
   });
 
   test("buildArgs empty", () => {
@@ -51,6 +52,21 @@ describe("ClaudeCodeHarness", () => {
       h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true }),
     ).toEqual(["--dangerously-skip-permissions", "--model", "opus", "--output-format", "json"]);
   });
+
+  test("buildArgs emits effort via the --effort flag", () => {
+    expect(h.buildArgs({ model: "sonnet", effort: "high" })).toEqual([
+      "--model",
+      "sonnet",
+      "--effort",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["--effort", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["--effort", "medium"]);
+  });
+
+  test("buildArgs omits effort when unset (default behavior unchanged)", () => {
+    expect(h.buildArgs({ model: "sonnet" })).toEqual(["--model", "sonnet"]);
+  });
 });
 
 describe("ClineHarness", () => {
@@ -75,6 +91,18 @@ describe("ClineHarness", () => {
       "--model",
       "gpt-4",
     ]);
+  });
+
+  test("buildArgs emits effort via the --thinking flag (cline's reasoning-effort control)", () => {
+    expect(h.buildArgs({ model: "claude-sonnet-4-5", effort: "high" })).toEqual([
+      "task",
+      "--model",
+      "claude-sonnet-4-5",
+      "--thinking",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["task", "--thinking", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["task", "--thinking", "medium"]);
   });
 
   test("buildArgs structured output", () => {
@@ -129,6 +157,39 @@ describe("CodexHarness", () => {
       'features.network_proxy.domains={ "*" = "allow" }',
       "--model",
       "gpt-4o",
+    ]);
+  });
+
+  test("buildArgs emits effort as a model_reasoning_effort config override", () => {
+    expect(h.buildArgs({ model: "gpt-5.2", effort: "high" })).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "--model",
+      "gpt-5.2",
+      "-c",
+      'model_reasoning_effort="high"',
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "-c",
+      'model_reasoning_effort="low"',
+    ]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "-c",
+      'model_reasoning_effort="medium"',
+    ]);
+  });
+
+  test("buildArgs omits effort override when unset (default behavior unchanged)", () => {
+    expect(h.buildArgs({})).toEqual(["exec", "--skip-git-repo-check"]);
+    expect(h.buildArgs({ model: "gpt-5.2" })).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "--model",
+      "gpt-5.2",
     ]);
   });
 });
@@ -209,6 +270,17 @@ describe("AntigravityHarness", () => {
   test("buildArgs ignores maxTurns (not a stable CLI flag)", () => {
     expect(h.buildArgs({ maxTurns: 10 })).toEqual([]);
   });
+
+  test("buildArgs emits effort via the --effort flag (agy v1.1.5+)", () => {
+    expect(h.buildArgs({ model: "gemini-3.5-flash-medium", effort: "high" })).toEqual([
+      "--model",
+      "gemini-3.5-flash-medium",
+      "--effort",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["--effort", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["--effort", "medium"]);
+  });
 });
 
 describe("GeminiHarness (deprecated re-export)", () => {
@@ -276,6 +348,18 @@ describe("KiloCodeHarness", () => {
       "--model",
       "claude",
     ]);
+  });
+
+  test("buildArgs emits effort via the --variant flag (provider-specific reasoning effort)", () => {
+    expect(h.buildArgs({ model: "openai/gpt-5.2", effort: "high" })).toEqual([
+      "run",
+      "--model",
+      "openai/gpt-5.2",
+      "--variant",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["run", "--variant", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["run", "--variant", "medium"]);
   });
 });
 
@@ -362,6 +446,35 @@ describe("OpencodeHarness", () => {
       "/tmp/devintern-review-worktree-feature-x",
     ]);
   });
+
+  test("buildArgs emits effort via the --variant flag (provider-specific reasoning effort)", () => {
+    expect(h.buildArgs({ model: "openai/gpt-5.2", effort: "high" })).toEqual([
+      "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--model",
+      "openai/gpt-5.2",
+      "--variant",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual([
+      "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--variant",
+      "low",
+    ]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual([
+      "run",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--variant",
+      "medium",
+    ]);
+  });
 });
 
 describe("PiHarness", () => {
@@ -394,6 +507,82 @@ describe("PiHarness", () => {
       "--model",
       "claude-sonnet-4-6:high",
     ]);
+  });
+
+  test("buildArgs composes effort into the model string (pi encodes thinking in --model)", () => {
+    expect(h.buildArgs({ model: "claude-sonnet-4-6", effort: "high" })).toEqual([
+      "--model",
+      "claude-sonnet-4-6:high",
+    ]);
+    expect(h.buildArgs({ model: "openai/gpt-5.2", effort: "low" })).toEqual([
+      "--model",
+      "openai/gpt-5.2:low",
+    ]);
+  });
+
+  test("buildArgs keeps an explicit :thinking suffix in the model string", () => {
+    expect(h.buildArgs({ model: "claude-sonnet-4-6:low", effort: "high" })).toEqual([
+      "--model",
+      "claude-sonnet-4-6:low",
+    ]);
+  });
+
+  test("buildArgs ignores effort without a model (nothing to compose onto) and warns", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.buildArgs({ effort: "high" })).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("Pi (pi) composes reasoning effort into the model string");
+    expect(warnings[0]).toContain("no model is set");
+    expect(warnings[0]).toContain('ignoring effort "high"');
+  });
+
+  test("composePiModelWithEffort composition rules", () => {
+    expect(composePiModelWithEffort(undefined, undefined)).toBeUndefined();
+    expect(composePiModelWithEffort("claude-sonnet-4-6", undefined)).toBe("claude-sonnet-4-6");
+    expect(composePiModelWithEffort(undefined, "high")).toBeUndefined();
+    expect(composePiModelWithEffort("claude-sonnet-4-6", "medium")).toBe(
+      "claude-sonnet-4-6:medium",
+    );
+    expect(composePiModelWithEffort("provider/model:low", "high")).toBe("provider/model:low");
+  });
+});
+
+describe("Effort no-op for harnesses without support", () => {
+  test("cursor ignores effort (no flags, no errors)", () => {
+    const h = new CursorHarness();
+    expect(h.buildArgs({ effort: "high" })).toEqual(["-p"]);
+    expect(h.buildArgs({ model: "claude-3", effort: "low" })).toEqual([
+      "-p",
+      "--model",
+      "claude-3",
+    ]);
+    expect(h.supportsEffort).toBeUndefined();
+  });
+
+  test("goose ignores effort (effort is env/config-only, no goose run flag)", () => {
+    const h = new GooseHarness();
+    expect(h.buildArgs({ effort: "high" })).toEqual(["run"]);
+    expect(h.supportsEffort).toBeUndefined();
+  });
+
+  test("qwen ignores effort (slash command / settings only, no headless flag)", () => {
+    const h = new QwenCodeHarness();
+    expect(h.buildArgs({ effort: "high" })).toEqual([]);
+    expect(h.supportsEffort).toBeUndefined();
+  });
+
+  test("kimi ignores effort (boolean --thinking toggle only, no effort levels)", () => {
+    const h = new KimiHarness();
+    expect(h.buildArgs({ effort: "high" })).toEqual(["--print"]);
+    expect(h.supportsEffort).toBeUndefined();
   });
 });
 
@@ -469,6 +658,18 @@ describe("GrokHarness", () => {
   test("buildArgs ignores maxTurns (not supported)", () => {
     expect(h.buildArgs({ maxTurns: 10 })).toEqual(["--no-auto-update"]);
   });
+
+  test("buildArgs emits effort via the --effort flag (alias --reasoning-effort)", () => {
+    expect(h.buildArgs({ model: "grok-4.5", effort: "high" })).toEqual([
+      "--no-auto-update",
+      "-m",
+      "grok-4.5",
+      "--effort",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["--no-auto-update", "--effort", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["--no-auto-update", "--effort", "medium"]);
+  });
 });
 
 describe("DeepSeekHarness", () => {
@@ -492,6 +693,18 @@ describe("DeepSeekHarness", () => {
 
   test("buildArgs with model", () => {
     expect(h.buildArgs({ model: "deepseek-pro" })).toEqual(["run", "--model", "deepseek-pro"]);
+  });
+
+  test("buildArgs emits effort via the --effort flag (reasonix session override)", () => {
+    expect(h.buildArgs({ model: "deepseek-pro", effort: "high" })).toEqual([
+      "run",
+      "--model",
+      "deepseek-pro",
+      "--effort",
+      "high",
+    ]);
+    expect(h.buildArgs({ effort: "low" })).toEqual(["run", "--effort", "low"]);
+    expect(h.buildArgs({ effort: "medium" })).toEqual(["run", "--effort", "medium"]);
   });
 
   test("buildArgs ignores skipPermissions and maxTurns", () => {

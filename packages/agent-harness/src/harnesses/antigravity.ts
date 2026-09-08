@@ -39,15 +39,21 @@ export class AntigravityHarness implements AgentHarness {
    * status, response text, and usage metadata.
    */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via the dedicated `--effort` flag (`low`, `medium`, or
+   * `high` — exactly the shared `AgentEffort` union; added upstream in
+   * v1.1.5 and documented for headless `-p` runs).
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `agy` CLI flags for headless (`-p`) execution.
    *
    * @param options - Supports `skipPermissions`
    *   (`--dangerously-skip-permissions`), `model` (`--model`, added upstream
-   *   in v1.0.5; takes a model slug as listed by `agy models`),
-   *   `structuredOutput`, and `workingDir`. Max-turns has no `--max-turns`
-   *   equivalent.
+   *   in v1.0.5; takes a model slug as listed by `agy models`), `effort`
+   *   (`--effort`, v1.1.5+), `structuredOutput`, and `workingDir`.
+   *   Max-turns has no `--max-turns` equivalent.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -62,6 +68,10 @@ export class AntigravityHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--effort", options.effort);
     }
 
     if (options.structuredOutput) {

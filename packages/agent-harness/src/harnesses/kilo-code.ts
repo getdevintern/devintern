@@ -20,12 +20,20 @@ export class KiloCodeHarness implements AgentHarness {
   readonly supportedModes = [] as const;
   /** `--format json` streams raw JSON events (one object per line) to stdout. */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via `--variant <level>` — kilo's documented "model variant
+   * (provider-specific reasoning effort)" flag. Variant names are
+   * model-specific; standard effort variants (`low`/`medium`/`high`) exist on
+   * reasoning models, and unknown variants degrade the run rather than
+   * silently changing behavior.
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `kilo run` subcommand flags for non-interactive execution.
    *
-   * @param options - Supports `skipPermissions` (`--auto`), `model`, and
-   *   `structuredOutput`.
+   * @param options - Supports `skipPermissions` (`--auto`), `model`, `effort`
+   *   (`--variant`), and `structuredOutput`.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -38,6 +46,10 @@ export class KiloCodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--variant", options.effort);
     }
 
     if (options.structuredOutput) {

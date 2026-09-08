@@ -395,6 +395,52 @@ describe("createEngine", () => {
     ]);
   });
 
+  test("forwards effort from engine options into every agent call", async () => {
+    const seenEffort: Array<string | undefined> = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR, effort: "high" },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          seenEffort.push(options.effort);
+          return {
+            stdout: '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    await engine.generateStory({ source: { type: "prompt", content: "x" }, promptStyle: "pm" });
+    expect(seenEffort).toEqual(["high"]);
+  });
+
+  test("agent calls have no effort when the engine option is unset", async () => {
+    const seenEffort: Array<string | undefined> = [];
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: async (_harness, _path, _prompt, options) => {
+          seenEffort.push(options.effort);
+          return {
+            stdout: '{"summary": "S", "description": "D"}',
+            stderr: "",
+            exitCode: 0,
+            maxTurnsReached: false,
+          };
+        },
+      },
+    );
+
+    await engine.generateStory({ source: { type: "prompt", content: "x" }, promptStyle: "pm" });
+    expect(seenEffort).toEqual([undefined]);
+  });
+
   test("editStory includes current draft and edit request in the prompt", async () => {
     let seenPrompt = "";
     const engine = await createEngine(

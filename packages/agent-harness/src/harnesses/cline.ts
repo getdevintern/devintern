@@ -20,12 +20,18 @@ export class ClineHarness implements AgentHarness {
   readonly supportedModes = [] as const;
   /** `--json` emits newline-delimited JSON message objects instead of styled text. */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via the `--thinking <level>` flag, which sets reasoning
+   * effort (`none|low|medium|high|xhigh`; the shared `AgentEffort` union is a
+   * subset, so it is always valid).
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `cline task` subcommand flags for non-interactive execution.
    *
-   * @param options - Supports `skipPermissions` (`--yolo`), `model`, and
-   *   `structuredOutput` (`--json`).
+   * @param options - Supports `skipPermissions` (`--yolo`), `model`, `effort`
+   *   (`--thinking <level>`), and `structuredOutput` (`--json`).
    * @returns Args starting with `task`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -38,6 +44,10 @@ export class ClineHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--thinking", options.effort);
     }
 
     if (options.structuredOutput) {

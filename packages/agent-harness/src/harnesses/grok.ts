@@ -37,12 +37,19 @@ export class GrokHarness implements AgentHarness {
   readonly supportedModes = ["plan", "readonly"] as const;
   /** `--output-format json` emits one JSON object (text, stopReason, session, usage). */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via the dedicated `--effort` flag (alias
+   * `--reasoning-effort`; canonical levels include low/medium/high, works in
+   * TUI and headless mode).
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `grok` CLI flags for headless (`-p`) execution.
    *
    * @param options - Supports `mode`, `skipPermissions` (`--always-approve`),
-   *   `model` (`-m`), `structuredOutput`, and `workingDir` (`--cwd`).
+   *   `model` (`-m`), `effort` (`--effort`), `structuredOutput`, and
+   *   `workingDir` (`--cwd`).
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -58,6 +65,10 @@ export class GrokHarness implements AgentHarness {
 
     if (options.model) {
       args.push("-m", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--effort", options.effort);
     }
 
     if (options.workingDir) {
