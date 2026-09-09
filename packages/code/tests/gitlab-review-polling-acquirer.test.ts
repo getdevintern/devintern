@@ -27,6 +27,10 @@ function snapshot(overrides: Partial<GitLabPollingSnapshot> = {}): GitLabPolling
     headSha: "abc123",
     webUrl: "https://gitlab.com/acme/widgets/-/merge_requests/17",
     assignedReviewerIds: [],
+    sourceBranch: "feature/widgets",
+    targetBranch: "main",
+    baseSha: "base123",
+    mergeability: "mergeable",
     feedback: [
       {
         discussionId: "discussion-1",
@@ -172,6 +176,35 @@ describe("GitLabReviewPollingAcquirer", () => {
     now += 30_000;
     await run.acquirer.tick();
     expect(run.addressCalls).toBe(2);
+  });
+
+  test("runs base synchronization only for definitive conflict or behind states", async () => {
+    const rows = [registered()];
+    const processed = new Set<string>();
+    const resolved: Array<{ headSha: string; baseSha?: string }> = [];
+    const acquirer = new GitLabReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState: {
+        listOpenAgentChangeRequests: () => rows,
+        markAgentChangeRequestClosed: () => {},
+      },
+      queue: {
+        hasProcessed: (_source, id) => processed.has(id),
+        markProcessed: (_source, id) => processed.add(id),
+      },
+      clientFor: () => ({
+        getPollingSnapshot: async () => snapshot({ mergeability: "conflicts", feedback: [] }),
+        getMemberAccessLevel: async () => 30,
+      }),
+      addressMr: async () => true,
+      resolveMr: async (_mr, expected) => {
+        resolved.push(expected);
+        return { outcome: "resolved", message: "done" };
+      },
+    });
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(resolved).toEqual([{ headSha: "abc123", baseSha: "base123" }]);
   });
 
   test("polls only registered GitLab rows allowed for this workspace", async () => {

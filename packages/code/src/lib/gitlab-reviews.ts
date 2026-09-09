@@ -37,6 +37,8 @@ interface GitLabMergeRequest {
   target_project_id: number;
   web_url: string;
   reviewers?: GitLabUser[];
+  detailed_merge_status?: string;
+  diff_refs?: { base_sha?: string; head_sha?: string } | null;
 }
 
 interface GitLabPosition {
@@ -101,6 +103,28 @@ export interface GitLabPollingSnapshot {
   webUrl: string;
   assignedReviewerIds: number[];
   feedback: GitLabPollingFeedback[];
+  sourceBranch: string;
+  targetBranch: string;
+  baseSha?: string;
+  mergeability: GitLabMergeability;
+}
+
+export type GitLabMergeability =
+  | "mergeable"
+  | "conflicts"
+  | "behind"
+  | "checking"
+  | "blocked"
+  | "unknown";
+
+export interface GitLabChangeRequestInfo {
+  number: number;
+  title: string;
+  state: string;
+  head: { ref: string; sha: string };
+  base: { ref: string; sha: string };
+  mergeability: GitLabMergeability;
+  webUrl: string;
 }
 
 /** REST API v4 client for manual GitLab merge-request review addressing. */
@@ -267,7 +291,66 @@ export class GitLabReviewsClient {
       webUrl: mergeRequest.web_url,
       assignedReviewerIds: (mergeRequest.reviewers ?? []).map((reviewer) => reviewer.id),
       feedback,
+      sourceBranch: mergeRequest.source_branch,
+      targetBranch: mergeRequest.target_branch,
+      baseSha: mergeRequest.diff_refs?.base_sha,
+      mergeability: this.mergeability(mergeRequest.detailed_merge_status),
     };
+  }
+
+  /** Resolve an MR into the provider-neutral shape used by local base synchronization. */
+  async getChangeRequest(projectPath: string, iid: number): Promise<GitLabChangeRequestInfo> {
+    const project = await this.requestJson<GitLabProject>(
+      `/projects/${encodeURIComponent(projectPath)}`,
+    );
+    const mergeRequest = await this.requestJson<GitLabMergeRequest>(
+      `/projects/${project.id}/merge_requests/${iid}`,
+    );
+    if (
+      mergeRequest.source_project_id !== project.id ||
+      mergeRequest.target_project_id !== project.id
+    ) {
+      throw new Error(
+        "Fork merge requests are not supported; conflict repair requires same-project branches.",
+      );
+    }
+    const accessLevel = Math.max(
+      project.permissions?.project_access?.access_level ?? 0,
+      project.permissions?.group_access?.access_level ?? 0,
+    );
+    if (accessLevel < 30) {
+      throw new Error(
+        "The configured GitLab identity does not have Developer-or-higher project access.",
+      );
+    }
+    const branch = await this.requestJson<GitLabBranch>(
+      `/projects/${project.id}/repository/branches/${encodeURIComponent(mergeRequest.source_branch)}`,
+    );
+    if (branch.can_push !== true) {
+      throw new Error(
+        `The configured GitLab identity cannot push to source branch '${mergeRequest.source_branch}'.`,
+      );
+    }
+    return {
+      number: iid,
+      title: mergeRequest.title,
+      state: mergeRequest.state,
+      head: { ref: mergeRequest.source_branch, sha: mergeRequest.sha },
+      base: {
+        ref: mergeRequest.target_branch,
+        sha: mergeRequest.diff_refs?.base_sha ?? "",
+      },
+      mergeability: this.mergeability(mergeRequest.detailed_merge_status),
+      webUrl: mergeRequest.web_url,
+    };
+  }
+
+  /** Post a top-level MR note. */
+  async postMergeRequestNote(project: string | number, iid: number, body: string): Promise<void> {
+    await this.requestJson(
+      `/projects/${encodeURIComponent(String(project))}/merge_requests/${iid}/notes`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    );
   }
 
   /** Effective project membership for an actor; missing/inaccessible means unknown. */
@@ -328,6 +411,27 @@ export class GitLabReviewsClient {
       userType !== "bot" &&
       userType !== "service_account"
     );
+  }
+
+  private mergeability(status: string | undefined): GitLabMergeability {
+    if (status === "mergeable") return "mergeable";
+    if (status === "conflict") return "conflicts";
+    if (status === "need_rebase") return "behind";
+    if (status === "unchecked" || status === "checking" || status === "preparing") {
+      return "checking";
+    }
+    if (
+      status === "discussions_not_resolved" ||
+      status === "draft_status" ||
+      status === "ci_must_pass" ||
+      status === "ci_still_running" ||
+      status === "not_approved" ||
+      status === "requested_changes" ||
+      status === "merge_request_blocked"
+    ) {
+      return "blocked";
+    }
+    return "unknown";
   }
 
   private async getAllPages<T>(path: string): Promise<T[]> {

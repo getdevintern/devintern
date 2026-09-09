@@ -321,6 +321,7 @@ export function runResolveConflictsViaCli(
     /** Override the CLI entrypoint and output handling (subprocess tests). */
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
   } = {},
 ): Promise<AutomaticResolveResult> {
   const args = [
@@ -328,6 +329,21 @@ export function runResolveConflictsViaCli(
     ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
   ];
   return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
+}
+
+/** Run conflict resolution for a canonical provider change-request URL. */
+export function runResolveConflictsUrlViaCli(
+  webUrl: string,
+  serializationKey: string,
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    expectedHeadSha?: string;
+    expectedBaseSha?: string;
+    timeoutMs?: number;
+  } = {},
+): Promise<AutomaticResolveResult> {
+  return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
 }
 
 function runResolveSubcommand(
@@ -340,6 +356,7 @@ function runResolveSubcommand(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
   },
 ): Promise<AutomaticResolveResult> {
   return runResolveWithFailover(repo, prNumber, extraArgs, opts);
@@ -355,6 +372,7 @@ async function runResolveWithFailover(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
   },
 ): Promise<AutomaticResolveResult> {
   let last: AutomaticResolveResult | null = null;
@@ -387,9 +405,10 @@ function spawnResolveOnce(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
   },
 ): Promise<{ code: number; result: AutomaticResolveResult }> {
-  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     let result: AutomaticResolveResult | null = null;
     let resultOutput = "";

@@ -162,7 +162,8 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Existing labels | Best-effort; missing labels are skipped |
 | Manual `address-review` | Experimental; same-project writable branches only |
 | Registered-MR polling | Experimental; DevIntern-created MRs only |
-| Conflict and CI repair | Deferred |
+| Conflict/base synchronization | Experimental; `auto` mode and manual command |
+| CI repair | Deferred |
 | Direct project webhooks | Deferred |
 | Repository-wide mentions and hosted relay | Not currently planned |
 
@@ -200,6 +201,18 @@ GITLAB_REVIEWER_ALLOWLIST=alice,bob
 ```
 
 The poller reconciles merged, closed, deleted, and inaccessible MRs, paginates discussion results, honors API retry instructions, and applies bounded retry backoff when an addressing run fails or is deferred. Explicit adoption of pre-existing MRs is not supported yet.
+
+## Keep GitLab branches current
+
+Registered MRs can use the same guarded base-sync pipeline as GitHub pull requests. In `auto` conflict-resolution mode, the worker acts only when GitLab definitively reports `conflict` or `need_rebase`; checking, blocked, inaccessible, and unknown states never trigger an agent run. The MR must be same-project, the configured identity must have Developer access or higher, and its source branch must be writable.
+
+You can also run synchronization directly:
+
+```bash
+devintern resolve-conflicts https://gitlab.com/group/project/-/merge_requests/123
+```
+
+The resolver fetches the actual target-branch tip, revalidates the MR state and head immediately before publication, and uses a normal fast-forward push—never a force push. Concurrent branch movement is deferred safely. Scheduled GitLab conflict windows remain deferred; a workspace configured with `conflict_resolution = "scheduled"` records no GitLab synchronization work until provider-neutral scheduling support lands. Manual resolution remains available in every mode.
 
 ## Batch processing with --query
 
