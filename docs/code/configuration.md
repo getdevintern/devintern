@@ -417,6 +417,7 @@ Applies to every unattended worker surface — fleet task polling, PR review add
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
 - Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- If the persisted active harness is no longer part of `AGENT_HARNESS` (for example after shortening the chain), startup warns once and stores the highest-priority available entry as the new active harness, so later restarts do not repeat the stale-harness warning.
 - Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
 
 Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
