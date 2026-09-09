@@ -33,6 +33,16 @@ export interface TaskSupervisor {
   schedule<T>(request: ScheduleRequest<T>): Promise<T>;
   updateLimits(limits: SupervisorLimits): void;
   drain(options?: DrainOptions): Promise<void>;
+  /**
+   * Reject new admissions until {@link resume} without touching running
+   * jobs — the idle self-update gate. Unlike {@link drain}, this never
+   * aborts in-flight work.
+   */
+  holdAdmissions(): void;
+  /** Lift a hold or drain so new jobs are admitted again. */
+  resume(): void;
+  /** How many admitted jobs are currently running. */
+  inFlightCount(): number;
 }
 
 export const DEFAULT_SUPERVISOR_DRAIN_GRACE_MS = 20_000;
@@ -173,6 +183,17 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
     }
   };
 
+  /** Stop admitting new jobs; queued-but-unstarted ones are rejected. */
+  const beginDraining = (): void => {
+    if (draining) return;
+    draining = true;
+    const error = new JobNotStartedError();
+    for (const job of queued.splice(0)) {
+      knownIds.delete(job.request.id);
+      job.reject(error);
+    }
+  };
+
   return {
     schedule<T>(request: ScheduleRequest<T>): Promise<T> {
       try {
@@ -203,14 +224,7 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
     },
 
     async drain(options: DrainOptions = {}): Promise<void> {
-      if (!draining) {
-        draining = true;
-        const error = new JobNotStartedError();
-        for (const job of queued.splice(0)) {
-          knownIds.delete(job.request.id);
-          job.reject(error);
-        }
-      }
+      beginDraining();
 
       const waitForRunning = (): Promise<void> =>
         Promise.all([...running.values()].map((job) => job.settled)).then(() => undefined);
@@ -232,6 +246,20 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
 
       for (const job of running.values()) job.controller.abort();
       await waitForRunning();
+    },
+
+    holdAdmissions(): void {
+      beginDraining();
+    },
+
+    resume(): void {
+      if (!draining) return;
+      draining = false;
+      pump();
+    },
+
+    inFlightCount(): number {
+      return running.size;
     },
   };
 }

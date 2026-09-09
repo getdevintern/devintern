@@ -144,6 +144,41 @@ describe("WorkspaceConfigReloader", () => {
     expect(current.teams[0]?.repo).toBe("backend");
   });
 
+  test("swaps the worker section so [worker] auto_update applies live", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(`${V1}\n[worker]\nauto_update = false\n`);
+    expect(current.worker.autoUpdate).toBe(true);
+    expect(next.worker.autoUpdate).toBe(false);
+
+    applyWorkspaceConfig(current, next);
+
+    expect(current.worker.autoUpdate).toBe(false);
+  });
+
+  test("rejects [worker.schedule] edits without mutating the active config", () => {
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V1);
+    const current: WorkspaceConfig = parseWorkspaceConfig(readFileSync(path, "utf8"));
+    const reloader = new WorkspaceConfigReloader({
+      configPath: path,
+      current,
+      validate: (next, active) => {
+        if (JSON.stringify(next.worker.schedule) !== JSON.stringify(active.worker.schedule)) {
+          throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
+        }
+      },
+      onError: () => undefined,
+    });
+
+    writeToml(path, `${V1}\n[worker.schedule]\nactive = ["22:00-06:00"]\n`);
+    const outcome = reloader.reload("schedule edit");
+
+    expect(outcome.applied).toBe(false);
+    expect(current.worker.schedule).toBeNull();
+    expect(current.worker.autoUpdate).toBe(true);
+  });
+
   test("rejects runtime-incompatible changes before mutating active config", () => {
     const dir = freshDir();
     const path = join(dir, "workspace.toml");

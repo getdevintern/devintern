@@ -927,6 +927,59 @@ timezone = "Nowhere/Land"
   });
 });
 
+describe("parseWorkspaceConfig [worker] auto_update (idle self-update)", () => {
+  test("defaults to enabled without the key", () => {
+    const config = parseWorkspaceConfig(VALID_CONFIG);
+    expect(config.worker.autoUpdate).toBe(true);
+  });
+
+  test("parses auto_update = false as the opt-out", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = false
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.autoUpdate).toBe(false);
+  });
+
+  test("parses auto_update = true explicitly", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = true
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.autoUpdate).toBe(true);
+  });
+
+  test("rejects non-boolean auto_update values", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = "no"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`),
+    ).toThrow(/\[worker\]\.auto_update must be a boolean/);
+  });
+});
+
 describe("workspace paths", () => {
   let workspaceDir: string;
   let previousOverride: string | undefined;

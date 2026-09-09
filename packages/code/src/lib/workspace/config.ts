@@ -163,6 +163,13 @@ export interface WorkerSettings {
    * `[worker.schedule]` table is absent or empty (pickup unrestricted).
    */
   schedule: WorkerScheduleConfig | null;
+  /**
+   * Keep the globally installed CLI current: while the worker is idle it
+   * checks npm at most once per day and, when a newer `@getdevintern/code`
+   * exists, installs it and restarts on the new version. Non-global installs
+   * (source checkouts, `bun link`, local `node_modules`) are never touched.
+   */
+  autoUpdate: boolean;
 }
 
 /** Parsed and validated `workspace.toml`. */
@@ -187,6 +194,8 @@ export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
 export const DEFAULT_MAX_CONCURRENCY = 1;
 export const DEFAULT_MAX_CONCURRENCY_PER_REPO = 1;
+/** Workers self-update while idle unless `[worker].auto_update = false`. */
+export const DEFAULT_WORKER_AUTO_UPDATE = true;
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -695,6 +704,9 @@ export function parseWorkspaceConfig(
   const workerTable = asTable(document.worker, "[worker]", errors);
   const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
   errors.push(...schedule.errors);
+  const workerAutoUpdate =
+    readOptionalBoolean(workerTable, "auto_update", "[worker]", errors) ??
+    DEFAULT_WORKER_AUTO_UPDATE;
 
   const estimationResult = parseEstimationEntries(document.estimations);
   errors.push(...estimationResult.errors);
@@ -732,7 +744,7 @@ export function parseWorkspaceConfig(
       conflictResolution,
       conflictSchedule,
     },
-    worker: { schedule: schedule.config },
+    worker: { schedule: schedule.config, autoUpdate: workerAutoUpdate },
     defaults,
     teams,
     repos,

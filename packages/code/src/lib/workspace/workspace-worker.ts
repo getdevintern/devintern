@@ -62,6 +62,7 @@ import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 import { startWorkerFailover } from "../worker-failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
+import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
 function orphanMaxAgeMs(): number {
@@ -1146,6 +1147,23 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
+  // Idle self-update: while the daemon runs for weeks, keep a global
+  // npm/bun install current — checked at most daily, applied only when the
+  // supervisor is idle, never touching source/local installs. Opt out with
+  // [worker] auto_update = false (live-reloaded) or DEVINTERN_NO_UPDATE=1.
+  let restartRequested = false;
+  const autoUpdater = createIdleWorkerAutoUpdater({
+    config,
+    supervisor,
+    cliVersion: options.cliVersion ?? "0.0.0",
+    requestShutdown: () => {
+      if (restartRequested) return;
+      restartRequested = true;
+      process.kill(process.pid, "SIGTERM");
+    },
+  });
+  autoUpdater.start();
+
   const { startWorker } = await import("../../worker");
   await startWorker(
     {
@@ -1157,7 +1175,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
         reloader.stop();
+        autoUpdater.stop();
       },
+      finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",

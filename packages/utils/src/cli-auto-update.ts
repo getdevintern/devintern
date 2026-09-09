@@ -46,6 +46,12 @@ export type CliUpdateConfig = {
   noUpdateEnv?: string;
   /** Package-specific auto-update env var, e.g. `DEVINTERN_AUTO_UPDATE`. */
   autoUpdateEnv?: string;
+  /**
+   * Install without prompting in non-interactive sessions, without requiring
+   * the auto-update env var. Used by the worker daemon's idle self-update
+   * path, which has already decided (config + idle) that installing is safe.
+   */
+  autoInstall?: boolean;
   /** Override home directory (tests). */
   homeDir?: string;
   /** Override cache file path (tests). */
@@ -254,6 +260,41 @@ function writeCache(cachePath: string, cache: UpdateCache): void {
   }
 }
 
+/**
+ * Whether a registry check for `packageName` is due, judged from the shared
+ * update-check cache without any network access.
+ *
+ * A check is due when the cached entry is missing, older than the check
+ * interval, or already holds a `latestVersion` that is newer than the
+ * running version (a previously discovered update that could not be applied
+ * yet — the worker defers while busy and must not wait another full interval).
+ *
+ * Never throws; unreadable/missing cache reads as due.
+ */
+export function isCliUpdateCheckDue(options: {
+  packageName: string;
+  currentVersion: string;
+  homeDir?: string;
+  cachePath?: string;
+  checkIntervalMs?: number;
+  now?: () => number;
+}): boolean {
+  const now = options.now ?? Date.now;
+  const homeDir = options.homeDir ?? homedir();
+  const cachePath = options.cachePath ?? defaultCachePath(homeDir);
+  const checkIntervalMs = options.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
+  try {
+    const entry = readCache(cachePath)[options.packageName];
+    if (!entry) return true;
+    const age = now() - (entry.checkedAt || 0);
+    if (!(age >= 0) || age >= checkIntervalMs) return true;
+    if (!entry.latestVersion) return true;
+    return isNewerVersion(entry.latestVersion, options.currentVersion);
+  } catch {
+    return true;
+  }
+}
+
 async function defaultConfirm(message: string): Promise<boolean> {
   process.stdout.write(`${message} (Y/n): `);
   const rl = createInterface({ input: process.stdin });
@@ -278,7 +319,13 @@ async function defaultConfirm(message: string): Promise<boolean> {
   }
 }
 
-function defaultInstall(opts: {
+/**
+ * Install `packageName@version` globally with the detected package manager.
+ * Exported so the worker's idle self-update path can wrap the install (it
+ * re-checks its opt-out between the registry check and the install) while
+ * reusing the exact command the interactive flow runs.
+ */
+export function installGlobalCli(opts: {
   packageManager: "npm" | "bun";
   packageName: string;
   version: string;
@@ -290,6 +337,8 @@ function defaultInstall(opts: {
       : spawnSync("npm", ["install", "-g", spec], { stdio: "inherit", encoding: "utf8" });
   return result.status === 0;
 }
+
+const defaultInstall = installGlobalCli;
 
 function defaultReexec(argv: string[]): void {
   // argv[0] is the runtime (node/bun); argv.slice(1) is the script + user args.
@@ -377,6 +426,7 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
     }
 
     const autoUpdate =
+      config.autoInstall === true ||
       env.DEVINTERN_AUTO_UPDATE === "1" ||
       env.DEVINTERN_AUTO_UPDATE === "true" ||
       (config.autoUpdateEnv != null &&
@@ -402,9 +452,13 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
       }
       shouldInstall = true;
     } else if (autoUpdate) {
-      log(
-        `⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
-      );
+      if (config.autoInstall === true) {
+        log(`⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion}...`);
+      } else {
+        log(
+          `⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
+        );
+      }
       shouldInstall = true;
     } else {
       // Safe default for non-interactive: never mutate the global install.

@@ -219,4 +219,73 @@ describe("TaskSupervisor", () => {
     gates.forEach((gate) => gate.resolve());
     await Promise.all(jobs);
   });
+
+  test("inFlightCount reports running jobs only", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    expect(supervisor.inFlightCount()).toBe(0);
+    const gate = deferred<void>();
+    const job = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+        },
+      }),
+    );
+    await Promise.resolve();
+    expect(supervisor.inFlightCount()).toBe(1);
+    gate.resolve();
+    await job;
+    expect(supervisor.inFlightCount()).toBe(0);
+  });
+
+  test("holdAdmissions rejects new work without interrupting running jobs, and resume re-admits", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const gate = deferred<void>();
+    let finished = false;
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+          finished = true;
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    supervisor.holdAdmissions();
+
+    await expect(
+      supervisor.schedule(request({ id: "held", repo: "repo", run: async () => undefined })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    gate.resolve();
+    await running;
+    // The held-period job kept running to completion; nothing was aborted.
+    expect(finished).toBe(true);
+
+    // admissions are still closed while the running job was in flight
+    await expect(
+      supervisor.schedule(request({ id: "still-held", repo: "repo", run: async () => undefined })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    supervisor.resume();
+    const admitted = await supervisor.schedule(
+      request({ id: "after-resume", repo: "repo", run: async () => "ran" }),
+    );
+    expect(admitted).toBe("ran");
+  });
+
+  test("resume after a drain re-admits new work", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    await supervisor.drain();
+    supervisor.resume();
+    const result = await supervisor.schedule(
+      request({ id: "post-drain", repo: "repo", run: async () => "ran" }),
+    );
+    expect(result).toBe("ran");
+  });
 });

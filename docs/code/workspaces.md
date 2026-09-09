@@ -72,6 +72,9 @@ repo = "frontend"
 project = "WEB"
 labels = ["frontend"]
 
+[worker]
+auto_update = true           # false disables the worker's idle CLI self-update
+
 [worker.schedule]
 active = ["22:00-06:00"]     # optional quiet hours: drain new tasks only at night
 blocked = []                 # subtract from active windows (conflicts resolve to quiet)
@@ -99,6 +102,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
+- `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
@@ -264,7 +268,7 @@ While the daemon is running you can request one immediate drain (for example whi
 
 The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
 
-- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, conflict-resolution mode/schedules, and `[worker].auto_update` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
 - **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.

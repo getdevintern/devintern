@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   detectInstallKind,
   fetchLatestVersion,
+  isCliUpdateCheckDue,
   isNewerVersion,
   maybeOfferCliUpdate,
   parseSemver,
@@ -275,6 +276,64 @@ describe("maybeOfferCliUpdate", () => {
     expect(reexeced).toBe(true);
   });
 
+  test("autoInstall installs without a prompt or env opt-in", async () => {
+    let installed = false;
+    let reexeced = false;
+    const logs: string[] = [];
+
+    const result = await maybeOfferCliUpdate({
+      packageName: "@getdevintern/code",
+      binName: "devintern",
+      currentVersion: "1.0.0",
+      isInteractive: false,
+      autoInstall: true,
+      installKind: "bun-global",
+      cachePath: join(tempDir(), "cache.json"),
+      checkIntervalMs: 0,
+      fetchFn: async () => new Response(JSON.stringify({ version: "1.4.0" }), { status: 200 }),
+      installFn: async () => {
+        installed = true;
+        return true;
+      },
+      reexecFn: () => {
+        reexeced = true;
+      },
+      log: (m) => logs.push(m),
+    });
+
+    expect(result).toBe("updated");
+    expect(installed).toBe(true);
+    expect(reexeced).toBe(true);
+    expect(logs.some((line) => line.includes("1.4.0"))).toBe(true);
+    expect(logs.some((line) => line.includes("Non-interactive"))).toBe(false);
+  });
+
+  test("autoInstall still honors the no-update env opt-out", async () => {
+    let installed = false;
+
+    const result = await maybeOfferCliUpdate({
+      packageName: "@getdevintern/code",
+      binName: "devintern",
+      currentVersion: "1.0.0",
+      isInteractive: false,
+      autoInstall: true,
+      installKind: "npm-global",
+      noUpdateEnv: "DEVINTERN_NO_UPDATE",
+      env: { DEVINTERN_NO_UPDATE: "1" },
+      cachePath: join(tempDir(), "cache.json"),
+      checkIntervalMs: 0,
+      fetchFn: async () => new Response(JSON.stringify({ version: "1.5.0" }), { status: 200 }),
+      installFn: async () => {
+        installed = true;
+        return true;
+      },
+      log: () => {},
+    });
+
+    expect(result).toBe("skipped");
+    expect(installed).toBe(false);
+  });
+
   test("respects check interval cache without refetching", async () => {
     const dir = tempDir();
     const cachePath = join(dir, "cache.json");
@@ -320,5 +379,86 @@ describe("maybeOfferCliUpdate", () => {
       fetchFn: async () => new Response(JSON.stringify({ version: "9.0.0" }), { status: 200 }),
     });
     expect(result).toBe("skipped");
+  });
+});
+
+describe("isCliUpdateCheckDue", () => {
+  test("due when the cache file is missing", () => {
+    expect(
+      isCliUpdateCheckDue({
+        packageName: "@getdevintern/code",
+        currentVersion: "1.0.0",
+        cachePath: join(tempDir(), "absent.json"),
+      }),
+    ).toBe(true);
+  });
+
+  test("not due while the cache is fresh and current", () => {
+    const cachePath = join(tempDir(), "cache.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        "@getdevintern/code": { checkedAt: 1_000, latestVersion: "1.0.0" },
+      }),
+    );
+    expect(
+      isCliUpdateCheckDue({
+        packageName: "@getdevintern/code",
+        currentVersion: "1.0.0",
+        cachePath,
+        checkIntervalMs: 60_000,
+        now: () => 31_000,
+      }),
+    ).toBe(false);
+  });
+
+  test("due once the check interval elapses", () => {
+    const cachePath = join(tempDir(), "cache.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        "@getdevintern/code": { checkedAt: 1_000, latestVersion: "1.0.0" },
+      }),
+    );
+    expect(
+      isCliUpdateCheckDue({
+        packageName: "@getdevintern/code",
+        currentVersion: "1.0.0",
+        cachePath,
+        checkIntervalMs: 60_000,
+        now: () => 61_000,
+      }),
+    ).toBe(true);
+  });
+
+  test("due when the cached latest version is newer (deferred update)", () => {
+    const cachePath = join(tempDir(), "cache.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        "@getdevintern/code": { checkedAt: 1_000, latestVersion: "2.0.0" },
+      }),
+    );
+    expect(
+      isCliUpdateCheckDue({
+        packageName: "@getdevintern/code",
+        currentVersion: "1.0.0",
+        cachePath,
+        checkIntervalMs: 60_000,
+        now: () => 31_000,
+      }),
+    ).toBe(true);
+  });
+
+  test("due when the cache is unreadable", () => {
+    const cachePath = join(tempDir(), "cache.json");
+    writeFileSync(cachePath, "not json at all");
+    expect(
+      isCliUpdateCheckDue({
+        packageName: "@getdevintern/code",
+        currentVersion: "1.0.0",
+        cachePath,
+      }),
+    ).toBe(true);
   });
 });

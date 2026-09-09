@@ -187,4 +187,73 @@ describe("createWorkerShutdownHandler", () => {
 
     expect(order).toEqual(["lock", "capture", "flush", "exit:0"]);
   });
+
+  test("finalExitCode runs after cleanup and can override the exit status", async () => {
+    const order: string[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => order.push("lock") },
+      flush: async () => {
+        order.push("flush");
+      },
+      finalExitCode: () => {
+        order.push("final");
+        return 1;
+      },
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    // The hook runs last (after the lock release), so a post-update successor
+    // spawn sees the workspace lock already released.
+    expect(order).toEqual(["lock", "flush", "final", "exit:1"]);
+  });
+
+  test("a void finalExitCode keeps the zero exit status", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => undefined,
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([0]);
+  });
+
+  test("a failing finalExitCode exits zero instead of crashing the handler", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => {
+        throw new Error("hook failed");
+      },
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([0]);
+  });
+
+  test("awaits an async finalExitCode before exiting", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: async () => 1,
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([1]);
+  });
 });
