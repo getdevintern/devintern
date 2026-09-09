@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Stale persisted active harness is re-pointed on startup (DEV-122)**: when the saved failover harness is no longer in the current `AGENT_HARNESS` chain (e.g. after editing or shortening it), the worker already fell back in memory but kept the removed name stored, repeating the `Persisted active harness "..." is not in the current AGENT_HARNESS chain` warning on every restart. The selected fallback — the highest-priority available entry, or the parked primary while every entry is still limited — is now written back to the queue database, so the warning appears once and later restarts stay quiet. Unchanged chains keep their existing failover/failback behavior
+
 ## [2.10.0] - 2026-09-08
 
 Worker convenience release: `worker init` can install and start the background service for you, agent reasoning effort is configurable across harnesses, every prepared worktree gets its dependencies installed, and the Sentry watcher stays quiet until it picks something up.
