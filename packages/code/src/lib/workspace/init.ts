@@ -42,6 +42,14 @@ ci_failure_fix = false
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"
 
+# Optional bounded host concurrency. This is throughput, not VM isolation:
+# concurrent jobs share ports, processes, Docker, caches, and linked Git data.
+# Uncomment all three lines to opt in.
+# [workspace.execution]
+# isolation = "best_effort_host"
+# max_concurrency = 4
+# max_concurrency_per_repo = 1
+
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, gitlab,
 # azure-devops, asana, trello, or markdown.

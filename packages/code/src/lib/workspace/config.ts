@@ -17,8 +17,23 @@ import { parseToml } from "./toml";
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
 
+/** Execution isolation available in the host-concurrency release. */
+export type WorkspaceExecutionIsolation = "best_effort_host";
+
+/** Workspace-wide agent admission settings. */
+export interface WorkspaceExecutionSettings {
+  /** Explicit acknowledgement that concurrent jobs share the host. */
+  isolation?: WorkspaceExecutionIsolation;
+  /** Maximum agent jobs admitted across the workspace. */
+  maxConcurrency: number;
+  /** Maximum disposable-worktree task jobs admitted for one repository. */
+  maxConcurrencyPerRepo: number;
+}
+
 /** Workspace-wide settings from the `[workspace]` table. */
 export interface WorkspaceSettings {
+  /** Agent execution and concurrency settings from `[workspace.execution]`. */
+  execution: WorkspaceExecutionSettings;
   /** Days before a leftover (failed-run) task worktree is swept. */
   worktreesTtlDays: number;
   /** Serve the local observability dashboard from the worker process. */
@@ -170,6 +185,8 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
 export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
+export const DEFAULT_MAX_CONCURRENCY = 1;
+export const DEFAULT_MAX_CONCURRENCY_PER_REPO = 1;
 
 /** Repo names double as directory names; keep them filesystem-safe. */
 const REPO_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -320,6 +337,42 @@ export function parseWorkspaceConfig(
   const errors: string[] = [];
 
   const workspaceTable = asTable(document.workspace, "[workspace]", errors);
+  const executionTable = asTable(workspaceTable.execution, "[workspace.execution]", errors);
+  const isolationRaw = readString(executionTable, "isolation", "[workspace.execution]", errors);
+  let isolation: WorkspaceExecutionIsolation | undefined;
+  if (isolationRaw === "best_effort_host") {
+    isolation = isolationRaw;
+  } else if (isolationRaw) {
+    errors.push(
+      '[workspace.execution].isolation must be "best_effort_host". Isolated execution is not available yet.',
+    );
+  }
+  const maxConcurrency =
+    readOptionalInteger(executionTable, "max_concurrency", "[workspace.execution]", errors, {
+      min: 1,
+      message: "[workspace.execution].max_concurrency must be a positive integer.",
+    }) ?? DEFAULT_MAX_CONCURRENCY;
+  const maxConcurrencyPerRepo =
+    readOptionalInteger(
+      executionTable,
+      "max_concurrency_per_repo",
+      "[workspace.execution]",
+      errors,
+      {
+        min: 1,
+        message: "[workspace.execution].max_concurrency_per_repo must be a positive integer.",
+      },
+    ) ?? DEFAULT_MAX_CONCURRENCY_PER_REPO;
+  if (maxConcurrencyPerRepo > maxConcurrency) {
+    errors.push(
+      "[workspace.execution].max_concurrency_per_repo cannot exceed [workspace.execution].max_concurrency.",
+    );
+  }
+  if ((maxConcurrency > 1 || maxConcurrencyPerRepo > 1) && !isolation) {
+    errors.push(
+      '[workspace.execution].isolation = "best_effort_host" is required when concurrency is greater than 1.',
+    );
+  }
   const worktreesTtlDays =
     readOptionalInteger(workspaceTable, "worktrees_ttl_days", "[workspace]", errors, {
       min: 1,
@@ -667,6 +720,11 @@ export function parseWorkspaceConfig(
 
   return {
     workspace: {
+      execution: {
+        isolation,
+        maxConcurrency,
+        maxConcurrencyPerRepo,
+      },
       worktreesTtlDays,
       dashboard,
       dashboardPort,

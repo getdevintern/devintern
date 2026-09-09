@@ -374,11 +374,6 @@ describe("createFleetTaskExecutor with live-reloaded config", () => {
       workspaceDir: root,
       skips: { record() {} } as unknown as import("../src/lib/workspace/state").RoutingSkipStore,
       repoManager,
-      repoLock: () =>
-        ({
-          acquire: () => ({ success: true, message: "" }),
-          release() {},
-        }) as never,
       runTask: async (_taskKey, args, opts) => {
         runs.push({ args, cwd: opts.cwd, env: opts.env });
         return true;

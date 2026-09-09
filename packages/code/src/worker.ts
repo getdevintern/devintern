@@ -28,6 +28,12 @@ export interface WorkerOptions {
   /** Called once after every configured event source starts successfully. */
   onStarted?: (acquirerNames: string[]) => Promise<void> | void;
   /**
+   * Starts mode-specific shutdown work before acquirers stop. The returned
+   * promise is awaited after they stop, allowing admission drains and
+   * acquirer cleanup to unblock each other.
+   */
+  beginShutdown?: () => Promise<void> | void;
+  /**
    * Mode-specific cleanup awaited after acquirers stop and before the worker
    * lock is released. A future execution supervisor uses this to settle jobs,
    * destroy sandboxes, and close its durable stores.
@@ -54,6 +60,7 @@ export interface WorkerShutdownDependencies {
   acquirers: Array<Pick<Acquirer, "name" | "stop">>;
   lock: Pick<LockManager, "release">;
   capture?: Pick<WorkerCaptureHandle, "stop"> | null;
+  beginShutdown?: () => Promise<void> | void;
   onShutdown?: () => Promise<void> | void;
   shutdownTimeoutMs?: number;
   flush?: () => Promise<void>;
@@ -109,6 +116,22 @@ export function createWorkerShutdownHandler(
     shuttingDown = true;
     console.log(`\n🛑 Received ${signal}, shutting down worker...`);
 
+    // Start admission shutdown before stopping acquirers. Do not await it
+    // yet: an admitted automation holds its supervisor slot until its
+    // acquirer terminates the child and releases the run context.
+    let beginningShutdown: Promise<void> | null = null;
+    if (dependencies.beginShutdown) {
+      try {
+        beginningShutdown = Promise.resolve(dependencies.beginShutdown());
+      } catch (error) {
+        beginningShutdown = Promise.reject(error);
+      }
+      // Attach a handler immediately so a synchronous failure cannot become
+      // unhandled while an acquirer is still stopping. The original promise
+      // remains rejected and is reported by the bounded hook below.
+      void beginningShutdown.catch(() => undefined);
+    }
+
     for (const acquirer of dependencies.acquirers) {
       try {
         await acquirer.stop();
@@ -117,10 +140,13 @@ export function createWorkerShutdownHandler(
       }
     }
 
-    if (dependencies.onShutdown) {
+    if (beginningShutdown || dependencies.onShutdown) {
       const timeoutMs = dependencies.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
       try {
-        await runShutdownHook(dependencies.onShutdown, timeoutMs);
+        await runShutdownHook(async () => {
+          await beginningShutdown;
+          await dependencies.onShutdown?.();
+        }, timeoutMs);
       } catch (error) {
         console.warn(`⚠️  Shutdown hook failed: ${(error as Error).message}`);
       }
@@ -215,6 +241,7 @@ export async function startWorker(
     acquirers,
     lock,
     capture,
+    beginShutdown: options.beginShutdown,
     onShutdown: options.onShutdown,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
   });

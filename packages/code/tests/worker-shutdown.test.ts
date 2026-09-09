@@ -57,6 +57,40 @@ describe("createWorkerShutdownHandler", () => {
     ]);
   });
 
+  test("starts an admission drain before stopping acquirers and awaits it afterward", async () => {
+    const order: string[] = [];
+    let finishDrain!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled gate for shutdown ordering.
+    const drain = new Promise<void>((resolve) => {
+      finishDrain = resolve;
+    });
+    const handler = createWorkerShutdownHandler({
+      acquirers: [
+        {
+          name: "scheduled",
+          stop: () => {
+            order.push("stop");
+            finishDrain();
+          },
+        },
+      ],
+      beginShutdown: () => {
+        order.push("begin");
+        return drain;
+      },
+      onShutdown: () => {
+        order.push("hook");
+      },
+      lock: { release: () => order.push("lock") },
+      flush: async () => undefined,
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    expect(order).toEqual(["begin", "stop", "hook", "lock", "exit:0"]);
+  });
+
   test("continues cleanup when an acquirer and shutdown hook fail", async () => {
     const order: string[] = [];
     const handler = createWorkerShutdownHandler({
