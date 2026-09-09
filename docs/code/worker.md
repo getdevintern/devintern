@@ -294,6 +294,8 @@ To turn automatic conflict resolution off entirely — no detection, no queuing,
 
 Set `[workspace].ci_failure_fix = true` to watch GitHub Actions and commit statuses on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.
 
+For experimental GitLab code-host profiles, the same switch watches pipelines, required jobs, job traces, and external commit statuses on registered MRs. `allow_failure` jobs and manual, skipped, or canceled work do not trigger repair; unavailable or incomplete CI information remains unknown instead of being treated as success. GitLab CI is polling-only and uses the configured code-host token and instance.
+
 The watch is continuous while the worker and PR remain open, not just when the PR is created. It runs once at worker startup and then every `[defaults].poll_interval` seconds, survives restarts through the workspace database, and stops when the PR closes, its repository leaves the workspace, or the setting is disabled. Only PRs recorded in the local `agent_prs` registry are watched; similarly named PRs created elsewhere are not discovered automatically.
 
 Only completed `failure` and `timed_out` workflow runs, plus failed legacy commit statuses, trigger repair. The worker waits while any workflow is pending before declaring CI green, deduplicates successful repair runs by head SHA and workflow-run or status ID, and retries failed/no-op invocations up to `CI_FIX_MAX_ATTEMPTS` (default 3). After exhaustion it comments on the PR and waits for a human push or a green result before resetting the budget. Failing Actions job logs are reduced to an error-focused excerpt.

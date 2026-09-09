@@ -69,6 +69,91 @@ function clientFor(
 }
 
 describe("GitLabReviewsClient", () => {
+  test("normalizes only definitive required GitLab CI failures", async () => {
+    const fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/projects/acme%2Fwidgets")) {
+        return json({ id: 42, path_with_namespace: "acme/widgets" });
+      }
+      if (url.includes("/pipelines?") && !url.includes("/jobs?")) {
+        return json([
+          { id: 8, status: "failed" },
+          { id: 9, status: "canceled" },
+        ]);
+      }
+      if (url.includes("/pipelines/8/jobs?")) {
+        return json([
+          { id: 11, name: "test", status: "failed", allow_failure: false },
+          { id: 12, name: "lint advisory", status: "failed", allow_failure: true },
+          { id: 13, name: "deploy", status: "manual", allow_failure: false },
+        ]);
+      }
+      if (url.includes("/pipelines/9/jobs?")) {
+        return json([
+          { id: 14, name: "skipped", status: "skipped" },
+          { id: 15, name: "canceled", status: "canceled" },
+        ]);
+      }
+      if (url.includes("/repository/commits/abc123/statuses?")) {
+        return json([
+          { id: 11, name: "test", status: "failed", allow_failure: false },
+          { id: 21, name: "external/security", status: "failed", allow_failure: false },
+          { id: 22, name: "external/advisory", status: "failed", allow_failure: true },
+        ]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const client = new GitLabReviewsClient("token", "https://gitlab.com", { fetch });
+
+    const snapshot = await client.getCiSnapshot("acme/widgets", "abc123");
+
+    expect(snapshot.state).toBe("failure");
+    expect(snapshot.failures.map((failure) => failure.name)).toEqual(["test", "external/security"]);
+    expect(snapshot.jobIds).toEqual([11]);
+  });
+
+  test("does not interpret canceled, skipped, manual, or absent CI as success", async () => {
+    const fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/projects/acme%2Fwidgets")) {
+        return json({ id: 42, path_with_namespace: "acme/widgets" });
+      }
+      if (url.includes("/pipelines?")) return json([{ id: 9, status: "canceled" }]);
+      if (url.includes("/pipelines/9/jobs?")) {
+        return json([
+          { id: 13, name: "deploy", status: "manual" },
+          { id: 14, name: "skipped", status: "skipped" },
+        ]);
+      }
+      if (url.includes("/statuses?")) return json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const client = new GitLabReviewsClient("token", "https://gitlab.com", { fetch });
+
+    await expect(client.getCiSnapshot("acme/widgets", "abc123")).resolves.toEqual({
+      state: "unknown",
+      failures: [],
+      jobIds: [],
+    });
+  });
+
+  test("collects bounded failed-job traces without failing when one is unavailable", async () => {
+    const fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/projects/acme%2Fwidgets")) {
+        return json({ id: 42, path_with_namespace: "acme/widgets" });
+      }
+      if (url.endsWith("/jobs/11/trace")) return new Response("ERROR: tests failed");
+      if (url.endsWith("/jobs/12/trace")) return new Response("erased", { status: 404 });
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const client = new GitLabReviewsClient("token", "https://gitlab.com", { fetch });
+
+    await expect(client.getJobTraces("acme/widgets", [11, 12])).resolves.toBe(
+      "## Job 11\nERROR: tests failed",
+    );
+  });
+
   test("normalizes unresolved human inline and top-level feedback", async () => {
     const { client } = clientFor([
       {

@@ -94,7 +94,7 @@ This workflow:
 
 ## Experimental merge-request creation
 
-This first code-host release creates and records merge requests. Manual `address-review` support is delivered in the next stacked phase. GitLab review polling, conflict repair, CI repair, broad `@mention` discovery, and GitLab webhooks are not enabled yet.
+GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, and CI repair are available. Broad `@mention` discovery, scheduled GitLab conflict windows, and GitLab webhooks are not enabled yet.
 
 Add a separate code-host profile to `.devintern-code/.env`:
 
@@ -163,7 +163,7 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Manual `address-review` | Experimental; same-project writable branches only |
 | Registered-MR polling | Experimental; DevIntern-created MRs only |
 | Conflict/base synchronization | Experimental; `auto` mode and manual command |
-| CI repair | Deferred |
+| CI repair | Experimental; registered MRs and polling only |
 | Direct project webhooks | Deferred |
 | Repository-wide mentions and hosted relay | Not currently planned |
 
@@ -213,6 +213,12 @@ devintern resolve-conflicts https://gitlab.com/group/project/-/merge_requests/12
 ```
 
 The resolver fetches the actual target-branch tip, revalidates the MR state and head immediately before publication, and uses a normal fast-forward push—never a force push. Concurrent branch movement is deferred safely. Scheduled GitLab conflict windows remain deferred; a workspace configured with `conflict_resolution = "scheduled"` records no GitLab synchronization work until provider-neutral scheduling support lands. Manual resolution remains available in every mode.
+
+## Repair GitLab CI failures
+
+When `[workspace].ci_failure_fix = true`, the worker polls pipelines, jobs, and external commit statuses for registered GitLab MRs. It invokes the existing guarded `address-review --ci-feedback` repair path only for definitive required failures. Failed jobs marked `allow_failure` and manual, skipped, or canceled work are ignored. Missing, inaccessible, incomplete, or otherwise unrecognized CI data remains unknown—it is never counted as green.
+
+Failure metadata and bounded excerpts from up to five failed job traces are passed to the agent. Before the repair begins, the worker revalidates the MR head SHA and the same-project writable-branch guard. Successful events deduplicate durably; unsuccessful attempts retain the existing `CI_FIX_MAX_ATTEMPTS` budget and post a GitLab MR note on exhaustion. A new head SHA grants a fresh retry budget.
 
 ## Batch processing with --query
 

@@ -42,6 +42,8 @@ export interface AddressReviewOptions {
   verbose?: boolean;
   /** Internal worker mode: fix the failures described in this JSON file. */
   ciFeedbackPath?: string;
+  /** Internal worker guard: refuse stale feedback after the MR head moves. */
+  expectedHeadSha?: string;
 }
 
 function readCiFeedbackFile(filePath: string): CiFailureFeedback {
@@ -411,9 +413,6 @@ export async function addressReview(
     }
     pr = githubPr;
   } else {
-    if (options.ciFeedbackPath) {
-      throw new Error("GitLab CI repair is deferred to the CI-repair phase.");
-    }
     const config = resolveGitLabCodeHostConfig(identity.instanceUrl);
     if (!config.ok) throw new Error(config.message);
     gitlabClient = new GitLabReviewsClient(config.token, config.instanceUrl, {
@@ -433,6 +432,11 @@ export async function addressReview(
   console.log(`   Title: ${pr.title}`);
   console.log(`   Branch: ${pr.head.ref}`);
   console.log(`   State: ${pr.state}`);
+  if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
+    throw new Error(
+      `${identity.provider === "gitlab" ? "MR" : "PR"} head changed before CI repair started; refusing stale feedback.`,
+    );
+  }
 
   const ciFeedback = options.ciFeedbackPath
     ? readCiFeedbackFile(options.ciFeedbackPath)
@@ -1087,10 +1091,10 @@ export async function addressReview(
 
     console.log(
       ciFeedback
-        ? `\n✅ Successfully pushed a CI fix for PR #${prNumber}`
+        ? `\n✅ Successfully pushed a CI fix for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`
         : `\n✅ Successfully addressed review for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`,
     );
-    console.log(`   View PR: ${prUrl}`);
+    console.log(`   View ${identity.provider === "gitlab" ? "MR" : "PR"}: ${prUrl}`);
     endRun("succeeded");
     return;
   } catch (error) {
