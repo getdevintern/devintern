@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   detectInstallKind,
   fetchLatestVersion,
+  installGlobalCliAsync,
   isCliUpdateCheckDue,
   isNewerVersion,
   maybeOfferCliUpdate,
@@ -379,6 +381,117 @@ describe("maybeOfferCliUpdate", () => {
       fetchFn: async () => new Response(JSON.stringify({ version: "9.0.0" }), { status: 200 }),
     });
     expect(result).toBe("skipped");
+  });
+});
+
+describe("installGlobalCliAsync", () => {
+  type SpawnFn = typeof import("node:child_process").spawn;
+
+  function fakeSpawn(
+    outcome: { exitCode?: number | null; error?: Error },
+    captured: Array<{ command: string; args: string[] }>,
+  ): SpawnFn {
+    return ((command: string, args: string[]) => {
+      captured.push({ command, args });
+      return {
+        once: (event: string, handler: (...args: unknown[]) => void) => {
+          queueMicrotask(() => {
+            if (event === "error" && outcome.error) handler(outcome.error);
+            if (event === "exit" && !outcome.error) handler(outcome.exitCode ?? null);
+          });
+        },
+      } as unknown as ChildProcess;
+    }) as unknown as SpawnFn;
+  }
+
+  test("runs npm install -g and resolves true on exit 0", async () => {
+    const captured: Array<{ command: string; args: string[] }> = [];
+    const ok = await installGlobalCliAsync({
+      packageManager: "npm",
+      packageName: "@getdevintern/code",
+      version: "1.2.3",
+      spawnFn: fakeSpawn({ exitCode: 0 }, captured),
+    });
+    expect(ok).toBe(true);
+    expect(captured).toEqual([
+      { command: "npm", args: ["install", "-g", "@getdevintern/code@1.2.3"] },
+    ]);
+  });
+
+  test("resolves false on a non-zero exit", async () => {
+    const captured: Array<{ command: string; args: string[] }> = [];
+    const ok = await installGlobalCliAsync({
+      packageManager: "bun",
+      packageName: "@getdevintern/pm",
+      version: "2.0.0",
+      spawnFn: fakeSpawn({ exitCode: 1 }, captured),
+    });
+    expect(ok).toBe(false);
+    expect(captured).toEqual([
+      { command: "bun", args: ["install", "-g", "@getdevintern/pm@2.0.0"] },
+    ]);
+  });
+
+  test("resolves false when the package manager cannot be spawned", async () => {
+    const ok = await installGlobalCliAsync({
+      packageManager: "npm",
+      packageName: "@getdevintern/code",
+      version: "1.2.3",
+      spawnFn: fakeSpawn({ error: new Error("spawn ENOENT") }, []),
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("resolves false when spawn throws synchronously", async () => {
+    const ok = await installGlobalCliAsync({
+      packageManager: "bun",
+      packageName: "@getdevintern/code",
+      version: "1.2.3",
+      spawnFn: (() => {
+        throw new Error("bad arguments");
+      }) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("resolves via 'close' when the child never emits 'exit'", async () => {
+    const captured: Array<{ command: string; args: string[] }> = [];
+    const ok = await installGlobalCliAsync({
+      packageManager: "npm",
+      packageName: "@getdevintern/code",
+      version: "1.2.3",
+      spawnFn: ((command: string, args: string[]) => {
+        captured.push({ command, args });
+        return {
+          once: (event: string, handler: (...args: unknown[]) => void) => {
+            if (event === "close") queueMicrotask(() => handler(0));
+          },
+        } as unknown as ChildProcess;
+      }) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(true);
+    expect(captured).toEqual([
+      { command: "npm", args: ["install", "-g", "@getdevintern/code@1.2.3"] },
+    ]);
+  });
+
+  test("kills a hung install and resolves false once the timeout elapses", async () => {
+    let killSignal: string | undefined;
+    const ok = await installGlobalCliAsync({
+      packageManager: "bun",
+      packageName: "@getdevintern/code",
+      version: "1.2.3",
+      timeoutMs: 1,
+      spawnFn: ((_command: string, _args: string[]) =>
+        ({
+          once: () => undefined,
+          kill: (signal: string) => {
+            killSignal = signal;
+          },
+        }) as unknown as ChildProcess) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(false);
+    expect(killSignal).toBe("SIGKILL");
   });
 });
 

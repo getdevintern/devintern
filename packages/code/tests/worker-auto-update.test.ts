@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,8 @@ import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-superv
 import type { TaskSupervisor } from "../src/lib/task-supervisor";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
+import { toRoutableTask } from "../src/lib/workspace/router";
+import type { RoutingSkipStore } from "../src/lib/workspace/state";
 import {
   createIdleWorkerAutoUpdater,
   runningUnderServiceManager,
@@ -14,6 +17,10 @@ import {
   WORKER_AUTO_UPDATE_TICK_MS,
 } from "../src/lib/workspace/worker-auto-update";
 import type { IdleAutoUpdaterOptions } from "../src/lib/workspace/worker-auto-update";
+import { createFleetTaskExecutor } from "../src/lib/workspace/workspace-worker";
+import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+
+type SpawnFn = typeof import("node:child_process").spawn;
 
 const GLOBAL_ARGV = [
   "bun",
@@ -110,7 +117,7 @@ describe("createIdleWorkerAutoUpdater", () => {
     await updater.tick();
     expect(checks).toBe(0);
     expect(updater.isRestartPending()).toBe(false);
-    expect(updater.finalExitCode()).toBeUndefined();
+    expect(await updater.finalExitCode()).toBeUndefined();
   });
 
   test("skips when [worker] auto_update is false, and resumes when re-enabled", async () => {
@@ -276,6 +283,71 @@ describe("createIdleWorkerAutoUpdater", () => {
       run: async () => "ran",
     });
     expect(result).toBe("ran");
+  });
+
+  test("a held-off task is deferred during the check and re-offered to completion after the skip", async () => {
+    // Production-path integration: the real supervisor + updater hold, the
+    // real fleet task executor's JobNotStartedError → "deferred" mapping,
+    // and the poll-cycle re-offer that runs the task once the hold lifts.
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    const root = tempDir();
+    const config = configWith();
+    const runs: string[] = [];
+    const executor = createFleetTaskExecutor({
+      config,
+      workspaceDir: root,
+      skips: { record() {} } as unknown as RoutingSkipStore,
+      repoManager: {
+        async ensureBareClone() {
+          return root;
+        },
+        async fetch() {},
+        async ensureBaseWorktree() {
+          return root;
+        },
+        async createTaskWorktree(_repo: unknown, taskKey: string) {
+          return join(root, "worktrees", taskKey.toLowerCase());
+        },
+        async removeTaskWorktree() {},
+        async sweepStaleWorktrees() {
+          return [];
+        },
+      } as unknown as RepoManagerLike,
+      supervisor,
+      runTask: async (taskKey) => {
+        runs.push(taskKey);
+        return true;
+      },
+    });
+    let releaseCheck!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled gate for the update window.
+    const checkGate = new Promise<void>((resolve) => {
+      releaseCheck = resolve;
+    });
+    const updater = createIdleWorkerAutoUpdater(
+      optionsWith({
+        config,
+        supervisor,
+        runCheck: async () => {
+          await checkGate;
+          return "skipped";
+        },
+      }),
+    );
+
+    // The daily check holds admissions; the task poll's offer during the
+    // update window comes back deferred — rejected, but never failed.
+    const tick = updater.tick();
+    const routable = toRoutableTask({ key: "PROJ-7", components: [], labels: ["backend"] });
+    expect(await executor("PROJ-7", routable)).toBe("deferred");
+    expect(runs).toEqual([]);
+
+    // The skip releases the hold; the next poll re-offers the same task
+    // and it completes.
+    releaseCheck();
+    await tick;
+    expect(await executor("PROJ-7", routable)).toBe(true);
+    expect(runs).toEqual(["PROJ-7"]);
   });
 
   test("a mid-check opt-out flips the install into a skip", async () => {
@@ -457,9 +529,9 @@ describe("createIdleWorkerAutoUpdater", () => {
         underServiceManager: () => true,
       }),
     );
-    expect(updater.finalExitCode()).toBeUndefined();
+    expect(await updater.finalExitCode()).toBeUndefined();
     await updater.tick();
-    expect(updater.finalExitCode()).toBe(1);
+    expect(await updater.finalExitCode()).toBe(1);
   });
 
   test("finalExitCode spawns a successor when no service manager is involved", async () => {
@@ -476,7 +548,7 @@ describe("createIdleWorkerAutoUpdater", () => {
       }),
     );
     await updater.tick();
-    expect(updater.finalExitCode()).toBe(0);
+    expect(await updater.finalExitCode()).toBe(0);
     expect(spawned).toBe(1);
   });
 
@@ -486,11 +558,87 @@ describe("createIdleWorkerAutoUpdater", () => {
         config: configWith(),
         runCheck: async () => "updated",
         underServiceManager: () => false,
-        spawnSuccessor: () => false,
+        spawnSuccessor: async () => false,
       }),
     );
     await updater.tick();
-    expect(updater.finalExitCode()).toBe(1);
+    expect(await updater.finalExitCode()).toBe(1);
+  });
+
+  test("the second update cycle of a handover chain hands over again instead of exiting non-zero", async () => {
+    // Cycle 1: a plain-terminal worker installs an update and spawns its
+    // successor; the real spawnWorkerSuccessor tags it DEVINTERN_HANDOVER=1.
+    let successorEnv: NodeJS.ProcessEnv | undefined;
+    const handedOver = await spawnWorkerSuccessor({
+      execPath: "/runtime/bun",
+      argv: GLOBAL_ARGV,
+      env: {},
+      spawnFn: ((_path: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+        successorEnv = opts.env;
+        return {
+          pid: 4242,
+          unref: () => undefined,
+          once: (event: string, handler: () => void) => {
+            if (event === "spawn") queueMicrotask(handler);
+          },
+        } as unknown as ChildProcess;
+      }) as unknown as SpawnFn,
+    });
+    expect(handedOver).toBe(true);
+    expect(successorEnv?.DEVINTERN_HANDOVER).toBe("1");
+
+    // Cycle 2: once the parent exited, macOS reparented the detached
+    // successor to launchd (ppid 1). Without the tag the ppid heuristic
+    // would read that as service-manager supervision and exit 1 for a
+    // restart that never comes, leaving the daemon down. With it, the
+    // worker must take the self-spawn path again.
+    let successorsSpawned = 0;
+    const updater = createIdleWorkerAutoUpdater(
+      optionsWith({
+        config: configWith(),
+        env: successorEnv,
+        runCheck: async () => "updated",
+        underServiceManager: () => runningUnderServiceManager(successorEnv ?? {}, "darwin", 1),
+        spawnSuccessor: () => {
+          successorsSpawned++;
+          return true;
+        },
+      }),
+    );
+    await updater.tick();
+    expect(updater.isRestartPending()).toBe(true);
+    expect(await updater.finalExitCode()).toBe(0);
+    expect(successorsSpawned).toBe(1);
+  });
+
+  test("a queued-but-unstarted job counts as busy for a custom supervisor", async () => {
+    let checks = 0;
+    let held = false;
+    const supervisor: TaskSupervisor = {
+      schedule: () => Promise.reject(new JobNotStartedError()),
+      updateLimits: () => undefined,
+      drain: async () => undefined,
+      holdAdmissions: () => {
+        held = true;
+      },
+      resume: () => undefined,
+      inFlightCount: () => 0,
+      queuedCount: () => 2,
+    };
+    const updater = createIdleWorkerAutoUpdater(
+      optionsWith({
+        config: configWith(),
+        supervisor,
+        runCheck: async () => {
+          checks++;
+          return "skipped";
+        },
+      }),
+    );
+
+    await updater.tick();
+    expect(checks).toBe(0);
+    expect(held).toBe(false);
   });
 
   test("start/stop are idempotent and the tick timer never blocks exit", () => {
@@ -539,6 +687,27 @@ describe("runningUnderServiceManager", () => {
     expect(runningUnderServiceManager({ SYSTEMD_EXEC_PID: "1234" })).toBe(true);
     expect(runningUnderServiceManager({ DEVINTERN_SERVICE: "1" })).toBe(true);
   });
+
+  test("detects a launchd parent on darwin", () => {
+    expect(runningUnderServiceManager({}, "darwin", 1)).toBe(true);
+    expect(runningUnderServiceManager({}, "darwin", 4298)).toBe(false);
+    expect(runningUnderServiceManager({}, "linux", 1)).toBe(false);
+  });
+
+  test("a handover successor is never manager-supervised, even when reparented to pid 1", () => {
+    // A detached successor is reparented to launchd (pid 1) on macOS once its
+    // parent exits; the handover tag must suppress the ppid heuristic so the
+    // successor self-spawns instead of exiting for a restart that never comes.
+    expect(runningUnderServiceManager({ DEVINTERN_HANDOVER: "1" }, "darwin", 1)).toBe(false);
+    expect(runningUnderServiceManager({ DEVINTERN_HANDOVER: "1" }, "darwin", 4298)).toBe(false);
+    // Explicit manager markers stay authoritative for tagged processes too.
+    expect(
+      runningUnderServiceManager({ DEVINTERN_HANDOVER: "1", DEVINTERN_SERVICE: "1" }, "darwin", 1),
+    ).toBe(true);
+    expect(
+      runningUnderServiceManager({ DEVINTERN_HANDOVER: "1", INVOCATION_ID: "abc" }, "darwin", 1),
+    ).toBe(true);
+  });
 });
 
 describe("spawnWorkerSuccessor", () => {
@@ -555,20 +724,51 @@ describe("spawnWorkerSuccessor", () => {
     console.warn = originalWarn;
   });
 
-  test("spawns the runtime with the original script args, detached and unref'd", () => {
+  interface FakeChild {
+    pid: number;
+    unref: () => undefined;
+    once: (event: string, handler: (error?: Error) => void) => void;
+  }
+
+  /**
+   * Build a spawnFn returning a fake child whose listeners are registered
+   * synchronously; `emit` then fires one of them from a microtask.
+   */
+  const fakeChildSpawn =
+    (emit: (fire: (event: string, error?: Error) => void) => void) =>
+    (path: string, args: string[], opts: { detached: boolean }): ChildProcess => {
+      void path;
+      void args;
+      void opts;
+      const handlers = new Map<string, (error?: Error) => void>();
+      const child: FakeChild = {
+        pid: 4321,
+        unref: () => undefined,
+        once: (event, handler) => {
+          handlers.set(event, handler);
+        },
+      };
+      queueMicrotask(() =>
+        emit((event, error) => {
+          const handler = handlers.get(event);
+          if (event === "spawn") handler?.();
+          else handler?.(error);
+        }),
+      );
+      return child as unknown as ChildProcess;
+    };
+
+  test("spawns the runtime with the original script args, detached and unref'd", async () => {
     const spawned: Array<{ execPath: string; args: string[]; detached: boolean }> = [];
-    const ok = spawnWorkerSuccessor({
+    const ok = await spawnWorkerSuccessor({
       execPath: "/runtime/bun",
       argv: ["bun", "/global/dist/index.js", "worker", "--workspace", "/tmp/ws/workspace.toml"],
       env: {},
       spawnFn: ((path: string, args: string[], opts: { detached: boolean }) => {
         spawned.push({ execPath: path, args, detached: opts.detached });
-        return {
-          pid: 4321,
-          unref: () => undefined,
-          once: () => undefined,
-        } as unknown as import("node:child_process").ChildProcess;
-      }) as unknown as typeof import("node:child_process").spawn,
+        return fakeChildSpawn(() => undefined)(path, args, opts);
+      }) as unknown as SpawnFn,
+      signalFn: () => true,
     });
     expect(ok).toBe(true);
     expect(spawned).toEqual([
@@ -580,13 +780,102 @@ describe("spawnWorkerSuccessor", () => {
     ]);
   });
 
-  test("returns false when spawning throws", () => {
+  test("tags the successor env with DEVINTERN_HANDOVER=1, preserving the parent env", async () => {
+    let childEnv: NodeJS.ProcessEnv | undefined;
+    const ok = await spawnWorkerSuccessor({
+      execPath: "/runtime/bun",
+      argv: GLOBAL_ARGV,
+      env: { DEVINTERN_NO_UPDATE: "1" },
+      spawnFn: ((_path: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+        childEnv = opts.env;
+        return {
+          pid: 4242,
+          unref: () => undefined,
+          once: (event: string, handler: () => void) => {
+            if (event === "spawn") queueMicrotask(handler);
+          },
+        } as unknown as ChildProcess;
+      }) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(true);
+    expect(childEnv?.DEVINTERN_HANDOVER).toBe("1");
+    expect(childEnv?.DEVINTERN_NO_UPDATE).toBe("1");
+  });
+
+  test("resolves true once the child reports a successful spawn", async () => {
+    const ok = await spawnWorkerSuccessor({
+      argv: GLOBAL_ARGV,
+      spawnFn: fakeChildSpawn((fire) => fire("spawn")) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(true);
+  });
+
+  test("resolves false when the child reports an async spawn error", async () => {
     const warns: string[] = [];
-    const ok = spawnWorkerSuccessor({
+    const ok = await spawnWorkerSuccessor({
+      argv: GLOBAL_ARGV,
+      spawnFn: fakeChildSpawn((fire) => fire("error", new Error("EAGAIN"))) as unknown as SpawnFn,
+      warn: (message) => warns.push(message),
+    });
+    expect(ok).toBe(false);
+    expect(warns.some((line) => line.includes("failed to start"))).toBe(true);
+  });
+
+  test("assumes success when the successor process is alive at the verdict wait", async () => {
+    const ok = await spawnWorkerSuccessor({
+      argv: GLOBAL_ARGV,
+      verifyTimeoutMs: 1,
+      spawnFn: (() =>
+        ({
+          pid: process.pid,
+          unref: () => undefined,
+          once: () => undefined,
+        }) as unknown as ChildProcess) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(true);
+  });
+
+  test("resolves false when the successor process is dead at the verdict wait", async () => {
+    const warns: string[] = [];
+    const esrch = Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    const ok = await spawnWorkerSuccessor({
+      argv: GLOBAL_ARGV,
+      verifyTimeoutMs: 1,
+      spawnFn: (() =>
+        ({
+          pid: 4242,
+          unref: () => undefined,
+          once: () => undefined,
+        }) as unknown as ChildProcess) as unknown as SpawnFn,
+      signalFn: (() => {
+        throw esrch;
+      }) as typeof process.kill,
+      warn: (message) => warns.push(message),
+    });
+    expect(ok).toBe(false);
+    expect(warns.some((line) => line.includes("not running"))).toBe(true);
+  });
+
+  test("resolves false when the successor never received a pid", async () => {
+    const ok = await spawnWorkerSuccessor({
+      argv: GLOBAL_ARGV,
+      verifyTimeoutMs: 1,
+      spawnFn: (() =>
+        ({
+          unref: () => undefined,
+          once: () => undefined,
+        }) as unknown as ChildProcess) as unknown as SpawnFn,
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("returns false when spawning throws", async () => {
+    const warns: string[] = [];
+    const ok = await spawnWorkerSuccessor({
       argv: GLOBAL_ARGV,
       spawnFn: (() => {
         throw new Error("spawn failed");
-      }) as unknown as typeof import("node:child_process").spawn,
+      }) as unknown as SpawnFn,
       warn: (message) => warns.push(message),
     });
     expect(ok).toBe(false);

@@ -35,8 +35,10 @@ export const DEFAULT_RELOAD_DEBOUNCE_MS = 300;
  *
  * The `worker` section is swapped too, so `[worker]` settings such as
  * `auto_update` apply live; startup-only keys it contains (today
- * `[worker.schedule]`) are guarded by the reloader's `validate` hook before
- * this function runs.
+ * `[worker.schedule]`) are startup-only because the daemon installs
+ * {@linkcode import("./workspace-worker").validateReloadedWorkspaceConfig}
+ * as the reloader's `validate` hook, which rejects them before this
+ * function runs.
  */
 export function applyWorkspaceConfig(target: WorkspaceConfig, next: WorkspaceConfig): void {
   target.workspace = next.workspace;

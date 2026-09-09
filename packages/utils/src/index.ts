@@ -5,6 +5,7 @@ export {
   detectInstallKind,
   fetchLatestVersion,
   installGlobalCli,
+  installGlobalCliAsync,
   isCliUpdateCheckDue,
   isNewerVersion,
   maybeOfferCliUpdate,

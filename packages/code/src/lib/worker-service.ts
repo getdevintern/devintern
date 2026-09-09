@@ -173,6 +173,10 @@ function escapeXml(value: string): string {
  *
  * Like the systemd unit, this does not redirect stdout/stderr: the worker
  * self-captures into the dashboard's log files (see `worker-capture.ts`).
+ *
+ * The definition always sets `DEVINTERN_SERVICE=1` so the worker knows a
+ * manager will restart it (launchd exports no identifying variables and the
+ * parent-process heuristic cannot be relied on for every setup).
  */
 export function renderLaunchdPlist(options: {
   execPath: string;
@@ -185,13 +189,12 @@ export function renderLaunchdPlist(options: {
   const runtimeArgument = options.runtimePath
     ? `    <string>${escapeXml(options.runtimePath)}</string>\n`
     : "";
-  const environment = options.environmentPath
-    ? `  <key>EnvironmentVariables</key>
+  const environment = `  <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>${escapeXml(options.environmentPath)}</string>
-  </dict>\n`
-    : "";
+${options.environmentPath ? `    <key>PATH</key>\n    <string>${escapeXml(options.environmentPath)}</string>\n` : ""}    <key>DEVINTERN_SERVICE</key>
+    <string>1</string>
+  </dict>
+`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- ${SERVICE_MANAGED_MARKER} -->

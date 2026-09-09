@@ -12,9 +12,9 @@
  *   busy window (or an interactive decline) left behind. After any attempt,
  *   the daily interval also applies again, so failures back off instead of
  *   retrying on every tick.
- * - "Idle" means the admission supervisor has zero in-flight jobs. When a
- *   check is due while busy, the worker waits for the next idle tick instead
- *   of interrupting work.
+ * - "Idle" means the admission supervisor has zero running and zero queued
+ *   jobs. When a check is due while busy, the worker waits for the next idle
+ *   tick instead of interrupting work.
  * - Once idle, admissions are held (queued agent jobs are deferred and
  *   retried on the next poll; running jobs are never aborted) so no new work
  *   starts during the check and install. A skip releases the hold; a
@@ -34,7 +34,7 @@
 import { spawn } from "node:child_process";
 import {
   detectInstallKind,
-  installGlobalCli,
+  installGlobalCliAsync,
   isCliUpdateCheckDue,
   maybeOfferCliUpdate,
   shouldSkipUpdateCheck,
@@ -51,6 +51,12 @@ const BUSY_LOG_INTERVAL_MS = 60 * 60 * 1000;
 /** Default minimum ms between registry checks (matches the CLI update cache). */
 const DEFAULT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How long the successor handover waits for the child's spawn/error verdict
+ * before assuming the spawn worked (spawn failures surface asynchronously).
+ */
+const SUCCESSOR_SPAWN_VERIFY_MS = 500;
+
 const PACKAGE_NAME = "@getdevintern/code";
 const BIN_NAME = "devintern";
 
@@ -61,7 +67,7 @@ export interface IdleAutoUpdaterOptions {
    * without a restart (see `applyWorkspaceConfig`).
    */
   config: WorkspaceConfig;
-  /** Admission supervisor; the in-flight job count is the idle signal. */
+  /** Admission supervisor; the running + queued job counts are the idle signal. */
   supervisor: TaskSupervisor;
   /** Running CLI version. */
   cliVersion: string;
@@ -87,7 +93,7 @@ export interface IdleAutoUpdaterOptions {
   /** Override due-ness (tests). */
   isDue?: () => boolean;
   /** Override successor spawn (tests). */
-  spawnSuccessor?: () => boolean;
+  spawnSuccessor?: () => boolean | Promise<boolean>;
   /** Override service-manager detection (tests). */
   underServiceManager?: () => boolean;
   /**
@@ -116,59 +122,145 @@ export interface IdleAutoUpdaterHandle {
   /**
    * Exit code for the shutdown handler after cleanup: non-zero asks a
    * service manager to restart the worker on the installed version;
-   * otherwise the successor spawn covers it and the worker exits 0.
-   * Undefined when no restart is pending (regular exit code 0 applies).
+   * otherwise the successor spawn covers it and the worker exits 0. The
+   * spawn result is awaited (spawn failures surface asynchronously), so a
+   * failed handover also asks the service manager path via the non-zero
+   * status. Undefined when no restart is pending (regular exit code 0
+   * applies).
    */
-  finalExitCode(): number | undefined;
+  finalExitCode(): Promise<number | undefined>;
 }
+
+/**
+ * Env var tagging a worker that a previous worker spawned as its own
+ * successor (see `spawnWorkerSuccessor`). Once the parent exits, macOS
+ * reparents the detached child to launchd (pid 1), which is indistinguishable
+ * from a launchd job by ppid alone — so a tagged worker must never take the
+ * manager-restart path (exit non-zero expecting a relaunch that will never
+ * come) and instead always spawns its own successor.
+ */
+export const WORKER_HANDOVER_ENV_VAR = "DEVINTERN_HANDOVER";
 
 /**
  * Whether this process was started by a service manager, so exiting non-zero
  * makes it come back (systemd user unit or launchd agent). systemd exports
  * `INVOCATION_ID`/`SYSTEMD_EXEC_PID` to every unit process; generated
- * definitions may set `DEVINTERN_SERVICE=1`.
+ * definitions set `DEVINTERN_SERVICE=1` (launchd exports no identifying
+ * variables). As a fallback on macOS, a job parented directly by launchd
+ * (pid 1) is also treated as manager-supervised — except for handover
+ * successors (`DEVINTERN_HANDOVER=1`, set by `spawnWorkerSuccessor`): their
+ * pid-1 parent may just be launchd reparenting an orphan, so the ppid
+ * heuristic is skipped for them and they self-spawn instead. The explicit
+ * markers above stay authoritative for tagged processes too.
  */
-export function runningUnderServiceManager(env: NodeJS.ProcessEnv = process.env): boolean {
+export function runningUnderServiceManager(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  ppid: number = process.ppid,
+): boolean {
   if (env.DEVINTERN_SERVICE === "1") return true;
   if (env.INVOCATION_ID) return true;
   if (env.SYSTEMD_EXEC_PID) return true;
+  if (env[WORKER_HANDOVER_ENV_VAR] === "1") return false;
+  if (platform === "darwin" && ppid === 1) return true;
   return false;
+}
+
+/**
+ * Whether `pid` belongs to a live process, probed with signal 0. A missing
+ * pid (the spawn already failed) reads as dead; EPERM still means the
+ * process exists (owned by another user), so only ESRCH reads as dead.
+ */
+function isProcessAlive(
+  pid: number | undefined,
+  signalFn: typeof process.kill = process.kill,
+): boolean {
+  if (!pid) return false;
+  try {
+    signalFn(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 /**
  * Spawn a replacement worker process on the (already updated) global
  * install, detached so it outlives this process and survives terminal
- * hangups. Returns false when the spawn could not even be started; the
- * caller logs and falls back to the restart-requested exit code.
+ * hangups. The successor is tagged `DEVINTERN_HANDOVER=1` so its own update
+ * cycle cannot mistake macOS's reparent-to-launchd (pid 1) for service-
+ * manager supervision and exit non-zero for a restart that will never come.
+ * Resolves false when the spawn could not even be started — either
+ * `spawn()` threw synchronously, the child reported an async spawn error
+ * (e.g. EAGAIN/ENOENT), or the successor process is not actually running
+ * when the spawn-verdict wait ends — so the caller can fall back to the
+ * restart-requested exit code instead of exiting 0 with no daemon.
  */
 export function spawnWorkerSuccessor(options?: {
   argv?: string[];
   execPath?: string;
   env?: NodeJS.ProcessEnv;
   spawnFn?: typeof spawn;
+  /** Override the spawn-verdict wait (tests). */
+  verifyTimeoutMs?: number;
+  /** Override the liveness probe used at the verdict wait (tests). */
+  signalFn?: typeof process.kill;
   log?: (message: string) => void;
   warn?: (message: string) => void;
-}): boolean {
+}): Promise<boolean> {
   const log = options?.log ?? console.log;
   const warn = options?.warn ?? console.warn;
   const execPath = options?.execPath ?? process.execPath;
   const args = (options?.argv ?? process.argv).slice(1);
   const spawnFn = options?.spawnFn ?? spawn;
+  const signalFn = options?.signalFn ?? process.kill;
+  const env = { ...(options?.env ?? process.env), [WORKER_HANDOVER_ENV_VAR]: "1" };
   try {
     const child = spawnFn(execPath, args, {
       detached: true,
       stdio: "inherit",
-      env: options?.env ?? process.env,
+      env,
     });
     child.unref();
-    child.once("error", (error) => {
-      warn(`⚠️  [update] replacement worker failed to start: ${(error as Error).message}`);
-    });
     log(`🔁 [update] handing over to the updated worker (pid ${child.pid ?? "?"})`);
-    return true;
+    // spawn() rarely throws synchronously; failures surface later via the
+    // 'error' event. Wait briefly for the spawn/error verdict before letting
+    // the caller decide the exit code.
+    // oxlint-disable-next-line promise/avoid-new -- deliberate event-to-promise bridge for the spawn verdict.
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (spawned: boolean): void => {
+        if (settled) return;
+        settled = true;
+        resolve(spawned);
+      };
+      child.once("spawn", () => settle(true));
+      child.once("error", (error) => {
+        warn(`⚠️  [update] replacement worker failed to start: ${(error as Error).message}`);
+        settle(false);
+      });
+      // Neither event fired (custom spawnFn, slow runtime): only assume the
+      // handover worked when the successor process is actually alive. An
+      // async 'error' (e.g. EAGAIN under load) can arrive after this wait,
+      // when the caller is already committed to its exit code — exiting 0
+      // with no daemon running would leave the worker down until a manual
+      // restart, so a non-running successor must read as a failed handover.
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        if (isProcessAlive(child.pid, signalFn)) {
+          settle(true);
+          return;
+        }
+        warn(
+          `⚠️  [update] replacement worker (pid ${child.pid ?? "?"}) is not running; treating the handover as failed.`,
+        );
+        settle(false);
+      }, options?.verifyTimeoutMs ?? SUCCESSOR_SPAWN_VERIFY_MS);
+      timeout.unref?.();
+    });
   } catch (error) {
     warn(`⚠️  [update] could not start the updated worker: ${(error as Error).message}`);
-    return false;
+    return Promise.resolve(false);
   }
 }
 
@@ -235,7 +327,7 @@ export function createIdleWorkerAutoUpdater(
             );
             return false;
           }
-          return (options.installFn ?? installGlobalCli)(install);
+          return (options.installFn ?? installGlobalCliAsync)(install);
         },
         reexecFn: () => {
           // The default re-exec would run the daemon as a synchronous child;
@@ -259,6 +351,12 @@ export function createIdleWorkerAutoUpdater(
       now,
     });
   };
+
+  // Idle means nothing running and nothing queued: a custom supervisor may
+  // keep admitted-but-unstarted jobs in its own queue, and starting an
+  // update on top of those would strand or reject them.
+  const activeJobCount = (): number =>
+    supervisor.inFlightCount() + (supervisor.queuedCount?.() ?? 0);
 
   const tick = async (): Promise<void> => {
     if (attemptInFlight || restartPending) return;
@@ -292,7 +390,7 @@ export function createIdleWorkerAutoUpdater(
     }
     if (!isDue()) return;
 
-    if (supervisor.inFlightCount() > 0) {
+    if (activeJobCount() > 0) {
       // Busy: wait for idle instead of interrupting work. Re-evaluated on the
       // next tick; a job running longer than a day just defers the update.
       const at = now();
@@ -306,7 +404,7 @@ export function createIdleWorkerAutoUpdater(
     // Idle and due: hold admissions so no new work starts during the check
     // and install, run the attempt, then release (skip) or hand over (update).
     supervisor.holdAdmissions();
-    if (supervisor.inFlightCount() > 0) {
+    if (activeJobCount() > 0) {
       // A job raced past the idle check (possible with a custom supervisor);
       // release and retry on the next tick rather than running over it.
       supervisor.resume();
@@ -350,7 +448,7 @@ export function createIdleWorkerAutoUpdater(
     isRestartPending(): boolean {
       return restartPending;
     },
-    finalExitCode(): number | undefined {
+    async finalExitCode(): Promise<number | undefined> {
       if (!restartPending) return undefined;
       if (options.underServiceManager?.() ?? runningUnderServiceManager(env)) {
         log(
@@ -359,7 +457,7 @@ export function createIdleWorkerAutoUpdater(
         );
         return 1;
       }
-      const spawned = (options.spawnSuccessor ?? spawnWorkerSuccessor)({ log, warn });
+      const spawned = await (options.spawnSuccessor ?? spawnWorkerSuccessor)({ log, warn });
       return spawned ? 0 : 1;
     },
   };

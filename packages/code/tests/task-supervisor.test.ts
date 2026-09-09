@@ -240,6 +240,38 @@ describe("TaskSupervisor", () => {
     expect(supervisor.inFlightCount()).toBe(0);
   });
 
+  test("queuedCount reports admitted-but-unstarted jobs and drops them on hold", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const gate = deferred<void>();
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+        },
+      }),
+    );
+    await Promise.resolve();
+    expect(supervisor.queuedCount()).toBe(0);
+
+    const queued = supervisor.schedule(
+      request({ id: "queued", repo: "repo-2", run: async () => undefined }),
+    );
+    await Promise.resolve();
+    expect(supervisor.queuedCount()).toBe(1);
+
+    supervisor.holdAdmissions();
+    await expect(queued).rejects.toBeInstanceOf(JobNotStartedError);
+    // The hold emptied the queue, so idle detection sees an idle supervisor.
+    expect(supervisor.queuedCount()).toBe(0);
+
+    supervisor.resume();
+    gate.resolve();
+    await running;
+    expect(supervisor.queuedCount()).toBe(0);
+  });
+
   test("holdAdmissions rejects new work without interrupting running jobs, and resume re-admits", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     const gate = deferred<void>();
@@ -279,13 +311,51 @@ describe("TaskSupervisor", () => {
     expect(admitted).toBe("ran");
   });
 
-  test("resume after a drain re-admits new work", async () => {
+  test("resume cannot lift a shutdown drain", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     await supervisor.drain();
     supervisor.resume();
-    const result = await supervisor.schedule(
-      request({ id: "post-drain", repo: "repo", run: async () => "ran" }),
+    await expect(
+      supervisor.schedule(request({ id: "post-drain", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+  });
+
+  test("an update hold finishing mid-drain does not re-admit work (SIGTERM race)", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: (signal) =>
+          new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          }),
+      }),
     );
-    expect(result).toBe("ran");
+    await Promise.resolve();
+
+    // The idle self-update holds admissions for its check...
+    supervisor.holdAdmissions();
+    await expect(
+      supervisor.schedule(request({ id: "held", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    // ...and SIGTERM arrives while the check is still awaiting the
+    // registry/install, starting the shutdown drain.
+    await supervisor.drain({ graceMs: 0 });
+
+    // The updater's tick later completes and releases its hold — the
+    // shutdown drain must stay closed so no work is admitted mid-drain.
+    supervisor.resume();
+    await expect(
+      supervisor.schedule(request({ id: "late", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    await expect(running).resolves.toBeUndefined();
+    supervisor.resume();
+    // The drain remains terminal even after a subsequent resume.
+    await expect(
+      supervisor.schedule(request({ id: "still-closed", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
   });
 });

@@ -14,6 +14,7 @@ import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import {
   createFleetTaskExecutor,
   resolveFleetAutomations,
+  validateReloadedWorkspaceConfig,
 } from "../src/lib/workspace/workspace-worker";
 import { toRoutableTask } from "../src/lib/workspace/router";
 
@@ -179,6 +180,35 @@ describe("WorkspaceConfigReloader", () => {
     expect(current.worker.autoUpdate).toBe(true);
   });
 
+  test("the production validator rejects [worker.schedule] edits while [worker] auto_update applies live", () => {
+    // Exercises the exact validate hook the daemon installs (see
+    // runWorkspaceWorker), not a hand-written stand-in.
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V1);
+    const current: WorkspaceConfig = parseWorkspaceConfig(readFileSync(path, "utf8"));
+    const reloader = new WorkspaceConfigReloader({
+      configPath: path,
+      current,
+      validate: (next, active) =>
+        validateReloadedWorkspaceConfig(next, active, { multiTeam: false, sourceCount: 1 }),
+      onError: () => undefined,
+    });
+
+    // Startup-only keys are rejected before the shared config moves.
+    writeToml(path, `${V1}\n[worker.schedule]\nactive = ["22:00-06:00"]\n`);
+    const outcome = reloader.reload("schedule edit");
+    expect(outcome.applied).toBe(false);
+    expect(current.worker.schedule).toBeNull();
+    expect(current.worker.autoUpdate).toBe(true);
+
+    // The rest of [worker] stays live: auto_update applies without a restart.
+    writeToml(path, `${V1}\n[worker]\nauto_update = false\n`);
+    expect(reloader.reload("auto_update edit").applied).toBe(true);
+    expect(current.worker.autoUpdate).toBe(false);
+    expect(current.worker.schedule).toBeNull();
+  });
+
   test("rejects runtime-incompatible changes before mutating active config", () => {
     const dir = freshDir();
     const path = join(dir, "workspace.toml");
@@ -322,6 +352,68 @@ describe("WorkspaceConfigReloader", () => {
     await waitFor(() => current.defaults.pollIntervalSeconds === 60);
     expect(current.repos).toHaveLength(2);
     expect(current.automations).toHaveLength(0);
+  });
+});
+
+describe("validateReloadedWorkspaceConfig", () => {
+  // Startup-only keys must be rejected with the active config untouched;
+  // these cases exercise the production validator directly (the reloader
+  // tests above only cover [worker.schedule] and live-applied auto_update).
+  const startupOnlyContext = { multiTeam: false, sourceCount: 1 };
+
+  test("rejects a [defaults] tracker change without mutating the active config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(V1.replace('tracker = "markdown"', 'tracker = "jira"'));
+    expect(() => validateReloadedWorkspaceConfig(next, current, startupOnlyContext)).toThrow(
+      "[defaults].tracker is startup-only",
+    );
+    expect(current.defaults.tracker).toBe("markdown");
+  });
+
+  test("rejects team identity changes without mutating the active config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(V1);
+    next.teams = [
+      { name: "platform", tracker: "jira", taskQuery: "project = PLAT", repo: "backend", env: {} },
+    ];
+    expect(() =>
+      validateReloadedWorkspaceConfig(next, current, { multiTeam: true, sourceCount: 1 }),
+    ).toThrow("Team names, trackers, env_file, and inline env are startup-only");
+    expect(current.teams).toHaveLength(0);
+  });
+
+  test("rejects [[error_monitors]] additions without mutating the active config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(
+      `${V1}\n[[error_monitors]]\nid = "sentry-prod"\nprovider = "sentry"\nrepo = "backend"\norganization = "acme"\nproject = "backend"\n`,
+    );
+    expect(() => validateReloadedWorkspaceConfig(next, current, startupOnlyContext)).toThrow(
+      "[[error_monitors]] is startup-only",
+    );
+    expect(current.errorMonitors).toHaveLength(0);
+  });
+
+  test("rejects [workspace] dashboard edits without mutating the active config", () => {
+    const current = parseWorkspaceConfig(V1);
+    const next = parseWorkspaceConfig(`${V1}\n[workspace]\ndashboard = false\n`);
+    expect(() => validateReloadedWorkspaceConfig(next, current, startupOnlyContext)).toThrow(
+      "[workspace].dashboard and dashboard_port are startup-only",
+    );
+    expect(current.workspace.dashboard).toBe(true);
+  });
+
+  test("rejects a task_query no change detector can serve; allows it once one exists", () => {
+    const current = parseWorkspaceConfig(V1.replace('task_query = "status=todo"\n', ""));
+    const next = parseWorkspaceConfig(V1);
+    expect(() =>
+      validateReloadedWorkspaceConfig(next, current, { multiTeam: false, sourceCount: 0 }),
+    ).toThrow("task_query cannot be enabled live");
+    expect(current.defaults.taskQuery).toBeUndefined();
+
+    // With a running detector the same edit is a normal live change.
+    expect(() =>
+      validateReloadedWorkspaceConfig(next, current, { multiTeam: false, sourceCount: 1 }),
+    ).not.toThrow();
   });
 });
 

@@ -210,6 +210,49 @@ describe("createWorkerShutdownHandler", () => {
     expect(order).toEqual(["lock", "flush", "final", "exit:1"]);
   });
 
+  test("a listening socket dropped in onShutdown is free before finalExitCode", async () => {
+    // Like the dashboard server: bound while the worker runs, and the update
+    // handover spawns a successor that rebinds the same port while this
+    // process is still alive. The socket must be released during onShutdown,
+    // never still bound when finalExitCode runs.
+    const daemonSocket = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("ok"),
+    });
+    const port = daemonSocket.port;
+    let successorBound = false;
+
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      onShutdown: () => {
+        daemonSocket.stop(true);
+      },
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => {
+        // What spawnWorkerSuccessor's successor does moments later.
+        let probe: ReturnType<typeof Bun.serve> | null = null;
+        try {
+          probe = Bun.serve({
+            port,
+            hostname: "127.0.0.1",
+            fetch: () => new Response("ok"),
+          });
+          successorBound = true;
+        } catch {
+          successorBound = false;
+        }
+        probe?.stop(true);
+        return 0;
+      },
+      exit: () => undefined,
+    });
+
+    await handler("SIGTERM");
+    expect(successorBound).toBe(true);
+  });
+
   test("a void finalExitCode keeps the zero exit status", async () => {
     const exits: number[] = [];
     const handler = createWorkerShutdownHandler({
