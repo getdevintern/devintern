@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in bounded host concurrency**: `[workspace.execution]` now supports global and per-repository agent limits behind an explicit `isolation = "best_effort_host"` acknowledgement. Polling tasks, retries, error fixes, PR feedback, CI repair, conflict resolution, automations, and estimations share one admission supervisor; task worktrees may overlap within a repository while jobs using its persistent base checkout remain serialized. Concurrent jobs still share host ports, processes, Docker, caches, and linked Git metadata and are documented as best-effort throughput rather than VM isolation
+
 ## [2.10.0] - 2026-09-08
 
 Worker convenience release: `worker init` can install and start the background service for you, agent reasoning effort is configurable across harnesses, every prepared worktree gets its dependencies installed, and the Sentry watcher stays quiet until it picks something up.
