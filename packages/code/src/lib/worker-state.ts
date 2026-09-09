@@ -462,6 +462,24 @@ export class WorkerState {
     );
   }
 
+  /** Mark one provider-neutral registered change request closed. */
+  markAgentChangeRequestClosed(identity: ChangeRequestIdentity): void {
+    this.db.run(
+      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+       WHERE provider = ? AND instance_url = ?
+         AND COALESCE(project_id, '') = COALESCE(?, '')
+         AND project_path = ? AND change_number = ?`,
+      [
+        Date.now(),
+        identity.provider,
+        identity.instanceUrl,
+        identity.projectId ?? null,
+        identity.projectPath,
+        identity.number,
+      ],
+    );
+  }
+
   /** Read CI autofix retry state, defaulting to a fresh budget. */
   getCiFixState(repo: string, prNumber: number): CiFixState {
     const row = this.db

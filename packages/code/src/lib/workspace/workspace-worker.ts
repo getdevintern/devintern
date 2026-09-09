@@ -1553,6 +1553,84 @@ export async function buildFleetEventAcquirers(options: {
     );
   }
 
+  // GitLab polling is deliberately independent of GitHub credentials and
+  // watches only provider-aware rows registered after successful MR creation.
+  const { parseGitLabHostAliases, parseGitRemoteUrl } = await import("../code-host");
+  const { resolveGitLabCodeHostConfig } = await import("../pr-client");
+  const resolveGitLabRepo = (mr: import("../worker-state").AgentPr) =>
+    config.repos.find((repo) => {
+      const env = buildRepoEnv(repo, workspaceDir);
+      const remote = parseGitRemoteUrl(repo.remote, {
+        gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
+        gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
+      });
+      return (
+        remote?.provider === "gitlab" &&
+        remote.instanceUrl === mr.instanceUrl &&
+        remote.projectPath === mr.projectPath
+      );
+    });
+  const hasGitLabProfile = config.repos.some((repo) => {
+    const env = buildRepoEnv(repo, workspaceDir);
+    const remote = parseGitRemoteUrl(repo.remote, {
+      gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
+      gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
+    });
+    return remote?.provider === "gitlab" && resolveGitLabCodeHostConfig(remote.instanceUrl, env).ok;
+  });
+  if (hasGitLabProfile) {
+    const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
+    const { GitLabReviewsClient } = await import("../gitlab-reviews");
+    const { runAddressReviewUrlViaCli } = await import("../review-polling-acquirer");
+    const gitlabPoller = new GitLabReviewPollingAcquirer({
+      intervalSeconds,
+      workerState: state.workerState,
+      queue: state.queue,
+      allowed: (mr) => Boolean(resolveGitLabRepo(mr)),
+      clientFor: (mr) => {
+        const repo = resolveGitLabRepo(mr);
+        if (!repo) return null;
+        const env = buildRepoEnv(repo, workspaceDir);
+        const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
+        if (!resolved.ok) return null;
+        try {
+          return new GitLabReviewsClient(resolved.token, resolved.instanceUrl, {
+            caFile: resolved.caFile,
+            proxy: resolved.proxy,
+          });
+        } catch (error) {
+          console.warn(
+            `⚠️  [fleet] GitLab client for ${mr.projectPath} could not be initialized: ${(error as Error).message}`,
+          );
+          return null;
+        }
+      },
+      addressMr: async (mr) => {
+        const repo = resolveGitLabRepo(mr);
+        if (!repo) return false;
+        await repoManager.ensureBareClone(repo);
+        await repoManager.fetch(repo.name);
+        const base = await repoManager.ensureBaseWorktree(repo);
+        const invoke = () =>
+          runAddressReviewUrlViaCli(
+            mr.webUrl,
+            `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
+            {
+              cwd: base,
+              env: buildRepoEnv(repo, workspaceDir),
+            },
+          );
+        return options.coordinator ? options.coordinator.run(invoke) : invoke();
+      },
+      reviewerAllowlist: (process.env.GITLAB_REVIEWER_ALLOWLIST ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    });
+    acquirers.push(gitlabPoller);
+    intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
+  }
+
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
   // GitHub handlers when those credentials are available.

@@ -36,6 +36,7 @@ interface GitLabMergeRequest {
   source_project_id: number | null;
   target_project_id: number;
   web_url: string;
+  reviewers?: GitLabUser[];
 }
 
 interface GitLabPosition {
@@ -85,6 +86,21 @@ export interface GitLabReviewContext {
   discussionByNoteId: Record<number, string>;
   /** All note ids included in the prompt, for durable local deduplication. */
   noteIds: number[];
+}
+
+export interface GitLabPollingFeedback {
+  discussionId: string;
+  noteId: number;
+  author: GitLabUser;
+  createdAt: string;
+}
+
+export interface GitLabPollingSnapshot {
+  state: string;
+  headSha: string;
+  webUrl: string;
+  assignedReviewerIds: number[];
+  feedback: GitLabPollingFeedback[];
 }
 
 /** REST API v4 client for manual GitLab merge-request review addressing. */
@@ -213,6 +229,57 @@ export class GitLabReviewsClient {
       discussionByNoteId,
       noteIds,
     };
+  }
+
+  /** Fetch lifecycle and unresolved discussion signals for registered-MR polling. */
+  async getPollingSnapshot(project: string | number, iid: number): Promise<GitLabPollingSnapshot> {
+    const encodedProject = encodeURIComponent(String(project));
+    const [currentUser, mergeRequest, discussions] = await Promise.all([
+      this.requestJson<GitLabUser>("/user"),
+      this.requestJson<GitLabMergeRequest>(`/projects/${encodedProject}/merge_requests/${iid}`),
+      this.getAllPages<GitLabDiscussion>(
+        `/projects/${encodedProject}/merge_requests/${iid}/discussions`,
+      ),
+    ]);
+    const feedback: GitLabPollingFeedback[] = [];
+    for (const discussion of discussions) {
+      const unresolved = discussion.notes.some((note) => note.resolvable && note.resolved !== true);
+      if (!unresolved) continue;
+      for (const note of discussion.notes) {
+        if (
+          note.resolvable &&
+          note.resolved !== true &&
+          this.isHumanFeedback(note, currentUser.id) &&
+          note.body.trim()
+        ) {
+          feedback.push({
+            discussionId: discussion.id,
+            noteId: note.id,
+            author: note.author,
+            createdAt: note.created_at,
+          });
+        }
+      }
+    }
+    return {
+      state: mergeRequest.state,
+      headSha: mergeRequest.sha,
+      webUrl: mergeRequest.web_url,
+      assignedReviewerIds: (mergeRequest.reviewers ?? []).map((reviewer) => reviewer.id),
+      feedback,
+    };
+  }
+
+  /** Effective project membership for an actor; missing/inaccessible means unknown. */
+  async getMemberAccessLevel(project: string | number, userId: number): Promise<number | null> {
+    try {
+      const member = await this.requestJson<{ access_level: number }>(
+        `/projects/${encodeURIComponent(String(project))}/members/all/${userId}`,
+      );
+      return member.access_level;
+    } catch {
+      return null;
+    }
   }
 
   /** Abort if the MR branch advanced while the agent was working. */
