@@ -589,12 +589,20 @@ export class WorkerState {
  * @param prUrl - PR URL returned by the PR client
  * @param branch - Source branch of the PR
  * @param taskKey - Task tracker key the PR implements
+ * @param identity - Provider identity returned directly by the creation client
  */
-export function recordAgentPrFromUrl(prUrl: string, branch?: string, taskKey?: string): void {
+export function recordAgentPrFromUrl(
+  prUrl: string,
+  branch?: string,
+  taskKey?: string,
+  identity?: ChangeRequestIdentity,
+): void {
   try {
-    const parsed = parseChangeRequestUrl(prUrl, {
-      gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
-    });
+    const parsed =
+      identity ??
+      parseChangeRequestUrl(prUrl, {
+        gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+      });
     if (!parsed) {
       return;
     }
