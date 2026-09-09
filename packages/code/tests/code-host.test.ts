@@ -91,6 +91,16 @@ describe("parseChangeRequestUrl", () => {
     ).toMatchObject({ provider: "gitlab", projectPath: "acme/platform/widgets", number: 14 });
   });
 
+  test("accepts provider detail pages and fragments", () => {
+    expect(parseChangeRequestUrl("https://github.com/acme/widgets/pull/12/files")).toMatchObject({
+      provider: "github",
+      number: 12,
+    });
+    expect(
+      parseChangeRequestUrl("https://gitlab.com/acme/widgets/-/merge_requests/14/diffs#note_123"),
+    ).toMatchObject({ provider: "gitlab", number: 14 });
+  });
+
   test("parses a self-managed URL below its installation path", () => {
     expect(
       parseChangeRequestUrl("https://git.example.test/gitlab/acme/widgets/-/merge_requests/9", {

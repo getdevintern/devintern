@@ -94,7 +94,7 @@ This workflow:
 
 ## Experimental merge-request creation
 
-This first code-host release creates and records merge requests. GitLab review polling, `address-review`, conflict repair, CI repair, broad `@mention` discovery, and GitLab webhooks are not enabled yet.
+This first code-host release creates and records merge requests. Manual `address-review` support is delivered in the next stacked phase. GitLab review polling, conflict repair, CI repair, broad `@mention` discovery, and GitLab webhooks are not enabled yet.
 
 Add a separate code-host profile to `.devintern-code/.env`:
 
@@ -160,13 +160,32 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Latest stable GitLab Self-Managed MR creation | Experimental |
 | Personal, project, and group access tokens | Supported for API access |
 | Existing labels | Best-effort; missing labels are skipped |
-| Manual `address-review` | Deferred |
+| Manual `address-review` | Experimental; same-project writable branches only |
 | Registered-MR polling | Deferred |
 | Conflict and CI repair | Deferred |
 | Direct project webhooks | Deferred |
 | Repository-wide mentions and hosted relay | Not currently planned |
 
 The validated Self-Managed target is the latest stable GitLab release at the time @devintern/code ships. Other REST API v4 versions continue best-effort with a compatibility warning.
+
+## Address GitLab review feedback manually
+
+With the same experimental flag and code-host credentials used for MR creation, run:
+
+```bash
+devintern address-review https://gitlab.com/group/project/-/merge_requests/123
+```
+
+Self-managed MR URLs below a configured relative installation path are accepted too. DevIntern:
+
+- reads unresolved inline discussions and top-level human notes;
+- ignores resolved discussions, system notes, bot users, blocked users, and its own replies;
+- refuses fork MRs, identities below Developer access, and source branches the identity cannot push;
+- verifies that the local `origin` is the exact MR project;
+- revalidates the MR head SHA immediately before pushing; and
+- replies with the result without resolving discussions or changing reviewer assignments.
+
+`--no-push` leaves the local commit unpushed. `--no-reply` pushes the fix without posting GitLab replies or recording the notes as addressed. GitLab CI repair through `--ci-feedback` remains deferred.
 
 ## Batch processing with --query
 
@@ -200,7 +219,7 @@ Self-hosted tokens only exist on their own instance — a gitlab.com token canno
 - **Attachments:** files embedded in issue bodies (`/uploads/...` links) are downloaded for the agent using your token; other external links stay as references.
 - **Status labels:** labels named in `settings.json` must already exist in the project. The error message lists available labels when one is missing.
 - **Comments:** use `--skip-comments` to skip issue comments and label transitions for a run.
-- **Merge-request automation:** the experimental release creates MRs only. Review, CI, conflict, mention, and webhook automation remain disabled until their provider-specific phases ship.
+- **Merge-request automation:** creation and manual review addressing are experimental. Polling, CI, conflict, mention, and webhook automation remain disabled until their provider-specific phases ship.
 
 ## Troubleshooting
 
