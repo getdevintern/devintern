@@ -188,4 +188,27 @@ describe("GitLabReviewsClient", () => {
     const context = await client.getReviewContext("acme/widgets", 17);
     expect(context.noteIds).toEqual([1, 2]);
   });
+
+  test("polling exposes only unresolved human discussion roots and reviewer ids", async () => {
+    const { client } = clientFor(
+      [
+        { id: "open", individual_note: false, notes: [note(1)] },
+        { id: "resolved", individual_note: false, notes: [note(2, { resolved: true })] },
+        {
+          id: "top-level",
+          individual_note: true,
+          notes: [note(3, { resolvable: false, position: null })],
+        },
+        {
+          id: "own",
+          individual_note: false,
+          notes: [note(4, { author: { id: 7, username: "devintern-bot" } })],
+        },
+      ],
+      { mr: { reviewers: [{ id: 8, username: "reviewer" }] } },
+    );
+    const result = await client.getPollingSnapshot(42, 17);
+    expect(result.assignedReviewerIds).toEqual([8]);
+    expect(result.feedback).toEqual([expect.objectContaining({ discussionId: "open", noteId: 1 })]);
+  });
 });

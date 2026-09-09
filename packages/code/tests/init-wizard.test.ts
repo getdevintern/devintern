@@ -77,6 +77,7 @@ describe("buildEnvExample", () => {
     expect(template).toContain("DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST=true");
     expect(template).toContain("GITLAB_CODE_HOST_TOKEN=glpat_xxxxxxxxxxxx");
     expect(template).toContain("GITLAB_CODE_HOST_CA_FILE=/path/to/company-ca.pem");
+    expect(template).toContain("GITLAB_REVIEWER_ALLOWLIST=alice,bob");
     expect(template).toContain("BITBUCKET_TOKEN");
   });
 });

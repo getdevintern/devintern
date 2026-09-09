@@ -112,6 +112,23 @@ describe("WorkerState", () => {
       expect(state.listOpenAgentPrs()).toHaveLength(0);
     });
 
+    test("markAgentChangeRequestClosed targets the full provider identity", () => {
+      const identity = {
+        provider: "gitlab" as const,
+        instanceUrl: "https://git.example.test",
+        projectId: "17",
+        projectPath: "acme/widgets",
+        number: 42,
+        webUrl: "https://git.example.test/acme/widgets/-/merge_requests/42",
+      };
+      state.recordAgentChangeRequest(identity);
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+      state.markAgentChangeRequestClosed(identity);
+
+      expect(state.listOpenAgentChangeRequests()).toHaveLength(1);
+      expect(state.listOpenAgentChangeRequests()[0]?.provider).toBe("github");
+    });
+
     test("re-recording a closed PR reopens it", () => {
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
       state.markAgentPrClosed("acme/widgets", 42);
