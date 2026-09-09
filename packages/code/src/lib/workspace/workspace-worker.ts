@@ -62,6 +62,7 @@ import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 import { startWorkerFailover } from "../worker-failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
+import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
 function orphanMaxAgeMs(): number {
@@ -700,6 +701,63 @@ export function attachPickupScheduleLogger(gate: PickupGate): void {
   });
 }
 
+/** Runtime facts the production reload validator needs about the worker. */
+export interface ReloadValidationContext {
+  /** Multi-team mode builds per-team clients, so team identities restart. */
+  multiTeam: boolean;
+  /** Running change-detector sources; 0 means none could be initialized. */
+  sourceCount: number;
+}
+
+function teamRuntimeShape(value: WorkspaceConfig) {
+  return value.teams.map(({ name, tracker, envFile, env }) => ({ name, tracker, envFile, env }));
+}
+
+/**
+ * The production reload gate the workspace worker installs on its reloader:
+ * rejects runtime-incompatible edits before the shared config instance is
+ * mutated (see `applyWorkspaceConfig`). Edits it allow apply live — including
+ * the whole `[worker]` section (e.g. `auto_update`); the startup-only keys it
+ * rejects (team identities, error monitors, dashboard, `[worker.schedule]`)
+ * need a restart.
+ */
+export function validateReloadedWorkspaceConfig(
+  next: WorkspaceConfig,
+  current: WorkspaceConfig,
+  context: ReloadValidationContext,
+): void {
+  const fleet = resolveFleetAutomations(next);
+  if (fleet.problems.length > 0) throw new Error(fleet.problems.join("\n- "));
+  if (next.defaults.tracker !== current.defaults.tracker) {
+    throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
+  }
+  if (JSON.stringify(teamRuntimeShape(next)) !== JSON.stringify(teamRuntimeShape(current))) {
+    throw new Error(
+      "Team names, trackers, env_file, and inline env are startup-only; restart the worker to change them.",
+    );
+  }
+  if (JSON.stringify(next.errorMonitors) !== JSON.stringify(current.errorMonitors)) {
+    throw new Error("[[error_monitors]] is startup-only; restart the worker to change it.");
+  }
+  if (!context.multiTeam && next.defaults.taskQuery && context.sourceCount === 0) {
+    throw new Error(
+      `task_query cannot be enabled live because the ${current.defaults.tracker} change detector ` +
+        "could not be initialized; fix its required workspace .env settings and restart the worker.",
+    );
+  }
+  if (
+    next.workspace.dashboard !== current.workspace.dashboard ||
+    next.workspace.dashboardPort !== current.workspace.dashboardPort
+  ) {
+    throw new Error(
+      "[workspace].dashboard and dashboard_port are startup-only; restart the worker to change them.",
+    );
+  }
+  if (JSON.stringify(next.worker.schedule) !== JSON.stringify(current.worker.schedule)) {
+    throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
+  }
+}
+
 /**
  * Assemble and start the worker in workspace (fleet) mode.
  *
@@ -1062,58 +1120,30 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     eventReloadHooks.hooks?.reconcileConflictResolution();
   };
 
-  const teamRuntimeShape = (value: WorkspaceConfig) =>
-    value.teams.map(({ name, tracker, envFile, env }) => ({ name, tracker, envFile, env }));
-
   // Live reload keeps queries, fixed team destinations, routing, repos,
   // automations, worker_task_args, and cadence live. Team identities and
   // credentials require rebuilding clients/detectors and therefore restart.
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
-    validate: (next, current) => {
-      const fleet = resolveFleetAutomations(next);
-      if (fleet.problems.length > 0) throw new Error(fleet.problems.join("\n- "));
-      if (next.defaults.tracker !== current.defaults.tracker) {
-        throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
-      }
-      if (JSON.stringify(teamRuntimeShape(next)) !== JSON.stringify(teamRuntimeShape(current))) {
-        throw new Error(
-          "Team names, trackers, env_file, and inline env are startup-only; restart the worker to change them.",
-        );
-      }
-      if (JSON.stringify(next.errorMonitors) !== JSON.stringify(current.errorMonitors)) {
-        throw new Error("[[error_monitors]] is startup-only; restart the worker to change it.");
-      }
-      if (!multiTeam && next.defaults.taskQuery && sources.length === 0) {
-        throw new Error(
-          `task_query cannot be enabled live because the ${current.defaults.tracker} change detector ` +
-            "could not be initialized; fix its required workspace .env settings and restart the worker.",
-        );
-      }
-      if (
-        next.workspace.dashboard !== current.workspace.dashboard ||
-        next.workspace.dashboardPort !== current.workspace.dashboardPort
-      ) {
-        throw new Error(
-          "[workspace].dashboard and dashboard_port are startup-only; restart the worker to change them.",
-        );
-      }
-      if (JSON.stringify(next.worker.schedule) !== JSON.stringify(current.worker.schedule)) {
-        throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
-      }
-    },
+    validate: (next, active) =>
+      validateReloadedWorkspaceConfig(next, active, {
+        multiTeam,
+        sourceCount: sources.length,
+      }),
     onApplied: applyReloadedConfig,
   });
   reloader.start();
 
+  // Closed during onShutdown so the handover successor can rebind the port.
+  let dashboardServer: ReturnType<typeof Bun.serve> | null = null;
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
       // `schedule`: retries are drained by this worker's retry-queue acquirer
       // through the normal pipeline (never spawned from the workspace home);
       // automation "Run now" triggers go through the in-process scheduler.
-      startDashboardServer({
+      dashboardServer = startDashboardServer({
         port: config.workspace.dashboardPort,
         retryMode: "schedule",
         automationActions,
@@ -1146,6 +1176,23 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
+  // Idle self-update: while the daemon runs for weeks, keep a global
+  // npm/bun install current — checked at most daily, applied only when the
+  // supervisor is idle, never touching source/local installs. Opt out with
+  // [worker] auto_update = false (live-reloaded) or DEVINTERN_NO_UPDATE=1.
+  let restartRequested = false;
+  const autoUpdater = createIdleWorkerAutoUpdater({
+    config,
+    supervisor,
+    cliVersion: options.cliVersion ?? "0.0.0",
+    requestShutdown: () => {
+      if (restartRequested) return;
+      restartRequested = true;
+      process.kill(process.pid, "SIGTERM");
+    },
+  });
+  autoUpdater.start();
+
   const { startWorker } = await import("../../worker");
   await startWorker(
     {
@@ -1157,7 +1204,21 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
         reloader.stop();
+        autoUpdater.stop();
+        // Release the listening socket before finalExitCode: the handover
+        // successor starts (binds the same dashboard port) while this
+        // process is still alive, so a socket still bound here can fail it
+        // with EADDRINUSE and leave the daemon down.
+        if (dashboardServer) {
+          try {
+            dashboardServer.stop();
+          } catch {
+            // Already stopped.
+          }
+          dashboardServer = null;
+        }
       },
+      finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",

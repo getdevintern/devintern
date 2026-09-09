@@ -33,6 +33,30 @@ export interface TaskSupervisor {
   schedule<T>(request: ScheduleRequest<T>): Promise<T>;
   updateLimits(limits: SupervisorLimits): void;
   drain(options?: DrainOptions): Promise<void>;
+  /**
+   * Reject new admissions until {@link resume} without touching running
+   * jobs — the idle self-update gate. Unlike {@link drain}, this never
+   * aborts in-flight work. Callers observe {@link JobNotStartedError} for
+   * rejected jobs and must treat it as a deferral: their source (task poll,
+   * event, automation) re-offers the work on a later pass.
+   */
+  holdAdmissions(): void;
+  /**
+   * Lift the admission hold {@link holdAdmissions} set. A shutdown
+   * {@link drain} is terminal for the process: this never re-opens
+   * admissions after it, so an update attempt finishing mid-drain cannot
+   * re-admit work the drain is waiting on.
+   */
+  resume(): void;
+  /** How many admitted jobs are currently running. */
+  inFlightCount(): number;
+  /**
+   * How many admitted jobs are waiting to start (queued behind concurrency
+   * limits). Supervisors that defer admissions instead of rejecting them
+   * must count them here so idle detection (the self-update gate) does not
+   * mistake a backed-up queue for an idle worker.
+   */
+  queuedCount(): number;
 }
 
 export const DEFAULT_SUPERVISOR_DRAIN_GRACE_MS = 20_000;
@@ -82,7 +106,13 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
   validateLimits(initialLimits);
 
   let limits = { ...initialLimits };
+  // Two independent closed states: `draining` is the shutdown drain (terminal
+  // for the process), `holding` is the idle self-update's temporary hold.
+  // resume() clears only the hold, so an update attempt completing while a
+  // SIGTERM drain is in flight cannot re-admit jobs mid-shutdown.
   let draining = false;
+  let holding = false;
+  const admissionsBlocked = (): boolean => draining || holding;
   const queued: QueuedJob[] = [];
   const running = new Map<string, RunningJob>();
   const knownIds = new Set<string>();
@@ -120,7 +150,7 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
 
   let pumping = false;
   const pump = (): void => {
-    if (pumping || draining) return;
+    if (pumping || admissionsBlocked()) return;
     pumping = true;
     try {
       // Scan for the first admissible job each time. A saturated repository
@@ -173,6 +203,22 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
     }
   };
 
+  /** Reject queued-but-unstarted jobs; callers treat this as a deferral. */
+  const rejectQueued = (): void => {
+    const error = new JobNotStartedError();
+    for (const job of queued.splice(0)) {
+      knownIds.delete(job.request.id);
+      job.reject(error);
+    }
+  };
+
+  /** Stop admitting new jobs for shutdown; queued-but-unstarted ones are rejected. */
+  const beginDraining = (): void => {
+    if (draining) return;
+    draining = true;
+    rejectQueued();
+  };
+
   return {
     schedule<T>(request: ScheduleRequest<T>): Promise<T> {
       try {
@@ -180,7 +226,7 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
       } catch (error) {
         return Promise.reject(error);
       }
-      if (draining) return Promise.reject(new JobNotStartedError());
+      if (admissionsBlocked()) return Promise.reject(new JobNotStartedError());
       if (knownIds.has(request.id)) {
         return Promise.reject(new Error(`A job with id "${request.id}" is already scheduled.`));
       }
@@ -203,14 +249,7 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
     },
 
     async drain(options: DrainOptions = {}): Promise<void> {
-      if (!draining) {
-        draining = true;
-        const error = new JobNotStartedError();
-        for (const job of queued.splice(0)) {
-          knownIds.delete(job.request.id);
-          job.reject(error);
-        }
-      }
+      beginDraining();
 
       const waitForRunning = (): Promise<void> =>
         Promise.all([...running.values()].map((job) => job.settled)).then(() => undefined);
@@ -232,6 +271,27 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
 
       for (const job of running.values()) job.controller.abort();
       await waitForRunning();
+    },
+
+    holdAdmissions(): void {
+      if (holding) return;
+      holding = true;
+      rejectQueued();
+    },
+
+    resume(): void {
+      // Only the update hold lifts; a shutdown drain stays closed.
+      if (!holding) return;
+      holding = false;
+      pump();
+    },
+
+    inFlightCount(): number {
+      return running.size;
+    },
+
+    queuedCount(): number {
+      return queued.length;
     },
   };
 }

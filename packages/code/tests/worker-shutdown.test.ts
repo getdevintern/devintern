@@ -187,4 +187,116 @@ describe("createWorkerShutdownHandler", () => {
 
     expect(order).toEqual(["lock", "capture", "flush", "exit:0"]);
   });
+
+  test("finalExitCode runs after cleanup and can override the exit status", async () => {
+    const order: string[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => order.push("lock") },
+      flush: async () => {
+        order.push("flush");
+      },
+      finalExitCode: () => {
+        order.push("final");
+        return 1;
+      },
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    // The hook runs last (after the lock release), so a post-update successor
+    // spawn sees the workspace lock already released.
+    expect(order).toEqual(["lock", "flush", "final", "exit:1"]);
+  });
+
+  test("a listening socket dropped in onShutdown is free before finalExitCode", async () => {
+    // Like the dashboard server: bound while the worker runs, and the update
+    // handover spawns a successor that rebinds the same port while this
+    // process is still alive. The socket must be released during onShutdown,
+    // never still bound when finalExitCode runs.
+    const daemonSocket = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("ok"),
+    });
+    const port = daemonSocket.port;
+    let successorBound = false;
+
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      onShutdown: () => {
+        daemonSocket.stop(true);
+      },
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => {
+        // What spawnWorkerSuccessor's successor does moments later.
+        let probe: ReturnType<typeof Bun.serve> | null = null;
+        try {
+          probe = Bun.serve({
+            port,
+            hostname: "127.0.0.1",
+            fetch: () => new Response("ok"),
+          });
+          successorBound = true;
+        } catch {
+          successorBound = false;
+        }
+        probe?.stop(true);
+        return 0;
+      },
+      exit: () => undefined,
+    });
+
+    await handler("SIGTERM");
+    expect(successorBound).toBe(true);
+  });
+
+  test("a void finalExitCode keeps the zero exit status", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => undefined,
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([0]);
+  });
+
+  test("a failing finalExitCode exits zero instead of crashing the handler", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: () => {
+        throw new Error("hook failed");
+      },
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([0]);
+  });
+
+  test("awaits an async finalExitCode before exiting", async () => {
+    const exits: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      finalExitCode: async () => 1,
+      exit: (code) => exits.push(code),
+    });
+
+    await handler("SIGTERM");
+
+    expect(exits).toEqual([1]);
+  });
 });

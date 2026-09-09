@@ -256,6 +256,26 @@ poll_interval = 60
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 
+## Keeping the worker up to date
+
+A worker that runs for weeks should not wait for a manual `npm install -g` to get fixes. When `devintern` is **globally installed** (npm or bun `-g`), the worker checks the npm registry for a newer `@getdevintern/code` at most once per calendar day and, when it finds one and is idle, installs it and restarts itself on the new version — no operator action, no interrupted work.
+
+The update is applied only while the worker is idle:
+
+- A check that comes due while agent work is in flight simply waits; the job runs to completion and the update happens on a later idle pass. A job that runs longer than a day just defers the update.
+- Once idle, new work is held for the duration of the check and install (queued work is deferred and picked up on the next poll; running jobs are never aborted). A skip releases the hold immediately.
+- After a successful install the worker shuts down cleanly and comes back on the new version. Under a service manager (systemd user unit, launchd agent) the exit asks for a restart and the manager relaunches it; running in a plain terminal, the worker hands over to a freshly spawned process on the new binary by itself. The generated definitions opt into this automatically (systemd exports its own markers, and the generated launchd agent sets `DEVINTERN_SERVICE=1`); a **hand-written** launchd agent must set `DEVINTERN_SERVICE=1` in its `EnvironmentVariables` so the worker uses the restart path instead of spawning its own successor alongside launchd's `KeepAlive`. Self-spawned successors carry a `DEVINTERN_HANDOVER=1` environment marker so a later update cycle knows the pid-1 parent it was reparented to on macOS is not a manager and hands over again instead of exiting for a restart that would never come.
+- Failures never take the daemon down: registry, network, or install errors are logged, the current version keeps serving, and the next idle window retries after the daily interval.
+
+Source checkouts, `bun link`, and local `node_modules` installs are never updated (the same policy as interactive CLI updates), and `DEVINTERN_NO_UPDATE=1` or `--no-update` skip the check entirely. To disable self-update for a workspace durably:
+
+```toml
+[worker]
+auto_update = false
+```
+
+The opt-out is a live setting: removing it or flipping it back on applies without a restart. The worker log records each step — `[update] checking npm …`, skip reasons (opt-out, not a global install, busy, already current), `⬆ Auto-updating devintern X → Y`, and the restart — into the same capture files the dashboard tails. Interactive CLI prompts are unaffected; only the worker's own idle path installs updates.
+
 ## Review feedback on the agent's PRs
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker (and PRs that disappear because a repository was renamed, transferred, or deleted) drop out of the open count within one poll.
