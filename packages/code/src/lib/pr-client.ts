@@ -1,5 +1,7 @@
 import type { AtlassianDocument, JiraIssue } from "../types/jira";
 import type { Task } from "../types/task-tracker";
+import { parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
+import type { CodeHostRepository } from "./code-host";
 import { GitHubAppAuth } from "./github-app-auth";
 import { Utils } from "./utils";
 
@@ -413,11 +415,10 @@ export class PRManager {
    *
    * @returns GitHub or Bitbucket metadata, or `unknown` when detection fails
    */
-  async detectRepository(): Promise<{
-    platform: "github" | "bitbucket" | "unknown";
-    repository: string;
-    workspace?: string;
-  }> {
+  async detectRepository(): Promise<
+    | (CodeHostRepository & { platform: CodeHostRepository["provider"] })
+    | { platform: "unknown"; repository: string }
+  > {
     try {
       // Get remote URL
       const { spawn } = await import("child_process");
@@ -432,26 +433,11 @@ export class PRManager {
         git.on("close", () => {
           const remoteUrl = output.trim();
 
-          if (remoteUrl.includes("github.com")) {
-            // Extract owner/repo from GitHub URL
-            const match = remoteUrl.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
-            if (match) {
-              return resolve({
-                platform: "github",
-                repository: `${match[1]}/${match[2]}`,
-              });
-            }
-          } else if (remoteUrl.includes("bitbucket.org")) {
-            // Extract workspace/repo from Bitbucket URL
-            const match = remoteUrl.match(/bitbucket\.org[:/]([^/]+)\/([^/.]+)/);
-            if (match) {
-              return resolve({
-                platform: "bitbucket",
-                repository: match[2],
-                workspace: match[1], // This is the workspace
-              });
-            }
-          }
+          const parsed = parseGitRemoteUrl(remoteUrl, {
+            gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+            gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
+          });
+          if (parsed) return resolve({ ...parsed, platform: parsed.provider });
 
           resolve({ platform: "unknown", repository: "" });
         });
@@ -483,7 +469,7 @@ export class PRManager {
     if (repoInfo.platform === "unknown") {
       return {
         success: false,
-        message: "Could not detect repository platform (GitHub or Bitbucket)",
+        message: "Could not detect repository platform (GitHub, GitLab, or Bitbucket)",
       };
     }
 
@@ -534,7 +520,7 @@ export class PRManager {
   private async dispatchCreatePullRequest(
     prInfo: PRInfo,
     repoInfo: {
-      platform: "github" | "bitbucket" | "unknown";
+      platform: "github" | "gitlab" | "bitbucket" | "unknown";
       repository: string;
       workspace?: string;
     },
@@ -588,6 +574,14 @@ export class PRManager {
 
       const bitbucketClient = new BitbucketPRClient(bitbucketToken, repoInfo.workspace);
       return await bitbucketClient.createPullRequest(prInfo);
+    }
+
+    if (repoInfo.platform === "gitlab") {
+      return {
+        success: false,
+        message:
+          "GitLab code-host support is not enabled in this release. The configured GitLab task tracker remains available.",
+      };
     }
 
     // This shouldn't be reached since we handle unknown platform at the start
