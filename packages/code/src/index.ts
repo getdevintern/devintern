@@ -1000,12 +1000,10 @@ if (process.argv[2] === "init") {
       } else if (args[i] === "--help" || args[i] === "-h") {
         console.log("Usage: devintern address-review <pr-url> [options]");
         console.log("");
-        console.log("Manually address PR review feedback using Agent");
+        console.log("Manually address pull-request or merge-request feedback using Agent");
         console.log("");
         console.log("Arguments:");
-        console.log(
-          "  pr-url         GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)",
-        );
+        console.log("  pr-url         GitHub PR or GitLab MR URL");
         console.log("");
         console.log("Options:");
         console.log("  --no-push      Don't push changes after fixing");
@@ -1015,6 +1013,9 @@ if (process.argv[2] === "init") {
         console.log("");
         console.log("Examples:");
         console.log("  devintern address-review https://github.com/owner/repo/pull/123");
+        console.log(
+          "  devintern address-review https://gitlab.com/group/project/-/merge_requests/123",
+        );
         console.log("  devintern address-review https://github.com/owner/repo/pull/123 --no-push");
         process.exit(0);
       } else if (!args[i].startsWith("-")) {
@@ -4035,6 +4036,9 @@ async function runAgentHarness(
                 const changeLabel =
                   prResult.changeRequest?.provider === "gitlab" ? "Merge request" : "Pull request";
                 console.log(`✅ ${changeLabel} created: ${prResult.url}`);
+                for (const warning of prResult.warnings ?? []) {
+                  console.warn(`⚠️  ${warning}`);
+                }
 
                 // Register the PR so worker review-polling watches it automatically.
                 if (prResult.url) {
