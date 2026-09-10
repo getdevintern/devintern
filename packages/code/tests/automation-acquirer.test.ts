@@ -41,11 +41,19 @@ describe("AutomationAcquirer", () => {
       expect(resolveAutomationRunArgs(automationOff, options)).toEqual(["--no-git"]);
     });
 
-    test("falls back to the shared flags and the CLI default", () => {
+    test("falls back to the shared flags with the open_pr policy applied", () => {
       expect(
         resolveAutomationRunArgs(automation(true), { extraArgs: () => ["--auto-review"] }),
-      ).toEqual(["--auto-review"]);
-      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--create-pr"]);
+      ).toEqual(["--auto-review", "--create-pr"]);
+      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--no-git"]);
+    });
+
+    test("the fallback strips PR flags from custom extraArgs when open_pr is off", () => {
+      expect(
+        resolveAutomationRunArgs(automation(false), {
+          extraArgs: () => ["--create-pr", "--auto-review"],
+        }),
+      ).toEqual(["--no-git"]);
     });
   });
 

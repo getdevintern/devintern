@@ -90,7 +90,7 @@ Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, a
 Each automation says explicitly whether its occurrences open a pull request via `open_pr` (boolean, default `false`). PR creation is pipeline policy, not a prompt instruction: the prompt says what to produce, and `open_pr` says whether the run should become a reviewable pull request.
 
 - **Off (the default).** Omit `open_pr` or set `open_pr = false` and an occurrence opens no pull request, pushes no review branch, and applies no PR labels — even if `[defaults].worker_task_args` still contains `--create-pr` or `--auto-review`. Workspace-level flags never turn PR creation on for an automation whose setting is off, and auto-review never runs. This is the right default for work whose output lands outside the repository (tweet drafts, reports written to another folder).
-- **Opt-in.** Set `open_pr = true` for code-changing jobs that should be reviewed — dependency bumps, test triage, safe refactors. Those runs still honor `[defaults].worker_task_args` (auto-review, `--auto-review-iterations`) and the repo's PR labels.
+- **Opt-in.** Set `open_pr = true` for code-changing jobs that should be reviewed — dependency bumps, test triage, safe refactors. Those runs still honor `[defaults].worker_task_args` (auto-review, `--auto-review-iterations`) and the repo's PR labels, and `--create-pr` is applied even when the configured value omits it — `open_pr = true` alone guarantees the run becomes a pull request.
 
 The dashboard's Automations table shows an **opens PR** badge per row; the dash (default) means off. **Run now** uses the same setting as the schedule, so you can validate a non-PR automation without a PR appearing.
 

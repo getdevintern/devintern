@@ -176,6 +176,20 @@ describe("automationTaskArgs", () => {
       "--create-pr",
       "--auto-review",
     ]);
+    expect(automationTaskArgs(open, ["--create-pr=true", "--auto-review"])).toEqual([
+      "--create-pr=true",
+      "--auto-review",
+    ]);
+  });
+
+  test("opted-in automations always create a PR even when the defaults omit --create-pr", () => {
+    expect(automationTaskArgs(open, ["--auto-review"])).toEqual(["--auto-review", "--create-pr"]);
+    expect(automationTaskArgs(open, [])).toEqual(["--create-pr"]);
+    expect(automationTaskArgs(open, ["--create-pr=false", "--auto-review"])).toEqual([
+      "--create-pr=false",
+      "--auto-review",
+      "--create-pr",
+    ]);
   });
 
   test("off (the default) strips PR/review flags even when the workspace defaults them", () => {
@@ -198,6 +212,22 @@ describe("automationTaskArgs", () => {
 
   test("an explicit --no-git is never duplicated", () => {
     expect(automationTaskArgs(off, ["--no-git"])).toEqual(["--no-git"]);
+  });
+
+  test("off strips inline = value forms (--create-pr=true, --auto-review=1)", () => {
+    expect(
+      automationTaskArgs(off, ["--create-pr=true", "--auto-review=1", "--sandbox", "none"]),
+    ).toEqual(["--sandbox", "none", "--no-git"]);
+  });
+
+  test("off strips --auto-review-iterations=N inline without leaving a dangling value", () => {
+    expect(automationTaskArgs(off, ["--auto-review-iterations=3", "--skip-clarity-check"])).toEqual(
+      ["--skip-clarity-check", "--no-git"],
+    );
+  });
+
+  test("off also strips --create-pr=false (PR creation never leaks in)", () => {
+    expect(automationTaskArgs(off, ["--create-pr=false"])).toEqual(["--no-git"]);
   });
 });
 

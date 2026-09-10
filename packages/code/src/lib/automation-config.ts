@@ -218,10 +218,12 @@ export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationCo
   return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
 }
 
-/** CLI flags that mean "review this run" — stripped unless the automation opens a PR. */
-const PR_FLAGS = new Set(["--create-pr", "--auto-review"]);
-/** Value-taking review flags; the flag and its value both go when PRs are off. */
+/** Value-taking review flag; its separate value is the next token. */
 const PR_FLAGS_WITH_VALUE = new Set(["--auto-review-iterations"]);
+/** PR/review flags in every form the CLI accepts, bare or `--flag=value`. */
+const PR_FLAG_PATTERN = /^(?:--create-pr|--auto-review(?:-iterations)?)(?:=.*)?$/;
+/** `--create-pr` forms that actually enable PR creation (`--create-pr=false` is not one). */
+const CREATE_PR_PATTERN = /^--create-pr(?:=(?!false$).*)?$/;
 
 /**
  * CLI args for one automation occurrence, derived from the workspace/task
@@ -230,15 +232,21 @@ const PR_FLAGS_WITH_VALUE = new Set(["--auto-review-iterations"]);
  * The automation's own `open_pr` setting is the source of truth for PR
  * creation — never an inherited flag list:
  *
- * - `open_pr = true`: pass the defaults through unchanged; auto-review and
- *   PR labels keep working exactly as configured.
+ * - `open_pr = true`: the defaults pass through with `--create-pr` appended
+ *   when missing, so the setting alone guarantees PR creation; auto-review
+ *   and PR labels keep working exactly as configured.
  * - `open_pr` off (the default): strip every PR/review flag from the
- *   defaults (so workspace-level `--create-pr --auto-review` cannot leak
- *   in) and append `--no-git` so the run makes no branch, no push, and no
- *   PR — the work lands wherever the prompt says it should.
+ *   defaults (so workspace-level `--create-pr --auto-review` — in bare or
+ *   `--flag=value` form — cannot leak in) and append `--no-git` so the run
+ *   makes no branch, no push, and no PR — the work lands wherever the
+ *   prompt says it should.
  */
 export function automationTaskArgs(automation: { openPr?: boolean }, baseArgs: string[]): string[] {
-  if (automation.openPr) return baseArgs;
+  if (automation.openPr) {
+    return baseArgs.some((arg) => CREATE_PR_PATTERN.test(arg))
+      ? baseArgs
+      : [...baseArgs, "--create-pr"];
+  }
   const filtered: string[] = [];
   let skipNext = false;
   for (const arg of baseArgs) {
@@ -250,7 +258,7 @@ export function automationTaskArgs(automation: { openPr?: boolean }, baseArgs: s
       skipNext = true;
       continue;
     }
-    if (PR_FLAGS.has(arg)) continue;
+    if (PR_FLAG_PATTERN.test(arg)) continue;
     filtered.push(arg);
   }
   if (!filtered.includes("--no-git")) filtered.push("--no-git");

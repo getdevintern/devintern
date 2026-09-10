@@ -9,7 +9,7 @@ import { resolveConfigDir } from "@devintern/utils";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
-import { nextScheduleOccurrence } from "./automation-config";
+import { automationTaskArgs, nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
@@ -129,7 +129,9 @@ export function nextAutomationDue(automation: AutomationConfig, afterMs: number)
 /**
  * Per-run CLI args for one automation occurrence: the per-automation policy
  * resolver wins when present; otherwise the shared per-task flags (a factory
- * for live-reload freshness) and finally `workerTaskArgs()`.
+ * for live-reload freshness) and finally `workerTaskArgs()`, always with the
+ * automation's `open_pr` policy applied so the default per-task flags cannot
+ * turn PR creation on for an automation that has it off.
  */
 export function resolveAutomationRunArgs(
   automation: AutomationConfig,
@@ -137,7 +139,8 @@ export function resolveAutomationRunArgs(
 ): string[] {
   if (options.automationArgs) return options.automationArgs(automation);
   const extraArgs = options.extraArgs;
-  return typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
+  const base = typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
+  return automationTaskArgs(automation, base);
 }
 
 /** One-timer scheduler with durable UTC cursors and per-automation leases. */
