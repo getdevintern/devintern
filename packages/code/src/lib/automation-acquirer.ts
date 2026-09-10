@@ -9,7 +9,7 @@ import { resolveConfigDir } from "@devintern/utils";
 
 import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
-import { nextScheduleOccurrence } from "./automation-config";
+import { automationTaskArgs, nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./task-polling-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
@@ -59,6 +59,8 @@ export interface AutomationScheduleStatus {
   interval?: string;
   repo?: string;
   prompt: string;
+  /** Whether occurrences open a pull request (opt-in; default off). */
+  openPr?: boolean;
   /** Durable next occurrence (epoch ms); absent before first registration. */
   nextDueAt?: number;
 }
@@ -82,6 +84,12 @@ export interface AutomationAcquirerOptions {
    * config reloads (e.g. `[defaults].worker_task_args`) apply to later runs.
    */
   extraArgs?: string[] | (() => string[]);
+  /**
+   * Per-automation CLI flags; when set this wins over `extraArgs`, so each
+   * occurrence's flags can honor its own `open_pr` policy (e.g. workspace
+   * flags for PR-opening automations, `--no-git` for the rest).
+   */
+  automationArgs?: (automation: AutomationConfig) => string[];
   resolveContext: (automation: AutomationConfig) => Promise<AutomationRunContext | null>;
   now?: () => number;
   spawnRun?: (automation: AutomationConfig, context: AutomationRunContext) => SpawnedAutomationRun;
@@ -116,6 +124,23 @@ export function nextAutomationDue(automation: AutomationConfig, afterMs: number)
     throw new Error(`Automation "${automation.id}" has no schedule`);
   }
   return nextScheduleOccurrence(automation, afterMs);
+}
+
+/**
+ * Per-run CLI args for one automation occurrence: the per-automation policy
+ * resolver wins when present; otherwise the shared per-task flags (a factory
+ * for live-reload freshness) and finally `workerTaskArgs()`, always with the
+ * automation's `open_pr` policy applied so the default per-task flags cannot
+ * turn PR creation on for an automation that has it off.
+ */
+export function resolveAutomationRunArgs(
+  automation: AutomationConfig,
+  options: Pick<AutomationAcquirerOptions, "automationArgs" | "extraArgs">,
+): string[] {
+  if (options.automationArgs) return options.automationArgs(automation);
+  const extraArgs = options.extraArgs;
+  const base = typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
+  return automationTaskArgs(automation, base);
 }
 
 /** One-timer scheduler with durable UTC cursors and per-automation leases. */
@@ -295,15 +320,12 @@ export class AutomationAcquirer implements Acquirer {
           continue;
         }
         console.log(`\n⏰ [${kind}:${automation.id}] starting scheduled run`);
-        const extraArgs = this.options.extraArgs;
-        const args =
-          typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
         const run = this.options.spawnRun
           ? this.options.spawnRun(automation, context)
           : defaultSpawnRun(
               automation,
               context,
-              args,
+              this.resolveAutomationArgs(automation),
               "scheduled",
               this.options.terminationGraceMs,
             );
@@ -447,13 +469,16 @@ export class AutomationAcquirer implements Acquirer {
     }
 
     console.log(`\n⏰ [${this.jobKind()}:${automationId}] starting manual run (dashboard)`);
-    const extraArgs = this.options.extraArgs;
-    const args = typeof extraArgs === "function" ? extraArgs() : (extraArgs ?? workerTaskArgs());
     let run: SpawnedAutomationRun;
     try {
       run = this.options.spawnManualRun
         ? this.options.spawnManualRun(automation, context)
-        : spawnManualAutomationRun(automation, context, args, this.options.terminationGraceMs);
+        : spawnManualAutomationRun(
+            automation,
+            context,
+            this.resolveAutomationArgs(automation),
+            this.options.terminationGraceMs,
+          );
     } catch (error) {
       this.store.release(stateId, this.owner);
       try {
@@ -480,9 +505,15 @@ export class AutomationAcquirer implements Acquirer {
         interval: automation.interval,
         repo: automation.repo,
         prompt: automation.prompt,
+        openPr: automation.openPr === true,
         nextDueAt: state?.nextDueAt,
       };
     });
+  }
+
+  /** Per-run CLI args: per-automation policy first, then the shared defaults. */
+  private resolveAutomationArgs(automation: AutomationConfig): string[] {
+    return resolveAutomationRunArgs(automation, this.options);
   }
 
   private jobKind(): string {
