@@ -225,6 +225,8 @@ export interface WebhookServerConfig {
   host: string;
   webhookSecret: string;
   gitlabWebhookSecret?: string;
+  /** GitLab Standard Webhooks signing token (`whsec_...`). */
+  gitlabWebhookSigningToken?: string;
   autoReview: boolean;
   autoReviewMaxIterations: number;
   validateIp: boolean;

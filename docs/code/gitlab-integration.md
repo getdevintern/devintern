@@ -225,13 +225,16 @@ Failure metadata and bounded excerpts from up to five failed job traces are pass
 Polling remains the default and fallback. For lower-latency repo-local automation, explicitly configure a GitLab project webhook:
 
 ```bash
+# GitLab 19+ Standard Webhooks signing token (preferred):
+export GITLAB_WEBHOOK_SIGNING_TOKEN="whsec_<base64-encoded-32-byte-key>"
+# Compatibility secret for older GitLab Self-Managed versions:
 export GITLAB_WEBHOOK_SECRET="a-long-random-secret"
 devintern webhook serve
 ```
 
-Set the project webhook URL to `https://your-host.example/webhooks/gitlab`, enter the same secret token, and enable **Comments**, **Merge request events**, **Pipeline events**, and **Job events**. Creating or editing a project webhook normally requires Maintainer or Owner access; the code-host API token used to process an event still needs the permissions documented above.
+Set the project webhook URL to `https://your-host.example/webhooks/gitlab`, configure the matching signing token (GitLab 19+) or legacy secret token, and enable **Comments**, **Merge request events**, **Pipeline events**, and **Job events**. Creating or editing a project webhook normally requires Maintainer or Owner access; the code-host API token used to process an event still needs the permissions documented above.
 
-The endpoint verifies `X-Gitlab-Token` with a timing-safe exact comparison, deduplicates delivery UUIDs, and durably queues work before responding. Only MRs already registered by DevIntern on the configured instance and project are eligible. Notes trigger the existing feedback reconciliation, closed or merged events stop the watch, definitive conflict states trigger guarded base sync, and failed pipeline/job events re-query CI before repair. Advisory jobs and canceled or ambiguous states remain non-actionable. Polling stays enabled, so missed deliveries and unsupported event variants are reconciled later.
+The endpoint verifies Standard Webhooks HMAC signatures with timestamp freshness checks or validates the legacy `X-Gitlab-Token` with a timing-safe exact comparison. If a signature header is present but invalid, DevIntern does not fall back to the legacy token. Deliveries are deduplicated by GitLab's delivery-scoped `webhook-id` or `Idempotency-Key`; the configured webhook UUID is never treated as a delivery ID. Only MRs already registered by DevIntern on the configured instance and project are eligible. Notes trigger the existing feedback reconciliation, closed or merged events stop the watch, definitive conflict states trigger guarded base sync, and failed pipeline/job events re-query CI before repair. Advisory jobs and canceled or ambiguous states remain non-actionable. Polling stays enabled, so missed deliveries and unsupported event variants are reconciled later.
 
 Hosted relay registration and repository-wide GitLab mention discovery remain out of scope.
 

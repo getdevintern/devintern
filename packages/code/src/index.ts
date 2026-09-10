@@ -580,6 +580,7 @@ function printWebhookServeHelp(): void {
   console.log("Environment variables:");
   console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
   console.log("  GITLAB_WEBHOOK_SECRET  Secret token for GitLab project webhooks");
+  console.log("  GITLAB_WEBHOOK_SIGNING_TOKEN  Standard Webhooks signing token (GitLab 19+)");
   console.log("  At least one provider webhook secret is required.");
   console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
   console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
