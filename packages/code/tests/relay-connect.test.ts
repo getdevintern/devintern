@@ -4,6 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  beginGitLabRelayRegistration,
+  completeGitLabRelayRegistration,
   connectRelayTarget,
   connectGitHubRepo,
   ensureRelayToken,
@@ -11,6 +13,7 @@ import {
   hasGitHubRelayRegistration,
   hasGitHubRelayRouting,
   loadRelayState,
+  removeGitLabRelayRegistration,
   registerRelaySource,
   saveRelayState,
 } from "../src/lib/relay-connect";
@@ -150,7 +153,111 @@ describe("relay-connect auth", () => {
     expect(state.registrations).toEqual([]);
     expect(state.github).toBeUndefined();
     expect(state.githubRepositories).toBeUndefined();
+    expect(state.gitlabRepositories).toBeUndefined();
     expect(hasGitHubRelayRegistration(state)).toBe(false);
+  });
+
+  test("GitLab registration lifecycle persists identity but never signing material", async () => {
+    const signingToken = "whsec_standard-secret";
+    const legacySecret = "legacy-secret";
+    const fetchImpl = mockFetch((_url, body) => {
+      const action = (body as { action: string }).action;
+      if (action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_gitlab",
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "begin-gitlab-registration") {
+        return new Response(
+          JSON.stringify({
+            registrationId: "glr_1",
+            ingestUrl: "https://relay.test/ingest/gitlab/route",
+            signingToken,
+            legacySecret,
+            expiresAt: Date.now() + 60_000,
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "complete-gitlab-registration") {
+        return new Response(
+          JSON.stringify({
+            registration: {
+              provider: "gitlab",
+              instanceUrl: "https://gitlab.example.com",
+              projectId: "42",
+              projectPath: "platform/widgets",
+              registrationId: "glr_1",
+              status: "active",
+              hookId: 7,
+              activatedAt: 1234,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      expect(action).toBe("remove-gitlab-registration");
+      return new Response(JSON.stringify({ removed: true }), { status: 200 });
+    });
+
+    const begun = await beginGitLabRelayRegistration({
+      instanceUrl: "https://gitlab.example.com",
+      projectId: "42",
+      projectPath: "platform/widgets",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+    expect(begun.signingToken).toBe(signingToken);
+    expect(begun.legacySecret).toBe(legacySecret);
+
+    const state = await completeGitLabRelayRegistration({
+      registrationId: begun.registrationId,
+      hookId: 7,
+      instanceUrl: "https://gitlab.example.com/",
+      projectId: "42",
+      projectPath: "platform/widgets",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+    expect(state.gitlabRepositories).toEqual([
+      {
+        instanceUrl: "https://gitlab.example.com",
+        projectId: "42",
+        projectPath: "platform/widgets",
+        hookId: 7,
+        registrationId: "glr_1",
+        connectedAt: expect.any(String),
+      },
+    ]);
+    const persisted = readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8");
+    expect(persisted).not.toContain(signingToken);
+    expect(persisted).not.toContain(legacySecret);
+
+    expect(
+      await removeGitLabRelayRegistration({
+        registrationId: "glr_1",
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl,
+      }),
+    ).toBe(true);
+    expect(loadRelayState(dir)?.gitlabRepositories).toEqual([]);
+    expect(calls.map((call) => (call.body as { action: string }).action)).toEqual([
+      "issue-token",
+      "begin-gitlab-registration",
+      "complete-gitlab-registration",
+      "remove-gitlab-registration",
+    ]);
   });
 
   test("connectGitHubRepo waits for verified GitHub App pairing", async () => {
