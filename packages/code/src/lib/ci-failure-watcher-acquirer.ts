@@ -448,6 +448,25 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
   }
 
+  /** Promptly reconcile one watched change after an authenticated provider hint. */
+  async reconcile(repo: string, prNumber: number): Promise<void> {
+    if (this.busy || !(this.options.enabled?.() ?? true)) return;
+    const watched = this.options.watchedChanges?.() ?? this.options.workerState.listOpenAgentPrs();
+    if (!watched.some((change) => change.repo === repo && change.prNumber === prNumber)) return;
+    this.busy = true;
+    const key = this.prKey(repo, prNumber);
+    try {
+      const outcome = await this.pollPr(repo, prNumber);
+      if (outcome === "unchanged-green") {
+        this.scheduleGreenPoll(key, 0);
+      } else {
+        this.greenPollSchedules.delete(key);
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+
   /** Poll a single PR; triggers at most one fix attempt per poll. */
   private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
     const { workerState, github, verbose } = this.options;

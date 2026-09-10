@@ -232,4 +232,15 @@ describe("GitLabReviewPollingAcquirer", () => {
     await filtered.tick();
     expect(snapshotCalls).toBe(0);
   });
+
+  test("relay reconciliation refetches only an exact registered MR", async () => {
+    const run = harness({ access: 30 });
+
+    await run.acquirer.reconcile(registered({ projectId: "99" }));
+    expect(run.snapshotCalls).toBe(0);
+
+    await run.acquirer.reconcile(registered());
+    expect(run.snapshotCalls).toBe(1);
+    expect(run.addressCalls).toBe(1);
+  });
 });
