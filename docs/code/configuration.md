@@ -275,6 +275,30 @@ DEVINTERN_VERBOSE=1
 
 This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
 
+## Auto-Review Loop
+
+With `--create-pr --auto-review`, the CLI critiques its own PR, applies fixes, and re-reviews until the review is approved, no important issues remain, or the iteration cap is reached. The cap is a ceiling, not a quota: most runs stop earlier on approval. How many iterations actually ran is recorded in the run record (`auto_review` stage) and in `auto-review-summary.json` in the task's output directory.
+
+One setting controls every auto-review path (direct CLI runs, workspace/worker runs, and the webhook server):
+
+```bash
+# .devintern-code/.env (or the workspace .env, or the shell)
+AUTO_REVIEW_ITERATIONS=3
+```
+
+or per run:
+
+```bash
+devintern PROJ-123 --create-pr --auto-review --auto-review-iterations 3
+```
+
+- **Default: `2`** review–fix cycles (lowered from 5 — most PRs converge in 1–2 passes or start thrashing, and every extra round is another agent run before a human sees the PR).
+- `1` means a single review pass with one fix round and no re-review. `0` is invalid, not "unlimited".
+- The CLI flag wins over the env var when both are set.
+- Invalid values (non-numeric or less than 1) are rejected with a clear error and the loop does not start.
+- Workers inherit the same setting: either include `--auto-review-iterations N` in `[defaults].worker_task_args` or set `AUTO_REVIEW_ITERATIONS` in the worker environment. Reloading `workspace.toml` applies a changed cap to subsequent tasks only.
+- The webhook server reads the same `AUTO_REVIEW_ITERATIONS` env var. The old webhook-only `WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS` still works as a deprecated fallback and prints a warning; migrate to the unified name.
+
 ## Error Reporting
 
 The CLI reports errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
@@ -417,6 +441,7 @@ Applies to every unattended worker surface — fleet task polling, PR review add
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
 - Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- If the persisted active harness is no longer part of `AGENT_HARNESS` (for example after shortening the chain), startup warns once and stores the highest-priority available entry as the new active harness, so later restarts do not repeat the stale-harness warning.
 - Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
 
 Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.

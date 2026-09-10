@@ -13,6 +13,11 @@ export interface AutomationConfig {
   interval?: string;
   intervalMs?: number;
   repo?: string;
+  /**
+   * Whether occurrences open a pull request. Opt-in and off by default:
+   * omitting it (workspace `worker_task_args` included) never creates PRs.
+   */
+  openPr?: boolean;
 }
 
 /** A cron-or-interval schedule using the `[[automations]]` format. */
@@ -163,6 +168,14 @@ export function parseAutomationEntries(
 
     const schedule = parseCronOrIntervalSchedule(table, { label }, errors);
 
+    // PR creation is opt-in per automation: omitted or `false` means no PR,
+    // no review branch, and no PR labels for this schedule's occurrences.
+    const openPrValue = table.open_pr;
+    const openPr = typeof openPrValue === "boolean" ? openPrValue : false;
+    if (openPrValue !== undefined && openPrValue !== null && typeof openPrValue !== "boolean") {
+      errors.push(`${label}.open_pr must be a boolean.`);
+    }
+
     const repo = stringValue("repo");
     if (repo && options.repoNames && !options.repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
@@ -177,6 +190,7 @@ export function parseAutomationEntries(
         interval: schedule.interval,
         intervalMs: schedule.intervalMs,
         repo,
+        openPr,
       });
     }
   }
@@ -202,4 +216,51 @@ export function parseAutomationConfig(text: string, sourceLabel = SINGLE_REPO_AU
 export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationConfig[] {
   const path = join(baseDir, SINGLE_REPO_AUTOMATIONS_PATH);
   return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
+}
+
+/** Value-taking review flag; its separate value is the next token. */
+const PR_FLAGS_WITH_VALUE = new Set(["--auto-review-iterations"]);
+/** PR/review flags in every form the CLI accepts, bare or `--flag=value`. */
+const PR_FLAG_PATTERN = /^(?:--create-pr|--auto-review(?:-iterations)?)(?:=.*)?$/;
+/** `--create-pr` forms that actually enable PR creation (`--create-pr=false` is not one). */
+const CREATE_PR_PATTERN = /^--create-pr(?:=(?!false$).*)?$/;
+
+/**
+ * CLI args for one automation occurrence, derived from the workspace/task
+ * default flags (`[defaults].worker_task_args` or `workerTaskArgs()`).
+ *
+ * The automation's own `open_pr` setting is the source of truth for PR
+ * creation — never an inherited flag list:
+ *
+ * - `open_pr = true`: the defaults pass through with `--create-pr` appended
+ *   when missing, so the setting alone guarantees PR creation; auto-review
+ *   and PR labels keep working exactly as configured.
+ * - `open_pr` off (the default): strip every PR/review flag from the
+ *   defaults (so workspace-level `--create-pr --auto-review` — in bare or
+ *   `--flag=value` form — cannot leak in) and append `--no-git` so the run
+ *   makes no branch, no push, and no PR — the work lands wherever the
+ *   prompt says it should.
+ */
+export function automationTaskArgs(automation: { openPr?: boolean }, baseArgs: string[]): string[] {
+  if (automation.openPr) {
+    return baseArgs.some((arg) => CREATE_PR_PATTERN.test(arg))
+      ? baseArgs
+      : [...baseArgs, "--create-pr"];
+  }
+  const filtered: string[] = [];
+  let skipNext = false;
+  for (const arg of baseArgs) {
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    if (PR_FLAGS_WITH_VALUE.has(arg)) {
+      skipNext = true;
+      continue;
+    }
+    if (PR_FLAG_PATTERN.test(arg)) continue;
+    filtered.push(arg);
+  }
+  if (!filtered.includes("--no-git")) filtered.push("--no-git");
+  return filtered;
 }

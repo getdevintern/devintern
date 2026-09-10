@@ -22,6 +22,7 @@ import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "./agent-json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
+import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "./sandbox";
 import type {
   AutoReviewLoopOptions,
@@ -615,7 +616,7 @@ export async function runAutoReviewLoop(
     baseBranch,
     harness,
     executablePath,
-    maxIterations = 5,
+    maxIterations = DEFAULT_AUTO_REVIEW_ITERATIONS,
     minPriority = "medium",
     workingDir,
     outputDir,

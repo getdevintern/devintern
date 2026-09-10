@@ -86,20 +86,60 @@ export function workerTaskArgs(): string[] {
 export async function runTaskViaCli(
   taskKey: string,
   extraArgs: string[] = workerTaskArgs(),
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<TaskExecutionResult> {
   const result = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve(1);
+          return;
+        }
+        const detached = process.platform !== "win32";
         const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
           stdio: "inherit",
           cwd: opts.cwd,
           env,
+          detached,
         });
-        child.on("close", (code) => resolve(code ?? 1));
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        let settled = false;
+        const abort = () => {
+          if (child.pid === undefined) return;
+          try {
+            if (detached) process.kill(-child.pid, "SIGTERM");
+            else child.kill("SIGTERM");
+          } catch {
+            // The child may already have exited.
+          }
+          killTimer = setTimeout(() => {
+            try {
+              if (detached) process.kill(-child.pid!, "SIGKILL");
+              else child.kill("SIGKILL");
+            } catch {
+              // The child may already have exited.
+            }
+          }, 5_000);
+          killTimer.unref?.();
+        };
+        const finish = (code: number) => {
+          if (settled) return;
+          settled = true;
+          opts.signal?.removeEventListener("abort", abort);
+          if (killTimer) clearTimeout(killTimer);
+          resolve(code);
+        };
+        opts.signal?.addEventListener("abort", abort, { once: true });
+        child.on("close", (code) => {
+          finish(code ?? 1);
+        });
         child.on("error", (error) => {
           console.error(`❌ Failed to spawn task run for ${taskKey}: ${error.message}`);
-          resolve(1);
+          finish(1);
         });
       }),
     opts.env ?? process.env,
@@ -209,6 +249,7 @@ export class TaskPollingAcquirer implements Acquirer {
         const { tasks } = await searchTasks(query);
         const skipped: string[] = [];
         const missingStamp: string[] = [];
+        const executions: Promise<void>[] = [];
         let pickedUp = 0;
 
         for (const task of tasks) {
@@ -229,22 +270,35 @@ export class TaskPollingAcquirer implements Acquirer {
 
           pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
-          const result = await executeTask(task.key);
-          if (result === "deferred") {
-            // The task never started. Release the provisional claim and retain
-            // the detector cursor so this same tracker change is evaluated on
-            // the next tick. Other tasks completed in this tick stay deduped.
-            queue.unmarkProcessed(detector.source, externalId);
-            tickDeferred = true;
-            console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
-          } else {
-            console.log(
-              result
-                ? `✅ [${this.name}] ${task.key} completed`
-                : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
-            );
-          }
+          executions.push(
+            (async () => {
+              const result = await executeTask(task.key);
+              if (result === "deferred") {
+                // The task never started. Release the provisional claim and retain
+                // the detector cursor so this same tracker change is evaluated on
+                // the next tick. Other tasks completed in this tick stay deduped.
+                queue.unmarkProcessed(detector.source, externalId);
+                tickDeferred = true;
+                console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+              } else {
+                console.log(
+                  result
+                    ? `✅ [${this.name}] ${task.key} completed`
+                    : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+                );
+              }
+            })(),
+          );
         }
+
+        // Keep the tick busy until every scheduled execution settles. Waiting
+        // for all outcomes prevents one rejection from opening a second tick
+        // while sibling jobs from this batch are still running.
+        const outcomes = await Promise.allSettled(executions);
+        const rejected = outcomes.find(
+          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+        );
+        if (rejected) throw rejected.reason;
 
         this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
         // Remember that a drain ran so working-window catch-up can tell an

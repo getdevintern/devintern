@@ -20,7 +20,7 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
-import { RunCoordinator } from "../src/lib/run-coordinator";
+import { createTaskSupervisor } from "../src/lib/task-supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
 import { saveRelayState } from "../src/lib/relay-connect";
 
@@ -140,7 +140,6 @@ describe("createWorkspaceTaskAcquirer", () => {
         ran.push({ taskKey, args, cwd: opts.cwd, env: opts.env });
         return runResult;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
   beforeEach(() => {
@@ -218,9 +217,9 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(state.skips.list()[0]).toMatchObject({ reason: "unrouted", candidates: [] });
   });
 
-  test("the repo run lock is held during execution and released after", async () => {
+  test("task execution no longer holds the legacy whole-run repo lock", async () => {
     tasks = [{ key: "T-5", updated: "u1", labels: ["backend"] }];
-    let lockedDuringRun = false;
+    let lockAvailableDuringRun = false;
     const acquirer = createWorkspaceTaskAcquirer({
       config: CONFIG,
       workspaceDir,
@@ -233,35 +232,55 @@ describe("createWorkspaceTaskAcquirer", () => {
       query: "status=todo",
       intervalSeconds: 3600,
       runTask: async () => {
-        lockedDuringRun = !createRepoRunLock("backend", workspaceDir).acquire().success;
+        const independent = createRepoRunLock("backend", workspaceDir);
+        lockAvailableDuringRun = independent.acquire().success;
+        independent.release();
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
-    expect(lockedDuringRun).toBe(true);
-    // Released afterwards.
-    const after = createRepoRunLock("backend", workspaceDir).acquire();
-    expect(after.success).toBe(true);
+    expect(lockAvailableDuringRun).toBe(true);
   });
 
-  test("a task deferred by a busy repo retries on the next poll", async () => {
+  test("the legacy repo lock no longer defers task admission", async () => {
     tasks = [{ key: "T-6", updated: "u1", labels: ["backend"] }];
     const heldLock = createRepoRunLock("backend", workspaceDir);
     expect(heldLock.acquire().success).toBe(true);
     const acquirer = makeAcquirer();
 
     await acquirer.tick();
-    expect(ran).toHaveLength(0);
-    expect(state.workerState.getCursor("markdown")).toBeNull();
-    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(false);
-
-    heldLock.release();
-    await acquirer.tick();
     expect(ran.map((run) => run.taskKey)).toEqual(["T-6"]);
     expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
     expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
+    heldLock.release();
+  });
+
+  test("a supervisor drain defers a task and rolls back its polling claim", async () => {
+    tasks = [{ key: "T-7", updated: "u1", labels: ["backend"] }];
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    await supervisor.drain();
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      supervisor,
+      runTask: async () => {
+        throw new Error("must not run");
+      },
+    });
+
+    await acquirer.tick();
+
+    expect(state.workerState.getCursor("markdown")).toBeNull();
+    expect(state.queue.hasProcessed("markdown", "task:T-7:u1")).toBe(false);
   });
 });
 
@@ -282,8 +301,8 @@ describe("createFleetTaskExecutor serialization", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test("with a coordinator, task runs wait for held agent slots (account-global limits)", async () => {
-    const coordinator = new RunCoordinator();
+  test("task runs wait for held supervisor slots", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     let agentStarted = false;
     const executor = createFleetTaskExecutor({
       config: CONFIG,
@@ -295,34 +314,72 @@ describe("createFleetTaskExecutor serialization", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
-      coordinator,
+      supervisor,
     });
 
-    // A scheduled estimation sweep holds the process-level slot first.
-    const releaseEstimation = await coordinator.acquire();
+    let releaseBlocker!: () => void;
+    const blocker = supervisor.schedule({
+      id: "blocker",
+      source: "test",
+      kind: "estimation",
+      checkoutClass: "workspace",
+      run: () =>
+        new Promise<void>((resolve) => {
+          releaseBlocker = resolve;
+        }),
+    });
     const routable = toRoutableTask({ key: "T-C1", labels: ["backend"], components: [] });
     const running = executor("T-C1", routable);
 
     await new Promise((resolve) => setTimeout(resolve, 30));
-    // Repo preparation may proceed, but no agent process starts while the
-    // estimation sweep holds the account-global slot.
     expect(agentStarted).toBe(false);
-    expect(repoManager.calls).toContain("worktree:backend:T-C1");
+    expect(repoManager.calls).not.toContain("worktree:backend:T-C1");
 
-    releaseEstimation();
-    await running;
+    releaseBlocker();
+    await Promise.all([blocker, running]);
     expect(agentStarted).toBe(true);
   });
 
-  test("without a coordinator, runs start immediately (unchanged legacy behavior)", async () => {
+  test("two same-repository tasks overlap when the per-repo cap is two", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      supervisor,
+      runTask: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return true;
+      },
+    });
+    const routable = toRoutableTask({ key: "T", labels: ["backend"], components: [] });
+
+    const first = executor("T-1", routable);
+    const second = executor("T-2", routable);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(peak).toBe(2);
+
+    release();
+    await Promise.all([first, second]);
+  });
+
+  test("without an injected supervisor, a focused executor uses config limits", async () => {
     const executor = createFleetTaskExecutor({
       config: CONFIG,
       workspaceDir,
       skips: state.skips,
       repoManager,
       runTask: async () => true,
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
     const routable = toRoutableTask({ key: "T-C2", labels: ["backend"], components: [] });
     const result = await executor("T-C2", routable);
@@ -338,7 +395,6 @@ describe("createFleetTaskExecutor serialization", () => {
         skips: state.skips,
         repoManager,
         runTask: async () => true,
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       },
       { repo: "frontend", extraArgs: ["--force"] },
     );
@@ -362,7 +418,6 @@ describe("createFleetTaskExecutor serialization", () => {
           observed = { args, env: options.env };
           return true;
         },
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       },
       {
         repo: "backend",
@@ -550,7 +605,7 @@ remote = "https://forgejo.example/acme/forgejo.git"
 });
 
 describe("resolveWorkspaceAutomationContext", () => {
-  test("does not prepare the repository when its run lock is unavailable", async () => {
+  test("prepares the repository without the legacy whole-run lock", async () => {
     const workspaceDir = join(
       tmpdir(),
       `ws-automation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -568,14 +623,10 @@ describe("resolveWorkspaceAutomationContext", () => {
       CONFIG,
       workspaceDir,
       repoManager,
-      () => ({
-        acquire: () => ({ success: false, message: "busy" }),
-        release() {},
-      }),
     );
 
-    expect(context).toBeNull();
-    expect(repoManager.calls).toEqual([]);
+    expect(context?.repo).toBe("backend");
+    expect(repoManager.calls).toContain("base:backend");
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 

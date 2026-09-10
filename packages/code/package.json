@@ -1,6 +1,6 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "description": "Self-hosted worker that turns tracker tickets and Sentry errors into pull requests with any coding agent. BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
