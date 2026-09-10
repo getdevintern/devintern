@@ -217,6 +217,22 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toEqual(["acme/widgets#42"]);
   });
 
+  test("relay reconciliation bypasses the timer for one registered change", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(150)],
+    };
+    const { acquirer, fixed } = makeAcquirer(gh);
+
+    await acquirer.reconcile("acme/other", 1);
+    expect(gh.prCalls ?? 0).toBe(0);
+
+    await acquirer.reconcile("acme/widgets", 42);
+    expect(fixed).toEqual(["acme/widgets#42"]);
+  });
+
   test("pending and non-failure conclusions never trigger", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
