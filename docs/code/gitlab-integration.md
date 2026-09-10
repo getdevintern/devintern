@@ -94,7 +94,7 @@ This workflow:
 
 ## Experimental merge-request creation
 
-GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, CI repair, and repo-local direct webhooks are available. Broad `@mention` discovery, scheduled GitLab conflict windows, and a hosted GitLab webhook relay are not enabled.
+GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, CI repair, hosted relay delivery, and repo-local direct webhooks are available. Broad `@mention` discovery and scheduled GitLab conflict windows are not enabled.
 
 Add a separate code-host profile to `.devintern-code/.env`:
 
@@ -107,6 +107,9 @@ GITLAB_CODE_HOST_URL=https://gitlab.example.com
 
 # Personal, project, or group access token with API access.
 GITLAB_CODE_HOST_TOKEN=glpat_xxxxxxxxxxxx
+
+# Optional: use a separate Maintainer/Owner token only for relay hook setup.
+GITLAB_WEBHOOK_ADMIN_TOKEN=glpat_xxxxxxxxxxxx
 ```
 
 Then run the existing compatible command:
@@ -163,9 +166,10 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Manual `address-review` | Experimental; same-project writable branches only |
 | Registered-MR polling | Experimental; DevIntern-created MRs only |
 | Conflict/base synchronization | Experimental; `auto` mode and manual command |
-| CI repair | Experimental; registered MRs through polling or direct webhooks |
+| CI repair | Experimental; registered MRs through polling, relay, or direct webhooks |
+| Hosted relay | Experimental; automatic project hooks, no worker inbound port |
 | Direct project webhooks | Experimental; repo-local server only |
-| Repository-wide mentions and hosted relay | Not currently planned |
+| Repository-wide mentions | Deferred |
 
 The validated Self-Managed target is the latest stable GitLab release at the time @devintern/code ships. Other REST API v4 versions continue best-effort with a compatibility warning.
 
@@ -220,7 +224,33 @@ When `[workspace].ci_failure_fix = true`, the worker polls pipelines, jobs, and 
 
 Failure metadata and bounded excerpts from up to five failed job traces are passed to the agent. Before the repair begins, the worker revalidates the MR head SHA and the same-project writable-branch guard. Successful events deduplicate durably; unsuccessful attempts retain the existing `CI_FIX_MAX_ATTEMPTS` budget and post a GitLab MR note on exhaustion. A new head SHA grants a fresh retry budget.
 
-## Direct project webhooks
+## Hosted relay (recommended instant-event path)
+
+The normal worker setup discovers every GitLab remote in `workspace.toml`, creates and tests a project hook, and receives reference-only events without exposing the worker host:
+
+```bash
+devintern worker init
+# or reconnect all GitHub and GitLab code hosts later:
+devintern worker connect
+# focused GitLab repair/rotation:
+devintern worker connect gitlab
+```
+
+Creating project hooks requires Maintainer or Owner access. DevIntern first tries `GITLAB_WEBHOOK_ADMIN_TOKEN`, then the normal code-host token (including the existing same-instance tracker-token fallback). A permission or network failure leaves polling active and continues with the other projects. Multiple projects, nested groups, GitLab.com, custom ports, relative Self-Managed installation paths, explicit SSH aliases, custom CA bundles, and integration-specific proxies use the same per-repository environment layers described above.
+
+GitLab 19+ uses a Standard Webhooks signing token. Older Self-Managed versions automatically fall back to a legacy secret token when the instance rejects the newer field. These webhook credentials are generated for the route and never shown during successful setup or persisted locally. Reconnection updates only the exact remembered DevIntern hook, tests the replacement route end to end, and keeps the previous route briefly during rotation.
+
+Relay deliveries contain only project/change references. The worker matches provider, instance, numeric project ID, project path, MR IID, and branch where supplied, then re-fetches discussions, MR state, mergeability, permissions, and CI state with `GITLAB_CODE_HOST_TOKEN`. It never trusts webhook payload state for an action. Polling continues as the fallback and correctness sweep.
+
+To remove the exact remembered hooks and relay routes while retaining polling:
+
+```bash
+devintern worker connect gitlab --disconnect
+```
+
+Self-Managed GitLab must be able to make outbound HTTPS requests to `relay.devintern.com`. No inbound connectivity to the customer worker is needed. The relay sees the GitLab provider, instance URL, numeric project ID/path, MR IID or branch/head SHA when needed, event type, delivery ID, and timestamp. It never receives GitLab API tokens, source code, diffs, discussion text, CI logs, ticket bodies, or agent prompts/output.
+
+## Direct project webhooks (advanced)
 
 Polling remains the default and fallback. For lower-latency repo-local automation, explicitly configure a GitLab project webhook:
 
@@ -236,7 +266,7 @@ Set the project webhook URL to `https://your-host.example/webhooks/gitlab`, conf
 
 The endpoint verifies Standard Webhooks HMAC signatures with timestamp freshness checks or validates the legacy `X-Gitlab-Token` with a timing-safe exact comparison. If a signature header is present but invalid, DevIntern does not fall back to the legacy token. Deliveries are deduplicated by GitLab's delivery-scoped `webhook-id` or `Idempotency-Key`; the configured webhook UUID is never treated as a delivery ID. Only MRs already registered by DevIntern on the configured instance and project are eligible. Notes trigger the existing feedback reconciliation, closed or merged events stop the watch, definitive conflict states trigger guarded base sync, and failed pipeline/job events re-query CI before repair. Advisory jobs and canceled or ambiguous states remain non-actionable. Polling stays enabled, so missed deliveries and unsupported event variants are reconciled later.
 
-Hosted relay registration and repository-wide GitLab mention discovery remain out of scope.
+Repository-wide GitLab mention discovery remains out of scope.
 
 ## Batch processing with --query
 
