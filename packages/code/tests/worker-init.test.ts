@@ -321,6 +321,47 @@ describe("runWorkerInit", () => {
     expect(logs.join("\n")).toContain("Relay pairing stored");
   });
 
+  test("default relay onboarding connects GitHub and GitLab workspace repositories", async () => {
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "github-app"
+remote = "git@github.com:acme/app.git"
+
+[[repos]]
+name = "gitlab-app"
+remote = "git@gitlab.com:acme/platform.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
+`,
+    );
+    const calls: Array<{ target: string; repo?: string; projectPath?: string }> = [];
+
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "", "n"], {
+        getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+        runRelayConnect: async (target, connectDeps) => {
+          calls.push({
+            target,
+            repo: connectDeps.repo,
+            projectPath: connectDeps.gitlabProject?.projectPath,
+          });
+          return 0;
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([
+      { target: "github", repo: "acme/app", projectPath: undefined },
+      { target: "gitlab", repo: undefined, projectPath: "acme/platform" },
+    ]);
+    expect(logs.join("\n")).toContain("Relay pairing stored");
+  });
+
   describe("GitHub App step", () => {
     const relayDeps = {
       getUser: async () => ({ id: "user-1", email: "dev@example.com" }),

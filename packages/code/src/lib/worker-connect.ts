@@ -22,7 +22,7 @@ Connect an integration to the workspace worker. GitHub and tracker targets use
 the DevIntern relay; Sentry adds a directly polled error-monitor project.
 
 Targets:
-  github (default)   Verify unpaired GitHub repositories through the App
+  github             Verify unpaired GitHub repositories through the App
   gitlab             Install relay hooks for GitLab.com or self-managed projects
   linear             Register a Linear webhook
   asana              Register an Asana webhook
@@ -40,7 +40,7 @@ Options:
 
 Tracker targets use the selected team's env_file/inline env over the workspace
 .env. A target used by multiple teams is polling-only until relay registrations
-carry team identity.`;
+carry team identity. With no target, GitHub and GitLab code hosts are connected.`;
 
 export interface WorkerConnectCommandDeps {
   workspaceDir?: string;
@@ -64,7 +64,7 @@ interface ParsedConnectArgs {
 }
 
 function parseConnectArgs(args: string[]): ParsedConnectArgs {
-  let target = "github";
+  let target = "all";
   let workspacePath: string | undefined;
   let help = false;
   let team: string | undefined;
@@ -179,6 +179,7 @@ export async function runWorkerConnectCommand(
   if (
     parsed.target !== "github" &&
     parsed.target !== "gitlab" &&
+    parsed.target !== "all" &&
     parsed.target !== "status" &&
     parsed.target !== "sentry" &&
     !TRACKER_TARGETS.has(parsed.target)
@@ -193,6 +194,7 @@ export async function runWorkerConnectCommand(
     parsed.team &&
     (parsed.target === "github" ||
       parsed.target === "gitlab" ||
+      parsed.target === "all" ||
       parsed.target === "status" ||
       parsed.target === "sentry")
   ) {
@@ -228,6 +230,30 @@ export async function runWorkerConnectCommand(
 
   for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
     if (process.env[key] === undefined) process.env[key] = value;
+  }
+
+  if (parsed.target === "all") {
+    let accessTokenPromise: Promise<string> | undefined;
+    const sharedDeps: WorkerConnectCommandDeps = {
+      ...deps,
+      workspaceDir,
+      workspacePath: configPath,
+      getAccessToken: deps.getAccessToken
+        ? () => (accessTokenPromise ??= deps.getAccessToken!())
+        : undefined,
+    };
+    let failures = 0;
+    if (workspaceRelayRepos(config).length > 0) {
+      if ((await runWorkerConnectCommand(["github"], sharedDeps)) !== 0) failures++;
+    } else {
+      console.log("   No GitHub repositories found; skipping GitHub relay setup.");
+    }
+    if (workspaceGitLabRelayProjects(config, workspaceDir).length > 0) {
+      if ((await runWorkerConnectCommand(["gitlab"], sharedDeps)) !== 0) failures++;
+    } else {
+      console.log("   No GitLab repositories found; skipping GitLab relay setup.");
+    }
+    return failures === 0 ? 0 : 1;
   }
 
   if (parsed.target === "sentry") {
