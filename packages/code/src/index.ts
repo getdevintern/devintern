@@ -545,7 +545,7 @@ function printWebhookHelp(): void {
   console.log("Run advanced direct-webhook services. Relay is recommended for normal workers.");
   console.log("");
   console.log("Commands:");
-  console.log("  serve               Start the repo-local GitHub webhook server");
+  console.log("  serve               Start the repo-local GitHub/GitLab webhook server");
   console.log("");
   console.log("Run 'devintern webhook serve --help' for command-specific options.");
 }
@@ -553,7 +553,7 @@ function printWebhookHelp(): void {
 function printWebhookServeHelp(): void {
   console.log("Usage: devintern webhook serve [options]");
   console.log("");
-  console.log("Start the repo-local webhook server for GitHub PR events.");
+  console.log("Start the repo-local webhook server for GitHub PR and GitLab MR events.");
   console.log("");
   console.log("Options:");
   console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
@@ -562,6 +562,8 @@ function printWebhookServeHelp(): void {
   console.log("");
   console.log("Environment variables:");
   console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
+  console.log("  GITLAB_WEBHOOK_SECRET  Secret token for GitLab project webhooks");
+  console.log("  At least one provider webhook secret is required.");
   console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
   console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
   console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");

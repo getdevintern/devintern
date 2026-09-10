@@ -224,6 +224,7 @@ export interface WebhookServerConfig {
   port: number;
   host: string;
   webhookSecret: string;
+  gitlabWebhookSecret?: string;
   autoReview: boolean;
   autoReviewMaxIterations: number;
   validateIp: boolean;

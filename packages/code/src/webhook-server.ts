@@ -3,13 +3,22 @@
 /**
  * Webhook Server for @devintern/code
  *
- * Listens for GitHub PR review events and automatically addresses
- * review feedback using an AI agent.
+ * Listens for GitHub PR and GitLab MR events and automatically handles
+ * registered review, lifecycle, synchronization, and CI work.
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { createServer } from "http";
 import type { IncomingMessage, ServerResponse } from "http";
+import { tmpdir } from "os";
 import { join } from "path";
 import PQueue from "p-queue";
 import {
@@ -34,6 +43,22 @@ import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-
 import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover";
 import type { WorkerFailover } from "./lib/worker-failover";
 import { WorkerState } from "./lib/worker-state";
+import type { AgentPr } from "./lib/worker-state";
+import { normalizeCodeHostUrl } from "./lib/code-host";
+import {
+  gitLabWebhookDeliveryId,
+  matchesRegisteredGitLabChange,
+  normalizeGitLabWebhook,
+  verifyGitLabWebhookToken,
+} from "./lib/gitlab-webhook";
+import type { GitLabWebhookEvent } from "./lib/gitlab-webhook";
+import { resolveGitLabCodeHostConfig } from "./lib/pr-client";
+import { GitLabReviewsClient } from "./lib/gitlab-reviews";
+import { runCiFixViaCli } from "./lib/ci-failure-watcher-acquirer";
+import {
+  runAddressReviewUrlViaCli,
+  runResolveConflictsUrlViaCli,
+} from "./lib/review-polling-acquirer";
 import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -62,6 +87,7 @@ const DEFAULT_CONFIG: WebhookServerConfig = {
   port: parseInt(process.env.WEBHOOK_PORT || "3000", 10),
   host: process.env.WEBHOOK_HOST || "0.0.0.0",
   webhookSecret: process.env.WEBHOOK_SECRET || "",
+  gitlabWebhookSecret: process.env.GITLAB_WEBHOOK_SECRET || "",
   autoReview: process.env.WEBHOOK_AUTO_REVIEW === "true",
   autoReviewMaxIterations: parseInt(process.env.WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS || "5", 10),
   validateIp: process.env.WEBHOOK_VALIDATE_IP === "true",
@@ -455,6 +481,205 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
   }
 
   return jsonResponse({ error: "Unhandled event type" }, 400);
+}
+
+interface QueuedGitLabWebhook {
+  event: GitLabWebhookEvent;
+  target: AgentPr;
+}
+
+/** Authenticate, scope, deduplicate, and durably enqueue one GitLab delivery. */
+export async function handleGitLabWebhook(
+  request: Request,
+  config: WebhookServerConfig,
+): Promise<Response> {
+  const clientIp =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "unknown";
+  if (!rateLimiter.isAllowed(clientIp)) {
+    return jsonResponse({ error: "Rate limit exceeded" }, 429);
+  }
+  if (!config.gitlabWebhookSecret) {
+    return jsonResponse({ error: "GitLab webhooks are not configured" }, 503);
+  }
+  if (
+    !verifyGitLabWebhookToken(request.headers.get("x-gitlab-token"), config.gitlabWebhookSecret)
+  ) {
+    return jsonResponse({ error: "Invalid GitLab webhook token" }, 401);
+  }
+  if (!webhookQueue) {
+    return jsonResponse({ error: "Webhook queue is not available" }, 503);
+  }
+  const queue = webhookQueue;
+
+  let payload: Record<string, unknown>;
+  const rawBody = await request.text();
+  try {
+    payload = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ error: "Invalid JSON payload" }, 400);
+  }
+  const event = normalizeGitLabWebhook(request.headers.get("x-gitlab-event"), payload);
+  if (!event) return jsonResponse({ error: "Unsupported GitLab event type" }, 400);
+
+  const deliveryId = gitLabWebhookDeliveryId(request.headers, rawBody, event.eventName);
+  if (queue.hasProcessed("gitlab:webhook", deliveryId)) {
+    return jsonResponse({ success: true, message: "Duplicate delivery", deliveryId });
+  }
+
+  if (event.kind === "ignored") {
+    queue.markProcessed("gitlab:webhook", deliveryId);
+    return jsonResponse({ success: true, message: "GitLab event does not require processing" });
+  }
+
+  const configuredInstanceUrl = normalizeCodeHostUrl(
+    process.env.GITLAB_CODE_HOST_URL || "https://gitlab.com",
+  );
+  const resolved = resolveGitLabCodeHostConfig(configuredInstanceUrl);
+  if (!resolved.ok) return jsonResponse({ error: resolved.message }, 503);
+  const instanceUrl = normalizeCodeHostUrl(resolved.instanceUrl);
+  const state = new WorkerState();
+  let targets: AgentPr[];
+  try {
+    targets = state
+      .listOpenAgentChangeRequests()
+      .filter((change) => matchesRegisteredGitLabChange(event, change, instanceUrl));
+  } finally {
+    state.close();
+  }
+  if (targets.length === 0) {
+    queue.markProcessed("gitlab:webhook", deliveryId);
+    return jsonResponse({ success: true, message: "No registered GitLab MR matched" });
+  }
+
+  const eventIds = targets.map((target) => {
+    const queued: QueuedGitLabWebhook = { event, target };
+    const eventId = queue.enqueue(`gitlab:${event.kind}`, queued);
+    reviewQueue
+      .add(() => processGitLabWithPersistence(eventId, queued))
+      .catch((error) => {
+        console.error("❌ Error processing GitLab webhook:", error);
+      });
+    return eventId;
+  });
+  queue.markProcessed("gitlab:webhook", deliveryId);
+  return jsonResponse({
+    success: true,
+    message: "GitLab event processing started",
+    eventIds: eventIds.filter(Boolean),
+    matchedMergeRequests: targets.length,
+  });
+}
+
+async function processGitLabWithPersistence(
+  eventId: string | undefined,
+  queued: QueuedGitLabWebhook,
+): Promise<void> {
+  if (eventId && webhookQueue) webhookQueue.markProcessing(eventId);
+  try {
+    await processGitLabEvent(queued);
+    if (eventId && webhookQueue) webhookQueue.markCompleted(eventId);
+  } catch (error) {
+    if (error instanceof UsageLimitError) {
+      handleUsageLimit(error.resetHint);
+      if (eventId && webhookQueue) webhookQueue.requeuePending(eventId);
+      reviewQueue
+        .add(() => processGitLabWithPersistence(eventId, queued))
+        .catch((cause) => {
+          console.error("❌ Error reprocessing deferred GitLab webhook:", cause);
+        });
+      return;
+    }
+    if (eventId && webhookQueue) webhookQueue.markFailed(eventId, (error as Error).message);
+    throw error;
+  }
+}
+
+async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promise<void> {
+  const serializationKey = `${target.instanceUrl}:${target.projectPath}!${target.changeNumber}`;
+  if (event.kind === "lifecycle") {
+    const state = new WorkerState();
+    try {
+      state.markAgentChangeRequestClosed({
+        provider: target.provider,
+        instanceUrl: target.instanceUrl,
+        projectId: target.projectId,
+        projectPath: target.projectPath,
+        number: target.changeNumber,
+        webUrl: target.webUrl,
+      });
+    } finally {
+      state.close();
+    }
+    return;
+  }
+
+  if (event.kind === "feedback") {
+    const result = await runAddressReviewUrlViaCli(target.webUrl, serializationKey, {
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    if (result === "deferred") throw new UsageLimitError();
+    if (!result) throw new Error("GitLab feedback run failed");
+    return;
+  }
+
+  const resolved = resolveGitLabCodeHostConfig(target.instanceUrl);
+  if (!resolved.ok) throw new Error(resolved.message);
+  const client = new GitLabReviewsClient(resolved.token, resolved.instanceUrl, {
+    caFile: resolved.caFile,
+    proxy: resolved.proxy,
+  });
+  const current = await client.getChangeRequest(target.projectPath, target.changeNumber);
+  if (current.state !== "opened") return;
+  if (event.headSha && event.headSha !== current.head.sha) return;
+
+  if (event.kind === "sync") {
+    const result = await runResolveConflictsUrlViaCli(target.webUrl, serializationKey, {
+      cwd: process.cwd(),
+      env: process.env,
+      expectedHeadSha: current.head.sha,
+      expectedBaseSha: current.base.sha || undefined,
+    });
+    if (result.outcome === "failed") throw new Error(result.message);
+    return;
+  }
+
+  if (event.kind === "ci") {
+    const snapshot = await client.getCiSnapshot(target.projectPath, current.head.sha);
+    if (snapshot.state !== "failure" || snapshot.failures.length === 0) return;
+    const rawLogs = await client.getJobTraces(target.projectPath, snapshot.jobIds);
+    const { truncateCiLogs } = await import("./lib/ci-failure-watcher-acquirer");
+    const feedbackDir = mkdtempSync(join(tmpdir(), "devintern-gitlab-webhook-ci-"));
+    const feedbackPath = join(feedbackDir, "ci-feedback.json");
+    writeFileSync(
+      feedbackPath,
+      JSON.stringify({
+        repository: target.projectPath,
+        prNumber: target.changeNumber,
+        branch: current.head.ref,
+        failures: snapshot.failures.map((failure) => ({
+          name: failure.name,
+          conclusion: failure.conclusion,
+          detailsUrl: failure.detailsUrl,
+        })),
+        logs: truncateCiLogs(rawLogs),
+      }),
+    );
+    try {
+      const ok = await runCiFixViaCli(target.projectPath, target.changeNumber, feedbackPath, {
+        cwd: process.cwd(),
+        env: process.env,
+        webUrl: target.webUrl,
+        serializationKey,
+        expectedHeadSha: current.head.sha,
+      });
+      if (!ok) throw new Error("GitLab CI repair did not complete");
+    } finally {
+      rmSync(feedbackDir, { recursive: true, force: true });
+    }
+  }
 }
 
 /**
@@ -1480,10 +1705,10 @@ async function sendResponse(res: ServerResponse, response: Response): Promise<vo
 }
 
 /**
- * Start the GitHub webhook HTTP server and recover pending queue events.
+ * Start the code-host webhook HTTP server and recover pending queue events.
  *
  * @param config - Partial configuration merged with defaults and env vars
- * @throws Exits the process when `WEBHOOK_SECRET` is missing
+ * @throws Exits the process when neither provider webhook secret is configured
  */
 export async function startWebhookServer(
   config: Partial<WebhookServerConfig> = {},
@@ -1494,9 +1719,9 @@ export async function startWebhookServer(
   };
 
   // Validate configuration
-  if (!finalConfig.webhookSecret) {
-    console.error("❌ WEBHOOK_SECRET environment variable is required");
-    console.error("   Generate one with: openssl rand -hex 32");
+  if (!finalConfig.webhookSecret && !finalConfig.gitlabWebhookSecret) {
+    console.error("❌ WEBHOOK_SECRET or GITLAB_WEBHOOK_SECRET is required");
+    console.error("   Generate a secret with: openssl rand -hex 32");
     process.exit(1);
   }
 
@@ -1518,18 +1743,22 @@ export async function startWebhookServer(
   console.log(`   IP validation: ${finalConfig.validateIp}`);
   console.log(`   Debug mode: ${finalConfig.debug}`);
 
-  // Log bot username for debugging
-  try {
-    const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
-    // Use a dummy repo to trigger app info fetch (doesn't need real repo for app auth)
-    const botName = await githubClient.getBotUsername("_", "_");
-    if (botName) {
-      console.log(`   Bot username: @${botName}`);
-    } else {
-      console.log(`   Bot username: (unknown - no GitHub App configured, using token or no auth)`);
+  // Log the GitHub bot username for debugging when that provider is enabled.
+  if (finalConfig.webhookSecret) {
+    try {
+      const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
+      // Use a dummy repo to trigger app info fetch (doesn't need real repo for app auth)
+      const botName = await githubClient.getBotUsername("_", "_");
+      if (botName) {
+        console.log(`   Bot username: @${botName}`);
+      } else {
+        console.log(
+          `   Bot username: (unknown - no GitHub App configured, using token or no auth)`,
+        );
+      }
+    } catch {
+      console.log(`   Bot username: (failed to determine)`);
     }
-  } catch (error) {
-    console.log(`   Bot username: (failed to determine)`);
   }
 
   // Prune expired dedupe ids and stale failed events on startup
@@ -1578,6 +1807,18 @@ export async function startWebhookServer(
     console.log(`\n🔄 Recovering ${pendingEvents.length} pending event(s) from previous run...`);
     for (const event of pendingEvents) {
       try {
+        if (event.eventType.startsWith("gitlab:")) {
+          const payload = JSON.parse(event.payload) as QueuedGitLabWebhook;
+          console.log(
+            `   Requeueing: GitLab MR !${payload.target.changeNumber} (${payload.target.projectPath})`,
+          );
+          reviewQueue
+            .add(() => processGitLabWithPersistence(event.id, payload))
+            .catch((error) => {
+              console.error(`❌ Error processing recovered event ${event.id}:`, error);
+            });
+          continue;
+        }
         if (event.eventType === "issue_comment") {
           const payload = JSON.parse(event.payload) as IssueCommentEvent;
           console.log(
@@ -1645,12 +1886,25 @@ export async function startWebhookServer(
         return;
       }
 
+      if (path === "/webhooks/gitlab" && method === "POST") {
+        const body = await readBody(req);
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (value) headers.set(key, Array.isArray(value) ? value[0] : value);
+        }
+        const request = new Request(url.toString(), { method: "POST", headers, body });
+        const response = await handleGitLabWebhook(request, finalConfig);
+        sendResponse(res, response);
+        return;
+      }
+
       // Root endpoint (info)
       if (path === "/" && method === "GET") {
         const response = jsonResponse({
           service: "@devintern/code Webhook Server",
           endpoints: {
-            webhook: "POST /webhooks/github",
+            githubWebhook: "POST /webhooks/github",
+            gitlabWebhook: "POST /webhooks/gitlab",
             health: "GET /health",
           },
         });
