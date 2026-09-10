@@ -49,6 +49,7 @@ import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
   normalizeGitLabWebhook,
+  verifyGitLabWebhookSignature,
   verifyGitLabWebhookToken,
 } from "./lib/gitlab-webhook";
 import type { GitLabWebhookEvent } from "./lib/gitlab-webhook";
@@ -88,6 +89,7 @@ const DEFAULT_CONFIG: WebhookServerConfig = {
   host: process.env.WEBHOOK_HOST || "0.0.0.0",
   webhookSecret: process.env.WEBHOOK_SECRET || "",
   gitlabWebhookSecret: process.env.GITLAB_WEBHOOK_SECRET || "",
+  gitlabWebhookSigningToken: process.env.GITLAB_WEBHOOK_SIGNING_TOKEN || "",
   autoReview: process.env.WEBHOOK_AUTO_REVIEW === "true",
   autoReviewMaxIterations: parseInt(process.env.WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS || "5", 10),
   validateIp: process.env.WEBHOOK_VALIDATE_IP === "true",
@@ -500,13 +502,8 @@ export async function handleGitLabWebhook(
   if (!rateLimiter.isAllowed(clientIp)) {
     return jsonResponse({ error: "Rate limit exceeded" }, 429);
   }
-  if (!config.gitlabWebhookSecret) {
+  if (!config.gitlabWebhookSecret && !config.gitlabWebhookSigningToken) {
     return jsonResponse({ error: "GitLab webhooks are not configured" }, 503);
-  }
-  if (
-    !verifyGitLabWebhookToken(request.headers.get("x-gitlab-token"), config.gitlabWebhookSecret)
-  ) {
-    return jsonResponse({ error: "Invalid GitLab webhook token" }, 401);
   }
   if (!webhookQueue) {
     return jsonResponse({ error: "Webhook queue is not available" }, 503);
@@ -515,6 +512,22 @@ export async function handleGitLabWebhook(
 
   let payload: Record<string, unknown>;
   const rawBody = await request.text();
+  const signature = request.headers.get("webhook-signature");
+  const authenticated = signature
+    ? verifyGitLabWebhookSignature(
+        signature,
+        request.headers.get("webhook-id"),
+        request.headers.get("webhook-timestamp"),
+        rawBody,
+        config.gitlabWebhookSigningToken ?? "",
+      )
+    : verifyGitLabWebhookToken(
+        request.headers.get("x-gitlab-token"),
+        config.gitlabWebhookSecret ?? "",
+      );
+  if (!authenticated) {
+    return jsonResponse({ error: "Invalid GitLab webhook signature" }, 401);
+  }
   try {
     payload = JSON.parse(rawBody) as Record<string, unknown>;
   } catch {
@@ -1719,8 +1732,14 @@ export async function startWebhookServer(
   };
 
   // Validate configuration
-  if (!finalConfig.webhookSecret && !finalConfig.gitlabWebhookSecret) {
-    console.error("❌ WEBHOOK_SECRET or GITLAB_WEBHOOK_SECRET is required");
+  if (
+    !finalConfig.webhookSecret &&
+    !finalConfig.gitlabWebhookSecret &&
+    !finalConfig.gitlabWebhookSigningToken
+  ) {
+    console.error(
+      "❌ WEBHOOK_SECRET, GITLAB_WEBHOOK_SECRET, or GITLAB_WEBHOOK_SIGNING_TOKEN is required",
+    );
     console.error("   Generate a secret with: openssl rand -hex 32");
     process.exit(1);
   }
