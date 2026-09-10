@@ -55,6 +55,7 @@ import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { automationTaskArgs } from "../automation-config";
 import { EstimationAcquirer } from "../estimation-acquirer";
 import { createTaskSupervisor, JobNotStartedError } from "../task-supervisor";
 import type { TaskSupervisor } from "../task-supervisor";
@@ -846,7 +847,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const fleetAutomationAcquirer = new AutomationAcquirer({
     automations: initialFleetAutomations.automations,
     dbPath: state.dbPath,
-    extraArgs: () => fleetTaskArgs(config),
+    // Each automation's `open_pr` decides PR creation — workspace-level
+    // `worker_task_args` (`--create-pr --auto-review`) applies only when the
+    // schedule opts in, and off/omitted runs get `--no-git` instead.
+    automationArgs: (automation) => automationTaskArgs(automation, fleetTaskArgs(config)),
     resolveContext: async (automation) => {
       const repo = automation.repo
         ? findRepo(config, automation.repo)

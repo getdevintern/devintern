@@ -99,7 +99,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
-- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
@@ -215,7 +215,7 @@ Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off
 
 The scheduling is identical; only where the work runs changes:
 
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. Dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
 - It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
 - Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 

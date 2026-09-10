@@ -80,6 +80,23 @@ function AutomationRow({
       >
         {automation.repo ?? "–"}
       </TableCell>
+      <TableCell className="px-4 py-2.5">
+        {automation.openPr ? (
+          <span
+            className="inline-flex items-center rounded-full border border-chart-4/40 bg-chart-4/10 px-2 py-0.5 text-xs font-medium text-chart-4"
+            title="Occurrences open a pull request (open_pr = true in the config)"
+          >
+            opens PR
+          </span>
+        ) : (
+          <span
+            className="text-muted-foreground"
+            title="Does not open a pull request (default; open_pr is off)"
+          >
+            –
+          </span>
+        )}
+      </TableCell>
       <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
         {automation.nextDueAt ? formatTime(automation.nextDueAt) : "–"}
       </TableCell>
@@ -146,6 +163,7 @@ export function AutomationsTable({
           <TableHead className="px-4">Automation</TableHead>
           <TableHead className="px-4">Schedule</TableHead>
           <TableHead className="px-4">Repo</TableHead>
+          <TableHead className="px-4">PR</TableHead>
           <TableHead className="px-4">Next run</TableHead>
           <TableHead className="px-4">Last run</TableHead>
           <TableHead className="px-4 text-right">Actions</TableHead>

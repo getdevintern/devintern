@@ -11,13 +11,44 @@ import {
   MAX_TIMER_DELAY_MS,
   automationRunEnv,
   nextAutomationDue,
+  resolveAutomationRunArgs,
   spawnAutomationProcess,
   writeAutomationTaskFile,
 } from "../src/lib/automation-acquirer";
+import { automationTaskArgs } from "../src/lib/automation-config";
 import { AutomationStateStore } from "../src/lib/automation-state";
 import type { AutomationConfig } from "../src/lib/automation-config";
 
 describe("AutomationAcquirer", () => {
+  describe("resolveAutomationRunArgs", () => {
+    const automation = (openPr: boolean): AutomationConfig => ({
+      id: "x",
+      enabled: true,
+      prompt: "p",
+      interval: "1h",
+      intervalMs: 3_600_000,
+      openPr,
+    });
+
+    test("the per-automation policy resolver wins over the shared defaults", () => {
+      const automationOn = automation(true);
+      const automationOff = automation(false);
+      const options = {
+        extraArgs: ["--create-pr"],
+        automationArgs: (a: AutomationConfig) => automationTaskArgs(a, ["--create-pr"]),
+      };
+      expect(resolveAutomationRunArgs(automationOn, options)).toEqual(["--create-pr"]);
+      expect(resolveAutomationRunArgs(automationOff, options)).toEqual(["--no-git"]);
+    });
+
+    test("falls back to the shared flags and the CLI default", () => {
+      expect(
+        resolveAutomationRunArgs(automation(true), { extraArgs: () => ["--auto-review"] }),
+      ).toEqual(["--auto-review"]);
+      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--create-pr"]);
+    });
+  });
+
   const dbPaths: string[] = [];
   afterEach(() => {
     for (const path of dbPaths.splice(0)) {

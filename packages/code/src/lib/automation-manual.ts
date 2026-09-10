@@ -15,7 +15,7 @@
  * to the worker's embedded dashboard.
  */
 
-import { loadSingleRepoAutomations } from "./automation-config";
+import { loadSingleRepoAutomations, automationTaskArgs } from "./automation-config";
 import type { AutomationConfig } from "./automation-config";
 import {
   AUTOMATION_ID_ENV,
@@ -51,6 +51,7 @@ export function loadStandaloneAutomationActions(
         interval: automation.interval,
         repo: automation.repo,
         prompt: automation.prompt,
+        openPr: automation.openPr === true,
       }));
     } catch {
       // A malformed automations.toml must not take the dashboard down; the
@@ -88,7 +89,11 @@ export function loadStandaloneAutomationActions(
     };
     const run = options.spawnRun
       ? options.spawnRun(automation, context)
-      : spawnManualAutomationRun(automation, context, workerTaskArgs());
+      : spawnManualAutomationRun(
+          automation,
+          context,
+          automationTaskArgs(automation, workerTaskArgs()),
+        );
     void run.completion.then((ok) => {
       console.log(
         ok
