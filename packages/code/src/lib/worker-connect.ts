@@ -4,11 +4,12 @@ import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 
 import { Utils } from "./utils";
+import { parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
 import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
-import { buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
+import { buildRepoEnv, buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./workspace/paths";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentrySetupPromptFn, SentryValidationOptions } from "./worker-sentry-setup";
@@ -22,6 +23,7 @@ the DevIntern relay; Sentry adds a directly polled error-monitor project.
 
 Targets:
   github (default)   Verify unpaired GitHub repositories through the App
+  gitlab             Install relay hooks for GitLab.com or self-managed projects
   linear             Register a Linear webhook
   asana              Register an Asana webhook
   trello             Register a Trello webhook
@@ -127,6 +129,39 @@ export function unverifiedWorkspaceRelayRepos(
   return workspaceRelayRepos(config).filter((repo) => !hasGitHubRelayRegistration(state, repo));
 }
 
+export interface WorkspaceGitLabRelayProject {
+  repoName: string;
+  instanceUrl: string;
+  projectPath: string;
+  env: Record<string, string | undefined>;
+}
+
+/** GitLab projects represented by workspace remotes, deduplicated by instance and path. */
+export function workspaceGitLabRelayProjects(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+): WorkspaceGitLabRelayProject[] {
+  const projects = new Map<string, WorkspaceGitLabRelayProject>();
+  for (const repo of config.repos) {
+    const env = buildRepoEnv(repo, workspaceDir);
+    const remote = parseGitRemoteUrl(repo.remote, {
+      gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
+      gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
+    });
+    if (remote?.provider !== "gitlab") continue;
+    const key = `${remote.instanceUrl.toLowerCase()}\n${remote.projectPath.toLowerCase()}`;
+    if (!projects.has(key)) {
+      projects.set(key, {
+        repoName: repo.name,
+        instanceUrl: remote.instanceUrl,
+        projectPath: remote.projectPath,
+        env,
+      });
+    }
+  }
+  return [...projects.values()];
+}
+
 /** Run the public, workspace-only `devintern worker connect` command. */
 export async function runWorkerConnectCommand(
   args: string[],
@@ -143,19 +178,23 @@ export async function runWorkerConnectCommand(
   }
   if (
     parsed.target !== "github" &&
+    parsed.target !== "gitlab" &&
     parsed.target !== "status" &&
     parsed.target !== "sentry" &&
     !TRACKER_TARGETS.has(parsed.target)
   ) {
     console.error(
       `❌ Unsupported connect target '${parsed.target}'. ` +
-        "Available: github, linear, asana, trello, azure-devops, jira, sentry, status.",
+        "Available: github, gitlab, linear, asana, trello, azure-devops, jira, sentry, status.",
     );
     return 1;
   }
   if (
     parsed.team &&
-    (parsed.target === "github" || parsed.target === "status" || parsed.target === "sentry")
+    (parsed.target === "github" ||
+      parsed.target === "gitlab" ||
+      parsed.target === "status" ||
+      parsed.target === "sentry")
   ) {
     console.error("❌ --team is only valid for tracker connect targets.");
     return 1;
@@ -226,7 +265,7 @@ export async function runWorkerConnectCommand(
       : undefined,
   };
 
-  if (target !== "github" && target !== "status") {
+  if (target !== "github" && target !== "gitlab" && target !== "status") {
     const matchingTeams = config.teams.filter(
       (team) => team.tracker.toLowerCase() === target.toLowerCase(),
     );
@@ -265,6 +304,33 @@ export async function runWorkerConnectCommand(
       console.log(`   Unverified workspace repositories: ${missing.join(", ")}`);
       console.log("   Run: devintern worker connect github");
     }
+    return 0;
+  }
+
+  if (target === "gitlab") {
+    const projects = workspaceGitLabRelayProjects(config, workspaceDir);
+    if (projects.length === 0) {
+      console.error("❌ No GitLab repositories found in workspace.toml.");
+      return 1;
+    }
+    let failures = 0;
+    for (const project of projects) {
+      console.log(`🔗 Connecting GitLab project ${project.projectPath} (${project.repoName}).`);
+      const result = await runConnect("gitlab", {
+        ...connectDeps,
+        env: project.env,
+        gitlabProject: {
+          instanceUrl: project.instanceUrl,
+          projectPath: project.projectPath,
+        },
+      });
+      if (result !== 0) failures++;
+    }
+    if (failures > 0) {
+      console.error(`❌ ${failures} GitLab project hook setup(s) failed; polling remains enabled.`);
+      return 1;
+    }
+    console.log("✅ All workspace GitLab projects are connected for relay delivery.");
     return 0;
   }
 

@@ -15,6 +15,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { saveGitHubAppRecord } from "./github-app-setup";
+import { GitLabWebhookAdminClient } from "./gitlab-webhook-admin";
+import type { GitLabProjectHook, GitLabWebhookProject } from "./gitlab-webhook-admin";
+import { resolveGitLabCodeHostConfig } from "./pr-client";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -218,6 +221,7 @@ export interface RelayConnectDeps {
 
 export type RelayConnectTarget =
   | "github"
+  | "gitlab"
   | "linear"
   | "asana"
   | "trello"
@@ -229,12 +233,25 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   workingDir: string;
   /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
   repo?: string;
+  /** GitLab project selected from workspace.toml by the fleet orchestrator. */
+  gitlabProject?: { instanceUrl: string; projectPath: string };
+  /** Injectable local project-hook administrator for tests. */
+  gitlabAdmin?: {
+    resolveMaintainedProject(projectPath: string): Promise<GitLabWebhookProject>;
+    upsertRelayHook(
+      projectId: number,
+      config: { ingestUrl: string; legacySecret: string; signingToken?: string },
+      existingHookId?: number,
+    ): Promise<{ hook: GitLabProjectHook; standardSigning: boolean }>;
+    testHook(projectId: number, hookId: number): Promise<void>;
+  };
   /** Explicit tracker credentials for a selected workspace team. */
   env?: Record<string, string | undefined>;
 }
 
 const RELAY_CONNECT_TARGETS = new Set<RelayConnectTarget>([
   "github",
+  "gitlab",
   "linear",
   "asana",
   "trello",
@@ -672,7 +689,7 @@ export async function connectRelayTarget(
   if (!RELAY_CONNECT_TARGETS.has(target as RelayConnectTarget)) {
     console.error(
       `❌ Unsupported connect target '${target}'. ` +
-        "Available: github, linear, asana, trello, azure-devops, jira, status.",
+        "Available: github, gitlab, linear, asana, trello, azure-devops, jira, status.",
     );
     return 1;
   }
@@ -714,6 +731,71 @@ export async function connectRelayTarget(
       return 0;
     } catch (error) {
       console.error(`❌ Relay status failed: ${(error as Error).message}`);
+      return 1;
+    }
+  }
+
+  if (target === "gitlab") {
+    const identity = deps.gitlabProject;
+    if (!identity) {
+      console.error("❌ GitLab relay connection requires a workspace repository.");
+      return 1;
+    }
+    const codeHost = resolveGitLabCodeHostConfig(identity.instanceUrl, env);
+    const adminToken = env.GITLAB_WEBHOOK_ADMIN_TOKEN || (codeHost.ok ? codeHost.token : undefined);
+    if (!adminToken) {
+      console.error(
+        "❌ GITLAB_WEBHOOK_ADMIN_TOKEN is required to install project hooks; polling remains enabled.",
+      );
+      return 1;
+    }
+    try {
+      const admin =
+        deps.gitlabAdmin ??
+        new GitLabWebhookAdminClient(adminToken, identity.instanceUrl, {
+          caFile: codeHost.ok ? codeHost.caFile : env.GITLAB_CODE_HOST_CA_FILE,
+          proxy: codeHost.ok ? codeHost.proxy : env.GITLAB_CODE_HOST_PROXY,
+        });
+      const project = await admin.resolveMaintainedProject(identity.projectPath);
+      const projectId = String(project.id);
+      const previous = gitLabRelayRepository(
+        loadRelayState(workingDir),
+        identity.instanceUrl,
+        projectId,
+      );
+      const begun = await beginGitLabRelayRegistration({
+        instanceUrl: identity.instanceUrl,
+        projectId,
+        projectPath: project.path,
+        ...connectOpts,
+      });
+      const { hook, standardSigning } = await admin.upsertRelayHook(
+        project.id,
+        {
+          ingestUrl: begun.ingestUrl,
+          signingToken: begun.signingToken,
+          legacySecret: begun.legacySecret,
+        },
+        previous?.hookId,
+      );
+      await admin.testHook(project.id, hook.id);
+      const state = await completeGitLabRelayRegistration({
+        registrationId: begun.registrationId,
+        hookId: hook.id,
+        instanceUrl: identity.instanceUrl,
+        projectId,
+        projectPath: project.path,
+        ...connectOpts,
+      });
+      console.log(`✅ Connected ${project.path} to the relay (${state.relayUrl})`);
+      console.log(
+        `   GitLab hook ${hook.id} verified with ${standardSigning ? "Standard Webhook signing" : "legacy secret-token authentication"}.`,
+      );
+      console.log("   Polling remains enabled as a fallback.");
+      return 0;
+    } catch (error) {
+      console.error(`❌ GitLab relay connect failed: ${(error as Error).message}`);
+      console.error("   Polling remains enabled; fix access or connectivity and retry.");
       return 1;
     }
   }

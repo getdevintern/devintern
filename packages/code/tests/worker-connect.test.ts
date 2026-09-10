@@ -15,6 +15,7 @@ describe("runWorkerConnectCommand", () => {
   const savedLinearKey = process.env.LINEAR_API_KEY;
   const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
   const savedWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
+  const savedGitLabAdminToken = process.env.GITLAB_WEBHOOK_ADMIN_TOKEN;
 
   beforeEach(() => {
     workspaceDir = mkdtempSync(join(tmpdir(), "devintern-worker-connect-"));
@@ -58,6 +59,8 @@ GITHUB_REPO = "acme/api"
     else process.env.SENTRY_AUTH_TOKEN = savedSentryToken;
     if (savedWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
     else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspaceDir;
+    if (savedGitLabAdminToken === undefined) delete process.env.GITLAB_WEBHOOK_ADMIN_TOKEN;
+    else process.env.GITLAB_WEBHOOK_ADMIN_TOKEN = savedGitLabAdminToken;
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
@@ -96,6 +99,68 @@ GITHUB_REPO = "acme/api"
 
     expect(result).toBe(1);
     expect(errors.join("\n")).toContain("--repo is only valid for Sentry connect");
+  });
+
+  test("connect gitlab discovers cloud and self-managed projects and continues after failure", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "cloud"
+remote = "git@gitlab.com:acme/cloud.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "cloud-admin"
+
+[[repos]]
+name = "self-managed"
+remote = "git@git.internal:platform/service.git"
+[repos.env]
+GITLAB_CODE_HOST_URL = "https://gitlab.internal"
+GITLAB_CODE_HOST_ALIASES = "git.internal"
+GITLAB_WEBHOOK_ADMIN_TOKEN = "self-admin"
+
+[[repos]]
+name = "duplicate"
+remote = "https://gitlab.com/acme/cloud.git"
+`,
+    );
+    const calls: Array<{
+      target: string;
+      project?: { instanceUrl: string; projectPath: string };
+      token?: string;
+    }> = [];
+
+    const result = await runWorkerConnectCommand(["gitlab"], {
+      workspaceDir,
+      runConnect: async (target, deps) => {
+        calls.push({
+          target,
+          project: deps.gitlabProject,
+          token: deps.env?.GITLAB_WEBHOOK_ADMIN_TOKEN,
+        });
+        return deps.gitlabProject?.instanceUrl === "https://gitlab.internal" ? 1 : 0;
+      },
+    });
+
+    expect(result).toBe(1);
+    expect(calls).toEqual([
+      {
+        target: "gitlab",
+        project: { instanceUrl: "https://gitlab.com", projectPath: "acme/cloud" },
+        token: "cloud-admin",
+      },
+      {
+        target: "gitlab",
+        project: {
+          instanceUrl: "https://gitlab.internal",
+          projectPath: "platform/service",
+        },
+        token: "self-admin",
+      },
+    ]);
+    expect(errors.join("\n")).toContain("1 GitLab project hook setup(s) failed");
   });
 
   test("connect sentry validates and adds a monitor for the selected repo", async () => {
