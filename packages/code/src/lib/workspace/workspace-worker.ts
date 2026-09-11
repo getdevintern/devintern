@@ -1620,7 +1620,21 @@ export async function buildFleetEventAcquirers(options: {
               env: buildRepoEnv(repo, workspaceDir),
             },
           );
-        return options.coordinator ? options.coordinator.run(invoke) : invoke();
+        if (!options.supervisor) return invoke();
+        try {
+          return await options.supervisor.schedule({
+            id: randomUUID(),
+            source: "gitlab:feedback",
+            repo: repo.name,
+            kind: "review",
+            label: `${mr.projectPath}!${mr.changeNumber}`,
+            checkoutClass: "shared_base",
+            run: invoke,
+          });
+        } catch (error) {
+          if (error instanceof JobNotStartedError) return "deferred";
+          throw error;
+        }
       },
       reviewerAllowlist: (process.env.GITLAB_REVIEWER_ALLOWLIST ?? "")
         .split(",")
