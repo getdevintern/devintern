@@ -34,6 +34,8 @@ This file provides guidance to Claude Code when working with this repository.
 - `GITHUB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitHub transitions
 - `GITLAB_TOKEN`, `GITLAB_PROJECT`, `GITLAB_BASE_URL` - GitLab credentials (required when `TASK_TRACKER=gitlab`; base URL optional, defaults to https://gitlab.com)
 - `GITLAB_STATUS_LABELS` - Optional comma-separated mutually-exclusive status label names for GitLab transitions
+- `DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST`, `GITLAB_CODE_HOST_URL`, `GITLAB_CODE_HOST_TOKEN` - Opt-in GitLab merge-request creation, independently configured from the task tracker
+- `GITLAB_CODE_HOST_ALIASES`, `GITLAB_CODE_HOST_CA_FILE`, `GITLAB_CODE_HOST_PROXY` - Optional Self-Managed SSH aliases, custom CA bundle, and proxy
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - JIRA credentials
 - `TRELLO_API_KEY`, `TRELLO_API_TOKEN` - Trello credentials (required when `TASK_TRACKER=trello`)
 - `TRELLO_DEFAULT_BOARD_ID` - Optional Trello board ID for settings lookup and status transitions

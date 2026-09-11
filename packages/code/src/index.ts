@@ -231,6 +231,8 @@ interface ProgramOptions {
   skipClarityCheck: boolean; // New option to skip clarity check
   createPr: boolean; // New option to create pull request
   prTargetBranch: string; // Target branch for PR
+  prTargetBranchExplicit?: boolean; // Whether --pr-target-branch was supplied
+  requestedPrTargetBranch?: string; // Unresolved explicit target for provider validation
   autoReview: boolean; // New option to run automatic PR review loop
   autoReviewIterations?: string; // Max iterations for auto-review loop (unset → AUTO_REVIEW_ITERATIONS env or shared default)
   query?: string; // Generic query for batch processing
@@ -2070,6 +2072,9 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       gitAuthor,
       options.autoReview,
       autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
+      false,
+      options.prTargetBranchExplicit,
+      options.requestedPrTargetBranch,
     );
 
     // An incomplete-summary file written during this run means the agent
@@ -2300,6 +2305,10 @@ async function main(): Promise<void> {
     // Pull latest changes from remote (unless git is disabled)
     if (options.git) {
       const prTargetBranchSource = program.getOptionValueSource("prTargetBranch");
+      options.prTargetBranchExplicit = prTargetBranchSource !== "default";
+      options.requestedPrTargetBranch = options.prTargetBranchExplicit
+        ? options.prTargetBranch
+        : undefined;
       if (prTargetBranchSource === "default") {
         options.prTargetBranch = await Utils.getMainBranchName();
         console.log(`   Default branch detected as '${options.prTargetBranch}'`);
@@ -3516,6 +3525,8 @@ Now implement the solution. Write the actual code.`;
  * @param autoReviewIterations - Max auto-review iterations, resolved once at
  *   startup from the unified `--auto-review-iterations` arg / env var
  * @param isPlanRetry - Whether this run follows a plan-only retry
+ * @param prTargetBranchExplicit - Whether the user explicitly selected the target branch
+ * @param requestedPrTargetBranch - Original explicit target before Git fallback resolution
  */
 async function runAgentHarness(
   taskFile: string,
@@ -3536,6 +3547,8 @@ async function runAgentHarness(
   autoReview = false,
   autoReviewIterations: number = DEFAULT_AUTO_REVIEW_ITERATIONS,
   isPlanRetry = false,
+  prTargetBranchExplicit = false,
+  requestedPrTargetBranch?: string,
 ): Promise<void> {
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the run.
@@ -4013,15 +4026,26 @@ async function runAgentHarness(
                 branchForPr,
                 effectivePrTargetBranch,
                 implementationOutput,
+                undefined,
+                prTargetBranchExplicit,
+                requestedPrTargetBranch,
               );
 
               if (prResult.success) {
-                console.log(`✅ Pull request created: ${prResult.url}`);
+                const changeLabel =
+                  prResult.changeRequest?.provider === "gitlab" ? "Merge request" : "Pull request";
+                console.log(`✅ ${changeLabel} created: ${prResult.url}`);
 
                 // Register the PR so worker review-polling watches it automatically.
                 if (prResult.url) {
-                  recordAgentPrFromUrl(prResult.url, branchForPr, taskKey);
-                  recordRunPr({ ...parseGitHubPrUrl(prResult.url), url: prResult.url });
+                  recordAgentPrFromUrl(prResult.url, branchForPr, taskKey, prResult.changeRequest);
+                  const runChange = prResult.changeRequest
+                    ? {
+                        repo: prResult.changeRequest.projectPath,
+                        prNumber: prResult.changeRequest.number,
+                      }
+                    : parseGitHubPrUrl(prResult.url);
+                  recordRunPr({ ...runChange, url: prResult.url });
                 }
 
                 if (taskKey && tracker && !skipComments) {

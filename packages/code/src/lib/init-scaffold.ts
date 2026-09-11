@@ -238,6 +238,16 @@ AGENT_HARNESS=claude-code
 #   Relay-backed workspace: GITHUB_TOKEN is used; custom App credentials are ignored.
 #   No-relay workspace / webhook serve: the custom App is preferred (bot identity).
 
+# Experimental GitLab code-host integration (--create-pr opens a merge request).
+# Independent from TASK_TRACKER; supports GitLab.com or one default Self-Managed instance.
+# DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST=true
+# GITLAB_CODE_HOST_URL=https://gitlab.example.com
+# GITLAB_CODE_HOST_TOKEN=glpat_xxxxxxxxxxxx
+# Optional SSH aliases, custom CA bundle, and explicit proxy:
+# GITLAB_CODE_HOST_ALIASES=corp-git,gitlab.internal
+# GITLAB_CODE_HOST_CA_FILE=/path/to/company-ca.pem
+# GITLAB_CODE_HOST_PROXY=http://proxy.example.com:8080
+
 # Bitbucket app password for creating pull requests
 # Create at: https://bitbucket.org/account/settings/app-passwords/
 # Required permissions: 'Repositories: Write'
