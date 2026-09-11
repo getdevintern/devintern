@@ -44,7 +44,12 @@ export interface FleetEventDeps {
     repo: string,
     prNumber: number,
     feedbackPath: string,
-    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      expectedHeadSha?: string;
+      signal?: AbortSignal;
+    },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
@@ -228,9 +233,14 @@ export function createFleetResolveConflicts(
 /** Build the fleet CI-fix runner using the repo checkout and shared run gate. */
 export function createFleetCiFix(
   deps: FleetEventDeps,
-): (slug: string, prNumber: number, feedbackPath: string) => Promise<CiFixResult> {
+): (
+  slug: string,
+  prNumber: number,
+  feedbackPath: string,
+  expectedHeadSha?: string,
+) => Promise<CiFixResult> {
   const runCiFix = deps.runCiFix ?? runCiFixViaCli;
-  return async (slug, prNumber, feedbackPath) => {
+  return async (slug, prNumber, feedbackPath, expectedHeadSha) => {
     const repo = repoBySlug(deps.config, slug);
     if (!repo) {
       console.warn(`⚠️  [fleet] CI failure for ${slug}#${prNumber} has no workspace repo.`);
@@ -243,6 +253,7 @@ export function createFleetCiFix(
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
         env: buildRepoEnv(repo, deps.workspaceDir),
+        ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });
     };

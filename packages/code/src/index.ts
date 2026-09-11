@@ -980,6 +980,7 @@ if (process.argv[2] === "init") {
     let noReply = false;
     let verbose = false;
     let ciFeedbackPath: string | undefined;
+    let expectedHeadSha: string | undefined;
 
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--no-push") {
@@ -996,6 +997,15 @@ if (process.argv[2] === "init") {
           return;
         }
         ciFeedbackPath = feedbackPath;
+        i++;
+      } else if (args[i] === "--expected-head") {
+        const sha = args[i + 1];
+        if (!sha || sha.startsWith("-")) {
+          console.error("Error: --expected-head requires a commit SHA");
+          process.exitCode = 1;
+          return;
+        }
+        expectedHeadSha = sha;
         i++;
       } else if (args[i] === "--help" || args[i] === "-h") {
         console.log("Usage: devintern address-review <pr-url> [options]");
@@ -1034,7 +1044,13 @@ if (process.argv[2] === "init") {
     // Import and run address-review
     const { addressReview } = await import("./lib/address-review");
     try {
-      await addressReview(prUrl, { noPush, noReply, verbose, ciFeedbackPath });
+      await addressReview(prUrl, {
+        noPush,
+        noReply,
+        verbose,
+        ciFeedbackPath,
+        expectedHeadSha,
+      });
     } catch (error) {
       if (exitIfWorkerUsageLimit(error)) {
         return;

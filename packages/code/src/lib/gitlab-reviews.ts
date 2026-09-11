@@ -70,6 +70,28 @@ interface GitLabBranch {
   can_push?: boolean;
 }
 
+interface GitLabPipeline {
+  id: number;
+  status: string;
+  web_url?: string;
+}
+
+interface GitLabJob {
+  id: number;
+  name: string;
+  status: string;
+  allow_failure?: boolean;
+  web_url?: string;
+}
+
+interface GitLabCommitStatus {
+  id: number;
+  name?: string;
+  status: string;
+  allow_failure?: boolean;
+  target_url?: string | null;
+}
+
 export interface GitLabReviewClientOptions {
   caFile?: string;
   proxy?: string;
@@ -125,6 +147,20 @@ export interface GitLabChangeRequestInfo {
   base: { ref: string; sha: string };
   mergeability: GitLabMergeability;
   webUrl: string;
+}
+
+export interface GitLabCiFailure {
+  externalId: string;
+  name: string;
+  conclusion: string;
+  detailsUrl?: string;
+  jobId?: number;
+}
+
+export interface GitLabCiSnapshot {
+  state: "unknown" | "pending" | "success" | "failure";
+  failures: GitLabCiFailure[];
+  jobIds: number[];
 }
 
 /** REST API v4 client for manual GitLab merge-request review addressing. */
@@ -351,6 +387,105 @@ export class GitLabReviewsClient {
       `/projects/${encodeURIComponent(String(project))}/merge_requests/${iid}/notes`,
       { method: "POST", body: JSON.stringify({ body }) },
     );
+  }
+
+  /** Normalize pipelines, required jobs, and external commit statuses for one MR head. */
+  async getCiSnapshot(projectPath: string, headSha: string): Promise<GitLabCiSnapshot> {
+    const project = await this.requestJson<GitLabProject>(
+      `/projects/${encodeURIComponent(projectPath)}`,
+    );
+    const pipelines = await this.getAllPages<GitLabPipeline>(
+      `/projects/${project.id}/pipelines?sha=${encodeURIComponent(headSha)}`,
+    );
+    const jobs: GitLabJob[] = [];
+    for (const pipeline of pipelines) {
+      jobs.push(
+        ...(await this.getAllPages<GitLabJob>(
+          `/projects/${project.id}/pipelines/${pipeline.id}/jobs?include_retried=false`,
+        )),
+      );
+    }
+    const statuses = await this.getAllPages<GitLabCommitStatus>(
+      `/projects/${project.id}/repository/commits/${encodeURIComponent(headSha)}/statuses?all=true`,
+    );
+
+    const failures: GitLabCiFailure[] = [];
+    const failedJobIds = new Set<number>();
+    for (const job of jobs) {
+      if (job.status !== "failed" || job.allow_failure === true) continue;
+      failedJobIds.add(job.id);
+      failures.push({
+        externalId: `job:${project.id}:${headSha}:${job.id}`,
+        name: job.name,
+        conclusion: job.status,
+        detailsUrl: job.web_url,
+        jobId: job.id,
+      });
+    }
+    for (const status of statuses) {
+      if (
+        status.status !== "failed" ||
+        status.allow_failure === true ||
+        failedJobIds.has(status.id)
+      ) {
+        continue;
+      }
+      failures.push({
+        externalId: `status:${project.id}:${headSha}:${status.id}`,
+        name: status.name ?? `commit-status-${status.id}`,
+        conclusion: status.status,
+        detailsUrl: status.target_url ?? undefined,
+      });
+    }
+
+    const active = new Set([
+      "created",
+      "waiting_for_resource",
+      "preparing",
+      "pending",
+      "running",
+      "scheduled",
+    ]);
+    const hasPending =
+      pipelines.some((pipeline) => active.has(pipeline.status)) ||
+      jobs.some((job) => active.has(job.status)) ||
+      statuses.some((status) => active.has(status.status));
+    const hasSuccess =
+      pipelines.some((pipeline) => pipeline.status === "success") ||
+      (pipelines.length === 0 && statuses.some((status) => status.status === "success"));
+
+    return {
+      state:
+        failures.length > 0
+          ? "failure"
+          : hasPending
+            ? "pending"
+            : hasSuccess
+              ? "success"
+              : "unknown",
+      failures,
+      jobIds: [...failedJobIds],
+    };
+  }
+
+  /** Fetch raw traces for required failed jobs. Missing traces are ignored, not treated as green. */
+  async getJobTraces(projectPath: string, jobIds: number[]): Promise<string | null> {
+    if (jobIds.length === 0) return null;
+    const project = await this.requestJson<GitLabProject>(
+      `/projects/${encodeURIComponent(projectPath)}`,
+    );
+    const chunks: string[] = [];
+    for (const jobId of jobIds.slice(0, 5)) {
+      try {
+        const response = await this.request(`/projects/${project.id}/jobs/${jobId}/trace`);
+        const trace = await response.text();
+        if (trace.trim()) chunks.push(`## Job ${jobId}\n${trace}`);
+      } catch {
+        // Traces can be erased or separately inaccessible. The failure
+        // remains actionable; the agent receives metadata without a trace.
+      }
+    }
+    return chunks.length > 0 ? chunks.join("\n\n") : null;
   }
 
   /** Effective project membership for an actor; missing/inaccessible means unknown. */

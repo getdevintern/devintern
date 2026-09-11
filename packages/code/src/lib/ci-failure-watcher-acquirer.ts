@@ -50,6 +50,8 @@ export interface PolledCiPr {
 
 export interface WatchedWorkflowRun {
   id: number;
+  /** Provider-native durable identifier when a numeric run id is insufficient. */
+  externalId?: string;
   name?: string;
   /** `queued`, `in_progress`, `waiting`, or `completed`. */
   status: string;
@@ -104,7 +106,12 @@ export interface CiFailureWatcherAcquirerOptions {
    * Fix CI failures on one PR given a feedback JSON path (injected for
    * tests). Resolves success when the fix was committed and pushed.
    */
-  fixPr: (repo: string, prNumber: number, feedbackPath: string) => Promise<CiFixResult>;
+  fixPr: (
+    repo: string,
+    prNumber: number,
+    feedbackPath: string,
+    expectedHeadSha: string,
+  ) => Promise<CiFixResult>;
   /** Max consecutive failed autofix attempts per PR (default 3). */
   maxAttempts?: number;
   /** Live workspace switch; false suppresses all GitHub polling and fixes. */
@@ -112,15 +119,24 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Clock override for deterministic scheduling tests. */
   now?: () => number;
   verbose?: boolean;
+  /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
+  watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
+  /** Optional provider-specific close operation. */
+  markClosed?: (repo: string, prNumber: number) => void;
+  /** Durable key namespace; defaults to `github`. */
+  namespace?: string;
+  /** Human-readable provider label used for missing-log diagnostics. */
+  ciProviderLabel?: string;
+  /** Provider-native display reference, for example `group/project!17`. */
+  describeChange?: (repo: string, prNumber: number) => string;
+  /** Provider-native project path stored in CI feedback. */
+  feedbackRepository?: (repo: string) => string;
+  /** Recovery sentence appended to the exhausted-attempt comment. */
+  escalationRecoveryText?: string;
 }
 
 /** Dedupe source for CI failures (keyed by head SHA + workflow run/status id). */
 const SOURCE = "github:ci";
-
-/** Cursor source prefixes persisted per watched PR. */
-const PR_CURSOR_PREFIX = "github:cipr:";
-const ACTIONS_CURSOR_PREFIX = "github:ciactions:";
-const STATUS_CURSOR_PREFIX = "github:cistatus:";
 
 /** Default consecutive-attempt cap per PR (`CI_FIX_MAX_ATTEMPTS` override). */
 export const DEFAULT_CI_FIX_MAX_ATTEMPTS = 3;
@@ -226,12 +242,15 @@ export function runCiFixViaCli(
   opts: {
     cwd?: string;
     env?: Record<string, string | undefined>;
+    webUrl?: string;
+    serializationKey?: string;
+    expectedHeadSha?: string;
     signal?: AbortSignal;
   } = {},
 ): Promise<boolean> {
-  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   return serializePrRun(
-    repo,
+    opts.serializationKey ?? repo,
     prNumber,
     () =>
       new Promise((resolve) => {
@@ -242,7 +261,14 @@ export function runCiFixViaCli(
         const detached = process.platform !== "win32";
         const child = spawn(
           process.execPath,
-          [process.argv[1], "address-review", prUrl, "--ci-feedback", feedbackPath],
+          [
+            process.argv[1],
+            "address-review",
+            prUrl,
+            "--ci-feedback",
+            feedbackPath,
+            ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
+          ],
           {
             stdio: "inherit",
             cwd: opts.cwd,
@@ -347,7 +373,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     console.log(
       `${enabled ? "🤖" : "⏸️ "} CI failure fixes ${enabled ? "enabled" : "disabled"}; ` +
         `poll interval ${this.options.intervalSeconds}s ` +
-        `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
+        `(watching ${
+          this.options.watchedChanges?.().length ??
+          this.options.workerState.listOpenAgentPrs().length
+        } open change request(s))`,
     );
     await this.tick();
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
@@ -384,7 +413,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      const watchedPrs = this.options.workerState.listOpenAgentPrs();
+      const watchedPrs =
+        this.options.watchedChanges?.() ?? this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
       for (const key of this.greenPollSchedules.keys()) {
         if (!watchedKeys.has(key)) this.greenPollSchedules.delete(key);
@@ -423,11 +453,11 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     const { workerState, github, verbose } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
-    const prSource = `${PR_CURSOR_PREFIX}${repo}#${prNumber}`;
+    const prSource = `${this.namespace}:cipr:${repo}#${prNumber}`;
     const prCursor = workerState.getCursor(prSource);
     const prResult = await github.fetchPr(repo, prNumber, prCursor?.etag);
     if ((prResult as CiConditionalResult<PolledCiPr> & { gone?: boolean }).gone) {
-      workerState.markAgentPrClosed(repo, prNumber);
+      this.markClosed(repo, prNumber);
       return "removed";
     }
     if (!prResult.notModified) {
@@ -435,8 +465,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         workerState.setCursor(prSource, prResult.data?.head?.sha ?? "", prResult.etag);
       }
       if (prResult.data && prResult.data.state !== "open") {
-        console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${prResult.data.state}; unwatching`);
-        workerState.markAgentPrClosed(repo, prNumber);
+        console.log(
+          `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${prResult.data.state}; unwatching`,
+        );
+        this.markClosed(repo, prNumber);
         return "removed";
       }
     }
@@ -451,7 +483,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     const headRepo = prResult.data?.head?.repo?.full_name;
     if (headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) {
       if (verbose) {
-        console.log(`   [${this.name}] ${repo}#${prNumber} is a fork PR (${headRepo}); skipping`);
+        console.log(
+          `   [${this.name}] ${this.describe(repo, prNumber)} is a fork PR (${headRepo}); skipping`,
+        );
       }
       return "active";
     }
@@ -463,7 +497,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     // 2. GitHub Actions workflow runs (ETag-cached): terminal failures only.
     // This API is available to fine-grained PATs with Actions: Read; unlike
     // the Checks API, it does not require a GitHub App or classic PAT.
-    const actionsSource = `${ACTIONS_CURSOR_PREFIX}${repo}#${prNumber}`;
+    const actionsSource = `${this.namespace}:ciactions:${repo}#${prNumber}`;
     const actionsCursor = workerState.getCursor(actionsSource);
     const cachedActions = parseSnapshot(actionsCursor?.cursorValue);
     const actionsResult = await github.fetchWorkflowRuns(
@@ -492,7 +526,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           continue;
         }
         actionFailures.push({
-          externalId: `action:${repo}#${prNumber}:${headSha}:${run.id}`,
+          externalId: run.externalId ?? `action:${repo}#${prNumber}:${headSha}:${run.id}`,
           name: run.name ?? `workflow-run-${run.id}`,
           conclusion: run.conclusion,
           detailsUrl: run.html_url,
@@ -517,7 +551,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     // 3. Combined commit status (ETag-cached): non-Actions reporters.
-    const statusSource = `${STATUS_CURSOR_PREFIX}${repo}#${prNumber}`;
+    const statusSource = `${this.namespace}:cistatus:${repo}#${prNumber}`;
     const statusCursor = workerState.getCursor(statusSource);
     const cachedStatus = parseSnapshot(statusCursor?.cursorValue);
     const statusResult = await github.fetchCommitStatus(
@@ -577,7 +611,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     // successful invocation so crashes/no-op runs remain retryable.
     const fresh: PendingFailure[] = [];
     for (const failure of pending) {
-      if (!this.options.queue.hasProcessed(SOURCE, failure.externalId)) {
+      if (!this.options.queue.hasProcessed(this.source, failure.externalId)) {
         fresh.push(failure);
       }
     }
@@ -597,7 +631,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       // Head moved past the escalation point: someone (presumably a human)
       // pushed. Grant a fresh budget.
       console.log(
-        `♻️  [${this.name}] ${repo}#${prNumber}: head moved past escalation point; retrying CI fixes`,
+        `♻️  [${this.name}] ${this.describe(repo, prNumber)}: head moved past escalation point; retrying CI fixes`,
       );
       state.consecutiveFailures = 0;
       state.escalatedSha = undefined;
@@ -611,7 +645,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         await this.escalateToHuman(repo, prNumber, pending);
       } else if (verbose) {
         console.log(
-          `   [${this.name}] ${repo}#${prNumber}: retry budget exhausted; waiting for human`,
+          `   [${this.name}] ${this.describe(repo, prNumber)}: retry budget exhausted; waiting for human`,
         );
       }
       return "active";
@@ -622,14 +656,14 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     console.log(
-      `\n🤖 [${this.name}] CI failure(s) on ${repo}#${prNumber} @ ${headSha.slice(0, 7)}: ` +
+      `\n🤖 [${this.name}] CI failure(s) on ${this.describe(repo, prNumber)} @ ${headSha.slice(0, 7)}: ` +
         fresh.map((f) => f.name).join(", "),
     );
 
     // 6. Gather failure-relevant logs and run one fix attempt.
     const logs = await this.collectLogs(repo, headSha);
     const feedback: CiFailureFeedback = {
-      repository: repo,
+      repository: this.options.feedbackRepository?.(repo) ?? repo,
       prNumber,
       branch: undefined,
       failures: fresh.map((f) => ({
@@ -647,7 +681,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     try {
       let result: CiFixResult = false;
       try {
-        result = await this.options.fixPr(repo, prNumber, feedbackPath);
+        result = await this.options.fixPr(repo, prNumber, feedbackPath, headSha);
       } catch (error) {
         console.warn(`⚠️  [${this.name}] CI fix invocation failed: ${(error as Error).message}`);
       }
@@ -660,7 +694,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       const ok = result;
       state.consecutiveFailures += 1;
       if (ok) {
-        for (const failure of fresh) this.options.queue.markProcessed(SOURCE, failure.externalId);
+        for (const failure of fresh) {
+          this.options.queue.markProcessed(this.source, failure.externalId);
+        }
       }
       if (!ok && state.consecutiveFailures >= this.maxAttempts && !state.escalatedSha) {
         state.escalatedSha = headSha;
@@ -669,9 +705,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       workerState.setCiFixState(repo, prNumber, state);
       console.log(
         ok
-          ? `✅ [${this.name}] ${repo}#${prNumber} CI fix pushed (attempt ` +
+          ? `✅ [${this.name}] ${this.describe(repo, prNumber)} CI fix pushed (attempt ` +
               `${state.consecutiveFailures}/${this.maxAttempts})`
-          : `⚠️  [${this.name}] ${repo}#${prNumber} CI fix attempt did not complete`,
+          : `⚠️  [${this.name}] ${this.describe(repo, prNumber)} CI fix attempt did not complete`,
       );
     } finally {
       rmSync(feedbackDir, { recursive: true, force: true });
@@ -722,7 +758,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     console.warn(
-      `⚠️  [${this.name}] ${repo}: could not fetch Actions logs; proceeding without them`,
+      `⚠️  [${this.name}] ${this.options.feedbackRepository?.(repo) ?? repo}: could not fetch ${this.options.ciProviderLabel ?? "Actions"} logs; proceeding without them`,
     );
     return null;
   }
@@ -731,7 +767,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   private resetRetryBudget(repo: string, prNumber: number, reason: string): void {
     const state = this.options.workerState.getCiFixState(repo, prNumber);
     if (state.consecutiveFailures > 0 || state.escalatedSha) {
-      console.log(`💚 [${this.name}] ${repo}#${prNumber}: ${reason}; resetting CI fix counter`);
+      console.log(
+        `💚 [${this.name}] ${this.describe(repo, prNumber)}: ${reason}; resetting CI fix counter`,
+      );
       this.options.workerState.setCiFixState(repo, prNumber, {
         consecutiveFailures: 0,
         escalatedSha: undefined,
@@ -749,17 +787,18 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     const body =
       "⚠️ I could not fix the following CI failure(s) automatically after " +
       `${this.maxAttempts} attempt(s):\n\n${names}\n\n` +
-      "I have stopped retrying to avoid churn. Push a new commit (or mention me) " +
-      "and I will take another look.";
+      "I have stopped retrying to avoid churn. " +
+      (this.options.escalationRecoveryText ??
+        "Push a new commit (or mention me) and I will take another look.");
     try {
       await this.options.github.postComment(repo, prNumber, body);
       console.log(
-        `📣 [${this.name}] ${repo}#${prNumber}: posted escalation comment after ` +
+        `📣 [${this.name}] ${this.describe(repo, prNumber)}: posted escalation comment after ` +
           `${this.maxAttempts} failed attempt(s)`,
       );
     } catch (error) {
       console.warn(
-        `⚠️  [${this.name}] could not post escalation comment on ${repo}#${prNumber}: ` +
+        `⚠️  [${this.name}] could not post escalation comment on ${this.describe(repo, prNumber)}: ` +
           `${(error as Error).message}`,
       );
     }
@@ -767,6 +806,23 @@ export class CiFailureWatcherAcquirer implements Acquirer {
 
   private get maxAttempts(): number {
     return this.options.maxAttempts ?? DEFAULT_CI_FIX_MAX_ATTEMPTS;
+  }
+
+  private get namespace(): string {
+    return this.options.namespace ?? "github";
+  }
+
+  private get source(): string {
+    return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
+  }
+
+  private markClosed(repo: string, prNumber: number): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber);
+  }
+
+  private describe(repo: string, prNumber: number): string {
+    return this.options.describeChange?.(repo, prNumber) ?? `${repo}#${prNumber}`;
   }
 }
 

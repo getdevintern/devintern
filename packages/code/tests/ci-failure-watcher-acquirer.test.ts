@@ -236,6 +236,41 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toEqual([]);
   });
 
+  test("provider hooks reuse retry and dedupe semantics in an isolated namespace", async () => {
+    const key = "https://gitlab.example:acme/widgets";
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [
+        {
+          ...failingRun(201),
+          externalId: "gitlab:https://gitlab.example:job:42:aaaa:201",
+        },
+      ],
+    };
+    const fixed: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: makeGithub(gh),
+      watchedChanges: () => [{ repo: key, prNumber: 17 }],
+      namespace: "gitlab",
+      fixPr: async (repo, n, _path, expectedHead) => {
+        fixed.push(`${repo}!${n}@${expectedHead}`);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+
+    expect(fixed).toEqual([`${key}!17@${sha1}`]);
+    expect(queue.hasProcessed("gitlab:ci", "gitlab:https://gitlab.example:job:42:aaaa:201")).toBe(
+      true,
+    );
+  });
+
   test("dedupe survives worker restarts (new instance, shared queue)", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {

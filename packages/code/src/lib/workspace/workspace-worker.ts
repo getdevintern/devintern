@@ -1579,33 +1579,36 @@ export async function buildFleetEventAcquirers(options: {
     return remote?.provider === "gitlab" && resolveGitLabCodeHostConfig(remote.instanceUrl, env).ok;
   });
   if (hasGitLabProfile) {
+    const { CiFailureWatcherAcquirer, runCiFixViaCli } =
+      await import("../ci-failure-watcher-acquirer");
     const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
     const { GitLabReviewsClient } = await import("../gitlab-reviews");
     const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
       await import("../review-polling-acquirer");
+    const clientForGitLabMr = (mr: import("../worker-state").AgentPr) => {
+      const repo = resolveGitLabRepo(mr);
+      if (!repo) return null;
+      const env = buildRepoEnv(repo, workspaceDir);
+      const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
+      if (!resolved.ok) return null;
+      try {
+        return new GitLabReviewsClient(resolved.token, resolved.instanceUrl, {
+          caFile: resolved.caFile,
+          proxy: resolved.proxy,
+        });
+      } catch (error) {
+        console.warn(
+          `⚠️  [fleet] GitLab client for ${mr.projectPath} could not be initialized: ${(error as Error).message}`,
+        );
+        return null;
+      }
+    };
     const gitlabPoller = new GitLabReviewPollingAcquirer({
       intervalSeconds,
       workerState: state.workerState,
       queue: state.queue,
       allowed: (mr) => Boolean(resolveGitLabRepo(mr)),
-      clientFor: (mr) => {
-        const repo = resolveGitLabRepo(mr);
-        if (!repo) return null;
-        const env = buildRepoEnv(repo, workspaceDir);
-        const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
-        if (!resolved.ok) return null;
-        try {
-          return new GitLabReviewsClient(resolved.token, resolved.instanceUrl, {
-            caFile: resolved.caFile,
-            proxy: resolved.proxy,
-          });
-        } catch (error) {
-          console.warn(
-            `⚠️  [fleet] GitLab client for ${mr.projectPath} could not be initialized: ${(error as Error).message}`,
-          );
-          return null;
-        }
-      },
+      clientFor: clientForGitLabMr,
       addressMr: async (mr) => {
         const repo = resolveGitLabRepo(mr);
         if (!repo) return false;
@@ -1682,6 +1685,160 @@ export async function buildFleetEventAcquirers(options: {
     });
     acquirers.push(gitlabPoller);
     intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
+
+    const gitlabCiRows = new Map<string, import("../worker-state").AgentPr>();
+    const gitlabCiSnapshots = new Map<
+      string,
+      { sha: string; snapshot: import("../gitlab-reviews").GitLabCiSnapshot }
+    >();
+    const ciKey = (mr: import("../worker-state").AgentPr) => `${mr.instanceUrl}:${mr.projectPath}`;
+    const resolveCi = (key: string) => {
+      const mr = gitlabCiRows.get(key);
+      if (!mr) throw new Error("GitLab MR is no longer registered");
+      const client = clientForGitLabMr(mr);
+      if (!client) throw new Error("GitLab code-host profile is unavailable");
+      return { mr, client };
+    };
+    const gitlabCiWatcher = new CiFailureWatcherAcquirer({
+      intervalSeconds,
+      enabled: () => config.workspace.ciFailureFix,
+      workerState: state.workerState,
+      queue: state.queue,
+      namespace: "gitlab",
+      ciProviderLabel: "GitLab job trace",
+      feedbackRepository: (key) => gitlabCiRows.get(key)?.projectPath ?? key,
+      describeChange: (key, n) => `${gitlabCiRows.get(key)?.projectPath ?? key}!${n}`,
+      escalationRecoveryText: "Push a new commit and I will take another look.",
+      watchedChanges: () => {
+        gitlabCiRows.clear();
+        return state.workerState
+          .listOpenAgentChangeRequests()
+          .filter((mr) => mr.provider === "gitlab" && Boolean(resolveGitLabRepo(mr)))
+          .map((mr) => {
+            const key = ciKey(mr);
+            gitlabCiRows.set(key, mr);
+            return { repo: key, prNumber: mr.changeNumber };
+          });
+      },
+      markClosed: (key) => {
+        const mr = gitlabCiRows.get(key);
+        if (mr) {
+          state.workerState.markAgentChangeRequestClosed({
+            provider: mr.provider,
+            instanceUrl: mr.instanceUrl,
+            projectId: mr.projectId,
+            projectPath: mr.projectPath,
+            number: mr.changeNumber,
+            webUrl: mr.webUrl,
+          });
+        }
+      },
+      github: {
+        fetchPr: async (key, n) => {
+          const { mr, client } = resolveCi(key);
+          try {
+            const current = await client.getChangeRequest(mr.projectPath, n);
+            return {
+              data: {
+                state: current.state === "opened" ? "open" : current.state,
+                head: { sha: current.head.sha, repo: { full_name: key } },
+              },
+              notModified: false,
+            };
+          } catch (error) {
+            if ((error as Error).message.includes("GitLab API error (404)")) {
+              return { data: null, notModified: false, gone: true };
+            }
+            throw error;
+          }
+        },
+        fetchWorkflowRuns: async (key, sha) => {
+          const { mr, client } = resolveCi(key);
+          const snapshot = await client.getCiSnapshot(mr.projectPath, sha);
+          gitlabCiSnapshots.set(key, { sha, snapshot });
+          const runs: import("../ci-failure-watcher-acquirer").WatchedWorkflowRun[] =
+            snapshot.failures.map((failure, index) => ({
+              id: index + 1,
+              externalId: `gitlab:${mr.instanceUrl}:${failure.externalId}`,
+              name: failure.name,
+              status: "completed",
+              conclusion: failure.conclusion,
+              html_url: failure.detailsUrl,
+            }));
+          if (runs.length === 0 && snapshot.state === "pending") {
+            runs.push({ id: 0, name: "GitLab pipeline", status: "running", conclusion: null });
+          } else if (runs.length === 0 && snapshot.state === "success") {
+            runs.push({
+              id: 0,
+              name: "GitLab pipeline",
+              status: "completed",
+              conclusion: "success",
+            });
+          }
+          return { data: runs, notModified: false };
+        },
+        fetchCommitStatus: async (key, sha) => {
+          const cached = gitlabCiSnapshots.get(key);
+          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
+          return {
+            data: {
+              state: snapshot?.state ?? "unknown",
+              total_count: snapshot?.state === "unknown" ? 0 : 1,
+              statuses: [],
+            },
+            notModified: false,
+          };
+        },
+        fetchFailingJobLogs: async (key, sha) => {
+          const { mr, client } = resolveCi(key);
+          const cached = gitlabCiSnapshots.get(key);
+          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
+          return client.getJobTraces(mr.projectPath, snapshot?.jobIds ?? []);
+        },
+        postComment: async (key, n, body) => {
+          const { mr, client } = resolveCi(key);
+          await client.postMergeRequestNote(mr.projectId ?? mr.projectPath, n, body);
+        },
+      },
+      fixPr: async (key, _n, feedbackPath, expectedHeadSha) => {
+        const { mr, client } = resolveCi(key);
+        const current = await client.getChangeRequest(mr.projectPath, mr.changeNumber);
+        if (current.state !== "opened" || current.head.sha !== expectedHeadSha) return false;
+        const repo = resolveGitLabRepo(mr);
+        if (!repo) return false;
+        const invoke = async (signal?: AbortSignal) => {
+          await repoManager.ensureBareClone(repo);
+          await repoManager.fetch(repo.name);
+          const base = await repoManager.ensureBaseWorktree(repo);
+          return runCiFixViaCli(mr.projectPath, mr.changeNumber, feedbackPath, {
+            cwd: base,
+            env: buildRepoEnv(repo, workspaceDir),
+            webUrl: mr.webUrl,
+            serializationKey: `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
+            expectedHeadSha,
+            signal,
+          });
+        };
+        if (!options.supervisor) return invoke();
+        try {
+          return await options.supervisor.schedule({
+            id: randomUUID(),
+            source: "gitlab:ci",
+            repo: repo.name,
+            kind: "ci_fix",
+            label: `${mr.projectPath}!${mr.changeNumber}`,
+            checkoutClass: "shared_base",
+            run: invoke,
+          });
+        } catch (error) {
+          if (error instanceof JobNotStartedError) return "deferred";
+          throw error;
+        }
+      },
+      verbose,
+    });
+    acquirers.push(gitlabCiWatcher);
+    intervalUpdaters.push((seconds) => gitlabCiWatcher.updateInterval(seconds));
   }
 
   // Mode 2 relay is independent of GitHub polling credentials: tracker
