@@ -1,9 +1,12 @@
+import { createHmac } from "crypto";
+
 import { describe, expect, test } from "bun:test";
 
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
   normalizeGitLabWebhook,
+  verifyGitLabWebhookSignature,
   verifyGitLabWebhookToken,
 } from "../src/lib/gitlab-webhook";
 
@@ -17,14 +20,67 @@ describe("GitLab direct webhooks", () => {
     expect(verifyGitLabWebhookToken("correct horse", "")).toBe(false);
   });
 
-  test("prefers delivery UUIDs and otherwise hashes the event and body", () => {
+  test("verifies current GitLab Standard Webhooks signatures", () => {
+    const rawBody = '{"event":"note"}';
+    const secret = Buffer.from("signing secret");
+    const token = `whsec_${secret.toString("base64")}`;
+    const webhookId = "delivery-1";
+    const timestamp = "1788998400";
+    const signature = createHmac("sha256", secret)
+      .update(`${webhookId}.${timestamp}.${rawBody}`)
+      .digest("base64");
+
+    expect(
+      verifyGitLabWebhookSignature(
+        `v1,invalid v1,${signature}`,
+        webhookId,
+        timestamp,
+        rawBody,
+        token,
+        { nowMs: 1_788_998_400_000 },
+      ),
+    ).toBe(true);
+    expect(
+      verifyGitLabWebhookSignature(`v1,${signature}`, webhookId, timestamp, `${rawBody} `, token, {
+        nowMs: 1_788_998_400_000,
+      }),
+    ).toBe(false);
+    expect(
+      verifyGitLabWebhookSignature(`v1,${signature}`, webhookId, timestamp, rawBody, token, {
+        nowMs: 1_788_998_701_000,
+      }),
+    ).toBe(false);
+  });
+
+  test("does not accept malformed Standard Webhooks signature inputs", () => {
+    expect(verifyGitLabWebhookSignature(null, "delivery-1", "1", "{}", "whsec_YQ==")).toBe(false);
+    expect(verifyGitLabWebhookSignature("v1,YQ==", null, "1", "{}", "whsec_YQ==")).toBe(false);
+    expect(verifyGitLabWebhookSignature("v1,YQ==", "delivery-1", "nope", "{}", "whsec_YQ==")).toBe(
+      false,
+    );
+    expect(verifyGitLabWebhookSignature("v1,YQ==", "delivery-1", "1", "{}", "legacy")).toBe(false);
+  });
+
+  test("prefers delivery-scoped ids and never treats the webhook UUID as a delivery", () => {
     expect(
       gitLabWebhookDeliveryId(
-        new Headers({ "x-gitlab-event-uuid": "delivery-1" }),
+        new Headers({ "webhook-id": "delivery-1", "idempotency-key": "retry-1" }),
         "{}",
         "Note Hook",
       ),
-    ).toBe("delivery-1");
+    ).toBe("webhook-id:delivery-1");
+    expect(
+      gitLabWebhookDeliveryId(new Headers({ "idempotency-key": "retry-1" }), "{}", "Note Hook"),
+    ).toBe("idempotency-key:retry-1");
+    const eventId = gitLabWebhookDeliveryId(
+      new Headers({
+        "x-gitlab-event-uuid": "event-1",
+        "x-gitlab-webhook-uuid": "configured-hook-not-delivery",
+      }),
+      "{}",
+      "Note Hook",
+    );
+    expect(eventId).toStartWith("event-uuid:event-1:");
     const first = gitLabWebhookDeliveryId(new Headers(), '{"a":1}', "Note Hook");
     expect(first).toStartWith("body:");
     expect(gitLabWebhookDeliveryId(new Headers(), '{"a":1}', "Note Hook")).toBe(first);

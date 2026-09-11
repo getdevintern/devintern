@@ -1,6 +1,6 @@
 /** GitLab direct-webhook authentication and provider-native event normalization. */
 
-import { createHash, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 
 import { normalizeCodeHostUrl } from "./code-host";
 
@@ -41,18 +41,59 @@ export function verifyGitLabWebhookToken(actual: string | null, expected: string
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
-/** Prefer GitLab delivery UUIDs, with a deterministic body hash as a fallback. */
+const DEFAULT_SIGNATURE_TOLERANCE_SECONDS = 5 * 60;
+
+/** Verify a GitLab Standard Webhooks HMAC signature and reject stale deliveries. */
+export function verifyGitLabWebhookSignature(
+  signatureHeader: string | null,
+  webhookId: string | null,
+  timestamp: string | null,
+  rawBody: string,
+  signingToken: string,
+  options: { nowMs?: number; toleranceSeconds?: number } = {},
+): boolean {
+  if (!signatureHeader || !webhookId || !timestamp || !signingToken.startsWith("whsec_")) {
+    return false;
+  }
+
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isInteger(timestampSeconds)) return false;
+  const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1000);
+  const toleranceSeconds = options.toleranceSeconds ?? DEFAULT_SIGNATURE_TOLERANCE_SECONDS;
+  if (Math.abs(nowSeconds - timestampSeconds) > toleranceSeconds) return false;
+
+  const secret = Buffer.from(signingToken.slice("whsec_".length), "base64");
+  if (secret.length === 0) return false;
+  const expected = createHmac("sha256", secret)
+    .update(`${webhookId}.${timestamp}.${rawBody}`)
+    .digest();
+
+  return signatureHeader.split(/\s+/).some((entry) => {
+    const [version, encoded, ...extra] = entry.split(",");
+    if (version !== "v1" || !encoded || extra.length > 0) return false;
+    const actual = Buffer.from(encoded, "base64");
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  });
+}
+
+/** Prefer delivery-scoped identifiers, with a deterministic body hash as a fallback. */
 export function gitLabWebhookDeliveryId(
   headers: Headers,
   rawBody: string,
   eventName: string,
 ): string {
-  return (
-    headers.get("x-gitlab-event-uuid") ??
-    headers.get("x-gitlab-webhook-uuid") ??
-    headers.get("x-request-id") ??
-    `body:${createHash("sha256").update(eventName).update("\0").update(rawBody).digest("hex")}`
-  );
+  const webhookId = headers.get("webhook-id");
+  if (webhookId) return `webhook-id:${webhookId}`;
+  const idempotencyKey = headers.get("idempotency-key");
+  if (idempotencyKey) return `idempotency-key:${idempotencyKey}`;
+
+  const bodyHash = createHash("sha256")
+    .update(eventName)
+    .update("\0")
+    .update(rawBody)
+    .digest("hex");
+  const eventUuid = headers.get("x-gitlab-event-uuid");
+  return eventUuid ? `event-uuid:${eventUuid}:${bodyHash}` : `body:${bodyHash}`;
 }
 
 /** Scope a normalized delivery to a registered MR on the exact provider instance and project. */
