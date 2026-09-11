@@ -1080,9 +1080,7 @@ if (process.argv[2] === "init") {
         console.log("conflicts with the agent when needed, then push (never forced).");
         console.log("");
         console.log("Arguments:");
-        console.log(
-          "  pr-url         GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)",
-        );
+        console.log("  pr-url         GitHub PR or GitLab MR URL");
         console.log("");
         console.log("Options:");
         console.log("  --no-push      Resolve and commit locally but don't push");

@@ -211,4 +211,19 @@ describe("GitLabReviewsClient", () => {
     expect(result.assignedReviewerIds).toEqual([8]);
     expect(result.feedback).toEqual([expect.objectContaining({ discussionId: "open", noteId: 1 })]);
   });
+
+  test("maps GitLab mergeability without using GitHub state strings", async () => {
+    const { client } = clientFor([], {
+      mr: {
+        detailed_merge_status: "conflict",
+        diff_refs: { base_sha: "base123", head_sha: "abc123" },
+      },
+    });
+    const result = await client.getChangeRequest("acme/widgets", 17);
+    expect(result).toMatchObject({
+      mergeability: "conflicts",
+      head: { ref: "feature/widgets", sha: "abc123" },
+      base: { ref: "main", sha: "base123" },
+    });
+  });
 });

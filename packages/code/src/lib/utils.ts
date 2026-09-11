@@ -1018,11 +1018,11 @@ export class Utils {
 
       let pushResult;
       if (expectedRemoteSha || (remoteBranchExists.success && remoteBranchExists.output.trim())) {
-        // Remote branch exists, just push
-        const lease = expectedRemoteSha
-          ? [`--force-with-lease=refs/heads/${currentBranch}:${expectedRemoteSha}`]
-          : [];
-        pushResult = await Utils.executeGitCommand(["push", ...lease, "origin", currentBranch], {
+        // The ancestry check above guarantees this update is a fast-forward.
+        // Use a normal push so no conflict-resolution path can overwrite
+        // remote history, even with a lease. A concurrent update is rejected
+        // by Git and handled as divergence below.
+        pushResult = await Utils.executeGitCommand(["push", "origin", currentBranch], {
           verbose,
           cwd,
         });

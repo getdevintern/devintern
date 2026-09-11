@@ -322,6 +322,7 @@ export function runResolveConflictsViaCli(
     /** Override the CLI entrypoint and output handling (subprocess tests). */
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
     signal?: AbortSignal;
   } = {},
 ): Promise<AutomaticResolveResult> {
@@ -330,6 +331,21 @@ export function runResolveConflictsViaCli(
     ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
   ];
   return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
+}
+
+/** Run conflict resolution for a canonical provider change-request URL. */
+export function runResolveConflictsUrlViaCli(
+  webUrl: string,
+  serializationKey: string,
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    expectedHeadSha?: string;
+    expectedBaseSha?: string;
+    timeoutMs?: number;
+  } = {},
+): Promise<AutomaticResolveResult> {
+  return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
 }
 
 function runResolveSubcommand(
@@ -342,6 +358,7 @@ function runResolveSubcommand(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
     signal?: AbortSignal;
   },
 ): Promise<AutomaticResolveResult> {
@@ -358,6 +375,7 @@ async function runResolveWithFailover(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
     signal?: AbortSignal;
   },
 ): Promise<AutomaticResolveResult> {
@@ -391,10 +409,11 @@ function spawnResolveOnce(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
     signal?: AbortSignal;
   },
 ): Promise<{ code: number; result: AutomaticResolveResult }> {
-  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
     if (opts.signal?.aborted) {
       resolve({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });

@@ -3,6 +3,7 @@
 import { captureError } from "@devintern/utils";
 import type { Acquirer } from "../worker";
 import type { TaskExecutionResult } from "./task-polling-acquirer";
+import type { AutomaticResolveResult } from "./review-polling-acquirer";
 import type { AgentPr, WorkerState } from "./worker-state";
 import type { WebhookQueue } from "./webhook-queue";
 import type { GitLabPollingSnapshot } from "./gitlab-reviews";
@@ -18,6 +19,11 @@ export interface GitLabReviewPollingOptions {
   queue: Pick<WebhookQueue, "hasProcessed" | "markProcessed">;
   clientFor: (mr: AgentPr) => GitLabPollingClient | null;
   addressMr: (mr: AgentPr) => Promise<TaskExecutionResult>;
+  resolveMr?: (
+    mr: AgentPr,
+    expected: { headSha: string; baseSha?: string },
+  ) => Promise<AutomaticResolveResult>;
+  shouldResolve?: () => boolean;
   allowed?: (mr: AgentPr) => boolean;
   reviewerAllowlist?: Iterable<string>;
   now?: () => number;
@@ -129,6 +135,31 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
         `🧹 [${this.name}] ${mr.projectPath}!${mr.changeNumber} is ${snapshot.state}; unwatching`,
       );
       return;
+    }
+
+    if (
+      this.options.resolveMr &&
+      (this.options.shouldResolve?.() ?? true) &&
+      (snapshot.mergeability === "conflicts" || snapshot.mergeability === "behind")
+    ) {
+      const syncRetryKey = `sync:${key}`;
+      const syncRetry = this.retries.get(syncRetryKey);
+      if (syncRetry && now < syncRetry.nextAt) return;
+      const syncKey = `sync:${key}:${snapshot.baseSha ?? "unknown"}:${snapshot.headSha}`;
+      if (!this.options.queue.hasProcessed(SOURCE, syncKey)) {
+        const outcome = await this.options.resolveMr(mr, {
+          headSha: snapshot.headSha,
+          baseSha: snapshot.baseSha,
+        });
+        if (outcome.outcome === "failed" || outcome.outcome === "deferred") {
+          this.recordFailure(syncRetryKey, now);
+        } else {
+          this.options.queue.markProcessed(SOURCE, syncKey);
+          this.retries.delete(syncRetryKey);
+        }
+        // Re-fetch provider state on the next tick before considering feedback.
+        return;
+      }
     }
 
     const candidates = [] as GitLabPollingSnapshot["feedback"];

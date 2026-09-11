@@ -1581,7 +1581,8 @@ export async function buildFleetEventAcquirers(options: {
   if (hasGitLabProfile) {
     const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
     const { GitLabReviewsClient } = await import("../gitlab-reviews");
-    const { runAddressReviewUrlViaCli } = await import("../review-polling-acquirer");
+    const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
+      await import("../review-polling-acquirer");
     const gitlabPoller = new GitLabReviewPollingAcquirer({
       intervalSeconds,
       workerState: state.workerState,
@@ -1633,6 +1634,44 @@ export async function buildFleetEventAcquirers(options: {
           });
         } catch (error) {
           if (error instanceof JobNotStartedError) return "deferred";
+          throw error;
+        }
+      },
+      // Scheduled GitLab conflict windows need provider-neutral durable
+      // scheduling state; until that lands, never violate a scheduled policy.
+      shouldResolve: () => config.workspace.conflictResolution === "auto",
+      resolveMr: async (mr, expected) => {
+        const repo = resolveGitLabRepo(mr);
+        if (!repo) return { outcome: "skipped", message: "repository is not configured" };
+        await repoManager.ensureBareClone(repo);
+        await repoManager.fetch(repo.name);
+        const base = await repoManager.ensureBaseWorktree(repo);
+        const invoke = () =>
+          runResolveConflictsUrlViaCli(
+            mr.webUrl,
+            `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
+            {
+              cwd: base,
+              env: buildRepoEnv(repo, workspaceDir),
+              expectedHeadSha: expected.headSha,
+              expectedBaseSha: expected.baseSha,
+            },
+          );
+        if (!options.supervisor) return invoke();
+        try {
+          return await options.supervisor.schedule({
+            id: randomUUID(),
+            source: "gitlab:conflict",
+            repo: repo.name,
+            kind: "conflict",
+            label: `${mr.projectPath}!${mr.changeNumber}`,
+            checkoutClass: "shared_base",
+            run: invoke,
+          });
+        } catch (error) {
+          if (error instanceof JobNotStartedError) {
+            return { outcome: "deferred", message: error.message };
+          }
           throw error;
         }
       },
