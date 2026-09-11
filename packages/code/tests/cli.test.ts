@@ -394,7 +394,7 @@ describe.concurrent("CLI Argument Handling", () => {
     const output = result.stdout + result.stderr;
     expect(result.exitCode).toBe(1);
     expect(output).toContain("AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1");
-    expect(output).not.toContain("WEBHOOK_SECRET environment variable is required");
+    expect(output).not.toContain("WEBHOOK_SECRET or GITLAB_WEBHOOK_SECRET is required");
     expect(output).not.toContain("Starting @devintern/code Webhook Server");
   });
 
@@ -412,7 +412,7 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(output).toContain(
       "WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS is deprecated, use AUTO_REVIEW_ITERATIONS instead",
     );
-    expect(output).toContain("WEBHOOK_SECRET environment variable is required");
+    expect(output).toContain("WEBHOOK_SECRET or GITLAB_WEBHOOK_SECRET is required");
     expect(result.exitCode).toBe(1);
   });
 
@@ -424,7 +424,7 @@ describe.concurrent("CLI Argument Handling", () => {
     // Mirroring the CLI, the unused cap is not resolved, so startup gets past
     // cap resolution and fails at the secret gate instead.
     expect(output).not.toContain("must be a whole number");
-    expect(output).toContain("WEBHOOK_SECRET environment variable is required");
+    expect(output).toContain("WEBHOOK_SECRET or GITLAB_WEBHOOK_SECRET is required");
     expect(result.exitCode).toBe(1);
   });
 
