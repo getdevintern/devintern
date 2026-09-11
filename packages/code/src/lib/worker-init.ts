@@ -57,6 +57,7 @@ import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
 import { workspaceConfigPath } from "./workspace/paths";
+import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
 import {
@@ -161,6 +162,8 @@ export interface WorkerInitDeps {
     trackerType: string;
     log: LogFn;
   }) => Promise<boolean>;
+  /** Override individual relay target setup while exercising default init orchestration. */
+  runRelayConnect?: typeof connectRelayTarget;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
   /** Validate Sentry credentials and project access; returns the current issue count. */
@@ -394,12 +397,15 @@ export function workspaceGitHubRepos(config: WorkspaceConfig): string[] {
   ];
 }
 
-async function defaultConnectRelay(options: {
-  projectRoot: string;
-  workspaceDir: string;
-  trackerType: string;
-  log: LogFn;
-}): Promise<boolean> {
+async function defaultConnectRelay(
+  options: {
+    projectRoot: string;
+    workspaceDir: string;
+    trackerType: string;
+    log: LogFn;
+  },
+  runConnect: typeof connectRelayTarget = connectRelayTarget,
+): Promise<boolean> {
   const getAccessToken = async () => {
     const user = await requireAuthenticatedUser(
       projectAuthConfig(options.projectRoot),
@@ -414,15 +420,33 @@ async function defaultConnectRelay(options: {
 
   if (repos.length > 0) {
     for (const repo of repos) {
-      const repoOk = (await connectRelayTarget("github", { ...deps, repo })) === 0;
+      const repoOk = (await runConnect("github", { ...deps, repo })) === 0;
       ok = repoOk && ok;
     }
   } else {
     options.log("   No GitHub remote detected; skipping GitHub relay registration.");
   }
 
+  const gitlabProjects = workspaceGitLabRelayProjects(workspace, options.workspaceDir);
+  if (gitlabProjects.length > 0) {
+    for (const project of gitlabProjects) {
+      const projectOk =
+        (await runConnect("gitlab", {
+          ...deps,
+          env: project.env,
+          gitlabProject: {
+            instanceUrl: project.instanceUrl,
+            projectPath: project.projectPath,
+          },
+        })) === 0;
+      ok = projectOk && ok;
+    }
+  } else {
+    options.log("   No GitLab remote detected; skipping GitLab relay registration.");
+  }
+
   if (options.trackerType !== "github" && options.trackerType !== "markdown") {
-    const trackerOk = (await connectRelayTarget(options.trackerType, deps)) === 0;
+    const trackerOk = (await runConnect(options.trackerType, deps)) === 0;
     ok = trackerOk && ok;
   }
 
@@ -633,7 +657,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
 
       if (user) {
-        const connectRelay = deps.connectRelay ?? defaultConnectRelay;
+        const connectRelay =
+          deps.connectRelay ??
+          ((options) => defaultConnectRelay(options, deps.runRelayConnect ?? connectRelayTarget));
         try {
           const connected = await connectRelay({
             projectRoot,

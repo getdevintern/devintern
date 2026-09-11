@@ -92,6 +92,44 @@ GITHUB_REPO = "acme/api"
     expect(errors.join("\n")).toContain("1 workspace repository pairing(s) failed");
   });
 
+  test("bare connect configures both GitHub and GitLab code hosts", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "github-api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "gitlab-api"
+remote = "git@gitlab.com:acme/platform.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
+`,
+    );
+    const calls: Array<{ target: string; repo?: string; projectPath?: string }> = [];
+
+    const result = await runWorkerConnectCommand([], {
+      workspaceDir,
+      runConnect: async (target, deps) => {
+        calls.push({
+          target,
+          repo: deps.repo,
+          projectPath: deps.gitlabProject?.projectPath,
+        });
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(calls).toEqual([
+      { target: "github", repo: "acme/api", projectPath: undefined },
+      { target: "gitlab", repo: undefined, projectPath: "acme/platform" },
+    ]);
+  });
+
   test("rejects repository selection for relay targets", async () => {
     const result = await runWorkerConnectCommand(["github", "--repo", "acme/web"], {
       workspaceDir,
