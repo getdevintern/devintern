@@ -19,6 +19,7 @@ import type {
   ManualTriggerOutcome,
 } from "./automation-acquirer";
 import { loadStandaloneAutomationActions } from "./automation-manual";
+import type { CodeHostProvider } from "./code-host";
 import { RunStore } from "./run-recorder";
 import type { RunOrigin, RunRecord, RunStageRecord, RunStats, RunStatus } from "./run-recorder";
 import type { ScheduleSnapshot } from "./schedule";
@@ -157,6 +158,10 @@ export interface WorkerStatusView {
 
 /** One open agent PR as served by `GET /api/agent-prs`. */
 export interface OpenAgentPrView {
+  provider: CodeHostProvider;
+  instanceUrl: string;
+  projectId?: string;
+  projectPath: string;
   repo: string;
   prNumber: number;
   prUrl: string;
@@ -448,7 +453,7 @@ export class DashboardData {
   }
 
   /**
-   * Open agent-created PRs with their GitHub URLs (`GET /api/agent-prs`).
+   * Open agent-created pull and merge requests (`GET /api/agent-prs`).
    * Ticket links are frozen in the registry by the worker at PR-creation
    * time (from the tracker configured then), so they survive tracker
    * switches and stay correct even when this dashboard process runs
@@ -456,10 +461,14 @@ export class DashboardData {
    */
   getOpenAgentPrs(): OpenAgentPrView[] {
     return this.read([], (stores) =>
-      stores.state.listOpenAgentPrs().map((pr) => ({
+      stores.state.listOpenAgentChangeRequests().map((pr) => ({
+        provider: pr.provider,
+        instanceUrl: pr.instanceUrl,
+        projectId: pr.projectId,
+        projectPath: pr.projectPath,
         repo: pr.repo,
         prNumber: pr.prNumber,
-        prUrl: `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+        prUrl: pr.webUrl,
         branch: pr.branch,
         taskKey: pr.taskKey,
         ticketUrl: pr.ticketUrl,
