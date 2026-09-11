@@ -192,7 +192,7 @@ export function parseChangeRequestUrl(
   const path = decodeURIComponent(url.pathname).replace(/^\/+|\/+$/g, "");
 
   if (hostname === "github.com") {
-    const match = path.match(/^([^/]+\/[^/]+)\/pull\/(\d+)$/);
+    const match = path.match(/^([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/);
     if (!match?.[1] || !match[2]) return null;
     return {
       provider: "github",
@@ -227,7 +227,7 @@ export function parseChangeRequestUrl(
   ) {
     relativePath = relativePath.slice(configured.pathPrefix.length).replace(/^\/+/, "");
   }
-  const match = relativePath.match(/^(.+)\/-\/merge_requests\/(\d+)$/);
+  const match = relativePath.match(/^(.+)\/-\/merge_requests\/(\d+)(?:\/.*)?$/);
   if (!match?.[1] || !match[2] || !cleanProjectPath(match[1])) return null;
   return {
     provider: "gitlab",
