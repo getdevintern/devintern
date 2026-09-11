@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  automationTaskArgs,
   nextScheduleOccurrence,
   parseAutomationConfig,
   parseAutomationInterval,
@@ -107,6 +108,126 @@ prompt = "estimate stories"
     }
     expect(message).toContain("kind is not supported");
     expect(message).toContain("[[estimations]]");
+  });
+
+  test("defaults open_pr to off and parses an explicit opt-in", () => {
+    const entries = parseAutomationConfig(`
+[[automations]]
+id = "weekday-tweets"
+enabled = true
+interval = "1d"
+prompt = "Draft a tweet."
+
+[[automations]]
+id = "dependency-health"
+enabled = true
+interval = "6h"
+open_pr = true
+prompt = "Upgrade one dependency."
+`);
+    expect(entries[0]?.openPr).toBe(false);
+    expect(entries[1]?.openPr).toBe(true);
+  });
+
+  test("rejects a non-boolean open_pr like any other invalid field", () => {
+    let message = "";
+    try {
+      parseAutomationConfig(`
+[[automations]]
+id = "wrong"
+enabled = true
+interval = "1d"
+open_pr = "yes"
+prompt = "work"
+`);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("[[automations]][0].open_pr must be a boolean.");
+  });
+
+  test("workspace validation keeps serving the last valid config on a broken open_pr", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "https://github.com/acme/api.git"
+
+[[automations]]
+id = "work"
+enabled = true
+interval = "1h"
+prompt = "work"
+open_pr = 1
+`),
+    ).toThrow(/open_pr must be a boolean/);
+  });
+});
+
+describe("automationTaskArgs", () => {
+  const open = { openPr: true };
+  const off = { openPr: false };
+
+  test("opted-in automations inherit the workspace flags unchanged", () => {
+    expect(automationTaskArgs(open, ["--create-pr", "--auto-review"])).toEqual([
+      "--create-pr",
+      "--auto-review",
+    ]);
+    expect(automationTaskArgs(open, ["--create-pr=true", "--auto-review"])).toEqual([
+      "--create-pr=true",
+      "--auto-review",
+    ]);
+  });
+
+  test("opted-in automations always create a PR even when the defaults omit --create-pr", () => {
+    expect(automationTaskArgs(open, ["--auto-review"])).toEqual(["--auto-review", "--create-pr"]);
+    expect(automationTaskArgs(open, [])).toEqual(["--create-pr"]);
+    expect(automationTaskArgs(open, ["--create-pr=false", "--auto-review"])).toEqual([
+      "--create-pr=false",
+      "--auto-review",
+      "--create-pr",
+    ]);
+  });
+
+  test("off (the default) strips PR/review flags even when the workspace defaults them", () => {
+    expect(
+      automationTaskArgs(off, ["--create-pr", "--auto-review", "--skip-clarity-check"]),
+    ).toEqual(["--skip-clarity-check", "--no-git"]);
+  });
+
+  test("off also drops value-taking review flags (flag and value)", () => {
+    expect(
+      automationTaskArgs(off, [
+        "--create-pr",
+        "--auto-review-iterations",
+        "3",
+        "--sandbox",
+        "none",
+      ]),
+    ).toEqual(["--sandbox", "none", "--no-git"]);
+  });
+
+  test("an explicit --no-git is never duplicated", () => {
+    expect(automationTaskArgs(off, ["--no-git"])).toEqual(["--no-git"]);
+  });
+
+  test("off strips inline = value forms (--create-pr=true, --auto-review=1)", () => {
+    expect(
+      automationTaskArgs(off, ["--create-pr=true", "--auto-review=1", "--sandbox", "none"]),
+    ).toEqual(["--sandbox", "none", "--no-git"]);
+  });
+
+  test("off strips --auto-review-iterations=N inline without leaving a dangling value", () => {
+    expect(automationTaskArgs(off, ["--auto-review-iterations=3", "--skip-clarity-check"])).toEqual(
+      ["--skip-clarity-check", "--no-git"],
+    );
+  });
+
+  test("off also strips --create-pr=false (PR creation never leaks in)", () => {
+    expect(automationTaskArgs(off, ["--create-pr=false"])).toEqual(["--no-git"]);
   });
 });
 

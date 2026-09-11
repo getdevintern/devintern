@@ -139,14 +139,41 @@ describe("HarnessFailover", () => {
     expect(h.failover.activeName).toBe("codex");
     expect(h.failover.isLimited("claude-code")).toBe(true);
     expect(h.failover.allLimited()).toBe(false);
+    expect(h.state.active).toBeNull();
   });
 
-  test("restore warns and falls back when the persisted active left the chain", () => {
+  test("restore warns and persists the fallback when the persisted active left the chain", () => {
     const h = makeFailover(["claude-code", "codex"]);
     const warnings = h.failover.restore({}, "grok");
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("grok");
     expect(h.failover.activeName).toBe("claude-code");
+    expect(h.state.active).toBe("claude-code");
+  });
+
+  test("the stale-harness warning is one-time across restarts", () => {
+    // Saved "codex", current chain opencode → grok → cursor.
+    const first = makeFailover(["opencode", "grok", "cursor"]);
+    const warnings = first.failover.restore({}, "codex");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("codex");
+    expect(first.failover.activeName).toBe("opencode");
+    expect(first.state.active).toBe("opencode");
+
+    // Second restart with the same chain reads the updated name: no warning.
+    const second = makeFailover(["opencode", "grok", "cursor"]);
+    expect(second.failover.restore({}, "opencode")).toEqual([]);
+    expect(second.failover.activeName).toBe("opencode");
+    expect(second.state.active).toBeNull();
+  });
+
+  test("restore re-points the persisted active even when every entry is limited", () => {
+    const h = makeFailover(["claude-code", "codex"]);
+    const warnings = h.failover.restore({ "claude-code": 5000, codex: 4000 }, "grok");
+    expect(warnings).toHaveLength(1);
+    expect(h.failover.activeName).toBe("claude-code");
+    expect(h.failover.allLimited()).toBe(true);
+    expect(h.state.active).toBe("claude-code");
   });
 
   test("restore ignores windows for harnesses outside the chain", () => {

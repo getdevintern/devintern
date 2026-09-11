@@ -16,7 +16,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Auto-Review Loop** (with `--auto-review` flag):
 
-1. Fetch PR diff → 2. Run Claude to review code (JSON feedback) → 3. Parse feedback by priority → 4. Address critical/high/medium issues → 5. Commit & push fixes → 6. Repeat up to N iterations (default: 5) or until approved
+1. Fetch PR diff → 2. Run Claude to review code (JSON feedback) → 3. Parse feedback by priority → 4. Address critical/high/medium issues → 5. Commit & push fixes → 6. Repeat up to N iterations (default: 2, from `--auto-review-iterations` / `AUTO_REVIEW_ITERATIONS`) or until approved
 
 **PR Review Handling:**
 

@@ -37,7 +37,7 @@
     },
     "packages/code": {
       "name": "@getdevintern/code",
-      "version": "2.9.0",
+      "version": "2.11.0",
       "bin": {
         "devintern": "dist/index.js",
       },
@@ -47,6 +47,7 @@
         "cron-parser": "^5.4.0",
         "dotenv": "^16.3.1",
         "p-queue": "^9.0.1",
+        "posthog-node": "^5.48.0",
         "turndown": "^7.2.0",
       },
       "devDependencies": {
