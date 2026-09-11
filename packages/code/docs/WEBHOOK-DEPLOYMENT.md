@@ -385,7 +385,7 @@ export WEBHOOK_PORT="3000"        # Default: 3000
 export WEBHOOK_HOST="0.0.0.0"     # Default: 0.0.0.0
 export WEBHOOK_AUTO_REPLY="true"  # Reply to addressed comments
 export WEBHOOK_AUTO_REVIEW="true" # Run self-review loop after addressing feedback
-export WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS="5"  # Max review iterations (default: 5)
+export AUTO_REVIEW_ITERATIONS="2" # Max review-fix cycles for the self-review loop (default: 2; shared with the CLI)
 ```
 
 ### Start the Server

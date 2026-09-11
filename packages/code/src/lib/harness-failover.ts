@@ -119,8 +119,13 @@ export class HarnessFailover {
    * afterwards is priority-driven: the highest-priority entry without an
    * open window becomes active, so a still-limited primary is never retried
    * and a fallback from before the restart is kept when it is the best
-   * available entry. The persisted active name is only used to warn when it
-   * has left the chain.
+   * available entry.
+   *
+   * When the persisted active name has left the chain (edited or shortened
+   * `AGENT_HARNESS`), the entry selected here is written back through
+   * {@link HarnessFailoverOptions.persistActive} so later restarts do not
+   * keep seeing the removed name (the warning is one-time). A name that is
+   * still in the chain is honored without rewriting it.
    *
    * @param windows - Persisted harness → limit-until (epoch ms) map
    * @param activeName - Persisted active harness name, when known
@@ -129,6 +134,7 @@ export class HarnessFailover {
   restore(windows: Record<string, number>, activeName?: string | null): string[] {
     const warnings: string[] = [];
     const nowMs = this.now();
+    const savedLeftChain = Boolean(activeName) && !this.entries.some((e) => e.name === activeName);
 
     for (const [harness, untilMs] of Object.entries(windows)) {
       if (!this.entries.some((e) => e.name === harness)) {
@@ -146,7 +152,7 @@ export class HarnessFailover {
       }
     }
 
-    if (activeName && !this.entries.some((e) => e.name === activeName)) {
+    if (savedLeftChain) {
       warnings.push(
         `Persisted active harness "${activeName}" is not in the current AGENT_HARNESS chain; falling back to the highest-priority available entry.`,
       );
@@ -160,6 +166,14 @@ export class HarnessFailover {
       // the resume path reselects when the earliest window elapses.
       this.activeIndex = 0;
     }
+
+    if (savedLeftChain) {
+      // The saved name is gone; store the entry we actually landed on (the
+      // best available one, or the parked primary when everything is
+      // limited) so the next restart does not repeat the stale warning.
+      this.persistActive?.(this.activeName);
+    }
+
     return warnings;
   }
 

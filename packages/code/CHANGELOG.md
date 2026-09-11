@@ -1,5 +1,19 @@
 # @devintern/code Changelog
 
+## [2.11.0] - 2026-09-09
+
+Throughput and cost-control release: host-level agent concurrency is now bounded behind an explicit acknowledgement, the auto-review loop caps itself earlier by default, and a stale persisted harness no longer warns on every restart.
+
+### Added
+
+- **Opt-in bounded host concurrency**: `[workspace.execution]` now supports global and per-repository agent limits behind an explicit `isolation = "best_effort_host"` acknowledgement. Polling tasks, retries, error fixes, PR feedback, CI repair, conflict resolution, automations, and estimations share one admission supervisor; task worktrees may overlap within a repository while jobs using its persistent base checkout remain serialized. Concurrent jobs still share host ports, processes, Docker, caches, and linked Git metadata and are documented as best-effort throughput rather than VM isolation
+- **One shared auto-review iteration cap (DEV-121)**: `--auto-review-iterations` and a matching `AUTO_REVIEW_ITERATIONS` env var are now the only controls for the review–fix cycle ceiling, honored identically by direct CLI runs, workspace/worker runs (`worker_task_args` passes the same flag through), and the webhook server. The webhook-only `WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS` env var still works as a deprecated fallback with a migration warning, and the `--auto-review-max-iterations` name that appeared in past release notes never existed in the CLI — use `--auto-review-iterations`
+- **Auto-review defaults to 2 review–fix cycles instead of 5**: most PRs converge in 1–2 passes or start thrashing, so the default cap now stops self-review sooner — humans see the PR earlier and agent spend per ticket drops. The cap is a ceiling, not a quota (approval or no remaining important issues still stops the loop early), `1` means a single review pass, and `0` is rejected rather than treated as unlimited. Invalid values (non-numeric or less than 1) for the flag or env var are rejected with a clear error before any agent runs
+
+### Fixed
+
+- **Stale persisted active harness is re-pointed on startup (DEV-122)**: when the saved failover harness is no longer in the current `AGENT_HARNESS` chain (e.g. after editing or shortening it), the worker already fell back in memory but kept the removed name stored, repeating the `Persisted active harness "..." is not in the current AGENT_HARNESS chain` warning on every restart. The selected fallback — the highest-priority available entry, or the parked primary while every entry is still limited — is now written back to the queue database, so the warning appears once and later restarts stay quiet. Unchanged chains keep their existing failover/failback behavior
+
 ## [2.10.0] - 2026-09-08
 
 Worker convenience release: `worker init` can install and start the background service for you, agent reasoning effort is configurable across harnesses, every prepared worktree gets its dependencies installed, and the Sentry watcher stays quiet until it picks something up.
