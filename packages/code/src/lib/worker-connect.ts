@@ -5,7 +5,12 @@ import { dirname, resolve } from "path";
 
 import { Utils } from "./utils";
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
-import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
+import {
+  connectRelayTarget,
+  hasGitHubRelayRegistration,
+  hasGitLabRelayRegistration,
+  loadRelayState,
+} from "./relay-connect";
 import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
@@ -31,7 +36,7 @@ export const WORKER_CONNECT_TARGETS: ReadonlySet<string> = new Set([
 
 const WORKER_CONNECT_HELP = `Usage: devintern worker connect [target] [options]
 
-Connect an integration to the workspace worker. GitHub and tracker targets use
+Connect an integration to the workspace worker. Code-host and tracker targets use
 the DevIntern relay; Sentry adds a directly polled error-monitor project.
 
 Targets:
@@ -49,6 +54,7 @@ Options:
   --workspace <path>   Use this workspace.toml
   --team <name>        Use one team's tracker credentials
   --repo <name>        Repository that owns a Sentry project
+  --disconnect         Remove managed GitLab hooks; polling remains enabled
   -h, --help           Display this help message
 
 Tracker targets use the selected team's env_file/inline env over the workspace
@@ -78,6 +84,7 @@ export interface ParsedConnectArgs {
   team?: string;
   repo?: string;
   help: boolean;
+  disconnect: boolean;
   error?: string;
 }
 
@@ -93,6 +100,7 @@ export function parseConnectArgs(args: string[]): ParsedConnectArgs {
   let team: string | undefined;
   let repo: string | undefined;
   let targetSet = false;
+  let disconnect = false;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -101,35 +109,77 @@ export function parseConnectArgs(args: string[]): ParsedConnectArgs {
     } else if (arg === "--workspace") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, team, repo, help, error: "--workspace requires a value." };
+        return {
+          target,
+          workspacePath,
+          team,
+          repo,
+          help,
+          disconnect,
+          error: "--workspace requires a value.",
+        };
       }
       workspacePath = value;
       index++;
     } else if (arg === "--team") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, team, repo, help, error: "--team requires a value." };
+        return {
+          target,
+          workspacePath,
+          team,
+          repo,
+          help,
+          disconnect,
+          error: "--team requires a value.",
+        };
       }
       team = value;
       index++;
     } else if (arg === "--repo") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) {
-        return { target, workspacePath, team, repo, help, error: "--repo requires a value." };
+        return {
+          target,
+          workspacePath,
+          team,
+          repo,
+          help,
+          disconnect,
+          error: "--repo requires a value.",
+        };
       }
       repo = value;
       index++;
+    } else if (arg === "--disconnect") {
+      disconnect = true;
     } else if (arg?.startsWith("-")) {
-      return { target, workspacePath, team, repo, help, error: `Unknown option: ${arg}` };
+      return {
+        target,
+        workspacePath,
+        team,
+        repo,
+        help,
+        disconnect,
+        error: `Unknown option: ${arg}`,
+      };
     } else if (arg && !arg.startsWith("-")) {
       if (targetSet) {
-        return { target, workspacePath, team, repo, help, error: `Unexpected argument: ${arg}` };
+        return {
+          target,
+          workspacePath,
+          team,
+          repo,
+          help,
+          disconnect,
+          error: `Unexpected argument: ${arg}`,
+        };
       }
       target = arg.toLowerCase();
       targetSet = true;
     }
   }
-  return { target, workspacePath, team, repo, help };
+  return { target, workspacePath, team, repo, help, disconnect };
 }
 
 /** GitHub slugs represented by the workspace, deduplicated in config order. */
@@ -219,6 +269,10 @@ export async function runWorkerConnectCommand(
   }
   if (parsed.repo && parsed.target !== "sentry") {
     console.error("❌ --repo is only valid for Sentry connect.");
+    return 1;
+  }
+  if (parsed.disconnect && parsed.target !== "gitlab") {
+    console.error("❌ --disconnect is only valid for the GitLab connect target.");
     return 1;
   }
 
@@ -347,6 +401,20 @@ export async function runWorkerConnectCommand(
       console.log(`   Unverified workspace repositories: ${missing.join(", ")}`);
       console.log("   Run: devintern worker connect github");
     }
+    const relayState = loadRelayState(workspaceDir);
+    const gitlabProjects = workspaceGitLabRelayProjects(config, workspaceDir);
+    const missingGitLab = gitlabProjects.filter(
+      (project) =>
+        !hasGitLabRelayRegistration(relayState, project.instanceUrl, project.projectPath),
+    );
+    if (gitlabProjects.length > 0 && missingGitLab.length === 0) {
+      console.log("   All workspace GitLab projects have local relay registrations.");
+    } else if (missingGitLab.length > 0) {
+      console.log(
+        `   GitLab projects without local relay registration: ${missingGitLab.map((project) => project.projectPath).join(", ")}`,
+      );
+      console.log("   Run: devintern worker connect gitlab");
+    }
     return 0;
   }
 
@@ -366,6 +434,7 @@ export async function runWorkerConnectCommand(
           instanceUrl: project.instanceUrl,
           projectPath: project.projectPath,
         },
+        disconnectGitLab: parsed.disconnect,
       });
       if (result !== 0) failures++;
     }

@@ -11,7 +11,7 @@
  */
 
 import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devintern/auth";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { saveGitHubAppRecord } from "./github-app-setup";
@@ -159,6 +159,24 @@ export function gitLabRelayRepository(
   );
 }
 
+/** Whether a GitLab project path has a completed local relay registration. */
+export function hasGitLabRelayRegistration(
+  state: RelayConnectState | null,
+  instanceUrl: string,
+  projectPath: string,
+): boolean {
+  if (!state?.relayToken) return false;
+  const instance = instanceUrl.replace(/\/+$/, "").toLowerCase();
+  const path = projectPath.toLowerCase();
+  return Boolean(
+    state.gitlabRepositories?.some(
+      (repository) =>
+        repository.instanceUrl.replace(/\/+$/, "").toLowerCase() === instance &&
+        repository.projectPath.toLowerCase() === path,
+    ),
+  );
+}
+
 /** Resolve the relay URL: env override, else the hosted default. */
 export function resolveRelayUrl(): string {
   return (process.env.WORKER_RELAY_URL || DEFAULT_RELAY_URL).replace(/\/+$/, "");
@@ -194,7 +212,8 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
 export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
   const path = relayStatePath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(state, null, 2) + "\n", "utf8");
+  writeFileSync(path, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 interface ConnectResponse {
@@ -235,6 +254,8 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   repo?: string;
   /** GitLab project selected from workspace.toml by the fleet orchestrator. */
   gitlabProject?: { instanceUrl: string; projectPath: string };
+  /** Remove the exact remembered GitLab hook and relay route instead of connecting it. */
+  disconnectGitLab?: boolean;
   /** Injectable local project-hook administrator for tests. */
   gitlabAdmin?: {
     resolveMaintainedProject(projectPath: string): Promise<GitLabWebhookProject>;
@@ -244,6 +265,7 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
       existingHookId?: number,
     ): Promise<{ hook: GitLabProjectHook; standardSigning: boolean }>;
     testHook(projectId: number, hookId: number): Promise<void>;
+    deleteHook(projectId: number, hookId: number): Promise<boolean>;
   };
   /** Explicit tracker credentials for a selected workspace team. */
   env?: Record<string, string | undefined>;
@@ -763,6 +785,21 @@ export async function connectRelayTarget(
         identity.instanceUrl,
         projectId,
       );
+      if (deps.disconnectGitLab) {
+        if (!previous) {
+          console.log(
+            `✅ ${project.path} has no remembered GitLab relay hook; polling remains on.`,
+          );
+          return 0;
+        }
+        await admin.deleteHook(project.id, previous.hookId);
+        await removeGitLabRelayRegistration({
+          registrationId: previous.registrationId,
+          ...connectOpts,
+        });
+        console.log(`✅ Disconnected ${project.path} from the relay; polling remains enabled.`);
+        return 0;
+      }
       const begun = await beginGitLabRelayRegistration({
         instanceUrl: identity.instanceUrl,
         projectId,

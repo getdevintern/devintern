@@ -201,6 +201,31 @@ remote = "https://gitlab.com/acme/cloud.git"
     expect(errors.join("\n")).toContain("1 GitLab project hook setup(s) failed");
   });
 
+  test("GitLab disconnect is explicit and applies to every configured project", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "gitlab"
+remote = "git@gitlab.com:acme/platform.git"
+`,
+    );
+    const disconnectFlags: Array<boolean | undefined> = [];
+
+    const result = await runWorkerConnectCommand(["gitlab", "--disconnect"], {
+      workspaceDir,
+      runConnect: async (_target, deps) => {
+        disconnectFlags.push(deps.disconnectGitLab);
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(disconnectFlags).toEqual([true]);
+  });
+
   test("rejects unknown connect targets before touching the workspace", async () => {
     const result = await runWorkerConnectCommand(["bogus"], { workspaceDir });
 
@@ -214,7 +239,7 @@ remote = "https://gitlab.com/acme/cloud.git"
     // running the status flow the shared parse selected.
     const result = await runWorkerConnectCommand(["bogus"], {
       workspaceDir,
-      parsed: { target: "status", help: false },
+      parsed: { target: "status", help: false, disconnect: false },
       runConnect: async (target) => {
         expect(target).toBe("status");
         return 0;
@@ -312,6 +337,40 @@ remote = "https://gitlab.com/acme/cloud.git"
 
     expect(result).toBe(0);
     expect(logs.join("\n")).toContain("Unverified workspace repositories: acme/web");
+  });
+
+  test("status reports GitLab verification independently from GitHub", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "gitlab"
+remote = "git@gitlab.com:acme/platform.git"
+`,
+    );
+    saveRelayState(
+      {
+        relayUrl: "https://relay.test",
+        customerId: "customer-1",
+        connectedAt: "2026-09-02T00:00:00.000Z",
+        registrations: [],
+        relayToken: "drt_test",
+      },
+      workspaceDir,
+    );
+
+    const result = await runWorkerConnectCommand(["status"], {
+      workspaceDir,
+      runConnect: async () => 0,
+    });
+
+    expect(result).toBe(0);
+    expect(logs.join("\n")).toContain(
+      "GitLab projects without local relay registration: acme/platform",
+    );
+    expect(logs.join("\n")).toContain("devintern worker connect gitlab");
   });
 
   test("tracker connect loads workspace env without overriding the shell", async () => {

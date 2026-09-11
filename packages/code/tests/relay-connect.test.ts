@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -104,6 +104,7 @@ describe("relay-connect auth", () => {
     expect(relayToken).toBe("drt_minted_abc");
     expect(state.customerId).toBe("user_1");
     expect(loadRelayState(dir)?.relayToken).toBe("drt_minted_abc");
+    expect(statSync(join(dir, ".devintern-code", "relay.json")).mode & 0o777).toBe(0o600);
     expect(calls[0].auth).toBe("Bearer supa-access");
 
     // Second call reuses the stored token (no re-mint).
@@ -562,6 +563,9 @@ describe("relay-connect auth", () => {
           { status: 200 },
         );
       }
+      if (action === "remove-gitlab-registration") {
+        return new Response(JSON.stringify({ removed: true }), { status: 200 });
+      }
       expect(action).toBe("complete-gitlab-registration");
       return new Response(
         JSON.stringify({
@@ -607,6 +611,10 @@ describe("relay-connect auth", () => {
         async testHook(projectId, hookId) {
           adminCalls.push(`test:${projectId}:${hookId}`);
         },
+        async deleteHook(projectId, hookId) {
+          adminCalls.push(`delete:${projectId}:${hookId}`);
+          return true;
+        },
       },
     });
 
@@ -623,5 +631,37 @@ describe("relay-connect auth", () => {
       hookId: 7,
       registrationId: "glr_target",
     });
+
+    const disconnected = await connectRelayTarget("gitlab", {
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+      getAccessToken: async () => "supa-access",
+      env: { GITLAB_WEBHOOK_ADMIN_TOKEN: "admin-token" },
+      disconnectGitLab: true,
+      gitlabProject: {
+        instanceUrl: "https://gitlab.example.com",
+        projectPath: "platform/widgets",
+      },
+      gitlabAdmin: {
+        async resolveMaintainedProject(path) {
+          adminCalls.push(`resolve:${path}`);
+          return { id: 42, path: "Platform/Widgets", accessLevel: 40 };
+        },
+        async upsertRelayHook() {
+          throw new Error("disconnect must not upsert");
+        },
+        async testHook() {
+          throw new Error("disconnect must not test");
+        },
+        async deleteHook(projectId, hookId) {
+          adminCalls.push(`delete:${projectId}:${hookId}`);
+          return true;
+        },
+      },
+    });
+    expect(disconnected).toBe(0);
+    expect(adminCalls.slice(-2)).toEqual(["resolve:platform/widgets", "delete:42:7"]);
+    expect(loadRelayState(dir)?.gitlabRepositories).toEqual([]);
   });
 });
