@@ -161,7 +161,7 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Personal, project, and group access tokens | Supported for API access |
 | Existing labels | Best-effort; missing labels are skipped |
 | Manual `address-review` | Experimental; same-project writable branches only |
-| Registered-MR polling | Deferred |
+| Registered-MR polling | Experimental; DevIntern-created MRs only |
 | Conflict and CI repair | Deferred |
 | Direct project webhooks | Deferred |
 | Repository-wide mentions and hosted relay | Not currently planned |
@@ -186,6 +186,20 @@ Self-managed MR URLs below a configured relative installation path are accepted 
 - replies with the result without resolving discussions or changing reviewer assignments.
 
 `--no-push` leaves the local commit unpushed. `--no-reply` pushes the fix without posting GitLab replies or recording the notes as addressed. GitLab CI repair through `--ci-feedback` remains deferred.
+
+## Registered-MR polling
+
+The workspace worker polls only GitLab MRs that DevIntern successfully created and recorded. It does not scan projects, infer ownership from branch names, or discover repository-wide mentions.
+
+Automatic addressing is triggered by a new unresolved discussion from either an assigned reviewer or a user whose effective project membership is Developer or higher. Permission lookup failures are treated as unknown and fail closed. Approvals are informational; unresolved actionable discussions are the feedback signal.
+
+To narrow eligible actors further, configure a comma-separated username allowlist:
+
+```bash
+GITLAB_REVIEWER_ALLOWLIST=alice,bob
+```
+
+The poller reconciles merged, closed, deleted, and inaccessible MRs, paginates discussion results, honors API retry instructions, and applies bounded retry backoff when an addressing run fails or is deferred. Explicit adoption of pre-existing MRs is not supported yet.
 
 ## Batch processing with --query
 
@@ -219,7 +233,7 @@ Self-hosted tokens only exist on their own instance — a gitlab.com token canno
 - **Attachments:** files embedded in issue bodies (`/uploads/...` links) are downloaded for the agent using your token; other external links stay as references.
 - **Status labels:** labels named in `settings.json` must already exist in the project. The error message lists available labels when one is missing.
 - **Comments:** use `--skip-comments` to skip issue comments and label transitions for a run.
-- **Merge-request automation:** creation and manual review addressing are experimental. Polling, CI, conflict, mention, and webhook automation remain disabled until their provider-specific phases ship.
+- **Merge-request automation:** creation, manual review addressing, and registered-MR polling are experimental. CI, conflict, mention, and webhook automation remain disabled until their provider-specific phases ship.
 
 ## Troubleshooting
 

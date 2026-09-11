@@ -274,6 +274,34 @@ export function runAddressReviewViaCli(
   );
 }
 
+/** Run manual feedback addressing for an already canonical change-request URL. */
+export function runAddressReviewUrlViaCli(
+  webUrl: string,
+  serializationKey: string,
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): Promise<TaskExecutionResult> {
+  return serializePrRun(serializationKey, 0, async () => {
+    const status = await runWithFailover(
+      (env) =>
+        new Promise<number>((resolve) => {
+          const child = spawn(process.execPath, [process.argv[1], "address-review", webUrl], {
+            stdio: ["inherit", "inherit", "inherit"],
+            cwd: opts.cwd,
+            env,
+          });
+          child.on("close", (code) => resolve(code ?? 1));
+          child.on("error", (error) => {
+            captureError(error, { command: "address-review", webUrl, stage: "spawn" });
+            console.error(`❌ Failed to spawn address-review for ${webUrl}: ${error.message}`);
+            resolve(1);
+          });
+        }),
+      opts.env ?? process.env,
+    );
+    return cliResultToTaskResult(status);
+  });
+}
+
 /**
  * Run `devintern resolve-conflicts` for a PR as a CLI subprocess.
  *

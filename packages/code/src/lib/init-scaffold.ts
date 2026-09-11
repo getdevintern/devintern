@@ -247,6 +247,8 @@ AGENT_HARNESS=claude-code
 # GITLAB_CODE_HOST_ALIASES=corp-git,gitlab.internal
 # GITLAB_CODE_HOST_CA_FILE=/path/to/company-ca.pem
 # GITLAB_CODE_HOST_PROXY=http://proxy.example.com:8080
+# Optional stricter automatic-review actor allowlist (comma-separated usernames).
+# GITLAB_REVIEWER_ALLOWLIST=alice,bob
 
 # Bitbucket app password for creating pull requests
 # Create at: https://bitbucket.org/account/settings/app-passwords/
