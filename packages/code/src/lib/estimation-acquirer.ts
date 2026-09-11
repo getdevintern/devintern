@@ -119,5 +119,5 @@ type ScheduledEstimation = AutomationConfig & EstimationConfig;
 
 /** Adapt estimation bodies to the shared durable scheduler's config shape. */
 function estimationSchedules(estimations: EstimationConfig[]): ScheduledEstimation[] {
-  return estimations.map((item) => ({ ...item, prompt: "" }));
+  return estimations.map((item) => ({ ...item, openPr: false, prompt: "" }));
 }

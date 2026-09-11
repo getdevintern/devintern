@@ -60,6 +60,7 @@ id = "dependency-health"
 enabled = true
 repo = "web-app"
 interval = "6h"
+open_pr = true
 prompt = """Pick one outdated dependency and upgrade it within the same major version.
 Run the test suite; if anything breaks, revert the upgrade instead of fixing forward."""
 
@@ -71,20 +72,40 @@ cron = "0 9 * * 1"
 prompt = """Re-run the test suite twice and look for flaky tests.
 For each flaky test, add a short comment explaining the suspected race condition.
 Do not change production code."""
+
+[[automations]]
+id = "weekday-tweets"
+enabled = true
+repo = "web-app"
+cron = "0 21 * * 1-5"
+# open_pr is off by default — occurrences must not touch the repository's PRs.
+prompt = """Draft one tweet about the product and save it as a markdown file
+under ~/Documents/Tweets/."""
 ```
 
 Every entry needs a stable unique `id`, boolean `enabled`, non-empty `prompt`, and exactly one schedule. Intervals use positive minutes, hours, or days (`15m`, `6h`, `1d`). Cron expressions have five fields and use the worker host's timezone in v1; persisted occurrence times are UTC.
 
-Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
+### Opening a pull request is opt-in
+
+Each automation says explicitly whether its occurrences open a pull request via `open_pr` (boolean, default `false`). PR creation is pipeline policy, not a prompt instruction: the prompt says what to produce, and `open_pr` says whether the run should become a reviewable pull request.
+
+- **Off (the default).** Omit `open_pr` or set `open_pr = false` and an occurrence opens no pull request, pushes no review branch, and applies no PR labels — even if `[defaults].worker_task_args` still contains `--create-pr` or `--auto-review`. Workspace-level flags never turn PR creation on for an automation whose setting is off, and auto-review never runs. This is the right default for work whose output lands outside the repository (tweet drafts, reports written to another folder).
+- **Opt-in.** Set `open_pr = true` for code-changing jobs that should be reviewed — dependency bumps, test triage, safe refactors. Those runs still honor `[defaults].worker_task_args` (auto-review, `--auto-review-iterations`) and the repo's PR labels, and `--create-pr` is applied even when the configured value omits it — `open_pr = true` alone guarantees the run becomes a pull request.
+
+The dashboard's Automations table shows an **opens PR** badge per row; the dash (default) means off. **Run now** uses the same setting as the schedule, so you can validate a non-PR automation without a PR appearing.
+
+Migrating an existing workspace: PRs used to be the default. Any automation that should keep opening PRs (dependency-health-style jobs) must set `open_pr = true` — if you upgrade without touching the config, every automation silently stops creating PRs.
+
+Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). A non-boolean `open_pr` is rejected like every other invalid `[[automations]]` field, and the last valid config keeps serving. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is
 
-Automations are independent of your task tracker: **the prompt is the task**. Each occurrence writes the prompt to a local markdown task file and feeds it through exactly the same pipeline as any other task — clarity check, planning, implementation, commit, PR creation, auto-review, run records. Nothing is created in your tracker, so no tracker credentials are needed for automation-only workers.
+Automations are independent of your task tracker: **the prompt is the task**. Each occurrence writes the prompt to a local markdown task file and feeds it through exactly the same pipeline as any other task — clarity check, planning, implementation, and run records. Whether the run also becomes a pull request is the automation's own `open_pr` setting: **off unless switched on** (see below). Nothing is created in your tracker, so no tracker credentials are needed for automation-only workers.
 
 Concretely, each occurrence:
 
 1. Writes `~/.devintern/automations/<id>/<timestamp>.md` (or the equivalent under `DEVINTERN_WORKSPACE_DIR`).
-2. Spawns the normal CLI on that file as a subprocess, so the run gets its own branch, commits, and — by default — a pull request.
+2. Spawns the normal CLI on that file as a subprocess — with the PR pipeline only when `open_pr = true` (otherwise no branch, no push, no PR).
 3. Records the attempt with the `scheduled` origin and the automation id, so you can filter scheduled runs in the [dashboard](./dashboard.md).
 
 Because the occurrence is just a markdown task, you can reproduce or rerun any occurrence by hand:
@@ -106,7 +127,7 @@ The prompt replaces the ticket description the agent would normally read, so tre
 
 ### Tuning how occurrences run
 
-Occurrences use the same flag defaults as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr`). For example, set `worker_task_args = "--create-pr --auto-review"` to have every automated PR go through the review loop too. This setting applies to polled tracker tasks as well.
+When `open_pr = true`, occurrences receive the same flags as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr`). For example, set `worker_task_args = "--create-pr --auto-review"` to have every automated PR go through the review loop too, and add `--auto-review-iterations 3` to the same value (or set the `AUTO_REVIEW_ITERATIONS` env var) to raise the shared review–fix cycle cap (default: 2). This setting applies to polled tracker tasks as well. Automations with `open_pr` off (the default) are never affected by these flags — PR and review flags are stripped from them and `--no-git` is applied instead.
 
 ### Schedule semantics
 

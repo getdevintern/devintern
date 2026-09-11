@@ -538,6 +538,17 @@ export async function resolveConflictsOnPr(
         }
       }
 
+      // Worktree preparation installs dependencies, and installers can rewrite
+      // tracked files (e.g. `bun install` normalizing `bun.lock`), leaving the
+      // tree dirty. `git merge` then refuses to start ("local changes would be
+      // overwritten"), even though there is nothing to preserve in this
+      // disposable worktree. Discard uncommitted tracked changes before
+      // merging; untracked install output (node_modules) is left intact.
+      await Utils.executeGitCommand(["reset", "--hard", "HEAD"], {
+        verbose: false,
+        cwd: workDir,
+      });
+
       const mergeTarget = `origin/${baseRef}`;
       const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
         cwd: workDir,

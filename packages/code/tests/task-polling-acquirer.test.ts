@@ -185,6 +185,43 @@ describe("TaskPollingAcquirer", () => {
     expect(workerState.getCursor("markdown")?.cursorValue).toBe("100");
   });
 
+  test("starts every eligible task before awaiting the batch", async () => {
+    const started: string[] = [];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: "100" }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({
+        tasks: [
+          { key: "TASK-1", updated: "a" },
+          { key: "TASK-2", updated: "b" },
+        ],
+      }),
+      executeTask: async (key) => {
+        started.push(key);
+        await gate;
+        return true;
+      },
+    });
+
+    const tick = acquirer.tick();
+    await Bun.sleep(0);
+    expect(started).toEqual(["TASK-1", "TASK-2"]);
+    release();
+    await tick;
+  });
+
   test("does not evaluate when nothing changed", async () => {
     const executed: string[] = [];
     const { acquirer } = makeAcquirer({

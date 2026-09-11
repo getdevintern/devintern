@@ -45,7 +45,12 @@ interface CLIResult {
 // Async so tests in describe.concurrent can overlap their subprocesses.
 async function runCLI(
   args: string[],
-  options: { env?: Record<string, string>; rawEnv?: boolean } = {},
+  options: {
+    env?: Record<string, string>;
+    rawEnv?: boolean;
+    /** Prepare fixture files inside the isolated cwd before the spawn runs. */
+    prepareDir?: (testDir: string) => void;
+  } = {},
 ): Promise<CLIResult> {
   // Create unique temp directory for this test run
   const testDir = join(
@@ -53,10 +58,13 @@ async function runCLI(
     `cli-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
   );
   mkdirSync(testDir, { recursive: true });
+  options.prepareDir?.(testDir);
 
   try {
     // Skip git for argument-handling runs (init has its own gitignore checks).
-    const extraArgs = args[0] === "init" || args.includes("--no-git") ? [] : ["--no-git"];
+    // The webhook subcommand parses its own args and rejects --no-git.
+    const extraArgs =
+      args[0] === "init" || args.includes("--no-git") || args[0] === "webhook" ? [] : ["--no-git"];
     const env = options.rawEnv
       ? { ...process.env, ...options.env }
       : cliTrackerTestEnv(options.env);
@@ -300,6 +308,124 @@ describe.concurrent("CLI Argument Handling", () => {
   test("should handle --hook-retries option", async () => {
     const result = await runCLI(["TEST-123", "--hook-retries", "5"]);
     expect(result.stdout).toContain("Processing");
+  });
+
+  test("should reject an invalid --auto-review-iterations value before any agent runs", async () => {
+    for (const value of ["abc", "0", "-1", "1.5"]) {
+      const result = await runCLI(["TEST-123", "--create-pr", "--auto-review-iterations", value]);
+      const output = result.stdout + result.stderr;
+      expect(result.exitCode).toBe(1);
+      expect(output).toContain(
+        "--auto-review-iterations must be a whole number of iterations >= 1",
+      );
+      expect(output).toContain(`(got "${value}")`);
+      expect(output).not.toContain("Processing");
+    }
+  });
+
+  test("should reject an invalid AUTO_REVIEW_ITERATIONS env var when auto-review is on", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      env: { AUTO_REVIEW_ITERATIONS: "0" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1");
+    expect(output).not.toContain("Processing");
+  });
+
+  test("should ignore an invalid AUTO_REVIEW_ITERATIONS env var when auto-review is off", async () => {
+    const result = await runCLI(["TEST-123"], {
+      env: { AUTO_REVIEW_ITERATIONS: "abc" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).not.toContain("AUTO_REVIEW_ITERATIONS");
+    expect(output).not.toContain("must be a whole number");
+    expect(result.stdout).toContain("Processing");
+  });
+
+  test("should accept a valid unified env var with --auto-review", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      env: { AUTO_REVIEW_ITERATIONS: "2" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).not.toContain("must be a whole number");
+    expect(result.stdout).toContain("Processing");
+  });
+
+  test("should honor AUTO_REVIEW_ITERATIONS from .devintern-code/.env", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      prepareDir: (dir) => {
+        mkdirSync(join(dir, ".devintern-code"), { recursive: true });
+        writeFileSync(join(dir, ".devintern-code", ".env"), "AUTO_REVIEW_ITERATIONS=3\n");
+      },
+    });
+    const output = result.stdout + result.stderr;
+    // A valid value from the project .env must not trip startup validation;
+    // the run proceeds past the startup cap resolution to the task pipeline.
+    expect(output).not.toContain("must be a whole number");
+    expect(result.stdout).toContain("Processing");
+  });
+
+  test("should reject an invalid AUTO_REVIEW_ITERATIONS from .devintern-code/.env before any agent runs", async () => {
+    const result = await runCLI(["TEST-123", "--create-pr", "--auto-review"], {
+      prepareDir: (dir) => {
+        mkdirSync(join(dir, ".devintern-code"), { recursive: true });
+        writeFileSync(join(dir, ".devintern-code", ".env"), "AUTO_REVIEW_ITERATIONS=abc\n");
+      },
+    });
+    const output = result.stdout + result.stderr;
+    // Failing on the value from the .env file proves the file is loaded into
+    // process.env before the startup resolution block, as documented.
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain(
+      'AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1 (got "abc")',
+    );
+    expect(output).not.toContain("Processing");
+  });
+
+  test("webhook serve should abort startup on an invalid AUTO_REVIEW_ITERATIONS when auto-review is on", async () => {
+    // Explicit WEBHOOK_AUTO_REVIEW/WEBHOOK_SECRET keep the test hermetic
+    // against ambient env or .env fallbacks. No secret: the cap resolution
+    // runs first, so the invalid value must stop startup before the secret
+    // check (and before any listen).
+    const result = await runCLI(["webhook", "serve"], {
+      env: { WEBHOOK_AUTO_REVIEW: "true", WEBHOOK_SECRET: "", AUTO_REVIEW_ITERATIONS: "abc" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("AUTO_REVIEW_ITERATIONS must be a whole number of iterations >= 1");
+    expect(output).not.toContain("WEBHOOK_SECRET environment variable is required");
+    expect(output).not.toContain("Starting @devintern/code Webhook Server");
+  });
+
+  test("webhook serve should honor the deprecated WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS with a warning", async () => {
+    const result = await runCLI(["webhook", "serve"], {
+      env: {
+        WEBHOOK_AUTO_REVIEW: "true",
+        WEBHOOK_SECRET: "",
+        WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS: "3",
+      },
+    });
+    const output = result.stdout + result.stderr;
+    // The deprecated value resolves (warning printed) and startup proceeds
+    // past cap resolution to the next gate (missing WEBHOOK_SECRET).
+    expect(output).toContain(
+      "WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS is deprecated, use AUTO_REVIEW_ITERATIONS instead",
+    );
+    expect(output).toContain("WEBHOOK_SECRET environment variable is required");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("webhook serve should ignore an invalid AUTO_REVIEW_ITERATIONS when auto-review is off", async () => {
+    const result = await runCLI(["webhook", "serve"], {
+      env: { WEBHOOK_AUTO_REVIEW: "false", WEBHOOK_SECRET: "", AUTO_REVIEW_ITERATIONS: "abc" },
+    });
+    const output = result.stdout + result.stderr;
+    // Mirroring the CLI, the unused cap is not resolved, so startup gets past
+    // cap resolution and fails at the secret gate instead.
+    expect(output).not.toContain("must be a whole number");
+    expect(output).toContain("WEBHOOK_SECRET environment variable is required");
+    expect(result.exitCode).toBe(1);
   });
 
   test("should handle combination of options", async () => {
