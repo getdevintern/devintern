@@ -28,16 +28,34 @@ export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 export const RELAY_BOT_LOGIN = "devintern-ai";
 
 export interface RelayRegistration {
-  kind: "repo" | "source";
+  kind: "repo" | "source" | "code-host";
   key: string;
   createdAt: number;
   lastEventAt: number | null;
+  provider?: string;
+  instanceUrl?: string;
+  projectId?: string;
+  projectPath?: string;
+  registrationId?: string;
+  status?: string;
+  hookId?: number;
+  activatedAt?: number;
 }
 
 export interface VerifiedGitHubRelayRepository {
   repo: string;
   installationId: number;
   repositoryId: number;
+}
+
+/** Safe, durable identity for one relay-managed GitLab project hook. */
+export interface VerifiedGitLabRelayRepository {
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  hookId: number;
+  registrationId: string;
+  connectedAt: string;
 }
 
 export interface RelayConnectState {
@@ -58,6 +76,8 @@ export interface RelayConnectState {
   };
   /** All verified GitHub repositories paired for this workspace. */
   githubRepositories?: VerifiedGitHubRelayRepository[];
+  /** Relay-managed GitLab hooks. Webhook signing material is never persisted here. */
+  gitlabRepositories?: VerifiedGitLabRelayRepository[];
 }
 
 function isVerifiedGitHubRepository(
@@ -118,6 +138,21 @@ export function hasGitHubRelayRouting(state: RelayConnectState | null, repo?: st
     (registration) =>
       registration.kind === "repo" &&
       (!repo || registration.key.toLowerCase() === repo.toLowerCase()),
+  );
+}
+
+/** Return an exact active GitLab association for an instance and immutable project id. */
+export function gitLabRelayRepository(
+  state: RelayConnectState | null,
+  instanceUrl: string,
+  projectId: string,
+): VerifiedGitLabRelayRepository | undefined {
+  if (!state?.relayToken) return undefined;
+  const normalizedInstance = instanceUrl.replace(/\/+$/, "").toLowerCase();
+  return state.gitlabRepositories?.find(
+    (repository) =>
+      repository.instanceUrl.replace(/\/+$/, "").toLowerCase() === normalizedInstance &&
+      repository.projectId === projectId,
   );
 }
 
@@ -295,6 +330,7 @@ export async function ensureRelayToken(
     relayToken: minted.relayToken,
     github: sameCustomer ? existing.github : undefined,
     githubRepositories: sameCustomer ? existing.githubRepositories : undefined,
+    gitlabRepositories: sameCustomer ? existing.gitlabRepositories : undefined,
   };
   saveRelayState(state, workingDir);
   return { relayToken: minted.relayToken, state };
@@ -334,9 +370,174 @@ function mergeConnectState(
     relayToken: relayToken ?? previousForCustomer?.relayToken,
     github: verifiedRepository ?? previousForCustomer?.github,
     githubRepositories,
+    gitlabRepositories: previousForCustomer?.gitlabRepositories,
   };
   saveRelayState(state, workingDir);
   return state;
+}
+
+export interface GitLabRelayRegistrationBegin {
+  registrationId: string;
+  ingestUrl: string;
+  signingToken: string;
+  legacySecret: string;
+  expiresAt: number;
+}
+
+/** Create a short-lived GitLab route. Its signing material is returned only to the caller. */
+export async function beginGitLabRelayRegistration(options: {
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<GitLabRelayRegistrationBegin> {
+  const deps: RelayConnectDeps = options;
+  await ensureRelayToken(options.accessToken, deps);
+  const response = await connectRequest(
+    options.accessToken,
+    {
+      action: "begin-gitlab-registration",
+      instanceUrl: options.instanceUrl,
+      projectId: options.projectId,
+      projectPath: options.projectPath,
+    },
+    deps,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as GitLabRelayRegistrationBegin;
+  if (
+    !data.registrationId ||
+    !data.ingestUrl ||
+    !data.signingToken ||
+    !data.legacySecret ||
+    !Number.isFinite(data.expiresAt)
+  ) {
+    throw new Error("relay returned an invalid GitLab registration");
+  }
+  return data;
+}
+
+/** Activate a provisioned GitLab route and persist only its non-secret identity. */
+export async function completeGitLabRelayRegistration(options: {
+  registrationId: string;
+  hookId: number;
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<RelayConnectState> {
+  const workingDir = options.workingDir ?? process.cwd();
+  const previous = loadRelayState(workingDir);
+  if (!previous?.relayToken) throw new Error("relay token is missing; begin registration again");
+  const response = await connectRequest(
+    options.accessToken,
+    {
+      action: "complete-gitlab-registration",
+      registrationId: options.registrationId,
+      hookId: options.hookId,
+    },
+    options,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as {
+    registration?: {
+      provider?: string;
+      instanceUrl?: string;
+      projectId?: string;
+      projectPath?: string;
+      registrationId?: string;
+      status?: string;
+      hookId?: number;
+      activatedAt?: number;
+    };
+  };
+  if (!data.registration || data.registration.registrationId !== options.registrationId) {
+    throw new Error("relay returned an invalid completed GitLab registration");
+  }
+  const repository: VerifiedGitLabRelayRepository = {
+    instanceUrl: options.instanceUrl.replace(/\/+$/, ""),
+    projectId: options.projectId,
+    projectPath: options.projectPath,
+    hookId: options.hookId,
+    registrationId: options.registrationId,
+    connectedAt: new Date().toISOString(),
+  };
+  const gitlabRepositories = [...(previous.gitlabRepositories ?? [])];
+  const existingIndex = gitlabRepositories.findIndex(
+    (item) =>
+      item.instanceUrl.toLowerCase() === repository.instanceUrl.toLowerCase() &&
+      item.projectId === repository.projectId,
+  );
+  if (existingIndex === -1) gitlabRepositories.push(repository);
+  else gitlabRepositories[existingIndex] = repository;
+  const registrations = previous.registrations.filter(
+    (registration) =>
+      !(
+        registration.kind === "code-host" &&
+        registration.provider === "gitlab" &&
+        registration.instanceUrl?.toLowerCase() === repository.instanceUrl.toLowerCase() &&
+        registration.projectId === repository.projectId
+      ),
+  );
+  registrations.push({
+    kind: "code-host",
+    key: `gitlab:${repository.instanceUrl}:${repository.projectId}`,
+    createdAt: data.registration.activatedAt ?? Date.now(),
+    lastEventAt: null,
+    ...data.registration,
+  });
+  const state = { ...previous, registrations, gitlabRepositories };
+  saveRelayState(state, workingDir);
+  return state;
+}
+
+/** Remove a GitLab route from the relay and local safe state. */
+export async function removeGitLabRelayRegistration(options: {
+  registrationId: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const response = await connectRequest(
+    options.accessToken,
+    { action: "remove-gitlab-registration", registrationId: options.registrationId },
+    options,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as { removed?: boolean };
+  const workingDir = options.workingDir ?? process.cwd();
+  const previous = loadRelayState(workingDir);
+  if (previous) {
+    saveRelayState(
+      {
+        ...previous,
+        registrations: previous.registrations.filter(
+          (registration) => registration.registrationId !== options.registrationId,
+        ),
+        gitlabRepositories: previous.gitlabRepositories?.filter(
+          (repository) => repository.registrationId !== options.registrationId,
+        ),
+      },
+      workingDir,
+    );
+  }
+  return data.removed === true;
 }
 
 /**
