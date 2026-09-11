@@ -5,7 +5,7 @@ description: "Implement GitLab issues and experimentally create merge requests o
 section: "Code"
 order: 6
 sidebarHidden: true
-dateModified: 2026-09-09
+dateModified: 2026-09-10
 tags: ["gitlab", "gitlab-self-hosted", "devintern/code", "integration"]
 ---
 
@@ -94,7 +94,7 @@ This workflow:
 
 ## Experimental merge-request creation
 
-GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, and CI repair are available. Broad `@mention` discovery, scheduled GitLab conflict windows, and GitLab webhooks are not enabled yet.
+GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, CI repair, and repo-local direct webhooks are available. Broad `@mention` discovery, scheduled GitLab conflict windows, and a hosted GitLab webhook relay are not enabled.
 
 Add a separate code-host profile to `.devintern-code/.env`:
 
@@ -163,8 +163,8 @@ GITLAB_CODE_HOST_PROXY=http://proxy.corp.example:8080
 | Manual `address-review` | Experimental; same-project writable branches only |
 | Registered-MR polling | Experimental; DevIntern-created MRs only |
 | Conflict/base synchronization | Experimental; `auto` mode and manual command |
-| CI repair | Experimental; registered MRs and polling only |
-| Direct project webhooks | Deferred |
+| CI repair | Experimental; registered MRs through polling or direct webhooks |
+| Direct project webhooks | Experimental; repo-local server only |
 | Repository-wide mentions and hosted relay | Not currently planned |
 
 The validated Self-Managed target is the latest stable GitLab release at the time @devintern/code ships. Other REST API v4 versions continue best-effort with a compatibility warning.
@@ -219,6 +219,21 @@ The resolver fetches the actual target-branch tip, revalidates the MR state and 
 When `[workspace].ci_failure_fix = true`, the worker polls pipelines, jobs, and external commit statuses for registered GitLab MRs. It invokes the existing guarded `address-review --ci-feedback` repair path only for definitive required failures. Failed jobs marked `allow_failure` and manual, skipped, or canceled work are ignored. Missing, inaccessible, incomplete, or otherwise unrecognized CI data remains unknown—it is never counted as green.
 
 Failure metadata and bounded excerpts from up to five failed job traces are passed to the agent. Before the repair begins, the worker revalidates the MR head SHA and the same-project writable-branch guard. Successful events deduplicate durably; unsuccessful attempts retain the existing `CI_FIX_MAX_ATTEMPTS` budget and post a GitLab MR note on exhaustion. A new head SHA grants a fresh retry budget.
+
+## Direct project webhooks
+
+Polling remains the default and fallback. For lower-latency repo-local automation, explicitly configure a GitLab project webhook:
+
+```bash
+export GITLAB_WEBHOOK_SECRET="a-long-random-secret"
+devintern webhook serve
+```
+
+Set the project webhook URL to `https://your-host.example/webhooks/gitlab`, enter the same secret token, and enable **Comments**, **Merge request events**, **Pipeline events**, and **Job events**. Creating or editing a project webhook normally requires Maintainer or Owner access; the code-host API token used to process an event still needs the permissions documented above.
+
+The endpoint verifies `X-Gitlab-Token` with a timing-safe exact comparison, deduplicates delivery UUIDs, and durably queues work before responding. Only MRs already registered by DevIntern on the configured instance and project are eligible. Notes trigger the existing feedback reconciliation, closed or merged events stop the watch, definitive conflict states trigger guarded base sync, and failed pipeline/job events re-query CI before repair. Advisory jobs and canceled or ambiguous states remain non-actionable. Polling stays enabled, so missed deliveries and unsupported event variants are reconciled later.
+
+Hosted relay registration and repository-wide GitLab mention discovery remain out of scope.
 
 ## Batch processing with --query
 
