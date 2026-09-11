@@ -28,6 +28,12 @@ import { defaultProbe, parseEnvContent } from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
 import {
+  trackWorkerInitCompleted,
+  trackWorkerInitFailed,
+  trackWorkerInitStarted,
+} from "./analytics";
+import type { RelayConnectOutcome, ServiceInstallOutcome } from "./analytics";
+import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
@@ -444,6 +450,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
   try {
     log("👷 Setting up the unattended devintern worker.");
+    trackWorkerInitStarted();
 
     // 1. Reuse tracker config from `devintern init`, or run that subset.
     log("\n1️⃣  Tracker configuration");
@@ -452,12 +459,14 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       : await defaultEnsureTracker(cwd, prompt, log);
     if (!trackerType) {
       log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
+      trackWorkerInitFailed("tracker_setup_incomplete");
       return abort;
     }
     const capabilities = TRACKER_CAPABILITIES[trackerType];
     if (!supportsPolling(trackerType)) {
       log(`❌ Tracker '${trackerType}' does not support worker polling.`);
       log(`   Pollable trackers: ${trackersSupportingPolling().join(", ")}`);
+      trackWorkerInitFailed("tracker_not_pollable");
       return abort;
     }
     const trackerName = capabilities?.displayName ?? trackerType;
@@ -481,6 +490,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const workspace = await bootstrap({ cwd, log });
     if ("error" in workspace) {
       log(`❌ ${workspace.error}`);
+      trackWorkerInitFailed("workspace_error");
       return abort;
     }
     const workspaceDir = workspace.workspaceDir;
@@ -491,6 +501,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
           `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
         );
         log("   One worker workspace has one active tracker; keep its defaults unchanged.");
+        trackWorkerInitFailed("workspace_tracker_mismatch");
         return abort;
       }
     }
@@ -586,6 +597,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
     let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+    let relayConnect: RelayConnectOutcome = "skipped";
     log("\n7️⃣  Instant events (optional; polling always stays on)");
     const relayAnswer = (
       await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
@@ -630,6 +642,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             log,
           });
           relayConnected = connected || hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+          relayConnect = connected ? "succeeded" : "partial";
           if (connected) {
             log(`✅ Relay pairing stored under ${workspaceDir}.`);
           } else {
@@ -638,6 +651,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             );
           }
         } catch (error) {
+          relayConnect = "failed";
           log(`⚠️  Relay setup failed: ${(error as Error).message}`);
           log("   Polling still works; relay only improves event latency.");
         }
@@ -713,6 +727,12 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const runtimePath = deps.runtimePath ?? process.execPath;
     const environmentPath = deps.environmentPath ?? process.env.PATH ?? "";
     let serviceRunning = false;
+    let serviceInstall: ServiceInstallOutcome =
+      platform !== "linux" && platform !== "darwin"
+        ? "unavailable"
+        : deps.noService
+          ? "skipped"
+          : "declined";
 
     const printManualServicePath = () => {
       if (platform !== "linux" && platform !== "darwin") {
@@ -757,6 +777,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       let accepted = false;
       if (state.installed && !state.managed) {
         serviceRunning = state.active;
+        serviceInstall = "existing";
         log("⚠️  The installed service has custom settings and will not be overwritten.");
         printManualServicePath();
       } else if (state.installed) {
@@ -797,6 +818,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             );
         if (result.ok) {
           serviceRunning = true;
+          serviceInstall = result.updated ? "updated" : "installed";
           log(
             result.updated
               ? "✅ devintern-worker service updated and restarted."
@@ -814,6 +836,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
               : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
           );
         } else {
+          serviceInstall = "failed";
           log(`❌ Could not install the service automatically: ${result.error}`);
           log("   Nothing was left half-installed. Install it manually:");
           printManualServicePath();
@@ -845,6 +868,13 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         log("   See the advanced GitHub integration guide if this installation must stay offline.");
       }
     }
+
+    trackWorkerInitCompleted({
+      tracker: trackerType,
+      relayConnect,
+      serviceInstall,
+      githubApp: githubAppOutcome,
+    });
     return { ok: true };
   } finally {
     rl?.close();

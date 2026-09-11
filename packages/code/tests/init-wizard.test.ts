@@ -10,6 +10,7 @@ import {
   scaffoldProject,
 } from "../src/lib/init-scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init-wizard";
+import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
 
 let tempDir: string;
 
@@ -661,6 +662,92 @@ describe("runInitWizard", () => {
     expect(output).toContain("📋 Readiness:");
     expect(output).toContain("✅ Task tracker — Linear");
     expect(output).not.toContain("❌ Task tracker");
+  });
+});
+
+describe("runInitWizard analytics", () => {
+  let telemetryDir: string;
+
+  beforeEach(() => {
+    telemetryDir = mkdtempSync(join(tmpdir(), "init-wizard-telemetry-"));
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[ANALYTICS_CONFIG_DIR_ENV] = telemetryDir;
+  });
+
+  afterEach(() => {
+    setAnalyticsCaptureForTests(undefined);
+    delete process.env.POSTHOG_API_KEY;
+    delete process.env[ANALYTICS_CONFIG_DIR_ENV];
+    rmSync(telemetryDir, { recursive: true, force: true });
+  });
+
+  function stubAnalytics(): Array<{ event?: string; properties?: Record<string, unknown> }> {
+    const recorded: Array<{ event?: string; properties?: Record<string, unknown> }> = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
+    return recorded;
+  }
+
+  test("completed wizard emits setup_started then setup_completed for the init source", async () => {
+    const recorded = stubAnalytics();
+    const { prompt } = promptQueue([
+      "markdown",
+      "", // accept ./tasks default
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    expect(recorded.map((e) => e.event)).toEqual(["setup_started", "setup_completed"]);
+    expect(recorded[0]?.properties).toMatchObject({ source: "init" });
+    expect(recorded[1]?.properties).toMatchObject({
+      tracker: "markdown",
+      signed_in: "skipped",
+    });
+  });
+
+  test("the first-run rescue records source: rescue on setup_started", async () => {
+    const recorded = stubAnalytics();
+    const { prompt } = promptQueue([
+      "markdown",
+      "", // accept ./tasks default
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+      source: "rescue",
+    });
+
+    expect(recorded.map((e) => e.event)).toEqual(["setup_started", "setup_completed"]);
+    expect(recorded[0]?.properties).toMatchObject({ source: "rescue" });
+  });
+
+  test("an existing configuration never starts the funnel", async () => {
+    scaffoldProject({ cwd: tempDir });
+    const recorded = stubAnalytics();
+    const { prompt, asked } = promptQueue([]);
+
+    await runInitWizard({
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    expect(asked).toHaveLength(0);
+    expect(recorded).toEqual([]);
   });
 });
 

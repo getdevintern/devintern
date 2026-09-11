@@ -103,6 +103,23 @@ describe("RepoManager", () => {
     expect(existsSync(second)).toBe(false);
   });
 
+  test("concurrent duplicate task runs get distinct worktrees", async () => {
+    await manager.ensureBareClone(repo);
+
+    const [first, second] = await Promise.all([
+      manager.createTaskWorktree(repo, "BACK-42"),
+      manager.createTaskWorktree(repo, "BACK-42"),
+    ]);
+
+    expect(first).not.toBe(second);
+    expect(existsSync(first)).toBe(true);
+    expect(existsSync(second)).toBe(true);
+    await Promise.all([
+      manager.removeTaskWorktree(repo.name, first),
+      manager.removeTaskWorktree(repo.name, second),
+    ]);
+  });
+
   test("task worktrees automatically isolate hooks from the bare clone", async () => {
     await manager.ensureBareClone(repo);
     const worktree = await manager.createTaskWorktree(repo, "BACK-50");

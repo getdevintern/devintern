@@ -17,8 +17,9 @@ import {
 } from "../src/lib/workspace/fleet-events";
 import { createFleetTaskExecutor } from "../src/lib/workspace/workspace-worker";
 import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
-import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
+import { openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
+import { createTaskSupervisor } from "../src/lib/task-supervisor";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -192,6 +193,50 @@ describe("fleet event handlers", () => {
     expect(reviews).toHaveLength(0);
   });
 
+  test("shared-base reviews serialize while a task worktree can overlap", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 2 });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const started: string[] = [];
+    const addressPr = createFleetAddressPr({
+      ...deps(),
+      supervisor,
+      runReview: async (_slug, prNumber) => {
+        started.push(`review-${prNumber}`);
+        if (prNumber === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+        return true;
+      },
+    });
+
+    const first = addressPr("acme/backend", 1);
+    const second = addressPr("acme/backend", 2);
+    const task = supervisor.schedule({
+      id: "task",
+      source: "test",
+      repo: "backend",
+      kind: "task",
+      checkoutClass: "task_worktree",
+      run: async () => started.push("task"),
+    });
+
+    await Promise.all([task, firstStarted]);
+    expect(started).toContain("review-1");
+    expect(started).toContain("task");
+    expect(started).not.toContain("review-2");
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(started.at(-1)).toBe("review-2");
+  });
+
   test("CI fixes run from the matching repo base worktree", async () => {
     const fix = createFleetCiFix(deps());
     expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe(true);
@@ -203,6 +248,15 @@ describe("fleet event handlers", () => {
         cwd: join(workspaceDir, "worktrees", "backend", "base"),
       },
     ]);
+  });
+
+  test("a queued CI fix reports deferred when shutdown prevents admission", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    await supervisor.drain({ graceMs: 0 });
+    const fix = createFleetCiFix({ ...deps(), supervisor });
+
+    expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe("deferred");
+    expect(ciFixes).toHaveLength(0);
   });
 
   test("coalesces overlapping feedback events into one follow-up reconciliation", async () => {
@@ -295,7 +349,6 @@ describe("createFleetTaskEvaluator", () => {
         ran.push(taskKey);
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
     const evaluate = createFleetTaskEvaluator({
       query: "status=todo",

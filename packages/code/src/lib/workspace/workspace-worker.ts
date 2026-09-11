@@ -10,8 +10,8 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
+import { randomUUID } from "crypto";
 
-import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
 import type { TaskExecutionResult } from "../task-polling-acquirer";
@@ -49,14 +49,16 @@ import {
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { WorkspaceConfigReloader } from "./config-reload";
-import { createRepoRunLock, createWorkspaceLock, openWorkspaceState } from "./state";
+import { createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { probePushAccess } from "../github-push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
+import { automationTaskArgs } from "../automation-config";
 import { EstimationAcquirer } from "../estimation-acquirer";
-import { RunCoordinator } from "../run-coordinator";
+import { createTaskSupervisor, JobNotStartedError } from "../task-supervisor";
+import type { TaskSupervisor } from "../task-supervisor";
 import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
 import { startWorkerFailover } from "../worker-failover";
@@ -194,45 +196,74 @@ export interface WorkspaceTaskAcquirerDeps {
   runTask?: (
     taskKey: string,
     extraArgs: string[],
-    opts: { cwd: string; env: Record<string, string | undefined> },
+    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
   ) => Promise<TaskExecutionResult>;
-  /** Repo run lock factory (injected for tests). */
-  repoLock?: (repoName: string) => LockManager;
-  /** Process-level agent-run gate; only set when scheduled estimation exists. */
-  coordinator?: RunCoordinator;
-}
-
-interface RepoRunLockLike {
-  acquire(): { success: boolean; message: string; pid?: number };
-  release(): void;
+  /** Shared admission supervisor. A local instance is created only for focused tests. */
+  supervisor?: TaskSupervisor;
 }
 
 /**
- * Hold a process-level agent slot for a scheduled run's lifetime.
- *
- * Without a coordinator (no [[estimations]] configured) the context passes
- * through untouched, so long-lived gates are never introduced silently.
- * With one, acquisition happens after any repo lock is held, and release
- * always runs — even when the caller's own release throws.
+ * Admit an automation context and retain its supervisor slot until the
+ * acquirer releases that context after its subprocess settles.
  */
-async function withCoordinatorSlot(
-  context: AutomationRunContext | null | Promise<AutomationRunContext | null>,
-  coordinator?: RunCoordinator,
+async function withSupervisorSlot(
+  resolveContext: () => Promise<AutomationRunContext | null>,
+  supervisor: TaskSupervisor,
+  request: {
+    source: string;
+    kind: "automation" | "estimation";
+    repo?: string;
+    checkoutClass: "shared_base" | "workspace";
+  },
 ): Promise<AutomationRunContext | null> {
-  const resolved = await context;
-  if (!coordinator || !resolved) return resolved;
-  const releaseRun = await coordinator.acquire();
-  const releaseContext = resolved.release;
-  return {
-    ...resolved,
-    release: async () => {
-      try {
-        await releaseContext();
-      } finally {
-        releaseRun();
+  let admit!: (context: AutomationRunContext | null) => void;
+  let rejectAdmission!: (error: unknown) => void;
+  const admitted = new Promise<AutomationRunContext | null>((resolve, reject) => {
+    admit = resolve;
+    rejectAdmission = reject;
+  });
+  let releaseSlot!: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseSlot = resolve;
+  });
+
+  const scheduled = supervisor.schedule({
+    id: randomUUID(),
+    ...request,
+    run: async (signal) => {
+      const context = await resolveContext();
+      if (!context) {
+        admit(null);
+        return;
       }
+      if (signal.aborted) {
+        await context.release();
+        throw new Error("The worker stopped while preparing the scheduled run.");
+      }
+      const releaseContext = context.release;
+      let released = false;
+      admit({
+        ...context,
+        release: async () => {
+          if (released) return;
+          released = true;
+          try {
+            await releaseContext();
+          } finally {
+            releaseSlot();
+          }
+        },
+      });
+      await held;
     },
-  };
+  });
+  void scheduled.catch(rejectAdmission);
+  try {
+    return await admitted;
+  } catch (error) {
+    if (error instanceof JobNotStartedError) return null;
+    throw error;
+  }
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -241,7 +272,6 @@ export async function resolveWorkspaceAutomationContext(
   config: WorkspaceConfig,
   workspaceDir: string,
   repoManager: RepoManagerLike,
-  repoLock: (repoName: string) => RepoRunLockLike = (name) => createRepoRunLock(name, workspaceDir),
 ) {
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
@@ -253,23 +283,16 @@ export async function resolveWorkspaceAutomationContext(
       : undefined;
   if (!repo) return { cwd: workspaceDir, env: { ...process.env }, taskFileDir, release() {} };
 
-  const lock = repoLock(repo.name);
-  if (!lock.acquire().success) return null;
-  try {
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const cwd = await repoManager.ensureBaseWorktree(repo);
-    return {
-      cwd,
-      env: buildRepoEnv(repo, workspaceDir),
-      repo: repo.name,
-      taskFileDir,
-      release: () => lock.release(),
-    };
-  } catch (error) {
-    lock.release();
-    throw error;
-  }
+  await repoManager.ensureBareClone(repo);
+  await repoManager.fetch(repo.name);
+  const cwd = await repoManager.ensureBaseWorktree(repo);
+  return {
+    cwd,
+    env: buildRepoEnv(repo, workspaceDir),
+    repo: repo.name,
+    taskFileDir,
+    release() {},
+  };
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -391,7 +414,9 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     team,
     verbose,
   } = deps;
-  const execute = createFleetTaskExecutor(deps);
+  const execute = createFleetTaskExecutor(deps, {
+    source: team ? `poll:${team.tracker}:${team.name}` : `poll:${config.defaults.tracker}`,
+  });
 
   // The acquirer's executeTask only receives the task key; remember each
   // task's routing fields from the evaluate step of the same tick.
@@ -434,8 +459,8 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
-  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "repoLock" | "team"
-> & { coordinator?: RunCoordinator };
+  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "team" | "supervisor"
+>;
 
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
@@ -457,11 +482,17 @@ export function createFleetTaskExecutor(
     extraArgs?: string[] | (() => string[]);
     repo?: string;
     runOrigin?: "worker" | "error_monitor";
+    source?: string;
   } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
-  const repoLock = deps.repoLock ?? ((name: string) => createRepoRunLock(name, workspaceDir));
+  const supervisor =
+    deps.supervisor ??
+    createTaskSupervisor({
+      maxConcurrency: config.workspace.execution.maxConcurrency,
+      maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
+    });
 
   return async (taskKey, routable) => {
     // Read per run: live config reloads must apply to subsequent work.
@@ -507,46 +538,45 @@ export function createFleetTaskExecutor(
       return false;
     }
 
-    const lock = repoLock(repo.name);
-    const lockResult = lock.acquire();
-    if (!lockResult.success) {
-      console.warn(
-        `⚠️  ${scope} repo "${repo.name}" is busy (${lockResult.message}); ${taskKey} deferred.`,
-      );
-      return "deferred";
-    }
-
     try {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const worktree = await repoManager.createTaskWorktree(repo, taskKey);
-      console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
+      return await supervisor.schedule({
+        id: randomUUID(),
+        source: options.source ?? options.runOrigin ?? (team ? `poll:${team.name}` : "worker"),
+        repo: repo.name,
+        kind: "task",
+        label: taskKey,
+        checkoutClass: "task_worktree",
+        run: async (signal) => {
+          await repoManager.ensureBareClone(repo);
+          await repoManager.fetch(repo.name);
+          const worktree = await repoManager.createTaskWorktree(repo, taskKey);
+          console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
 
-      const invoke = () =>
-        runTask(taskKey, extraArgs, {
-          cwd: worktree,
-          env: {
-            ...(team
-              ? buildTeamTaskEnv(repo, team, workspaceDir)
-              : buildRepoEnv(repo, workspaceDir)),
-            [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
-          },
-        });
-      const ok = deps.coordinator ? await deps.coordinator.run(invoke) : await invoke();
+          const ok = await runTask(taskKey, extraArgs, {
+            cwd: worktree,
+            env: {
+              ...(team
+                ? buildTeamTaskEnv(repo, team, workspaceDir)
+                : buildRepoEnv(repo, workspaceDir)),
+              [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
+            },
+            signal,
+          });
 
-      if (ok === true) {
-        await repoManager.removeTaskWorktree(repo.name, worktree);
-      } else {
-        console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
-      }
-      return ok;
+          if (ok === true) {
+            await repoManager.removeTaskWorktree(repo.name, worktree);
+          } else {
+            console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
+          }
+          return ok;
+        },
+      });
     } catch (error) {
+      if (error instanceof JobNotStartedError) return "deferred";
       console.error(
         `❌ ${scope} ${taskKey} failed in repo "${repo.name}": ${(error as Error).message}`,
       );
       return false;
-    } finally {
-      lock.release();
     }
   };
 }
@@ -749,13 +779,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
   });
   const repoManager = new RepoManager(workspaceDir);
-  // Preserve the worker's existing concurrency when scheduled estimation is
-  // absent or fully disabled. The account-global gate is needed only once an
-  // enabled schedule joins the process and must serialize with every other
-  // agent run.
-  const coordinator = new RunCoordinator(false);
-  if (config.estimations.some((item) => item.enabled)) coordinator.enable();
-
+  const supervisor = createTaskSupervisor({
+    maxConcurrency: config.workspace.execution.maxConcurrency,
+    maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
+  });
   // Recover what the previous worker left behind before acquiring new work.
   await recoverOrphanedWorkspaceRuns({
     config,
@@ -797,11 +824,16 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
             workspaceDir,
             skips: state.skips,
             repoManager,
+            supervisor,
             ...(retry.team ? { team: findTeam(config, retry.team) } : {}),
           },
           // The persisted repo/team make retries deterministic even when
           // task keys overlap or the original route depended on labels.
-          { extraArgs: () => ["--force", ...fleetTaskArgs(config)], repo: retry.repo },
+          {
+            extraArgs: () => ["--force", ...fleetTaskArgs(config)],
+            repo: retry.repo,
+            source: "retry",
+          },
         )(taskKey, routable),
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
@@ -815,12 +847,27 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const fleetAutomationAcquirer = new AutomationAcquirer({
     automations: initialFleetAutomations.automations,
     dbPath: state.dbPath,
-    extraArgs: () => fleetTaskArgs(config),
-    resolveContext: async (automation) =>
-      withCoordinatorSlot(
-        await resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
-        coordinator,
-      ),
+    // Each automation's `open_pr` decides PR creation — workspace-level
+    // `worker_task_args` (`--create-pr --auto-review`) applies only when the
+    // schedule opts in, and off/omitted runs get `--no-git` instead.
+    automationArgs: (automation) => automationTaskArgs(automation, fleetTaskArgs(config)),
+    resolveContext: async (automation) => {
+      const repo = automation.repo
+        ? findRepo(config, automation.repo)
+        : config.repos.length === 1
+          ? config.repos[0]
+          : undefined;
+      return withSupervisorSlot(
+        () => resolveWorkspaceAutomationContext(automation, config, workspaceDir, repoManager),
+        supervisor,
+        {
+          source: `automation:${automation.id}`,
+          kind: "automation",
+          repo: repo?.name,
+          checkoutClass: repo ? "shared_base" : "workspace",
+        },
+      );
+    },
   });
   const automationActions = {
     list: () => fleetAutomationAcquirer.listSchedules(),
@@ -839,10 +886,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const estimationAcquirer = new EstimationAcquirer({
     estimations: config.estimations,
     dbPath: state.dbPath,
-    resolveContext: () =>
-      withCoordinatorSlot(
-        Promise.resolve({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
-        coordinator,
+    resolveContext: (estimation) =>
+      withSupervisorSlot(
+        async () => ({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+        supervisor,
+        {
+          source: `estimation:${estimation.id}`,
+          kind: "estimation",
+          checkoutClass: "workspace",
+        },
       ),
   });
   acquirers.push(estimationAcquirer);
@@ -867,11 +919,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         skips: state.skips,
         repoManager,
         team,
-        coordinator,
+        supervisor,
       },
       {
         repo: repo.name,
         runOrigin: "error_monitor",
+        source: `error_monitor:${source.id}`,
         extraArgs: () => errorMonitorTaskArgs(config),
       },
     );
@@ -969,7 +1022,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       gate: pickupGate,
       team: source.team,
       verbose: options.verbose,
-      coordinator,
+      supervisor,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);
@@ -986,7 +1039,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       verbose: options.verbose,
       intervalUpdaters,
       reloadHooksOut: eventReloadHooks,
-      coordinator,
+      supervisor,
     })),
   );
 
@@ -996,10 +1049,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
    * cadence-driven acquirers when `[defaults].poll_interval` changed.
    */
   const applyReloadedConfig = (updated: WorkspaceConfig): void => {
+    supervisor.updateLimits({
+      maxConcurrency: updated.workspace.execution.maxConcurrency,
+      maxConcurrencyPerRepo: updated.workspace.execution.maxConcurrencyPerRepo,
+    });
     const fleet = resolveFleetAutomations(updated);
     fleetAutomationAcquirer.applyAutomations(fleet.automations);
-    if (updated.estimations.some((item) => item.enabled)) coordinator.enable();
-    else coordinator.disableWhenIdle();
     estimationAcquirer.applyEstimations(updated.estimations);
 
     if (updated.defaults.pollIntervalSeconds !== pollIntervalSeconds) {
@@ -1081,6 +1136,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     : config.defaults.tracker;
   console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
   console.log(
+    `⚙️  Agent concurrency: ${config.workspace.execution.maxConcurrency} global, ` +
+      `${config.workspace.execution.maxConcurrencyPerRepo} per repository`,
+  );
+  if (
+    config.workspace.execution.maxConcurrency > 1 ||
+    config.workspace.execution.maxConcurrencyPerRepo > 1
+  ) {
+    console.warn(
+      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
+    );
+  }
+  console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
   const { startWorker } = await import("../../worker");
@@ -1091,6 +1158,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
+      beginShutdown: () => supervisor.drain(),
+      onShutdown: () => {
+        reloader.stop();
+      },
       onStarted: async (acquirerNames) => {
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",
@@ -1131,8 +1202,8 @@ export async function buildFleetEventAcquirers(options: {
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
   reloadHooksOut?: { hooks?: FleetEventReloadHooks };
-  /** Process-level agent-run gate; only set when scheduled estimation exists. */
-  coordinator?: RunCoordinator;
+  /** Shared admission supervisor for every fleet execution path. */
+  supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
   const taskSources: Array<Pick<FleetSourceRuntime, "tracker" | "team" | "query" | "searchTasks">> =
@@ -1228,7 +1299,7 @@ export async function buildFleetEventAcquirers(options: {
       userHasPushAccess: (owner: string, repo: string, user: string) =>
         gh.userHasPushAccess(owner, repo, user),
       verbose,
-      coordinator: options.coordinator,
+      supervisor: options.supervisor,
     };
     const fleetAddressPr = coalescePrFeedbackRuns(createFleetAddressPr(eventDeps));
     addressPr = fleetAddressPr;
@@ -1297,7 +1368,7 @@ export async function buildFleetEventAcquirers(options: {
     acquirers.push(reviewAcquirer);
 
     // CI failure repair uses the same durable agent-PR registry, repo
-    // worktree, per-PR lock, and process-level run coordinator as reviews.
+    // worktree, per-PR lock, and workspace supervisor as reviews.
     const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
     const fixPr = createFleetCiFix(eventDeps);
     const ciWatcher = new CiFailureWatcherAcquirer({
@@ -1494,14 +1565,21 @@ export async function buildFleetEventAcquirers(options: {
       const { RelayAcquirer } = await import("../relay-acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
       const relayTaskSources = taskSources.map((source) => {
-        const execute = createFleetTaskExecutor({
-          config,
-          workspaceDir,
-          skips: state.skips,
-          repoManager,
-          team: source.team,
-          coordinator: options.coordinator,
-        });
+        const execute = createFleetTaskExecutor(
+          {
+            config,
+            workspaceDir,
+            skips: state.skips,
+            repoManager,
+            team: source.team,
+            supervisor: options.supervisor,
+          },
+          {
+            source: source.team
+              ? `relay:${source.tracker}:${source.team.name}`
+              : `relay:${source.tracker}`,
+          },
+        );
         return {
           tracker: source.tracker,
           label: source.team?.name,

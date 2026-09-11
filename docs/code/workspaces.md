@@ -4,7 +4,7 @@ sidebarLabel: "Multiple Repositories"
 description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
 section: "Automation"
 order: 2
-dateModified: 2026-09-07
+dateModified: 2026-09-09
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -22,7 +22,7 @@ Workspace mode runs under the same automation license as the rest of the worker:
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
 - Every task worktree is ready for the agent before it starts: git hooks are isolated when the worktree is created (so package postinstalls like lefthook cannot rewrite the shared `.git/hooks`), then dependencies are installed after the task's final branch is prepared by auto-detecting the package manager from the lockfile (bun/pnpm/yarn/npm, uv/poetry/pip, bundle, go, cargo, composer, maven, gradle). The install inherits the same layered workspace, repo, and team environment as the agent, including registry auth; if no lockfile is found or the install fails, the run continues with a warning — the agent can still set dependencies up itself.
 - All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
-- Runs are serialized: one task at a time, with a per-repository lock. One systemd unit (or one terminal) drives the whole fleet.
+- Agent runs use one workspace supervisor. The default global and per-repository limits are both 1; you can explicitly opt into bounded host concurrency as described below. One systemd unit (or one terminal) drives the whole fleet.
 
 ## workspace.toml
 
@@ -36,6 +36,12 @@ dashboard = true
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"         # exactly one of cron / interval
 # Or turn it off entirely: conflict_resolution = "disabled"
+
+# Optional bounded host concurrency (see warning below):
+# [workspace.execution]
+# isolation = "best_effort_host"
+# max_concurrency = 4
+# max_concurrency_per_repo = 1
 
 [defaults]
 tracker = "jira"
@@ -93,9 +99,26 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
-- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
+
+### Bounded host concurrency
+
+By default the worker admits one agent job globally and one disposable-worktree task per repository. To process independent work concurrently, explicitly acknowledge the shared-host execution model:
+
+```toml
+[workspace.execution]
+isolation = "best_effort_host"
+max_concurrency = 4
+max_concurrency_per_repo = 1
+```
+
+`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, and estimations. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+
+Raising either limit above 1 requires the explicit `best_effort_host` value. This mode is **not a security or isolation boundary**. Concurrent jobs share the host kernel, network namespace, localhost ports, process table, Docker daemon, browser profiles, package-manager caches, and linked Git metadata. Typical consequences include `EADDRINUSE`, Docker Compose published-port conflicts, cache/profile lock contention, Git ref-lock failures, and several jobs consuming the same agent account quota. Leftover child processes from one run may affect another. Each tracker task still has a separate worktree, but that does not isolate those host resources.
+
+Use concurrency only for repositories and tasks that tolerate those conflicts. A later isolated execution mode will retain these capacity keys while running each workflow in its own private clone and microVM.
 
 ### Multiple teams and tracker boards
 
@@ -192,7 +215,7 @@ Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off
 
 The scheduling is identical; only where the work runs changes:
 
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. Dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
 - It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
 - Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 
@@ -241,7 +264,7 @@ While the daemon is running you can request one immediate drain (for example whi
 
 The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
 
-- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
 - **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
