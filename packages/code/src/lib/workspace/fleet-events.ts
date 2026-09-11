@@ -12,13 +12,16 @@
 
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
 import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
+import { randomUUID } from "crypto";
+import type { CiFixResult } from "../ci-failure-watcher-acquirer";
 import type { AutomaticResolveResult } from "../review-polling-acquirer";
 import type { TaskExecutionResult } from "../task-polling-acquirer";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
-import type { RunCoordinator } from "../run-coordinator";
+import { JobNotStartedError } from "../task-supervisor";
+import type { TaskSupervisor } from "../task-supervisor";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -33,6 +36,7 @@ export interface FleetEventDeps {
     opts: {
       cwd: string;
       env: Record<string, string | undefined>;
+      signal?: AbortSignal;
     },
   ) => Promise<TaskExecutionResult>;
   /** CI-fix runner (injected for tests; defaults to the CLI subprocess). */
@@ -44,13 +48,14 @@ export interface FleetEventDeps {
       cwd: string;
       env: Record<string, string | undefined>;
       expectedHeadSha?: string;
+      signal?: AbortSignal;
     },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
-  /** Process-level agent-run gate; only set when scheduled estimation exists. */
-  coordinator?: RunCoordinator;
+  /** Shared workspace admission supervisor. */
+  supervisor?: TaskSupervisor;
 }
 
 type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult>;
@@ -146,15 +151,33 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       );
       return false;
     }
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const base = await repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runReview(slug, prNumber, {
+    const invoke = async (signal?: AbortSignal) => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      return runReview(slug, prNumber, {
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir),
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:feedback",
+          repo: repo.name,
+          kind: "review",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) return "deferred";
+      throw error;
+    }
   };
 }
 
@@ -173,17 +196,37 @@ export function createFleetResolveConflicts(
     if (!repo) {
       return { outcome: "skipped", message: "repository is not configured in this workspace" };
     }
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const base = await repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runResolve(slug, prNumber, {
+    const invoke = async (signal?: AbortSignal) => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      return runResolve(slug, prNumber, {
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir),
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:conflict",
+          repo: repo.name,
+          kind: "conflict",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) {
+        return { outcome: "deferred", message: error.message };
+      }
+      throw error;
+    }
   };
 }
 
@@ -195,7 +238,7 @@ export function createFleetCiFix(
   prNumber: number,
   feedbackPath: string,
   expectedHeadSha?: string,
-) => Promise<boolean> {
+) => Promise<CiFixResult> {
   const runCiFix = deps.runCiFix ?? runCiFixViaCli;
   return async (slug, prNumber, feedbackPath, expectedHeadSha) => {
     const repo = repoBySlug(deps.config, slug);
@@ -203,16 +246,34 @@ export function createFleetCiFix(
       console.warn(`⚠️  [fleet] CI failure for ${slug}#${prNumber} has no workspace repo.`);
       return false;
     }
-    await deps.repoManager.ensureBareClone(repo);
-    await deps.repoManager.fetch(repo.name);
-    const base = await deps.repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runCiFix(slug, prNumber, feedbackPath, {
+    const invoke = async (signal?: AbortSignal) => {
+      await deps.repoManager.ensureBareClone(repo);
+      await deps.repoManager.fetch(repo.name);
+      const base = await deps.repoManager.ensureBaseWorktree(repo);
+      return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
         env: buildRepoEnv(repo, deps.workspaceDir),
         ...(expectedHeadSha ? { expectedHeadSha } : {}),
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    if (deps.supervisor) {
+      try {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:ci",
+          repo: repo.name,
+          kind: "ci_fix",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      } catch (error) {
+        if (error instanceof JobNotStartedError) return "deferred";
+        throw error;
+      }
+    }
+    return invoke();
   };
 }
 

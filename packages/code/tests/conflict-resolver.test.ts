@@ -218,6 +218,36 @@ describe("resolveConflictsOnPr", () => {
     expect(fetches).toBeGreaterThanOrEqual(3); // eligibility, pre-push lease, post-push verify
   });
 
+  test("discards installer-dirtied tracked files before merging", async () => {
+    // Dependency installation during worktree preparation can rewrite tracked
+    // files (e.g. `bun install` normalizing a lockfile), and `git merge`
+    // refuses to start over uncommitted changes. The resolver must reset the
+    // disposable worktree before merging rather than aborting.
+    const original = Utils.installDependencies;
+    Utils.installDependencies = (async (dir: string) => {
+      writeFileSync(join(dir, "greeting.txt"), "clobbered by the installer\n");
+      return { success: true };
+    }) as typeof Utils.installDependencies;
+
+    try {
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+    } finally {
+      Utils.installDependencies = original;
+    }
+  });
+
   test("removes the review worktree after a successful run", async () => {
     let usedWorkDir: string | undefined;
     const result = await resolveConflictsOnPr(PR_URL, {

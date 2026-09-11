@@ -181,6 +181,8 @@ export interface DashboardAutomationView {
   repo?: string;
   /** The prompt executed per occurrence. */
   prompt: string;
+  /** Whether occurrences open a pull request (opt-in; default off). */
+  openPr: boolean;
   /** Next scheduled occurrence (epoch ms), when the scheduler registered it. */
   nextDueAt?: number;
   /** Most recent run of this automation (any origin), description stripped. */
@@ -410,6 +412,7 @@ export class DashboardData {
         schedule: status.cron ?? status.interval,
         repo: status.repo,
         prompt: status.prompt,
+        openPr: status.openPr === true,
         nextDueAt: status.nextDueAt,
         lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
       };

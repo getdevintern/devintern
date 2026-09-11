@@ -7,6 +7,7 @@ import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/ci-failure-
 import type {
   CiConditionalResult,
   CiFailureWatcherGitHub,
+  CiFixResult,
   PolledCiPr,
   WatchedStatusState,
   WatchedWorkflowRun,
@@ -156,7 +157,7 @@ describe("CiFailureWatcherAcquirer", () => {
     gh: FakeGitHubState,
     overrides: {
       maxAttempts?: number;
-      fixResults?: boolean[];
+      fixResults?: CiFixResult[];
       enabled?: () => boolean;
       now?: () => number;
     } = {},
@@ -528,6 +529,29 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toHaveLength(2);
     expect(comments).toHaveLength(1);
     expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+  });
+
+  test("a deferred repair preserves the retry budget and remains eligible", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(825)],
+    };
+    const { acquirer, fixed, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      fixResults: ["deferred", true],
+    });
+
+    await acquirer.tick();
+    expect(fixed).toHaveLength(1);
+    expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(0);
+    expect(comments).toHaveLength(0);
+
+    await acquirer.tick();
+    expect(fixed).toHaveLength(2);
+    expect(queue.hasProcessed("github:ci", `action:acme/widgets#42:${sha1}:825`)).toBe(true);
+    expect(comments).toHaveLength(0);
   });
 
   test("a disabled watcher makes no GitHub requests", async () => {

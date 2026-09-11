@@ -98,6 +98,29 @@ GITHUB_REPO = "acme/api"
     expect(errors.join("\n")).toContain("--repo is only valid for Sentry connect");
   });
 
+  test("rejects unknown connect targets before touching the workspace", async () => {
+    const result = await runWorkerConnectCommand(["bogus"], { workspaceDir });
+
+    expect(result).toBe(1);
+    expect(errors.join("\n")).toContain("Unsupported connect target 'bogus'");
+  });
+
+  test("honors a caller-supplied parse so attribution and execution share one result", async () => {
+    // The CLI entry parses once and passes the result through deps; if the
+    // command re-parsed the args it would reject target 'bogus' instead of
+    // running the status flow the shared parse selected.
+    const result = await runWorkerConnectCommand(["bogus"], {
+      workspaceDir,
+      parsed: { target: "status", help: false },
+      runConnect: async (target) => {
+        expect(target).toBe("status");
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+  });
+
   test("connect sentry validates and adds a monitor for the selected repo", async () => {
     const answers = ["", "acme", "frontend", "environment:production", "sntrys_connect"];
     const result = await runWorkerConnectCommand(["sentry", "--repo", "web"], {

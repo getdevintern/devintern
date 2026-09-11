@@ -130,7 +130,10 @@ describe("namespaced detector sources (multi-team workspaces)", () => {
   test("registry accepts explicit env maps without process.env", () => {
     const { searchTasks } = stubSearch(0);
     // Trello needs board credentials; they come from the map, not the shell.
-    expect(createChangeDetector("trello")).toBeNull();
+    // Pass an explicit map so the assertion cannot be flipped by ambient
+    // TRELLO_* variables (e.g. when tests run inside a worker that loaded
+    // .devintern-code/.env).
+    expect(createChangeDetector("trello", searchTasks, { env: {} })).toBeNull();
     const detector = createChangeDetector("trello", searchTasks, {
       env: { TRELLO_API_KEY: "k", TRELLO_API_TOKEN: "t", TRELLO_DEFAULT_BOARD_ID: "board" },
       source: "trello:growth-board",

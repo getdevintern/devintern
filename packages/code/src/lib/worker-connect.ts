@@ -15,6 +15,17 @@ import type { SentrySetupPromptFn, SentryValidationOptions } from "./worker-sent
 
 const TRACKER_TARGETS = new Set(["linear", "asana", "trello", "azure-devops", "jira"]);
 
+/**
+ * Every target `worker connect` accepts. Single source of truth for command
+ * validation and for bounding `worker_connect` analytics target cardinality.
+ */
+export const WORKER_CONNECT_TARGETS: ReadonlySet<string> = new Set([
+  "github",
+  ...TRACKER_TARGETS,
+  "sentry",
+  "status",
+]);
+
 const WORKER_CONNECT_HELP = `Usage: devintern worker connect [target] [options]
 
 Connect an integration to the workspace worker. GitHub and tracker targets use
@@ -50,9 +61,14 @@ export interface WorkerConnectCommandDeps {
   cwd?: string;
   prompt?: SentrySetupPromptFn;
   validateSentry?: (options: SentryValidationOptions) => Promise<number>;
+  /**
+   * Reuse a `parseConnectArgs` result from the caller so analytics attribution
+   * and command execution share one parse instead of drifting apart.
+   */
+  parsed?: ParsedConnectArgs;
 }
 
-interface ParsedConnectArgs {
+export interface ParsedConnectArgs {
   target: string;
   workspacePath?: string;
   team?: string;
@@ -61,7 +77,12 @@ interface ParsedConnectArgs {
   error?: string;
 }
 
-function parseConnectArgs(args: string[]): ParsedConnectArgs {
+/**
+ * Parse `worker connect` arguments. Exported so the CLI entry point can parse
+ * once and pass the result to the command via `deps.parsed`, keeping analytics
+ * attribution and execution in sync.
+ */
+export function parseConnectArgs(args: string[]): ParsedConnectArgs {
   let target = "github";
   let workspacePath: string | undefined;
   let help = false;
@@ -132,7 +153,7 @@ export async function runWorkerConnectCommand(
   args: string[],
   deps: WorkerConnectCommandDeps = {},
 ): Promise<number> {
-  const parsed = parseConnectArgs(args);
+  const parsed = deps.parsed ?? parseConnectArgs(args);
   if (parsed.help) {
     console.log(WORKER_CONNECT_HELP);
     return 0;
@@ -141,12 +162,7 @@ export async function runWorkerConnectCommand(
     console.error(`❌ ${parsed.error}`);
     return 1;
   }
-  if (
-    parsed.target !== "github" &&
-    parsed.target !== "status" &&
-    parsed.target !== "sentry" &&
-    !TRACKER_TARGETS.has(parsed.target)
-  ) {
+  if (!WORKER_CONNECT_TARGETS.has(parsed.target)) {
     console.error(
       `❌ Unsupported connect target '${parsed.target}'. ` +
         "Available: github, linear, asana, trello, azure-devops, jira, sentry, status.",
