@@ -1878,9 +1878,7 @@ export async function buildFleetEventAcquirers(options: {
       }
       for (const mr of matches) {
         if (envelope.eventType === "ci.changed") {
-          const key = ciKey(mr);
-          gitlabCiRows.set(key, mr);
-          await gitlabCiWatcher.reconcile(key, mr.changeNumber);
+          await gitlabCiWatcher.reconcile(ciKey(mr), mr.changeNumber);
         } else {
           await gitlabPoller.reconcile(mr);
         }
