@@ -1578,6 +1578,13 @@ export async function buildFleetEventAcquirers(options: {
     });
     return remote?.provider === "gitlab" && resolveGitLabCodeHostConfig(remote.instanceUrl, env).ok;
   });
+  let reconcileGitLabRelay:
+    | ((
+        envelope: import("../relay-acquirer").RelayEnvelope & {
+          codeHost: import("../relay-acquirer").RelayCodeHostIdentity;
+        },
+      ) => Promise<void>)
+    | undefined;
   if (hasGitLabProfile) {
     const { CiFailureWatcherAcquirer, runCiFixViaCli } =
       await import("../ci-failure-watcher-acquirer");
@@ -1846,6 +1853,37 @@ export async function buildFleetEventAcquirers(options: {
     });
     acquirers.push(gitlabCiWatcher);
     intervalUpdaters.push((seconds) => gitlabCiWatcher.updateInterval(seconds));
+
+    reconcileGitLabRelay = async (envelope) => {
+      const { codeHost, ref } = envelope;
+      const matches = state.workerState
+        .listOpenAgentChangeRequests()
+        .filter(
+          (mr) =>
+            mr.provider === "gitlab" &&
+            mr.instanceUrl === codeHost.instanceUrl &&
+            mr.projectId === codeHost.projectId &&
+            mr.projectPath === codeHost.projectPath &&
+            (ref.change === undefined || mr.changeNumber === ref.change) &&
+            (ref.branch === undefined || mr.branch === ref.branch),
+        );
+      if (matches.length === 0) {
+        if (verbose) {
+          console.log(
+            `   [relay] no registered GitLab change matches ${codeHost.projectPath}` +
+              `${ref.change ? `!${ref.change}` : ref.branch ? `:${ref.branch}` : ""}`,
+          );
+        }
+        return;
+      }
+      for (const mr of matches) {
+        if (envelope.eventType === "ci.changed") {
+          await gitlabCiWatcher.reconcile(ciKey(mr), mr.changeNumber);
+        } else {
+          await gitlabPoller.reconcile(mr);
+        }
+      }
+    };
   }
 
   // Mode 2 relay is independent of GitHub polling credentials: tracker
@@ -1934,6 +1972,19 @@ export async function buildFleetEventAcquirers(options: {
               await handleMention(repo, comment, prNumber);
             },
             evaluateTask,
+            reconcileCodeHost: async (envelope) => {
+              if (envelope.codeHost.provider !== "gitlab") return;
+              if (!reconcileGitLabRelay) {
+                if (verbose) {
+                  console.log(
+                    `   [relay] ignoring GitLab hint for ${envelope.codeHost.projectPath}: ` +
+                      "no matching local code-host credentials",
+                  );
+                }
+                return;
+              }
+              await reconcileGitLabRelay(envelope);
+            },
           },
           onPollSuccess: () => {
             relayLastSuccessAt = Date.now();

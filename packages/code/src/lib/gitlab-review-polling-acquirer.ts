@@ -88,6 +88,19 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
     }
   }
 
+  /** Promptly reconcile one registered MR after an authenticated relay hint. */
+  async reconcile(mr: AgentPr): Promise<void> {
+    if (this.busy || !this.gitLabMrs().some((candidate) => this.key(candidate) === this.key(mr))) {
+      return;
+    }
+    this.busy = true;
+    try {
+      await this.pollMr(mr);
+    } finally {
+      this.busy = false;
+    }
+  }
+
   private gitLabMrs(): AgentPr[] {
     return this.options.workerState
       .listOpenAgentChangeRequests()
