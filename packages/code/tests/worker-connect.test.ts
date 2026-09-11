@@ -15,6 +15,7 @@ describe("runWorkerConnectCommand", () => {
   const savedLinearKey = process.env.LINEAR_API_KEY;
   const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
   const savedWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
+  const savedGitLabAdminToken = process.env.GITLAB_WEBHOOK_ADMIN_TOKEN;
 
   beforeEach(() => {
     workspaceDir = mkdtempSync(join(tmpdir(), "devintern-worker-connect-"));
@@ -58,6 +59,8 @@ GITHUB_REPO = "acme/api"
     else process.env.SENTRY_AUTH_TOKEN = savedSentryToken;
     if (savedWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
     else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspaceDir;
+    if (savedGitLabAdminToken === undefined) delete process.env.GITLAB_WEBHOOK_ADMIN_TOKEN;
+    else process.env.GITLAB_WEBHOOK_ADMIN_TOKEN = savedGitLabAdminToken;
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
@@ -89,6 +92,44 @@ GITHUB_REPO = "acme/api"
     expect(errors.join("\n")).toContain("1 workspace repository pairing(s) failed");
   });
 
+  test("bare connect configures both GitHub and GitLab code hosts", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "github-api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "gitlab-api"
+remote = "git@gitlab.com:acme/platform.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
+`,
+    );
+    const calls: Array<{ target: string; repo?: string; projectPath?: string }> = [];
+
+    const result = await runWorkerConnectCommand([], {
+      workspaceDir,
+      runConnect: async (target, deps) => {
+        calls.push({
+          target,
+          repo: deps.repo,
+          projectPath: deps.gitlabProject?.projectPath,
+        });
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(calls).toEqual([
+      { target: "github", repo: "acme/api", projectPath: undefined },
+      { target: "gitlab", repo: undefined, projectPath: "acme/platform" },
+    ]);
+  });
+
   test("rejects repository selection for relay targets", async () => {
     const result = await runWorkerConnectCommand(["github", "--repo", "acme/web"], {
       workspaceDir,
@@ -96,6 +137,116 @@ GITHUB_REPO = "acme/api"
 
     expect(result).toBe(1);
     expect(errors.join("\n")).toContain("--repo is only valid for Sentry connect");
+  });
+
+  test("connect gitlab discovers cloud and self-managed projects and continues after failure", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "cloud"
+remote = "git@gitlab.com:acme/cloud.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "cloud-admin"
+
+[[repos]]
+name = "self-managed"
+remote = "git@git.internal:platform/service.git"
+[repos.env]
+GITLAB_CODE_HOST_URL = "https://gitlab.internal"
+GITLAB_CODE_HOST_ALIASES = "git.internal"
+GITLAB_WEBHOOK_ADMIN_TOKEN = "self-admin"
+
+[[repos]]
+name = "duplicate"
+remote = "https://gitlab.com/acme/cloud.git"
+`,
+    );
+    const calls: Array<{
+      target: string;
+      project?: { instanceUrl: string; projectPath: string };
+      token?: string;
+    }> = [];
+
+    const result = await runWorkerConnectCommand(["gitlab"], {
+      workspaceDir,
+      runConnect: async (target, deps) => {
+        calls.push({
+          target,
+          project: deps.gitlabProject,
+          token: deps.env?.GITLAB_WEBHOOK_ADMIN_TOKEN,
+        });
+        return deps.gitlabProject?.instanceUrl === "https://gitlab.internal" ? 1 : 0;
+      },
+    });
+
+    expect(result).toBe(1);
+    expect(calls).toEqual([
+      {
+        target: "gitlab",
+        project: { instanceUrl: "https://gitlab.com", projectPath: "acme/cloud" },
+        token: "cloud-admin",
+      },
+      {
+        target: "gitlab",
+        project: {
+          instanceUrl: "https://gitlab.internal",
+          projectPath: "platform/service",
+        },
+        token: "self-admin",
+      },
+    ]);
+    expect(errors.join("\n")).toContain("1 GitLab project hook setup(s) failed");
+  });
+
+  test("GitLab disconnect is explicit and applies to every configured project", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "gitlab"
+remote = "git@gitlab.com:acme/platform.git"
+`,
+    );
+    const disconnectFlags: Array<boolean | undefined> = [];
+
+    const result = await runWorkerConnectCommand(["gitlab", "--disconnect"], {
+      workspaceDir,
+      runConnect: async (_target, deps) => {
+        disconnectFlags.push(deps.disconnectGitLab);
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(disconnectFlags).toEqual([true]);
+  });
+
+  test("rejects unknown connect targets before touching the workspace", async () => {
+    const result = await runWorkerConnectCommand(["bogus"], { workspaceDir });
+
+    expect(result).toBe(1);
+    expect(errors.join("\n")).toContain("Unsupported connect target 'bogus'");
+  });
+
+  test("honors a caller-supplied parse so attribution and execution share one result", async () => {
+    // The CLI entry parses once and passes the result through deps; if the
+    // command re-parsed the args it would reject target 'bogus' instead of
+    // running the status flow the shared parse selected.
+    const result = await runWorkerConnectCommand(["bogus"], {
+      workspaceDir,
+      parsed: { target: "status", help: false, disconnect: false },
+      runConnect: async (target) => {
+        expect(target).toBe("status");
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
   });
 
   test("connect sentry validates and adds a monitor for the selected repo", async () => {
@@ -186,6 +337,40 @@ GITHUB_REPO = "acme/api"
 
     expect(result).toBe(0);
     expect(logs.join("\n")).toContain("Unverified workspace repositories: acme/web");
+  });
+
+  test("status reports GitLab verification independently from GitHub", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "linear"
+
+[[repos]]
+name = "gitlab"
+remote = "git@gitlab.com:acme/platform.git"
+`,
+    );
+    saveRelayState(
+      {
+        relayUrl: "https://relay.test",
+        customerId: "customer-1",
+        connectedAt: "2026-09-02T00:00:00.000Z",
+        registrations: [],
+        relayToken: "drt_test",
+      },
+      workspaceDir,
+    );
+
+    const result = await runWorkerConnectCommand(["status"], {
+      workspaceDir,
+      runConnect: async () => 0,
+    });
+
+    expect(result).toBe(0);
+    expect(logs.join("\n")).toContain(
+      "GitLab projects without local relay registration: acme/platform",
+    );
+    expect(logs.join("\n")).toContain("devintern worker connect gitlab");
   });
 
   test("tracker connect loads workspace env without overriding the shell", async () => {

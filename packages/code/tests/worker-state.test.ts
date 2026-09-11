@@ -74,12 +74,59 @@ describe("WorkerState", () => {
       expect(open[0]?.taskKey).toBe("PROJ-1");
       expect(open[0]?.ticketUrl).toBe("https://acme.atlassian.net/browse/PROJ-1");
       expect(open[0]?.state).toBe("open");
+      expect(open[0]).toMatchObject({
+        provider: "github",
+        instanceUrl: "https://github.com",
+        projectPath: "acme/widgets",
+        changeNumber: 42,
+        webUrl: "https://github.com/acme/widgets/pull/42",
+      });
+    });
+
+    test("provider-aware identities do not collide and GitHub polling stays isolated", () => {
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+      state.recordAgentChangeRequest({
+        provider: "gitlab",
+        instanceUrl: "https://git.example.test",
+        projectId: "17",
+        projectPath: "acme/widgets",
+        number: 42,
+        webUrl: "https://git.example.test/acme/widgets/-/merge_requests/42",
+      });
+
+      expect(state.listOpenAgentChangeRequests()).toHaveLength(2);
+      expect(state.listOpenAgentPrs()).toHaveLength(1);
+      expect(state.listOpenAgentPrs()[0]?.provider).toBe("github");
+      expect(
+        state.listOpenAgentChangeRequests().find((change) => change.provider === "gitlab"),
+      ).toMatchObject({
+        projectId: "17",
+        projectPath: "acme/widgets",
+        changeNumber: 42,
+      });
     });
 
     test("markAgentPrClosed removes the PR from the open list", () => {
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
       state.markAgentPrClosed("acme/widgets", 42);
       expect(state.listOpenAgentPrs()).toHaveLength(0);
+    });
+
+    test("markAgentChangeRequestClosed targets the full provider identity", () => {
+      const identity = {
+        provider: "gitlab" as const,
+        instanceUrl: "https://git.example.test",
+        projectId: "17",
+        projectPath: "acme/widgets",
+        number: 42,
+        webUrl: "https://git.example.test/acme/widgets/-/merge_requests/42",
+      };
+      state.recordAgentChangeRequest(identity);
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+      state.markAgentChangeRequestClosed(identity);
+
+      expect(state.listOpenAgentChangeRequests()).toHaveLength(1);
+      expect(state.listOpenAgentChangeRequests()[0]?.provider).toBe("github");
     });
 
     test("re-recording a closed PR reopens it", () => {
@@ -157,6 +204,13 @@ describe("WorkerState", () => {
       expect(open).toHaveLength(1);
       expect(open[0]?.taskKey).toBe("OLD-1");
       expect(open[0]?.ticketUrl).toBeUndefined();
+      expect(open[0]).toMatchObject({
+        provider: "github",
+        instanceUrl: "https://github.com",
+        projectPath: "acme/old",
+        changeNumber: 1,
+        webUrl: "https://github.com/acme/old/pull/1",
+      });
       migrated.recordAgentPr({
         repo: "acme/old",
         prNumber: 2,

@@ -266,11 +266,40 @@ export function runAddressReviewViaCli(
   opts: {
     cwd?: string;
     env?: Record<string, string | undefined>;
+    signal?: AbortSignal;
   } = {},
 ): Promise<TaskExecutionResult> {
   return serializePrRun(repo, prNumber, () =>
     runSubcommandViaCli("address-review", repo, prNumber, opts),
   );
+}
+
+/** Run manual feedback addressing for an already canonical change-request URL. */
+export function runAddressReviewUrlViaCli(
+  webUrl: string,
+  serializationKey: string,
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): Promise<TaskExecutionResult> {
+  return serializePrRun(serializationKey, 0, async () => {
+    const status = await runWithFailover(
+      (env) =>
+        new Promise<number>((resolve) => {
+          const child = spawn(process.execPath, [process.argv[1], "address-review", webUrl], {
+            stdio: ["inherit", "inherit", "inherit"],
+            cwd: opts.cwd,
+            env,
+          });
+          child.on("close", (code) => resolve(code ?? 1));
+          child.on("error", (error) => {
+            captureError(error, { command: "address-review", webUrl, stage: "spawn" });
+            console.error(`❌ Failed to spawn address-review for ${webUrl}: ${error.message}`);
+            resolve(1);
+          });
+        }),
+      opts.env ?? process.env,
+    );
+    return cliResultToTaskResult(status);
+  });
 }
 
 /**
@@ -293,6 +322,8 @@ export function runResolveConflictsViaCli(
     /** Override the CLI entrypoint and output handling (subprocess tests). */
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<AutomaticResolveResult> {
   const args = [
@@ -300,6 +331,21 @@ export function runResolveConflictsViaCli(
     ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
   ];
   return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
+}
+
+/** Run conflict resolution for a canonical provider change-request URL. */
+export function runResolveConflictsUrlViaCli(
+  webUrl: string,
+  serializationKey: string,
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    expectedHeadSha?: string;
+    expectedBaseSha?: string;
+    timeoutMs?: number;
+  } = {},
+): Promise<AutomaticResolveResult> {
+  return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
 }
 
 function runResolveSubcommand(
@@ -312,6 +358,8 @@ function runResolveSubcommand(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
+    signal?: AbortSignal;
   },
 ): Promise<AutomaticResolveResult> {
   return runResolveWithFailover(repo, prNumber, extraArgs, opts);
@@ -327,6 +375,8 @@ async function runResolveWithFailover(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
+    signal?: AbortSignal;
   },
 ): Promise<AutomaticResolveResult> {
   let last: AutomaticResolveResult | null = null;
@@ -359,10 +409,16 @@ function spawnResolveOnce(
     timeoutMs?: number;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
+    signal?: AbortSignal;
   },
 ): Promise<{ code: number; result: AutomaticResolveResult }> {
-  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
+    if (opts.signal?.aborted) {
+      resolve({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+      return;
+    }
     let result: AutomaticResolveResult | null = null;
     let resultOutput = "";
     let resultOverflow = false;
@@ -380,6 +436,12 @@ function spawnResolveOnce(
         env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
       },
     );
+    let aborted = false;
+    const abort = () => {
+      aborted = true;
+      killProcessTree(child);
+    };
+    opts.signal?.addEventListener("abort", abort, { once: true });
     const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
     const timer =
       timeoutMs > 0
@@ -401,7 +463,12 @@ function spawnResolveOnce(
       resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
+      opts.signal?.removeEventListener("abort", abort);
       if (timer) clearTimeout(timer);
+      if (aborted) {
+        resolve({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+        return;
+      }
       if (timedOut) {
         resolve({
           code: 1,
@@ -440,6 +507,7 @@ function spawnResolveOnce(
       });
     });
     child.on("error", (error) => {
+      opts.signal?.removeEventListener("abort", abort);
       if (timer) clearTimeout(timer);
       resolve({
         code: 1,
@@ -456,22 +524,39 @@ async function runSubcommandViaCli(
   opts: {
     cwd?: string;
     env?: Record<string, string | undefined>;
+    signal?: AbortSignal;
   } = {},
 ): Promise<TaskExecutionResult> {
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   const status = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve(1);
+          return;
+        }
         const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
           stdio: ["inherit", "inherit", "inherit"],
           cwd: opts.cwd,
           env,
+          detached: process.platform !== "win32",
         });
-        child.on("close", (code) => resolve(code ?? 1));
+        const abort = () => killProcessTree(child);
+        let settled = false;
+        const finish = (code: number) => {
+          if (settled) return;
+          settled = true;
+          opts.signal?.removeEventListener("abort", abort);
+          resolve(code);
+        };
+        opts.signal?.addEventListener("abort", abort, { once: true });
+        child.on("close", (code) => {
+          finish(code ?? 1);
+        });
         child.on("error", (error) => {
           captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
           console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
-          resolve(1);
+          finish(1);
         });
       }),
     opts.env ?? process.env,

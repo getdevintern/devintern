@@ -21,7 +21,8 @@ import {
 import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "./agent-json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
-import { resolveAgentModel } from "./agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
+import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "./sandbox";
 import type {
   AutoReviewLoopOptions,
@@ -337,6 +338,7 @@ async function runAgentPrompt(
         skipPermissions: true,
         workingDir,
         model: resolveAgentModel(),
+        effort: resolveAgentEffort(),
       });
       const { child: agentProcess, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -614,7 +616,7 @@ export async function runAutoReviewLoop(
     baseBranch,
     harness,
     executablePath,
-    maxIterations = 5,
+    maxIterations = DEFAULT_AUTO_REVIEW_ITERATIONS,
     minPriority = "medium",
     workingDir,
     outputDir,

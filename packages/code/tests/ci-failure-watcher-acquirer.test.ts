@@ -7,6 +7,7 @@ import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/ci-failure-
 import type {
   CiConditionalResult,
   CiFailureWatcherGitHub,
+  CiFixResult,
   PolledCiPr,
   WatchedStatusState,
   WatchedWorkflowRun,
@@ -156,7 +157,7 @@ describe("CiFailureWatcherAcquirer", () => {
     gh: FakeGitHubState,
     overrides: {
       maxAttempts?: number;
-      fixResults?: boolean[];
+      fixResults?: CiFixResult[];
       enabled?: () => boolean;
       now?: () => number;
     } = {},
@@ -217,6 +218,22 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toEqual(["acme/widgets#42"]);
   });
 
+  test("relay reconciliation bypasses the timer for one registered change", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(150)],
+    };
+    const { acquirer, fixed } = makeAcquirer(gh);
+
+    await acquirer.reconcile("acme/other", 1);
+    expect(gh.prCalls ?? 0).toBe(0);
+
+    await acquirer.reconcile("acme/widgets", 42);
+    expect(fixed).toEqual(["acme/widgets#42"]);
+  });
+
   test("pending and non-failure conclusions never trigger", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
@@ -233,6 +250,41 @@ describe("CiFailureWatcherAcquirer", () => {
 
     await acquirer.tick();
     expect(fixed).toEqual([]);
+  });
+
+  test("provider hooks reuse retry and dedupe semantics in an isolated namespace", async () => {
+    const key = "https://gitlab.example:acme/widgets";
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [
+        {
+          ...failingRun(201),
+          externalId: "gitlab:https://gitlab.example:job:42:aaaa:201",
+        },
+      ],
+    };
+    const fixed: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: makeGithub(gh),
+      watchedChanges: () => [{ repo: key, prNumber: 17 }],
+      namespace: "gitlab",
+      fixPr: async (repo, n, _path, expectedHead) => {
+        fixed.push(`${repo}!${n}@${expectedHead}`);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+
+    expect(fixed).toEqual([`${key}!17@${sha1}`]);
+    expect(queue.hasProcessed("gitlab:ci", "gitlab:https://gitlab.example:job:42:aaaa:201")).toBe(
+      true,
+    );
   });
 
   test("dedupe survives worker restarts (new instance, shared queue)", async () => {
@@ -493,6 +545,29 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toHaveLength(2);
     expect(comments).toHaveLength(1);
     expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+  });
+
+  test("a deferred repair preserves the retry budget and remains eligible", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(825)],
+    };
+    const { acquirer, fixed, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      fixResults: ["deferred", true],
+    });
+
+    await acquirer.tick();
+    expect(fixed).toHaveLength(1);
+    expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(0);
+    expect(comments).toHaveLength(0);
+
+    await acquirer.tick();
+    expect(fixed).toHaveLength(2);
+    expect(queue.hasProcessed("github:ci", `action:acme/widgets#42:${sha1}:825`)).toBe(true);
+    expect(comments).toHaveLength(0);
   });
 
   test("a disabled watcher makes no GitHub requests", async () => {

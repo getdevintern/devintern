@@ -56,13 +56,23 @@ function formatExpected(epochMs: number): string {
   });
 }
 
-test("columns read in scanning order: automation, schedule, repo, next run, last run, actions", () => {
+test("columns read in scanning order: automation, schedule, repo, PR, next run, last run, actions", () => {
   const html = render([automation()]);
 
-  const labels = ["Automation", "Schedule", "Repo", "Next run", "Last run", "Actions"];
+  const labels = ["Automation", "Schedule", "Repo", "PR", "Next run", "Last run", "Actions"];
   const indices = labels.map((label) => headerIndex(html, label));
   expect(indices.every((index) => index >= 0)).toBe(true);
   expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+});
+
+test("PR-creating automations show an obvious opens-PR badge; the default degrades to a dash", () => {
+  const on = render([automation({ openPr: true })]);
+  expect(on).toContain("opens PR");
+  expect(on).toContain("open_pr = true");
+
+  const off = render([automation()]);
+  expect(off).not.toContain("opens PR");
+  expect(off).toContain("open_pr is off");
 });
 
 test("long automation ids and prompts are capped and truncated in place", () => {

@@ -15,6 +15,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { parseChangeRequestUrl } from "./code-host";
+import type { ChangeRequestIdentity, CodeHostProvider } from "./code-host";
 import { configureSqliteConnection } from "./sqlite";
 import { buildTicketUrl } from "./ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
@@ -34,7 +36,15 @@ export const TASK_POLL_LAST_DRAIN_KEY = "task-poll:last-drain-at";
 export type AddressedCommentType = "review" | "conversation";
 
 export interface AgentPr {
+  provider: CodeHostProvider;
+  instanceUrl: string;
+  projectId?: string;
+  projectPath: string;
+  changeNumber: number;
+  webUrl: string;
+  /** @deprecated Use `projectPath`. Retained for GitHub polling compatibility. */
   repo: string; // owner/repo
+  /** @deprecated Use `changeNumber`. Retained for GitHub polling compatibility. */
   prNumber: number;
   branch?: string;
   taskKey?: string;
@@ -110,29 +120,7 @@ export class WorkerState {
       )
     `);
 
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS agent_prs (
-        repo TEXT NOT NULL,
-        pr_number INTEGER NOT NULL,
-        branch TEXT,
-        task_key TEXT,
-        ticket_url TEXT,
-        state TEXT NOT NULL DEFAULT 'open',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (repo, pr_number)
-      )
-    `);
-
-    // Additive migration for databases created before the ticket_url column
-    // (the readonly dashboard cannot migrate, so reads must tolerate its
-    // absence — see `listOpenAgentPrs`).
-    const prColumns = this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{
-      name: string;
-    }>;
-    if (!prColumns.some((c) => c.name === "ticket_url")) {
-      this.db.run("ALTER TABLE agent_prs ADD COLUMN ticket_url TEXT");
-    }
+    this.initializeAgentPrSchema();
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_agent_prs_state
@@ -165,6 +153,65 @@ export class WorkerState {
         escalated_sha TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (repo, pr_number)
+      )
+    `);
+  }
+
+  /** Create or migrate the change-request registry without losing legacy rows. */
+  private initializeAgentPrSchema(): void {
+    const existing = this.db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_prs'")
+      .get() as { name: string } | null;
+
+    if (!existing) {
+      this.createAgentPrTable();
+      return;
+    }
+
+    const columns = this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{
+      name: string;
+    }>;
+    if (columns.some((column) => column.name === "provider")) return;
+
+    const hasTicketUrl = columns.some((column) => column.name === "ticket_url");
+    this.db.transaction(() => {
+      this.db.run("ALTER TABLE agent_prs RENAME TO agent_prs_legacy");
+      this.createAgentPrTable();
+      this.db.run(`
+        INSERT INTO agent_prs (
+          provider, instance_url, project_path, change_number, web_url,
+          repo, pr_number, branch, task_key, ticket_url, state, created_at, updated_at
+        )
+        SELECT
+          'github', 'https://github.com', repo, pr_number,
+          'https://github.com/' || repo || '/pull/' || pr_number,
+          repo, pr_number, branch, task_key, ${hasTicketUrl ? "ticket_url" : "NULL"},
+          state, created_at, updated_at
+        FROM agent_prs_legacy
+      `);
+      this.db.run("DROP TABLE agent_prs_legacy");
+    })();
+  }
+
+  /** Create the provider-aware change-request registry. */
+  private createAgentPrTable(): void {
+    this.db.run(`
+      CREATE TABLE agent_prs (
+        provider TEXT NOT NULL,
+        instance_url TEXT NOT NULL,
+        project_id TEXT,
+        project_path TEXT NOT NULL,
+        change_number INTEGER NOT NULL,
+        web_url TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        branch TEXT,
+        task_key TEXT,
+        ticket_url TEXT,
+        state TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (provider, instance_url, project_path, change_number)
       )
     `);
   }
@@ -253,17 +300,55 @@ export class WorkerState {
     taskKey?: string;
     ticketUrl?: string;
   }): void {
+    this.recordAgentChangeRequest(
+      {
+        provider: "github",
+        instanceUrl: "https://github.com",
+        projectPath: pr.repo,
+        number: pr.prNumber,
+        webUrl: `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+      },
+      pr,
+    );
+  }
+
+  /** Register a provider-neutral pull or merge request. */
+  recordAgentChangeRequest(
+    change: ChangeRequestIdentity,
+    metadata: { branch?: string; taskKey?: string; ticketUrl?: string } = {},
+  ): void {
     const now = Date.now();
     this.db.run(
-      `INSERT INTO agent_prs (repo, pr_number, branch, task_key, ticket_url, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'open', ?, ?)
-       ON CONFLICT(repo, pr_number) DO UPDATE SET
+      `INSERT INTO agent_prs (
+         provider, instance_url, project_id, project_path, change_number, web_url,
+         repo, pr_number, branch, task_key, ticket_url, state, created_at, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+       ON CONFLICT(provider, instance_url, project_path, change_number) DO UPDATE SET
+         project_id = excluded.project_id,
+         web_url = excluded.web_url,
+         repo = excluded.repo,
+         pr_number = excluded.pr_number,
          branch = excluded.branch,
          task_key = excluded.task_key,
          ticket_url = excluded.ticket_url,
          state = 'open',
          updated_at = excluded.updated_at`,
-      [pr.repo, pr.prNumber, pr.branch ?? null, pr.taskKey ?? null, pr.ticketUrl ?? null, now, now],
+      [
+        change.provider,
+        change.instanceUrl,
+        change.projectId ?? null,
+        change.projectPath,
+        change.number,
+        change.webUrl,
+        change.projectPath,
+        change.number,
+        metadata.branch ?? null,
+        metadata.taskKey ?? null,
+        metadata.ticketUrl ?? null,
+        now,
+        now,
+      ],
     );
   }
 
@@ -275,28 +360,61 @@ export class WorkerState {
   listOpenAgentPrs(repo?: string): AgentPr[] {
     // `SELECT *` (like the run store's reads) so a readonly dashboard can
     // still list PRs from a database that predates the ticket_url column.
+    const hasProvider = (
+      this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{ name: string }>
+    ).some((column) => column.name === "provider");
+    const providerFilter = hasProvider ? " AND provider = 'github'" : "";
     const rows = (
       repo
         ? this.db
             .query(
-              `SELECT * FROM agent_prs WHERE state = 'open' AND repo = ? ORDER BY created_at ASC`,
+              `SELECT * FROM agent_prs
+               WHERE state = 'open'${providerFilter} AND repo = ? ORDER BY created_at ASC`,
             )
             .all(repo)
         : this.db
-            .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
+            .query(
+              `SELECT * FROM agent_prs
+               WHERE state = 'open'${providerFilter} ORDER BY created_at ASC`,
+            )
             .all()
     ) as Record<string, unknown>[];
 
-    return rows.map((row) => ({
-      repo: row.repo as string,
-      prNumber: row.pr_number as number,
+    return rows.map((row) => this.mapAgentPrRow(row));
+  }
+
+  /** List every open provider change request for dashboard and diagnostics. */
+  listOpenAgentChangeRequests(): AgentPr[] {
+    const rows = this.db
+      .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
+      .all() as Record<string, unknown>[];
+    return rows.map((row) => this.mapAgentPrRow(row));
+  }
+
+  /** Map both legacy readonly schemas and the provider-aware schema. */
+  private mapAgentPrRow(row: Record<string, unknown>): AgentPr {
+    const repo = row.repo as string;
+    const prNumber = row.pr_number as number;
+    const provider = (row.provider as CodeHostProvider | null) ?? "github";
+    const instanceUrl =
+      (row.instance_url as string | null) ??
+      (provider === "bitbucket" ? "https://bitbucket.org" : "https://github.com");
+    return {
+      provider,
+      instanceUrl,
+      projectId: (row.project_id as string | null) ?? undefined,
+      projectPath: (row.project_path as string | null) ?? repo,
+      changeNumber: (row.change_number as number | null) ?? prNumber,
+      webUrl: (row.web_url as string | null) ?? `https://github.com/${repo}/pull/${prNumber}`,
+      repo,
+      prNumber,
       branch: (row.branch as string | null) ?? undefined,
       taskKey: (row.task_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
       state: row.state as AgentPrState,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
-    }));
+    };
   }
 
   /**
@@ -316,7 +434,7 @@ export class WorkerState {
     const foreign = this.db
       .query(
         `SELECT repo, pr_number FROM agent_prs
-         WHERE state = 'open' AND repo NOT IN (${placeholders})`,
+         WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       )
       .all(...allowed) as Array<{ repo: string; pr_number: number }>;
     if (foreign.length === 0) {
@@ -324,7 +442,7 @@ export class WorkerState {
     }
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ?
-       WHERE state = 'open' AND repo NOT IN (${placeholders})`,
+       WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       [Date.now(), ...allowed],
     );
     return foreign.map((row) => ({ repo: row.repo, prNumber: row.pr_number }));
@@ -338,8 +456,27 @@ export class WorkerState {
    */
   markAgentPrClosed(repo: string, prNumber: number): void {
     this.db.run(
-      `UPDATE agent_prs SET state = 'closed', updated_at = ? WHERE repo = ? AND pr_number = ?`,
+      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+       WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
       [Date.now(), repo, prNumber],
+    );
+  }
+
+  /** Mark one provider-neutral registered change request closed. */
+  markAgentChangeRequestClosed(identity: ChangeRequestIdentity): void {
+    this.db.run(
+      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+       WHERE provider = ? AND instance_url = ?
+         AND COALESCE(project_id, '') = COALESCE(?, '')
+         AND project_path = ? AND change_number = ?`,
+      [
+        Date.now(),
+        identity.provider,
+        identity.instanceUrl,
+        identity.projectId ?? null,
+        identity.projectPath,
+        identity.number,
+      ],
     );
   }
 
@@ -470,17 +607,27 @@ export class WorkerState {
  * @param prUrl - PR URL returned by the PR client
  * @param branch - Source branch of the PR
  * @param taskKey - Task tracker key the PR implements
+ * @param identity - Provider identity returned directly by the creation client
  */
-export function recordAgentPrFromUrl(prUrl: string, branch?: string, taskKey?: string): void {
+export function recordAgentPrFromUrl(
+  prUrl: string,
+  branch?: string,
+  taskKey?: string,
+  identity?: ChangeRequestIdentity,
+): void {
   try {
-    const parsed = parseGitHubPrUrl(prUrl);
+    const parsed =
+      identity ??
+      parseChangeRequestUrl(prUrl, {
+        gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+      });
     if (!parsed) {
-      return; // non-GitHub host; review polling is GitHub-first
+      return;
     }
     const ticketUrl = buildTicketUrl(process.env.TASK_TRACKER, taskKey);
     const state = new WorkerState();
     try {
-      state.recordAgentPr({ ...parsed, branch, taskKey, ticketUrl });
+      state.recordAgentChangeRequest(parsed, { branch, taskKey, ticketUrl });
     } finally {
       state.close();
     }

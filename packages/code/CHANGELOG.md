@@ -1,10 +1,35 @@
 # @devintern/code Changelog
 
-## Unreleased
+## [2.11.0] - 2026-09-09
+
+Throughput and cost-control release: host-level agent concurrency is now bounded behind an explicit acknowledgement, the auto-review loop caps itself earlier by default, and a stale persisted harness no longer warns on every restart.
+
+### Added
+
+- **Opt-in bounded host concurrency**: `[workspace.execution]` now supports global and per-repository agent limits behind an explicit `isolation = "best_effort_host"` acknowledgement. Polling tasks, retries, error fixes, PR feedback, CI repair, conflict resolution, automations, and estimations share one admission supervisor; task worktrees may overlap within a repository while jobs using its persistent base checkout remain serialized. Concurrent jobs still share host ports, processes, Docker, caches, and linked Git metadata and are documented as best-effort throughput rather than VM isolation
+- **One shared auto-review iteration cap (DEV-121)**: `--auto-review-iterations` and a matching `AUTO_REVIEW_ITERATIONS` env var are now the only controls for the review–fix cycle ceiling, honored identically by direct CLI runs, workspace/worker runs (`worker_task_args` passes the same flag through), and the webhook server. The webhook-only `WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS` env var still works as a deprecated fallback with a migration warning, and the `--auto-review-max-iterations` name that appeared in past release notes never existed in the CLI — use `--auto-review-iterations`
+- **Auto-review defaults to 2 review–fix cycles instead of 5**: most PRs converge in 1–2 passes or start thrashing, so the default cap now stops self-review sooner — humans see the PR earlier and agent spend per ticket drops. The cap is a ceiling, not a quota (approval or no remaining important issues still stops the loop early), `1` means a single review pass, and `0` is rejected rather than treated as unlimited. Invalid values (non-numeric or less than 1) for the flag or env var are rejected with a clear error before any agent runs
+
+### Fixed
+
+- **Stale persisted active harness is re-pointed on startup (DEV-122)**: when the saved failover harness is no longer in the current `AGENT_HARNESS` chain (e.g. after editing or shortening it), the worker already fell back in memory but kept the removed name stored, repeating the `Persisted active harness "..." is not in the current AGENT_HARNESS chain` warning on every restart. The selected fallback — the highest-priority available entry, or the parked primary while every entry is still limited — is now written back to the queue database, so the warning appears once and later restarts stay quiet. Unchanged chains keep their existing failover/failback behavior
+
+## [2.10.0] - 2026-09-08
+
+Worker convenience release: `worker init` can install and start the background service for you, agent reasoning effort is configurable across harnesses, every prepared worktree gets its dependencies installed, and the Sentry watcher stays quiet until it picks something up.
+
+### Added
 
 - **Guided worker operating policy**: `worker init` now asks when new tasks may be picked up, whether failing CI should be repaired automatically, and whether pull-request conflicts should be handled immediately, on a schedule, or manually. Existing values become the prompt defaults when the wizard is rerun
-- **Safer worker workspace bootstrap**: worker setup and repository imports now enforce owner-only permissions on the shared credential file and repair existing Sentry credential-file permissions when setup is rerun. Workspace repositories follow `origin/HEAD` unless an explicit per-repository override is configured; the fleet-wide `[defaults].default_branch` setting has been removed
 - **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
+- **One-step worker service install (DEV-115)**: `worker init` now offers to install and start the background service automatically — a user-level systemd unit on Linux or a launchd agent on macOS — so setup finishes with the worker already running and auto-restarting. The unit uses the user manager's `default.target`, records the current executable `PATH`, invokes Bun directly, and enables user lingering so it starts after reboot without waiting for login; macOS health is only reported when launchd shows a running process. Declining keeps it manual (definition plus exact install commands written into the workspace home), `--no-service` skips service setup entirely, re-running detects an existing DevIntern-managed service and offers an in-place update, and a hand-written definition is never overwritten. Any failed step restores the previous state and prints the manual install commands so nothing is left half-installed
+- **Configurable reasoning effort (DEV-116)**: `AGENT_EFFORT` in `.devintern-code/.env` (`low | medium | high`) tunes how deeply the agent reasons per run, mirroring `AGENT_MODEL` and applying to every agent spawn. Harnesses with a documented per-run mechanism emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; OpenCode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses without a headless mechanism (Cursor, Goose, Qwen, Kimi) ignore it with a one-line warning, and invalid values fail with a clear error. With the setting unset, no extra flags are emitted and behavior is unchanged
+
+### Changed
+
+- **Safer worker workspace bootstrap**: worker setup and repository imports now enforce owner-only permissions on the shared credential file and repair existing Sentry credential-file permissions when setup is rerun. Workspace repositories follow `origin/HEAD` unless an explicit per-repository override is configured; the fleet-wide `[defaults].default_branch` setting has been removed
+- **Every prepared worktree gets its dependencies installed (DEV-119)**: dependency installation no longer happens only for review worktrees — task, automation, and conflict-resolution worktrees are prepared with the package manager auto-detected from the lockfile (bun/pnpm/yarn/npm, uv/poetry/pip, bundle, go, cargo, composer, maven, gradle) after the final branch checkout, reusing the worker's environment and registry auth. The base worktree installs once at creation and reuses skip reinstalling; a missing lockfile or failed install continues the run with a warning so the agent can still set dependencies up itself
+- **Quieter Sentry poller logging (DEV-118)**: the Sentry error watcher stays quiet while issues sit below `min_occurrences` — skipped issues are only explained with `--verbose` output, and a single line (project, issue id, occurrence count) is logged when an issue is actually picked up
 
 ## [2.9.0] - 2026-09-07
 

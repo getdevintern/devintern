@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  beginGitLabRelayRegistration,
+  completeGitLabRelayRegistration,
   connectRelayTarget,
   connectGitHubRepo,
   ensureRelayToken,
@@ -11,6 +13,7 @@ import {
   hasGitHubRelayRegistration,
   hasGitHubRelayRouting,
   loadRelayState,
+  removeGitLabRelayRegistration,
   registerRelaySource,
   saveRelayState,
 } from "../src/lib/relay-connect";
@@ -101,6 +104,7 @@ describe("relay-connect auth", () => {
     expect(relayToken).toBe("drt_minted_abc");
     expect(state.customerId).toBe("user_1");
     expect(loadRelayState(dir)?.relayToken).toBe("drt_minted_abc");
+    expect(statSync(join(dir, ".devintern-code", "relay.json")).mode & 0o777).toBe(0o600);
     expect(calls[0].auth).toBe("Bearer supa-access");
 
     // Second call reuses the stored token (no re-mint).
@@ -150,7 +154,111 @@ describe("relay-connect auth", () => {
     expect(state.registrations).toEqual([]);
     expect(state.github).toBeUndefined();
     expect(state.githubRepositories).toBeUndefined();
+    expect(state.gitlabRepositories).toBeUndefined();
     expect(hasGitHubRelayRegistration(state)).toBe(false);
+  });
+
+  test("GitLab registration lifecycle persists identity but never signing material", async () => {
+    const signingToken = "whsec_standard-secret";
+    const legacySecret = "legacy-secret";
+    const fetchImpl = mockFetch((_url, body) => {
+      const action = (body as { action: string }).action;
+      if (action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_gitlab",
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "begin-gitlab-registration") {
+        return new Response(
+          JSON.stringify({
+            registrationId: "glr_1",
+            ingestUrl: "https://relay.test/ingest/gitlab/route",
+            signingToken,
+            legacySecret,
+            expiresAt: Date.now() + 60_000,
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "complete-gitlab-registration") {
+        return new Response(
+          JSON.stringify({
+            registration: {
+              provider: "gitlab",
+              instanceUrl: "https://gitlab.example.com",
+              projectId: "42",
+              projectPath: "platform/widgets",
+              registrationId: "glr_1",
+              status: "active",
+              hookId: 7,
+              activatedAt: 1234,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      expect(action).toBe("remove-gitlab-registration");
+      return new Response(JSON.stringify({ removed: true }), { status: 200 });
+    });
+
+    const begun = await beginGitLabRelayRegistration({
+      instanceUrl: "https://gitlab.example.com",
+      projectId: "42",
+      projectPath: "platform/widgets",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+    expect(begun.signingToken).toBe(signingToken);
+    expect(begun.legacySecret).toBe(legacySecret);
+
+    const state = await completeGitLabRelayRegistration({
+      registrationId: begun.registrationId,
+      hookId: 7,
+      instanceUrl: "https://gitlab.example.com/",
+      projectId: "42",
+      projectPath: "platform/widgets",
+      accessToken: "supa-access",
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+    });
+    expect(state.gitlabRepositories).toEqual([
+      {
+        instanceUrl: "https://gitlab.example.com",
+        projectId: "42",
+        projectPath: "platform/widgets",
+        hookId: 7,
+        registrationId: "glr_1",
+        connectedAt: expect.any(String),
+      },
+    ]);
+    const persisted = readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8");
+    expect(persisted).not.toContain(signingToken);
+    expect(persisted).not.toContain(legacySecret);
+
+    expect(
+      await removeGitLabRelayRegistration({
+        registrationId: "glr_1",
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl,
+      }),
+    ).toBe(true);
+    expect(loadRelayState(dir)?.gitlabRepositories).toEqual([]);
+    expect(calls.map((call) => (call.body as { action: string }).action)).toEqual([
+      "issue-token",
+      "begin-gitlab-registration",
+      "complete-gitlab-registration",
+      "remove-gitlab-registration",
+    ]);
   });
 
   test("connectGitHubRepo waits for verified GitHub App pairing", async () => {
@@ -522,5 +630,133 @@ describe("relay-connect auth", () => {
     ) as { repositories: Array<{ installationId: number; repositoryId: number }> };
     expect(appRecord.repositories[0]?.installationId).toBe(7001);
     expect(appRecord.repositories[0]?.repositoryId).toBe(9001);
+  });
+
+  test("connectRelayTarget installs, tests, and activates a GitLab project hook", async () => {
+    const adminCalls: string[] = [];
+    const fetchImpl = mockFetch((_url, body) => {
+      const action = (body as { action: string }).action;
+      if (action === "issue-token") {
+        return new Response(
+          JSON.stringify({
+            customerId: "user_1",
+            licenseSource: "solo-automation",
+            relayToken: "drt_gitlab_target",
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "begin-gitlab-registration") {
+        return new Response(
+          JSON.stringify({
+            registrationId: "glr_target",
+            ingestUrl: "https://relay.test/ingest/gitlab/route",
+            signingToken: "whsec_target",
+            legacySecret: "legacy-target",
+            expiresAt: Date.now() + 60_000,
+          }),
+          { status: 200 },
+        );
+      }
+      if (action === "remove-gitlab-registration") {
+        return new Response(JSON.stringify({ removed: true }), { status: 200 });
+      }
+      expect(action).toBe("complete-gitlab-registration");
+      return new Response(
+        JSON.stringify({
+          registration: {
+            provider: "gitlab",
+            instanceUrl: "https://gitlab.example.com",
+            projectId: "42",
+            projectPath: "Platform/Widgets",
+            registrationId: "glr_target",
+            status: "active",
+            hookId: 7,
+            activatedAt: 1234,
+          },
+        }),
+        { status: 200 },
+      );
+    });
+
+    const result = await connectRelayTarget("gitlab", {
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+      getAccessToken: async () => "supa-access",
+      env: { GITLAB_WEBHOOK_ADMIN_TOKEN: "admin-token" },
+      gitlabProject: {
+        instanceUrl: "https://gitlab.example.com",
+        projectPath: "platform/widgets",
+      },
+      gitlabAdmin: {
+        async resolveMaintainedProject(path) {
+          adminCalls.push(`resolve:${path}`);
+          return { id: 42, path: "Platform/Widgets", accessLevel: 40 };
+        },
+        async upsertRelayHook(projectId, config, existingHookId) {
+          adminCalls.push(
+            `upsert:${projectId}:${config.signingToken}:${config.legacySecret}:${existingHookId ?? "new"}`,
+          );
+          return {
+            hook: { id: 7, url: config.ingestUrl, name: "DevIntern Relay" },
+            standardSigning: true,
+          };
+        },
+        async testHook(projectId, hookId) {
+          adminCalls.push(`test:${projectId}:${hookId}`);
+        },
+        async deleteHook(projectId, hookId) {
+          adminCalls.push(`delete:${projectId}:${hookId}`);
+          return true;
+        },
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(adminCalls).toEqual([
+      "resolve:platform/widgets",
+      "upsert:42:whsec_target:legacy-target:new",
+      "test:42:7",
+    ]);
+    expect(loadRelayState(dir)?.gitlabRepositories?.[0]).toMatchObject({
+      instanceUrl: "https://gitlab.example.com",
+      projectId: "42",
+      projectPath: "Platform/Widgets",
+      hookId: 7,
+      registrationId: "glr_target",
+    });
+
+    const disconnected = await connectRelayTarget("gitlab", {
+      workingDir: dir,
+      relayUrl: RELAY_URL,
+      fetchImpl,
+      getAccessToken: async () => "supa-access",
+      env: { GITLAB_WEBHOOK_ADMIN_TOKEN: "admin-token" },
+      disconnectGitLab: true,
+      gitlabProject: {
+        instanceUrl: "https://gitlab.example.com",
+        projectPath: "platform/widgets",
+      },
+      gitlabAdmin: {
+        async resolveMaintainedProject(path) {
+          adminCalls.push(`resolve:${path}`);
+          return { id: 42, path: "Platform/Widgets", accessLevel: 40 };
+        },
+        async upsertRelayHook() {
+          throw new Error("disconnect must not upsert");
+        },
+        async testHook() {
+          throw new Error("disconnect must not test");
+        },
+        async deleteHook(projectId, hookId) {
+          adminCalls.push(`delete:${projectId}:${hookId}`);
+          return true;
+        },
+      },
+    });
+    expect(disconnected).toBe(0);
+    expect(adminCalls.slice(-2)).toEqual(["resolve:platform/widgets", "delete:42:7"]);
+    expect(loadRelayState(dir)?.gitlabRepositories).toEqual([]);
   });
 });

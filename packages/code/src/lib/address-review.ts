@@ -15,13 +15,17 @@ import {
 } from "@devintern/agent-harness";
 import { readFileSync } from "fs";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
-import { resolveAgentModel } from "./agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
+import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
+import { GitLabReviewsClient } from "./gitlab-reviews";
+import type { GitLabReviewContext } from "./gitlab-reviews";
 import { beginRun, endRun, recordRunStage } from "./run-recorder";
-import { formatCiFixPrompt, formatReviewPrompt } from "./review-formatter";
+import { extractAgentSummary, formatCiFixPrompt, formatReviewPrompt } from "./review-formatter";
 import type { CiFailureFeedback } from "./review-formatter";
+import { resolveGitLabCodeHostConfig } from "./pr-client";
 import { GIT_CLEAN_ARGS, Utils } from "./utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "./mention-sweep-acquirer";
@@ -38,6 +42,8 @@ export interface AddressReviewOptions {
   verbose?: boolean;
   /** Internal worker mode: fix the failures described in this JSON file. */
   ciFeedbackPath?: string;
+  /** Internal worker guard: refuse stale feedback after the MR head moves. */
+  expectedHeadSha?: string;
 }
 
 function readCiFeedbackFile(filePath: string): CiFailureFeedback {
@@ -46,39 +52,6 @@ function readCiFeedbackFile(filePath: string): CiFailureFeedback {
     throw new Error(`Invalid CI feedback file: ${filePath}`);
   }
   return parsed;
-}
-
-interface ParsedPRUrl {
-  owner: string;
-  repo: string;
-  prNumber: number;
-}
-
-/**
- * Parse a GitHub PR URL into its components.
- *
- * @param url - GitHub pull request URL (e.g. `https://github.com/owner/repo/pull/123`)
- * @returns Owner, repository name, and PR number
- * @throws When the URL does not match the expected GitHub PR format
- */
-function parsePRUrl(url: string): ParsedPRUrl {
-  // Match URLs like:
-  // https://github.com/owner/repo/pull/123
-  // https://github.com/owner/repo/pull/123/files
-  // https://github.com/owner/repo/pull/123#discussion_r123456
-  const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-
-  if (!match) {
-    throw new Error(
-      `Invalid GitHub PR URL: ${url}\n` + `Expected format: https://github.com/owner/repo/pull/123`,
-    );
-  }
-
-  return {
-    owner: match[1],
-    repo: match[2],
-    prNumber: parseInt(match[3], 10),
-  };
 }
 
 /**
@@ -180,6 +153,7 @@ export async function runAgent(
         skipPermissions: true,
         workingDir: workDir,
         model: resolveAgentModel(),
+        effort: resolveAgentEffort(),
       };
       const agentArgs = buildHeadlessAgentArgs(harness, prompt, runOptions);
 
@@ -378,7 +352,7 @@ async function markCommentsAddressed(
 /**
  * Fetch PR review feedback and run an agent to address unaddressed comments.
  *
- * @param prUrl - Full GitHub pull request URL
+ * @param prUrl - Full GitHub pull request or GitLab merge-request URL
  * @param options - Control push, comment marking, and verbosity
  * @throws When the PR is not open, worktree setup fails, or agent/commit/push fails
  */
@@ -389,14 +363,29 @@ export async function addressReview(
   const { noPush = false, noReply = false, verbose = false } = options;
 
   console.log("🔍 Parsing PR URL...");
-  const { owner, repo, prNumber } = parsePRUrl(prUrl);
-  const repoSlug = `${owner}/${repo}`;
-  console.log(`   Repository: ${owner}/${repo}`);
-  console.log(`   PR #${prNumber}`);
+  const identity = parseChangeRequestUrl(prUrl, {
+    gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+  });
+  if (!identity || identity.provider === "bitbucket") {
+    throw new Error(
+      `Invalid PR URL: ${prUrl}\n` +
+        "Expected a GitHub pull request or configured GitLab merge-request URL.",
+    );
+  }
+  const prNumber = identity.number;
+  const repoSlug = identity.projectPath;
+  const [owner = "", repo = ""] = identity.projectPath.split("/");
+  console.log(`   Repository: ${repoSlug}`);
+  console.log(`   ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`);
+
+  let githubClient: GitHubReviewsClient | undefined;
+  let gitlabClient: GitLabReviewsClient | undefined;
+  let gitlabContext: GitLabReviewContext | undefined;
+  let pr: { title: string; state: string; head: { ref: string; sha: string } };
 
   // Get GitHub App author info if available (for commit attribution)
   let gitAuthor: { name: string; email: string } | undefined;
-  if (!process.env.GITHUB_TOKEN) {
+  if (identity.provider === "github" && !process.env.GITHUB_TOKEN) {
     const githubAppAuth = GitHubAppAuth.fromEnvironment();
     if (githubAppAuth) {
       try {
@@ -413,22 +402,40 @@ export async function addressReview(
     }
   }
 
-  // Direct/no-relay runs prefer the customer-owned App so its bot identity
-  // resolves. Relay-backed workspace subprocesses receive a token-only mode
-  // override plus the central App's static mention alias.
-  const githubClient = new GitHubReviewsClient({
-    authMode: resolveGitHubAuthMode("app-first"),
-  });
-
-  // Get PR details
-  console.log("\n📋 Fetching PR details...");
-  const pr = await githubClient.getPullRequest(owner, repo, prNumber);
+  console.log(`\n📋 Fetching ${identity.provider === "gitlab" ? "MR" : "PR"} details...`);
+  if (identity.provider === "github") {
+    // Direct/no-relay runs prefer the customer-owned App so its bot identity
+    // resolves. Relay-backed subprocesses receive a token-only override.
+    githubClient = new GitHubReviewsClient({ authMode: resolveGitHubAuthMode("app-first") });
+    const githubPr = await githubClient.getPullRequest(owner, repo, prNumber);
+    if (githubPr.state !== "open") {
+      throw new Error(`PR is ${githubPr.state}, not open. Cannot address review.`);
+    }
+    pr = githubPr;
+  } else {
+    const config = resolveGitLabCodeHostConfig(identity.instanceUrl);
+    if (!config.ok) throw new Error(config.message);
+    gitlabClient = new GitLabReviewsClient(config.token, config.instanceUrl, {
+      caFile: config.caFile,
+      proxy: config.proxy,
+    });
+    gitlabContext = await gitlabClient.getReviewContext(identity.projectPath, prNumber);
+    pr = {
+      title: gitlabContext.mergeRequest.title,
+      state: gitlabContext.mergeRequest.state,
+      head: {
+        ref: gitlabContext.mergeRequest.source_branch,
+        sha: gitlabContext.mergeRequest.sha,
+      },
+    };
+  }
   console.log(`   Title: ${pr.title}`);
   console.log(`   Branch: ${pr.head.ref}`);
   console.log(`   State: ${pr.state}`);
-
-  if (pr.state !== "open") {
-    throw new Error(`PR is ${pr.state}, not open. Cannot address review.`);
+  if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
+    throw new Error(
+      `${identity.provider === "gitlab" ? "MR" : "PR"} head changed before CI repair started; refusing stale feedback.`,
+    );
   }
 
   const ciFeedback = options.ciFeedbackPath
@@ -436,6 +443,7 @@ export async function addressReview(
     : undefined;
   let processedComments: ProcessedReviewComment[] = [];
   let processedConversationComments: ProcessedConversationComment[] = [];
+  let gitlabDiscussionIds: string[] = [];
   let prompt: string;
   let commitSummary: string;
 
@@ -467,7 +475,72 @@ export async function addressReview(
       branch: pr.head.ref,
     });
     commitSummary = "Fix CI failures";
+  } else if (gitlabContext) {
+    const stateKey = `gitlab:${identity.instanceUrl}:${gitlabContext.projectPath}`;
+    const workerState = new WorkerState();
+    try {
+      processedComments = gitlabContext.feedback.comments.filter(
+        (comment) => !workerState.isCommentAddressed(stateKey, "review", comment.id),
+      );
+      processedConversationComments = (gitlabContext.feedback.conversationComments ?? []).filter(
+        (comment) => !workerState.isCommentAddressed(stateKey, "conversation", comment.id),
+      );
+    } finally {
+      workerState.close();
+    }
+
+    const remainingIds = new Set([
+      ...processedComments.map((comment) => comment.id),
+      ...processedConversationComments.map((comment) => comment.id),
+    ]);
+    gitlabDiscussionIds = [
+      ...new Set(
+        [...remainingIds]
+          .map((noteId) => gitlabContext?.discussionByNoteId[noteId])
+          .filter((discussionId): discussionId is string => Boolean(discussionId)),
+      ),
+    ];
+
+    console.log(`\n📥 Found ${gitlabContext.noteIds.length} human feedback note(s)`);
+    const alreadyAddressed = gitlabContext.noteIds.length - remainingIds.size;
+    if (alreadyAddressed > 0) {
+      console.log(`   ${alreadyAddressed} already addressed (skipping)`);
+    }
+    console.log(`   ${remainingIds.size} remaining to address`);
+    if (remainingIds.size === 0) {
+      console.log("\n✅ All unresolved GitLab feedback has been addressed already.");
+      console.log(`   View MR: ${prUrl}`);
+      return;
+    }
+
+    const feedback: ProcessedReviewFeedback = {
+      ...gitlabContext.feedback,
+      comments: processedComments,
+      conversationComments:
+        processedConversationComments.length > 0 ? processedConversationComments : undefined,
+    };
+    beginRun({
+      origin: "pr_mention",
+      repo: repoSlug,
+      prNumber,
+      prUrl,
+      branch: pr.head.ref,
+      harness: resolveHarness({ warnDeprecated: false }).harness.name,
+    });
+    recordRunStage("change_request", {
+      status: "succeeded",
+      summary: `addressing ${remainingIds.size} GitLab feedback note(s) from ${feedback.reviewer}`,
+      detail: {
+        provider: "gitlab",
+        reviewers: feedback.reviewer,
+        reviewComments: processedComments.length,
+        conversationComments: processedConversationComments.length,
+      },
+    });
+    prompt = formatReviewPrompt(feedback);
+    commitSummary = `Address review feedback from ${feedback.reviewer}`;
   } else {
+    if (!githubClient) throw new Error("GitHub review client was not initialized");
     // Get latest actionable review (changes_requested, or commented when no
     // changes_requested reviews exist — the commented pick is mention-gated
     // after the comments below are fetched).
@@ -683,6 +756,26 @@ export async function addressReview(
   if (!isGitRepo) {
     throw new Error("Not in a git repository. Please run this command from within the repository.");
   }
+  if (identity.provider === "gitlab") {
+    const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
+      verbose: false,
+    });
+    const remote = remoteResult.success
+      ? parseGitRemoteUrl(remoteResult.output.trim(), {
+          gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+          gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
+        })
+      : null;
+    if (
+      remote?.provider !== "gitlab" ||
+      remote.instanceUrl !== identity.instanceUrl ||
+      remote.projectPath !== identity.projectPath
+    ) {
+      throw new Error(
+        `The current origin does not match GitLab project ${identity.projectPath} on ${identity.instanceUrl}.`,
+      );
+    }
+  }
 
   // Prepare the single reusable worktree for this review
   const worktreeResult = await Utils.prepareReviewWorktree(pr.head.ref, {
@@ -881,6 +974,14 @@ export async function addressReview(
 
     // Push changes if requested
     if (!noPush) {
+      if (gitlabClient && gitlabContext) {
+        console.log("\n🔒 Revalidating GitLab MR head before push...");
+        await gitlabClient.assertHeadSha(
+          gitlabContext.projectId,
+          prNumber,
+          gitlabContext.mergeRequest.sha,
+        );
+      }
       console.log("\n📤 Pushing changes...");
 
       // Try pushing with retry logic for git hook failures
@@ -943,7 +1044,38 @@ export async function addressReview(
     }
 
     // Mark comments as addressed if requested (only if push succeeded)
-    if (!ciFeedback && !noReply && !noPush) {
+    if (!ciFeedback && !noReply && !noPush && gitlabClient && gitlabContext) {
+      console.log("\n💬 Replying to GitLab discussions...");
+      const summary = extractAgentSummary(agentResult.output);
+      const replies = await gitlabClient.replyToDiscussions(
+        gitlabContext.projectId,
+        prNumber,
+        gitlabDiscussionIds,
+        `✅ Addressed this feedback in the latest commit.\n\n${summary}`,
+      );
+      const stateKey = `gitlab:${identity.instanceUrl}:${gitlabContext.projectPath}`;
+      const workerState = new WorkerState();
+      try {
+        workerState.markCommentsAddressed(
+          stateKey,
+          "review",
+          processedComments.map((comment) => comment.id),
+        );
+        workerState.markCommentsAddressed(
+          stateKey,
+          "conversation",
+          processedConversationComments.map((comment) => comment.id),
+        );
+      } finally {
+        workerState.close();
+      }
+      console.log(`   Replied to ${replies.replied} discussion(s); left them unresolved.`);
+      if (replies.failures.length > 0) {
+        console.warn(
+          `   ⚠️  Could not reply to ${replies.failures.length} discussion(s): ${replies.failures.join("; ")}`,
+        );
+      }
+    } else if (!ciFeedback && !noReply && !noPush && githubClient) {
       console.log("\n💬 Marking comments as addressed...");
 
       await markCommentsAddressed(
@@ -959,10 +1091,10 @@ export async function addressReview(
 
     console.log(
       ciFeedback
-        ? `\n✅ Successfully pushed a CI fix for PR #${prNumber}`
-        : `\n✅ Successfully addressed review for PR #${prNumber}`,
+        ? `\n✅ Successfully pushed a CI fix for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`
+        : `\n✅ Successfully addressed review for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`,
     );
-    console.log(`   View PR: ${prUrl}`);
+    console.log(`   View ${identity.provider === "gitlab" ? "MR" : "PR"}: ${prUrl}`);
     endRun("succeeded");
     return;
   } catch (error) {

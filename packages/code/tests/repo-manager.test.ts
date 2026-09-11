@@ -103,6 +103,34 @@ describe("RepoManager", () => {
     expect(existsSync(second)).toBe(false);
   });
 
+  test("concurrent duplicate task runs get distinct worktrees", async () => {
+    await manager.ensureBareClone(repo);
+
+    const [first, second] = await Promise.all([
+      manager.createTaskWorktree(repo, "BACK-42"),
+      manager.createTaskWorktree(repo, "BACK-42"),
+    ]);
+
+    expect(first).not.toBe(second);
+    expect(existsSync(first)).toBe(true);
+    expect(existsSync(second)).toBe(true);
+    await Promise.all([
+      manager.removeTaskWorktree(repo.name, first),
+      manager.removeTaskWorktree(repo.name, second),
+    ]);
+  });
+
+  test("task worktrees automatically isolate hooks from the bare clone", async () => {
+    await manager.ensureBareClone(repo);
+    const worktree = await manager.createTaskWorktree(repo, "BACK-50");
+
+    const worktreeGitDir = git(worktree, "rev-parse --absolute-git-dir");
+    expect(git(worktree, "config core.hooksPath")).toBe(join(worktreeGitDir, "hooks"));
+    expect(existsSync(join(worktreeGitDir, "hooks"))).toBe(true);
+    expect(git(worktree, "config --show-origin --get core.hooksPath")).toContain("config.worktree");
+
+    await manager.removeTaskWorktree(repo.name, worktree);
+  });
   test("per-worktree config keeps worktrees from a bare clone non-bare", async () => {
     const clonePath = await manager.ensureBareClone(repo);
     const worktree = await manager.createTaskWorktree(repo, "BACK-43");

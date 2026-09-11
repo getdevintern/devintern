@@ -82,6 +82,8 @@ describe("resolveConflictsOnPr", () => {
   let seedDir: string;
   const savedWorktreeBase = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
   const savedGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
+  const savedGitLabFlag = process.env.DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST;
+  const savedGitLabToken = process.env.GITLAB_CODE_HOST_TOKEN;
 
   function prInfo(overrides: Partial<PullRequestInfo> = {}): PullRequestInfo {
     return {
@@ -156,6 +158,10 @@ describe("resolveConflictsOnPr", () => {
     else process.env.DEVINTERN_REVIEW_WORKTREE_PATH = savedWorktreeBase;
     if (savedGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
     else process.env.GIT_CONFIG_GLOBAL = savedGitConfigGlobal;
+    if (savedGitLabFlag === undefined) delete process.env.DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST;
+    else process.env.DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = savedGitLabFlag;
+    if (savedGitLabToken === undefined) delete process.env.GITLAB_CODE_HOST_TOKEN;
+    else process.env.GITLAB_CODE_HOST_TOKEN = savedGitLabToken;
     rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -185,6 +191,61 @@ describe("resolveConflictsOnPr", () => {
       "hello from main and the branch\n",
     );
     rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("uses the same guarded merge pipeline for a GitLab MR", async () => {
+    process.env.DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true";
+    process.env.GITLAB_CODE_HOST_TOKEN = "test-token";
+    let fetches = 0;
+    const result = await resolveConflictsOnPr(
+      "https://gitlab.com/acme/widgets/-/merge_requests/7",
+      {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => {
+          fetches++;
+          return prInfo();
+        },
+        agentRunner: async (_prompt, workDir) => {
+          writeFileSync(join(workDir, "greeting.txt"), "gitlab resolution\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      },
+    );
+    expect(result.outcome).toBe("resolved");
+    expect(fetches).toBeGreaterThanOrEqual(3); // eligibility, pre-push lease, post-push verify
+  });
+
+  test("discards installer-dirtied tracked files before merging", async () => {
+    // Dependency installation during worktree preparation can rewrite tracked
+    // files (e.g. `bun install` normalizing a lockfile), and `git merge`
+    // refuses to start over uncommitted changes. The resolver must reset the
+    // disposable worktree before merging rather than aborting.
+    const original = Utils.installDependencies;
+    Utils.installDependencies = (async (dir: string) => {
+      writeFileSync(join(dir, "greeting.txt"), "clobbered by the installer\n");
+      return { success: true };
+    }) as typeof Utils.installDependencies;
+
+    try {
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+    } finally {
+      Utils.installDependencies = original;
+    }
   });
 
   test("removes the review worktree after a successful run", async () => {

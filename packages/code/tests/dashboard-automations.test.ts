@@ -19,6 +19,7 @@ const CATALOG: AutomationScheduleStatus[] = [
     enabled: true,
     interval: "1d",
     prompt: "Inspect dependency health.",
+    openPr: true,
     nextDueAt: 1_800_000_000_000,
   },
   {
@@ -26,6 +27,7 @@ const CATALOG: AutomationScheduleStatus[] = [
     enabled: false,
     cron: "0 9 * * 1",
     prompt: "Groom flaky tests.",
+    openPr: false,
   },
 ];
 
@@ -117,6 +119,7 @@ describe("dashboard automations (Run now)", () => {
       expect(health.enabled).toBe(true);
       expect(health.schedule).toBe("1d");
       expect(health.prompt).toBe("Inspect dependency health.");
+      expect(health.openPr).toBe(true);
       expect(health.nextDueAt).toBe(1_800_000_000_000);
       // Most recent run wins (the manual run), with descriptions stripped.
       expect(health.lastRun?.id).toBe(manual);
@@ -126,6 +129,7 @@ describe("dashboard automations (Run now)", () => {
       const grooming = body.automations[1] as DashboardAutomationView;
       expect(grooming.enabled).toBe(false);
       expect(grooming.schedule).toBe("0 9 * * 1");
+      expect(grooming.openPr).toBe(false);
       expect(grooming.lastRun).toBeUndefined();
     } finally {
       data.close();

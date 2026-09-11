@@ -10,7 +10,7 @@ import {
   createWorkspaceTaskAcquirer,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
-import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
+import { openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
 import {
@@ -163,7 +163,6 @@ describe("multi-team polling", () => {
         options.executed.push({ taskKey, cwd: opts.cwd, env: opts.env });
         return options.result ?? true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
   beforeEach(() => {
@@ -347,7 +346,6 @@ remote = "git@github.com:acme/web.git"
         executed.push({ taskKey, cwd: opts.cwd, env: opts.env });
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
@@ -378,7 +376,6 @@ remote = "git@github.com:acme/web.git"
         void args;
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
@@ -422,7 +419,6 @@ describe("relay task evaluation across teams", () => {
           ran.push(`${team?.name ?? "defaults"}:${taskKey}`);
           return true;
         },
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       }),
     });
   }

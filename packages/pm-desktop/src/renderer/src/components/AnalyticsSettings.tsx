@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { qk } from "../queries/keys.ts";
@@ -48,7 +49,17 @@ interface AnalyticsSettingsProps {
    * project is open (model is a per-project setting).
    */
   onSwitchModel?: (model: string) => Promise<string | null>;
+  /** Active `AGENT_EFFORT` override for the project, when set. */
+  activeEffort?: string;
+  /**
+   * Persist `AGENT_EFFORT` for the project and reload the session. Same
+   * contract as {@link onSwitchModel}; omitted when no PM project is open.
+   */
+  onSwitchEffort?: (effort: string) => Promise<string | null>;
 }
+
+/** Reasoning-effort levels shared with `AGENT_EFFORT` / the agent-harness layer. */
+const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 
 export function AnalyticsSettings({
   projectDir = null,
@@ -58,6 +69,8 @@ export function AnalyticsSettings({
   updatingFromRemote = false,
   activeModel,
   onSwitchModel,
+  activeEffort,
+  onSwitchEffort,
 }: AnalyticsSettingsProps = {}) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -73,6 +86,9 @@ export function AnalyticsSettings({
   const [modelInput, setModelInput] = useState(activeModel ?? "");
   const [savingModel, setSavingModel] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [effortInput, setEffortInput] = useState(activeEffort ?? "");
+  const [savingEffort, setSavingEffort] = useState(false);
+  const [effortError, setEffortError] = useState<string | null>(null);
   /** Quick Capture local state: enabled flag + custom binding (null = default). */
   const [quickCaptureOn, setQuickCaptureOn] = useState(false);
   const [quickCaptureShortcut, setQuickCaptureShortcut] = useState<string | null>(null);
@@ -102,12 +118,14 @@ export function AnalyticsSettings({
     setConfirmClearToken(false);
     setModelError(null);
     setModelInput(activeModel ?? "");
+    setEffortError(null);
+    setEffortInput(activeEffort ?? "");
     setRecordingShortcut(false);
     setQuickCaptureActionError(null);
     if (analyticsQuery.data !== undefined) {
       setEnabled(analyticsQuery.data);
     }
-  }, [open, analyticsQuery.data, activeModel]);
+  }, [open, analyticsQuery.data, activeModel, activeEffort]);
 
   // Seed Quick Capture controls from the status snapshot each time it lands.
   useEffect(() => {
@@ -145,6 +163,22 @@ export function AnalyticsSettings({
     void onSwitchModel(modelInput).then((errorMessage) => {
       setSavingModel(false);
       if (errorMessage) setModelError(errorMessage);
+    });
+  };
+
+  /** Persist the effort select value; "" (harness default) clears the override. */
+  const onSaveEffort = (next: string) => {
+    if (!onSwitchEffort) return;
+    if (next === (activeEffort ?? "")) return;
+    setSavingEffort(true);
+    setEffortError(null);
+    void onSwitchEffort(next).then((errorMessage) => {
+      setSavingEffort(false);
+      if (errorMessage) {
+        setEffortError(errorMessage);
+        return;
+      }
+      setEffortInput(next);
     });
   };
 
@@ -326,6 +360,45 @@ export function AnalyticsSettings({
               {modelError ? (
                 <p className="text-xs text-destructive" data-testid="settings-model-error">
                   {modelError}
+                </p>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+
+        {onSwitchEffort ? (
+          <>
+            <Separator />
+            <div className="space-y-3 py-1" data-testid="settings-agent-effort">
+              <div className="space-y-1">
+                <Label htmlFor="agent-effort" className="text-sm text-foreground">
+                  Agent effort
+                </Label>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Reasoning depth for this project&apos;s agent runs, stored in .devintern-pm/.env.
+                  Lower is faster and cheaper; higher reasons more deeply. Harnesses without effort
+                  support ignore it (e.g. Codex maps it to model_reasoning_effort).
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <NativeSelect
+                  id="agent-effort"
+                  value={effortInput}
+                  disabled={savingEffort}
+                  data-testid="settings-effort-select"
+                  onChange={(event) => onSaveEffort(event.target.value)}
+                >
+                  <option value="">Harness default</option>
+                  {EFFORT_LEVELS.map((level) => (
+                    <option key={level} value={level}>
+                      {level}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </div>
+              {effortError ? (
+                <p className="text-xs text-destructive" data-testid="settings-effort-error">
+                  {effortError}
                 </p>
               ) : null}
             </div>

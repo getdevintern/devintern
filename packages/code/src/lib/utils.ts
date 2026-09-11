@@ -1018,11 +1018,11 @@ export class Utils {
 
       let pushResult;
       if (expectedRemoteSha || (remoteBranchExists.success && remoteBranchExists.output.trim())) {
-        // Remote branch exists, just push
-        const lease = expectedRemoteSha
-          ? [`--force-with-lease=refs/heads/${currentBranch}:${expectedRemoteSha}`]
-          : [];
-        pushResult = await Utils.executeGitCommand(["push", ...lease, "origin", currentBranch], {
+        // The ancestry check above guarantees this update is a fast-forward.
+        // Use a normal push so no conflict-resolution path can overwrite
+        // remote history, even with a lease. A concurrent update is rejected
+        // by Git and handled as divergence below.
+        pushResult = await Utils.executeGitCommand(["push", "origin", currentBranch], {
           verbose,
           cwd,
         });
@@ -1801,20 +1801,7 @@ export class Utils {
                 console.log(`✅ Switched to branch ${branch}`);
               }
 
-              // Install dependencies
-              if (verbose) {
-                console.log(`📦 Installing dependencies...`);
-              }
-              // Confine hook rewrites by dependency postinstalls (lefthook)
-              // to this worktree, before `bun install` gets a chance to
-              // touch the shared `.git/hooks`.
-              await Utils.isolateWorktreeHooks(worktreePath, { verbose });
-              const installResult = await Utils.installDependencies(worktreePath, { verbose });
-
-              if (!installResult.success) {
-                console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
-                console.warn(`   Agent may not be able to run tests or build commands`);
-              }
+              await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
 
               return { success: true, path: worktreePath };
             }
@@ -1987,26 +1974,7 @@ export class Utils {
       }
 
       // Install dependencies to ensure Agent has everything needed
-      if (verbose) {
-        console.log(`📦 Installing dependencies...`);
-      }
-      // Confine hook rewrites by dependency postinstalls (lefthook) to this
-      // worktree, before `bun install` gets a chance to touch the shared
-      // `.git/hooks`.
-      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
-      const installResult = await Utils.installDependencies(worktreePath, {
-        verbose,
-      });
-
-      if (verbose) {
-        console.log(`   ✓ Dependency installation completed (success: ${installResult.success})`);
-      }
-
-      if (!installResult.success) {
-        // Log warning but don't fail - Agent can still work without dependencies in some cases
-        console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
-        console.warn(`   Agent may not be able to run tests or build commands`);
-      }
+      await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
 
       if (verbose) {
         console.log(`✅ Worktree preparation complete!`);
@@ -2263,6 +2231,55 @@ export class Utils {
   }
 
   /**
+   * Prepare a worktree for an agent run: isolate git hooks, then install
+   * dependencies.
+   *
+   * Shared by the review path (`prepareReviewWorktree`) and the fleet path
+   * (`RepoManager.addWorktree`) so the two cannot drift: hook isolation must
+   * always precede the install, because dependency postinstalls (lefthook)
+   * rewrite the shared `.git/hooks` otherwise.
+   *
+   * Both steps are non-fatal and this method never throws: a missing package
+   * manager on PATH or a failed install only logs a warning, so the agent
+   * still starts and can attempt setup itself.
+   */
+  static async prepareWorktreeForAgent(
+    worktreePath: string,
+    options?: { verbose?: boolean },
+  ): Promise<{ success: boolean; packageManager?: string; error?: string }> {
+    const verbose = options?.verbose ?? false;
+
+    try {
+      // Confine hook rewrites by dependency postinstalls (lefthook) to this
+      // worktree, before `bun install` gets a chance to touch the shared
+      // `.git/hooks`.
+      await Utils.isolateWorktreeHooks(worktreePath, { verbose });
+
+      if (verbose) {
+        console.log(`📦 Installing dependencies...`);
+      }
+      const installResult = await Utils.installDependencies(worktreePath, { verbose });
+
+      if (verbose) {
+        console.log(`   ✓ Dependency installation completed (success: ${installResult.success})`);
+      }
+
+      if (!installResult.success) {
+        // Log warning but don't fail - Agent can still work without dependencies in some cases
+        console.warn(`⚠️  Failed to install dependencies: ${installResult.error}`);
+        console.warn(`   Agent may not be able to run tests or build commands`);
+      }
+
+      return installResult;
+    } catch (error) {
+      const message = (error as Error).message;
+      console.warn(`⚠️  Dependency preparation failed: ${message}`);
+      console.warn(`   Agent may not be able to run tests or build commands`);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
    * Auto-detect package managers and install project dependencies in a worktree.
    *
    * @param workingDir - Repository root to inspect
@@ -2280,7 +2297,9 @@ export class Utils {
       {
         name: "bun",
         manifestFile: "package.json",
-        lockFile: "bun.lockb",
+        // Bun switched to a text `bun.lock` in 1.2; older repos still carry
+        // the binary `bun.lockb`.
+        lockFile: ["bun.lockb", "bun.lock"],
         command: "bun",
         args: ["install"],
       },
@@ -2403,7 +2422,8 @@ export class Utils {
       if (!manifestExists) return false;
 
       if (pm.lockFile) {
-        return existsSync(join(workingDir, pm.lockFile));
+        const lockFiles = Array.isArray(pm.lockFile) ? pm.lockFile : [pm.lockFile];
+        return lockFiles.some((lockFile) => existsSync(join(workingDir, lockFile)));
       }
 
       return false;

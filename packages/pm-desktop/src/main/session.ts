@@ -10,7 +10,7 @@
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { listInstalledHarnesses } from "@devintern/agent-harness";
+import { listInstalledHarnesses, parseAgentEffort } from "@devintern/agent-harness";
 import { findConfigDir } from "@devintern/utils";
 import { getTrackerDisplayName } from "@devintern/task-trackers";
 import type { ConfiguredTracker } from "@devintern/task-trackers";
@@ -29,6 +29,7 @@ import { syncProjectFromRemote } from "./git-sync.ts";
 import type { GitExec } from "./git-sync.ts";
 import {
   listConfiguredTrackersForProject,
+  persistActiveEffort,
   persistActiveHarness,
   persistActiveModel,
   persistActiveProject,
@@ -478,11 +479,16 @@ export async function loadProject(
 
     try {
       const config = await loadConfig(projectDir);
+      // parseAgentEffort throws on an invalid AGENT_EFFORT value; the catch
+      // below surfaces it as status.configError so the user sees why agent
+      // runs cannot start.
+      const effort = parseAgentEffort(process.env.AGENT_EFFORT);
       const engine = await createEngine(config, {
         promptsDir: resolvePromptsDir(),
         baseDir: projectDir,
         // loadConfig() has loaded .devintern-pm/.env into process.env.
         model: process.env.AGENT_MODEL?.trim() || undefined,
+        effort,
       });
       current = { projectDir, config, engine };
 
@@ -493,6 +499,7 @@ export async function loadProject(
       status.activeHarnessName = config.agent.harness.name;
       status.harnessDisplayName = config.agent.harness.displayName;
       status.activeModel = process.env.AGENT_MODEL?.trim() || undefined;
+      status.activeEffort = process.env.AGENT_EFFORT?.trim() || undefined;
       status.availableHarnesses = availableHarnessesForStatus(
         config.agent.harness.name,
         config.agent.harness.displayName,
@@ -593,5 +600,12 @@ export async function switchHarness(harnessName: string): Promise<ProjectStatus>
 export async function switchModel(model: string): Promise<ProjectStatus> {
   return switchContext(async (projectDir) => {
     await persistActiveModel(projectDir, model);
+  });
+}
+
+/** Persist `AGENT_EFFORT` and reload the session so the engine picks it up. */
+export async function switchEffort(effort: string): Promise<ProjectStatus> {
+  return switchContext(async (projectDir) => {
+    await persistActiveEffort(projectDir, effort);
   });
 }

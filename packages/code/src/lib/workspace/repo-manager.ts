@@ -7,7 +7,10 @@
  * The pipeline's tree-mutating steps (`createFeatureBranch` does
  * `git reset --hard` + `git clean -fd`) are safe there because the tree is
  * throwaway: removed after a successful run, kept for debugging on failure,
- * and swept by TTL on worker start.
+ * and swept by TTL on worker start. Git hooks are isolated as soon as each
+ * worktree is created so later package installs cannot clobber the shared
+ * `.git/hooks`. Task dependencies are installed by the task subprocess only
+ * after it has checked out its final feature branch.
  *
  * Bare-clone gotcha: `git clone --bare` records `remote.origin.url` but NOT
  * a fetch refspec, so `git fetch origin` would never update
@@ -18,6 +21,7 @@
 
 import { existsSync, mkdirSync, readdirSync, statSync } from "fs";
 import { join } from "path";
+import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
 import type { RepoConfig } from "./config";
@@ -28,6 +32,7 @@ export const BASE_WORKTREE_NAME = "base";
 
 export class RepoManager {
   private workspaceDir: string;
+  private readonly adminTails = new Map<string, Promise<void>>();
 
   constructor(workspaceDir: string = resolveWorkspaceDir()) {
     this.workspaceDir = workspaceDir;
@@ -57,6 +62,10 @@ export class RepoManager {
    * @throws When cloning or configuring the repository fails.
    */
   async ensureBareClone(repo: RepoConfig): Promise<string> {
+    return this.withAdminLock(repo.name, () => this.ensureBareCloneUnlocked(repo));
+  }
+
+  private async ensureBareCloneUnlocked(repo: RepoConfig): Promise<string> {
     const clonePath = this.bareClonePath(repo.name);
     if (existsSync(clonePath)) {
       const currentRemote = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
@@ -115,7 +124,7 @@ export class RepoManager {
       );
     }
 
-    await this.fetch(repo.name);
+    await this.fetchUnlocked(repo.name);
 
     // origin/HEAD backs Utils.getMainBranchName; ignore failure (repos with
     // an explicit default_branch never consult it).
@@ -130,6 +139,10 @@ export class RepoManager {
    * @throws When the fetch fails (network, auth, missing clone).
    */
   async fetch(repoName: string): Promise<void> {
+    await this.withAdminLock(repoName, () => this.fetchUnlocked(repoName));
+  }
+
+  private async fetchUnlocked(repoName: string): Promise<void> {
     const result = await Utils.executeGitCommand(["fetch", "--prune", "origin"], {
       cwd: this.bareClonePath(repoName),
     });
@@ -154,31 +167,44 @@ export class RepoManager {
    * Ensure the persistent base worktree (default branch) exists.
    *
    * Review and mention runs need a normal checkout to operate from; task
-   * runs use disposable worktrees instead.
+   * runs use disposable worktrees instead. Hooks are isolated on first
+   * creation; task subprocesses install dependencies after preparing their
+   * final branch, including every reuse by an automation.
    */
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
-    const path = this.baseWorktreePath(repo.name);
-    if (existsSync(path)) {
+    return this.withAdminLock(repo.name, async () => {
+      const path = this.baseWorktreePath(repo.name);
+      if (existsSync(path)) {
+        return path;
+      }
+      const branch = await this.resolveDefaultBranch(repo);
+      await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
       return path;
-    }
-    const branch = await this.resolveDefaultBranch(repo);
-    await this.addWorktree(repo.name, path, `origin/${branch}`);
-    return path;
+    });
   }
 
   /**
    * Create a disposable, detached worktree for one task run.
+   *
+   * Git hooks are isolated before the worktree is returned. The task
+   * subprocess installs dependencies after preparing its final branch, when
+   * the workspace's layered environment is active.
    *
    * @param repo - Workspace repo the task routed to
    * @param taskKey - Task key; used in the directory name for debuggability
    * @returns Absolute worktree path (unique per call).
    */
   async createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string> {
-    const branch = await this.resolveDefaultBranch(repo);
-    const safeKey = taskKey.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
-    const path = join(this.repoWorktreesDir(repo.name), `${safeKey}-${Date.now()}`);
-    await this.addWorktree(repo.name, path, `origin/${branch}`);
-    return path;
+    return this.withAdminLock(repo.name, async () => {
+      const branch = await this.resolveDefaultBranch(repo);
+      const safeKey = taskKey.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+      const path = join(
+        this.repoWorktreesDir(repo.name),
+        `${safeKey}-${Date.now()}-${randomUUID()}`,
+      );
+      await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
+      return path;
+    });
   }
 
   /**
@@ -188,6 +214,12 @@ export class RepoManager {
    * them later.
    */
   async removeTaskWorktree(repoName: string, worktreePath: string): Promise<void> {
+    await this.withAdminLock(repoName, () =>
+      this.removeTaskWorktreeUnlocked(repoName, worktreePath),
+    );
+  }
+
+  private async removeTaskWorktreeUnlocked(repoName: string, worktreePath: string): Promise<void> {
     const cwd = this.bareClonePath(repoName);
     await Utils.executeGitCommand(["worktree", "remove", "--force", worktreePath], { cwd });
     await Utils.executeGitCommand(["worktree", "prune"], { cwd });
@@ -227,7 +259,14 @@ export class RepoManager {
     return removed;
   }
 
-  private async addWorktree(repoName: string, path: string, ref: string): Promise<void> {
+  /**
+   * Add a worktree at `path` and isolate its git hooks.
+   *
+   * This must happen before the task subprocess installs packages: postinstall
+   * tools such as lefthook would otherwise rewrite the shared bare-clone
+   * `.git/hooks`. Isolation is best-effort, matching review worktrees.
+   */
+  private async addWorktreeUnlocked(repoName: string, path: string, ref: string): Promise<void> {
     const parent = this.repoWorktreesDir(repoName);
     if (!existsSync(parent)) {
       mkdirSync(parent, { recursive: true });
@@ -237,6 +276,27 @@ export class RepoManager {
     });
     if (!result.success) {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
+    }
+    await Utils.isolateWorktreeHooks(path);
+  }
+
+  /** Serialize compound Git administration without nesting public locks. */
+  private async withAdminLock<T>(repoName: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.adminTails.get(repoName) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => turn);
+    this.adminTails.set(repoName, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.adminTails.get(repoName) === tail) {
+        this.adminTails.delete(repoName);
+      }
     }
   }
 }

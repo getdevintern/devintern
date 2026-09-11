@@ -94,6 +94,7 @@ const api: PmDesktopApi = {
   switchProjectKey: (projectKey) => ipcRenderer.invoke(IPC_CHANNELS.switchProjectKey, projectKey),
   switchHarness: (harnessName) => ipcRenderer.invoke(IPC_CHANNELS.switchHarness, harnessName),
   switchModel: (model) => ipcRenderer.invoke(IPC_CHANNELS.switchModel, model),
+  switchEffort: (effort) => ipcRenderer.invoke(IPC_CHANNELS.switchEffort, effort),
   updateProjectFromRemote: () => ipcRenderer.invoke(IPC_CHANNELS.updateProjectFromRemote),
   onAgentChunk: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: AgentChunkEvent) =>

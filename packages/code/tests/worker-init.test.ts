@@ -1,10 +1,19 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
+import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
 import {
   configureWorkerOperatingPolicy,
   generateWebhookSecret,
@@ -114,9 +123,11 @@ describe("runWorkerInit", () => {
   let tempDir: string;
   let workspaceDir: string;
   let logs: string[];
+  let telemetryDir: string;
   const savedTracker = process.env.TASK_TRACKER;
   const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
   const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
+  const savedConfigDir = process.env[ANALYTICS_CONFIG_DIR_ENV];
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-worker-init-"));
@@ -135,6 +146,11 @@ describe("runWorkerInit", () => {
   });
 
   afterEach(() => {
+    setAnalyticsCaptureForTests(undefined);
+    delete process.env.POSTHOG_API_KEY;
+    if (savedConfigDir === undefined) delete process.env[ANALYTICS_CONFIG_DIR_ENV];
+    else process.env[ANALYTICS_CONFIG_DIR_ENV] = savedConfigDir;
+    if (telemetryDir) rmSync(telemetryDir, { recursive: true, force: true });
     if (savedTracker === undefined) delete process.env.TASK_TRACKER;
     else process.env.TASK_TRACKER = savedTracker;
     if (savedWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
@@ -155,8 +171,22 @@ describe("runWorkerInit", () => {
       configureOperatingPolicy: async () => {},
       // Detection is real otherwise: PRManager inspects the *runner's* cwd.
       detectGithubRepo: async () => null,
+      // Hermetic service step: detection stays in the temp home and never
+      // touches the runner's real systemd/launchd session.
+      platform: "linux" as NodeJS.Platform,
+      homedir: tempDir,
       ...overrides,
     };
+  }
+
+  /** Pin analytics to a throwaway config dir and record captured events. */
+  function stubAnalytics(): Array<{ event?: string; properties?: Record<string, unknown> }> {
+    telemetryDir = path.join(tempDir, "telemetry");
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[ANALYTICS_CONFIG_DIR_ENV] = telemetryDir;
+    const recorded: Array<{ event?: string; properties?: Record<string, unknown> }> = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
+    return recorded;
   }
 
   test("fails when tracker setup does not finish", async () => {
@@ -293,6 +323,49 @@ describe("runWorkerInit", () => {
     expect(logs.join("\n")).toContain("does not support worker polling");
   });
 
+  test("emits started and failed events when tracker setup does not finish", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => null }));
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "tracker_setup_incomplete" });
+  });
+
+  test("emits worker_init_failed with tracker_not_pollable for an unknown tracker", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => "not-a-tracker" }));
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "tracker_not_pollable" });
+  });
+
+  test("emits worker_init_failed with workspace_error when the workspace write fails", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(
+      deps([], { bootstrapWorkspace: async () => ({ error: "cannot write workspace" }) }),
+    );
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "workspace_error" });
+  });
+
+  test("emits started and completed events with per-step outcomes", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps(["status=todo"]));
+    expect(result.ok).toBe(true);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_completed"]);
+    expect(recorded[1]?.properties).toMatchObject({
+      tracker: "markdown",
+      relay_connect: "skipped",
+      service_install: "declined",
+      github_app: "unavailable",
+    });
+  });
+
   test("connects signed-in users and stores relay state in the workspace", async () => {
     const calls: Array<{ workspaceDir: string; trackerType: string }> = [];
     const result = await runWorkerInit(
@@ -306,6 +379,47 @@ describe("runWorkerInit", () => {
     );
     expect(result.ok).toBe(true);
     expect(calls).toEqual([{ workspaceDir, trackerType: "markdown" }]);
+    expect(logs.join("\n")).toContain("Relay pairing stored");
+  });
+
+  test("default relay onboarding connects GitHub and GitLab workspace repositories", async () => {
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      `[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "github-app"
+remote = "git@github.com:acme/app.git"
+
+[[repos]]
+name = "gitlab-app"
+remote = "git@gitlab.com:acme/platform.git"
+[repos.env]
+GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
+`,
+    );
+    const calls: Array<{ target: string; repo?: string; projectPath?: string }> = [];
+
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "", "n"], {
+        getUser: async () => ({ id: "user-1", email: "dev@example.com" }),
+        runRelayConnect: async (target, connectDeps) => {
+          calls.push({
+            target,
+            repo: connectDeps.repo,
+            projectPath: connectDeps.gitlabProject?.projectPath,
+          });
+          return 0;
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([
+      { target: "github", repo: "acme/app", projectPath: undefined },
+      { target: "gitlab", repo: undefined, projectPath: "acme/platform" },
+    ]);
     expect(logs.join("\n")).toContain("Relay pairing stored");
   });
 
@@ -407,25 +521,32 @@ describe("runWorkerInit", () => {
     });
   });
 
-  test("writes a Linux user service definition", async () => {
+  test("declining writes the Linux definition into the workspace with manual steps", async () => {
     const files = new Map<string, string>();
     const result = await runWorkerInit(
-      deps(["status=todo", "n", "n", ""], {
+      deps(["status=todo", "n", "n", "n"], {
         platform: "linux",
         execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/bun/bin/bun",
+        environmentPath: "/opt/bun/bin:/usr/bin",
         writeFile: (file, content) => files.set(file, content),
       }),
     );
     expect(result.ok).toBe(true);
     const unit = files.get(path.join(workspaceDir, "devintern-worker.service"));
     expect(unit).toContain("WorkingDirectory=" + workspaceDir);
-    expect(unit).toContain("ExecStart=/usr/local/bin/devintern worker");
+    expect(unit).toContain("ExecStart=/opt/bun/bin/bun /usr/local/bin/devintern worker");
+    expect(unit).toContain('Environment="PATH=/opt/bun/bin:/usr/bin"');
+    expect(unit).toContain("WantedBy=default.target");
+    const all = logs.join("\n");
+    expect(all).toContain("systemctl --user enable --now devintern-worker");
+    expect(all).toContain("loginctl enable-linger");
   });
 
-  test("writes a macOS launchd agent", async () => {
+  test("declining writes the macOS definition into the workspace with manual steps", async () => {
     const files = new Map<string, string>();
     const result = await runWorkerInit(
-      deps(["status=todo", "n", "n", ""], {
+      deps(["status=todo", "n", "n", "n"], {
         platform: "darwin",
         execPath: "/usr/local/bin/devintern",
         writeFile: (file, content) => files.set(file, content),
@@ -435,6 +556,200 @@ describe("runWorkerInit", () => {
     const plist = files.get(path.join(workspaceDir, "com.devintern.worker.plist"));
     expect(plist).toContain("<string>/usr/local/bin/devintern</string>");
     expect(plist).toContain(`<string>${workspaceDir}</string>`);
+    expect(logs.join("\n")).toContain("launchctl bootstrap gui/$(id -u)");
+  });
+
+  test("unknown platforms keep terminal guidance and write nothing", async () => {
+    const result = await runWorkerInit(deps(["status=todo", "n"], { platform: "win32" }));
+    expect(result.ok).toBe(true);
+    expect(logs.join("\n")).toContain("No generated service definition for win32");
+  });
+
+  test("--no-service skips the offer without prompting or writing files", async () => {
+    const run = async (command: string) => {
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const result = await runWorkerInit(
+      deps(["status=todo", "n"], { platform: "linux", noService: true, run }),
+    );
+    expect(result.ok).toBe(true);
+    expect(logs.join("\n")).toContain("--no-service");
+    expect(logs.join("\n")).not.toContain("Install and start the background service");
+  });
+
+  test("accepting installs and starts the systemd user unit on Linux", async () => {
+    const commands: string[][] = [];
+    let enabled = false;
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "n", ""], {
+        platform: "linux",
+        execPath: "/usr/local/bin/devintern",
+        runtimePath: "/opt/bun/bin/bun",
+        environmentPath: "/opt/bun/bin:/usr/bin",
+        homedir: tempDir,
+        run: async (command, args) => {
+          commands.push([command, ...args]);
+          if (args.includes("is-active")) {
+            return { status: enabled ? 0 : 3, stdout: enabled ? "active" : "inactive", stderr: "" };
+          }
+          if (args.includes("is-enabled")) {
+            return {
+              status: enabled ? 0 : 1,
+              stdout: enabled ? "enabled" : "disabled",
+              stderr: "",
+            };
+          }
+          if (args.includes("enable")) {
+            enabled = true;
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const unitPath = path.join(tempDir, ".config", "systemd", "user", "devintern-worker.service");
+    const unit = readFileSync(unitPath, "utf8");
+    expect(unit).toContain(`WorkingDirectory=${workspaceDir}`);
+    expect(unit).toContain("ExecStart=/opt/bun/bin/bun /usr/local/bin/devintern worker");
+    expect(unit).not.toContain("StandardOutput=");
+    expect(commands).toContainEqual(["systemctl", "--user", "daemon-reload"]);
+    expect(commands).toContainEqual(["systemctl", "--user", "enable", "--now", "devintern-worker"]);
+    const all = logs.join("\n");
+    expect(all).toContain("devintern-worker service installed and running");
+    expect(all).toContain("http://localhost:4400");
+    expect(commands).toContainEqual(["loginctl", "enable-linger"]);
+    expect(all).toContain("User lingering was enabled");
+    expect(all).toContain("already running as your user service");
+  });
+
+  test("an automatic install failure cleans up and falls back to manual steps", async () => {
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "n", ""], {
+        platform: "linux",
+        execPath: "/usr/local/bin/devintern",
+        homedir: tempDir,
+        run: async (_command, args) =>
+          args.includes("daemon-reload")
+            ? {
+                status: 1,
+                stdout: "",
+                stderr: "System has not been booted with systemd as init system (PID 1).",
+              }
+            : { status: 3, stdout: "inactive", stderr: "" },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const unitPath = path.join(tempDir, ".config", "systemd", "user", "devintern-worker.service");
+    expect(existsSync(unitPath)).toBe(false);
+    const all = logs.join("\n");
+    expect(all).toContain("System has not been booted with systemd");
+    expect(all).toContain("Nothing was left half-installed");
+    expect(all).toContain("systemctl --user enable --now devintern-worker");
+  });
+
+  test("an installed service is offered an update and restarted instead", async () => {
+    const unitDir = path.join(tempDir, ".config", "systemd", "user");
+    mkdirSync(unitDir, { recursive: true });
+    writeFileSync(
+      path.join(unitDir, "devintern-worker.service"),
+      "# Managed by devintern worker init\n[Service]\nWorkingDirectory=/old\n",
+      "utf8",
+    );
+    const commands: string[][] = [];
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "n", ""], {
+        platform: "linux",
+        execPath: "/usr/local/bin/devintern",
+        homedir: tempDir,
+        run: async (command, args) => {
+          commands.push([command, ...args]);
+          if (args.includes("is-enabled")) {
+            return { status: 0, stdout: "enabled", stderr: "" };
+          }
+          return { status: 0, stdout: "active", stderr: "" };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const unit = readFileSync(path.join(unitDir, "devintern-worker.service"), "utf8");
+    expect(unit).toContain(`WorkingDirectory=${workspaceDir}`);
+    expect(commands).toContainEqual(["systemctl", "--user", "restart", "devintern-worker"]);
+    expect(commands).not.toContainEqual([
+      "systemctl",
+      "--user",
+      "enable",
+      "--now",
+      "devintern-worker",
+    ]);
+    const all = logs.join("\n");
+    expect(all).toContain("devintern-worker service updated and restarted");
+    expect(all).not.toContain("installed and running");
+  });
+
+  test("a custom installed service is preserved and gets manual comparison steps", async () => {
+    const unitDir = path.join(tempDir, ".config", "systemd", "user");
+    mkdirSync(unitDir, { recursive: true });
+    writeFileSync(
+      path.join(unitDir, "devintern-worker.service"),
+      "[Service]\nWorkingDirectory=/old\n",
+      "utf8",
+    );
+    const commands: string[][] = [];
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "n"], {
+        platform: "linux",
+        execPath: "/usr/local/bin/devintern",
+        homedir: tempDir,
+        run: async (command, args) => {
+          commands.push([command, ...args]);
+          return { status: 0, stdout: "active", stderr: "" };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    // Only the read-only detection ran; no install or restart commands fired.
+    expect(commands.every((c) => c.includes("is-active"))).toBe(true);
+    expect(readFileSync(path.join(unitDir, "devintern-worker.service"), "utf8")).toContain(
+      "WorkingDirectory=/old",
+    );
+    expect(logs.join("\n")).toContain("custom settings and will not be overwritten");
+    expect(logs.join("\n")).toContain("already running as your user service");
+    expect(logs.join("\n")).toContain("systemctl --user enable --now devintern-worker");
+  });
+
+  test("accepting installs and bootstraps the launchd agent on macOS", async () => {
+    const commands: string[][] = [];
+    const plistPath = path.join(tempDir, "Library", "LaunchAgents", "com.devintern.worker.plist");
+    const result = await runWorkerInit(
+      deps(["status=todo", "n", "n", ""], {
+        platform: "darwin",
+        execPath: "/usr/local/bin/devintern",
+        homedir: tempDir,
+        uid: 501,
+        run: async (command, args) => {
+          commands.push([command, ...args]);
+          // launchd reports the label as absent until the agent file exists.
+          if (args[0] === "print" && !existsSync(plistPath)) {
+            return { status: 1, stdout: "", stderr: "Could not find service" };
+          }
+          return {
+            status: 0,
+            stdout: args[0] === "print" ? "state = running" : "",
+            stderr: "",
+          };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const plist = readFileSync(plistPath, "utf8");
+    expect(plist).toContain("<string>/usr/local/bin/devintern</string>");
+    expect(plist).toContain(`<string>${workspaceDir}</string>`);
+    expect(commands).toEqual([
+      ["launchctl", "print", "gui/501/com.devintern.worker"],
+      ["launchctl", "bootstrap", "gui/501", plistPath],
+      ["launchctl", "print", "gui/501/com.devintern.worker"],
+    ]);
+    expect(logs.join("\n")).toContain("devintern-worker service installed and running");
   });
 
   test("finds tracker config from a repository subdirectory", async () => {

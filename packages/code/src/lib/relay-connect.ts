@@ -11,10 +11,13 @@
  */
 
 import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devintern/auth";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import { saveGitHubAppRecord } from "./github-app-setup";
+import { GitLabWebhookAdminClient } from "./gitlab-webhook-admin";
+import type { GitLabProjectHook, GitLabWebhookProject } from "./gitlab-webhook-admin";
+import { resolveGitLabCodeHostConfig } from "./pr-client";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -28,7 +31,7 @@ export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 export const RELAY_BOT_LOGIN = "devintern-ai";
 
 export interface RelayRegistration {
-  kind: "repo" | "source";
+  kind: "repo" | "source" | "code-host";
   key: string;
   /** Stable workspace team slug for team-scoped tracker registrations. */
   team?: string;
@@ -36,12 +39,30 @@ export interface RelayRegistration {
   lastEventAt: number | null;
   /** Envelopes currently buffered for this registration, when reported by status. */
   buffered?: number;
+  provider?: string;
+  instanceUrl?: string;
+  projectId?: string;
+  projectPath?: string;
+  registrationId?: string;
+  status?: string;
+  hookId?: number;
+  activatedAt?: number;
 }
 
 export interface VerifiedGitHubRelayRepository {
   repo: string;
   installationId: number;
   repositoryId: number;
+}
+
+/** Safe, durable identity for one relay-managed GitLab project hook. */
+export interface VerifiedGitLabRelayRepository {
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  hookId: number;
+  registrationId: string;
+  connectedAt: string;
 }
 
 export interface RelayConnectState {
@@ -62,6 +83,8 @@ export interface RelayConnectState {
   };
   /** All verified GitHub repositories paired for this workspace. */
   githubRepositories?: VerifiedGitHubRelayRepository[];
+  /** Relay-managed GitLab hooks. Webhook signing material is never persisted here. */
+  gitlabRepositories?: VerifiedGitLabRelayRepository[];
 }
 
 function isVerifiedGitHubRepository(
@@ -125,6 +148,39 @@ export function hasGitHubRelayRouting(state: RelayConnectState | null, repo?: st
   );
 }
 
+/** Return an exact active GitLab association for an instance and immutable project id. */
+export function gitLabRelayRepository(
+  state: RelayConnectState | null,
+  instanceUrl: string,
+  projectId: string,
+): VerifiedGitLabRelayRepository | undefined {
+  if (!state?.relayToken) return undefined;
+  const normalizedInstance = instanceUrl.replace(/\/+$/, "").toLowerCase();
+  return state.gitlabRepositories?.find(
+    (repository) =>
+      repository.instanceUrl.replace(/\/+$/, "").toLowerCase() === normalizedInstance &&
+      repository.projectId === projectId,
+  );
+}
+
+/** Whether a GitLab project path has a completed local relay registration. */
+export function hasGitLabRelayRegistration(
+  state: RelayConnectState | null,
+  instanceUrl: string,
+  projectPath: string,
+): boolean {
+  if (!state?.relayToken) return false;
+  const instance = instanceUrl.replace(/\/+$/, "").toLowerCase();
+  const path = projectPath.toLowerCase();
+  return Boolean(
+    state.gitlabRepositories?.some(
+      (repository) =>
+        repository.instanceUrl.replace(/\/+$/, "").toLowerCase() === instance &&
+        repository.projectPath.toLowerCase() === path,
+    ),
+  );
+}
+
 /** Resolve the relay URL: env override, else the hosted default. */
 export function resolveRelayUrl(): string {
   return (process.env.WORKER_RELAY_URL || DEFAULT_RELAY_URL).replace(/\/+$/, "");
@@ -160,7 +216,8 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
 export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
   const path = relayStatePath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(state, null, 2) + "\n", "utf8");
+  writeFileSync(path, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 interface ConnectResponse {
@@ -187,6 +244,7 @@ export interface RelayConnectDeps {
 
 export type RelayConnectTarget =
   | "github"
+  | "gitlab"
   | "linear"
   | "asana"
   | "trello"
@@ -200,12 +258,28 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   repo?: string;
   /** Stable workspace team slug for tracker registration. */
   team?: string;
+  /** GitLab project selected from workspace.toml by the fleet orchestrator. */
+  gitlabProject?: { instanceUrl: string; projectPath: string };
+  /** Remove the exact remembered GitLab hook and relay route instead of connecting it. */
+  disconnectGitLab?: boolean;
+  /** Injectable local project-hook administrator for tests. */
+  gitlabAdmin?: {
+    resolveMaintainedProject(projectPath: string): Promise<GitLabWebhookProject>;
+    upsertRelayHook(
+      projectId: number,
+      config: { ingestUrl: string; legacySecret: string; signingToken?: string },
+      existingHookId?: number,
+    ): Promise<{ hook: GitLabProjectHook; standardSigning: boolean }>;
+    testHook(projectId: number, hookId: number): Promise<void>;
+    deleteHook(projectId: number, hookId: number): Promise<boolean>;
+  };
   /** Explicit tracker credentials for a selected workspace team. */
   env?: Record<string, string | undefined>;
 }
 
 const RELAY_CONNECT_TARGETS = new Set<RelayConnectTarget>([
   "github",
+  "gitlab",
   "linear",
   "asana",
   "trello",
@@ -301,6 +375,7 @@ export async function ensureRelayToken(
     relayToken: minted.relayToken,
     github: sameCustomer ? existing.github : undefined,
     githubRepositories: sameCustomer ? existing.githubRepositories : undefined,
+    gitlabRepositories: sameCustomer ? existing.gitlabRepositories : undefined,
   };
   saveRelayState(state, workingDir);
   return { relayToken: minted.relayToken, state };
@@ -340,9 +415,174 @@ function mergeConnectState(
     relayToken: relayToken ?? previousForCustomer?.relayToken,
     github: verifiedRepository ?? previousForCustomer?.github,
     githubRepositories,
+    gitlabRepositories: previousForCustomer?.gitlabRepositories,
   };
   saveRelayState(state, workingDir);
   return state;
+}
+
+export interface GitLabRelayRegistrationBegin {
+  registrationId: string;
+  ingestUrl: string;
+  signingToken: string;
+  legacySecret: string;
+  expiresAt: number;
+}
+
+/** Create a short-lived GitLab route. Its signing material is returned only to the caller. */
+export async function beginGitLabRelayRegistration(options: {
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<GitLabRelayRegistrationBegin> {
+  const deps: RelayConnectDeps = options;
+  await ensureRelayToken(options.accessToken, deps);
+  const response = await connectRequest(
+    options.accessToken,
+    {
+      action: "begin-gitlab-registration",
+      instanceUrl: options.instanceUrl,
+      projectId: options.projectId,
+      projectPath: options.projectPath,
+    },
+    deps,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as GitLabRelayRegistrationBegin;
+  if (
+    !data.registrationId ||
+    !data.ingestUrl ||
+    !data.signingToken ||
+    !data.legacySecret ||
+    !Number.isFinite(data.expiresAt)
+  ) {
+    throw new Error("relay returned an invalid GitLab registration");
+  }
+  return data;
+}
+
+/** Activate a provisioned GitLab route and persist only its non-secret identity. */
+export async function completeGitLabRelayRegistration(options: {
+  registrationId: string;
+  hookId: number;
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<RelayConnectState> {
+  const workingDir = options.workingDir ?? process.cwd();
+  const previous = loadRelayState(workingDir);
+  if (!previous?.relayToken) throw new Error("relay token is missing; begin registration again");
+  const response = await connectRequest(
+    options.accessToken,
+    {
+      action: "complete-gitlab-registration",
+      registrationId: options.registrationId,
+      hookId: options.hookId,
+    },
+    options,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as {
+    registration?: {
+      provider?: string;
+      instanceUrl?: string;
+      projectId?: string;
+      projectPath?: string;
+      registrationId?: string;
+      status?: string;
+      hookId?: number;
+      activatedAt?: number;
+    };
+  };
+  if (!data.registration || data.registration.registrationId !== options.registrationId) {
+    throw new Error("relay returned an invalid completed GitLab registration");
+  }
+  const repository: VerifiedGitLabRelayRepository = {
+    instanceUrl: options.instanceUrl.replace(/\/+$/, ""),
+    projectId: options.projectId,
+    projectPath: options.projectPath,
+    hookId: options.hookId,
+    registrationId: options.registrationId,
+    connectedAt: new Date().toISOString(),
+  };
+  const gitlabRepositories = [...(previous.gitlabRepositories ?? [])];
+  const existingIndex = gitlabRepositories.findIndex(
+    (item) =>
+      item.instanceUrl.toLowerCase() === repository.instanceUrl.toLowerCase() &&
+      item.projectId === repository.projectId,
+  );
+  if (existingIndex === -1) gitlabRepositories.push(repository);
+  else gitlabRepositories[existingIndex] = repository;
+  const registrations = previous.registrations.filter(
+    (registration) =>
+      !(
+        registration.kind === "code-host" &&
+        registration.provider === "gitlab" &&
+        registration.instanceUrl?.toLowerCase() === repository.instanceUrl.toLowerCase() &&
+        registration.projectId === repository.projectId
+      ),
+  );
+  registrations.push({
+    kind: "code-host",
+    key: `gitlab:${repository.instanceUrl}:${repository.projectId}`,
+    createdAt: data.registration.activatedAt ?? Date.now(),
+    lastEventAt: null,
+    ...data.registration,
+  });
+  const state = { ...previous, registrations, gitlabRepositories };
+  saveRelayState(state, workingDir);
+  return state;
+}
+
+/** Remove a GitLab route from the relay and local safe state. */
+export async function removeGitLabRelayRegistration(options: {
+  registrationId: string;
+  accessToken: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const response = await connectRequest(
+    options.accessToken,
+    { action: "remove-gitlab-registration", registrationId: options.registrationId },
+    options,
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json()) as { removed?: boolean };
+  const workingDir = options.workingDir ?? process.cwd();
+  const previous = loadRelayState(workingDir);
+  if (previous) {
+    saveRelayState(
+      {
+        ...previous,
+        registrations: previous.registrations.filter(
+          (registration) => registration.registrationId !== options.registrationId,
+        ),
+        gitlabRepositories: previous.gitlabRepositories?.filter(
+          (repository) => repository.registrationId !== options.registrationId,
+        ),
+      },
+      workingDir,
+    );
+  }
+  return data.removed === true;
 }
 
 /**
@@ -495,7 +735,7 @@ export async function connectRelayTarget(
   if (!RELAY_CONNECT_TARGETS.has(target as RelayConnectTarget)) {
     console.error(
       `❌ Unsupported connect target '${target}'. ` +
-        "Available: github, linear, asana, trello, azure-devops, jira, status.",
+        "Available: github, gitlab, linear, asana, trello, azure-devops, jira, status.",
     );
     return 1;
   }
@@ -540,6 +780,86 @@ export async function connectRelayTarget(
       return 0;
     } catch (error) {
       console.error(`❌ Relay status failed: ${(error as Error).message}`);
+      return 1;
+    }
+  }
+
+  if (target === "gitlab") {
+    const identity = deps.gitlabProject;
+    if (!identity) {
+      console.error("❌ GitLab relay connection requires a workspace repository.");
+      return 1;
+    }
+    const codeHost = resolveGitLabCodeHostConfig(identity.instanceUrl, env);
+    const adminToken = env.GITLAB_WEBHOOK_ADMIN_TOKEN || (codeHost.ok ? codeHost.token : undefined);
+    if (!adminToken) {
+      console.error(
+        "❌ GITLAB_WEBHOOK_ADMIN_TOKEN is required to install project hooks; polling remains enabled.",
+      );
+      return 1;
+    }
+    try {
+      const admin =
+        deps.gitlabAdmin ??
+        new GitLabWebhookAdminClient(adminToken, identity.instanceUrl, {
+          caFile: codeHost.ok ? codeHost.caFile : env.GITLAB_CODE_HOST_CA_FILE,
+          proxy: codeHost.ok ? codeHost.proxy : env.GITLAB_CODE_HOST_PROXY,
+        });
+      const project = await admin.resolveMaintainedProject(identity.projectPath);
+      const projectId = String(project.id);
+      const previous = gitLabRelayRepository(
+        loadRelayState(workingDir),
+        identity.instanceUrl,
+        projectId,
+      );
+      if (deps.disconnectGitLab) {
+        if (!previous) {
+          console.log(
+            `✅ ${project.path} has no remembered GitLab relay hook; polling remains on.`,
+          );
+          return 0;
+        }
+        await admin.deleteHook(project.id, previous.hookId);
+        await removeGitLabRelayRegistration({
+          registrationId: previous.registrationId,
+          ...connectOpts,
+        });
+        console.log(`✅ Disconnected ${project.path} from the relay; polling remains enabled.`);
+        return 0;
+      }
+      const begun = await beginGitLabRelayRegistration({
+        instanceUrl: identity.instanceUrl,
+        projectId,
+        projectPath: project.path,
+        ...connectOpts,
+      });
+      const { hook, standardSigning } = await admin.upsertRelayHook(
+        project.id,
+        {
+          ingestUrl: begun.ingestUrl,
+          signingToken: begun.signingToken,
+          legacySecret: begun.legacySecret,
+        },
+        previous?.hookId,
+      );
+      await admin.testHook(project.id, hook.id);
+      const state = await completeGitLabRelayRegistration({
+        registrationId: begun.registrationId,
+        hookId: hook.id,
+        instanceUrl: identity.instanceUrl,
+        projectId,
+        projectPath: project.path,
+        ...connectOpts,
+      });
+      console.log(`✅ Connected ${project.path} to the relay (${state.relayUrl})`);
+      console.log(
+        `   GitLab hook ${hook.id} verified with ${standardSigning ? "Standard Webhook signing" : "legacy secret-token authentication"}.`,
+      );
+      console.log("   Polling remains enabled as a fallback.");
+      return 0;
+    } catch (error) {
+      console.error(`❌ GitLab relay connect failed: ${(error as Error).message}`);
+      console.error("   Polling remains enabled; fix access or connectivity and retry.");
       return 1;
     }
   }

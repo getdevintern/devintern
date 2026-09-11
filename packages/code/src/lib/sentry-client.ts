@@ -102,10 +102,12 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       const id = String(raw.id);
       const shortId = String(raw.shortId ?? raw.id);
       const count = String(raw.count ?? "0");
+      const rawProject = raw.project as { slug?: unknown } | undefined;
       return {
         externalId: `issue:${id}`,
         displayId: shortId,
         occurrenceCount: Number(count),
+        projectSlug: typeof rawProject?.slug === "string" ? rawProject.slug : this.project,
         id,
         shortId,
         title: String(raw.title ?? ""),

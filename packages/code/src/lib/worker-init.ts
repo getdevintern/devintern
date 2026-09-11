@@ -4,8 +4,10 @@
  * Writes a workspace (first import is N=1) instead of `WORKER_TASK_QUERY` in
  * `.env`, dry-runs the ready-tasks query, checks any automation license,
  * offers Sentry auto-fixes, relay pairing plus the central DevIntern App
- * (@mention events), and can emit a native service definition. Polling is
- * always on; direct webhooks run as a separate advanced service.
+ * (@mention events), and can install and launch a native user service
+ * (systemd on Linux, launchd on macOS) — or just write its definition and
+ * print the manual steps. Polling is always on; direct webhooks run as a
+ * separate advanced service.
  *
  * Prompt-loop mechanics come from `@devintern/task-trackers` (shared with
  * `devintern init`); everything effectful is injectable for tests.
@@ -25,6 +27,12 @@ import {
 import { defaultProbe, parseEnvContent } from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
+import {
+  trackWorkerInitCompleted,
+  trackWorkerInitFailed,
+  trackWorkerInitStarted,
+} from "./analytics";
+import type { RelayConnectOutcome, ServiceInstallOutcome } from "./analytics";
 import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,
@@ -49,8 +57,26 @@ import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { gitHubSlugFromRemote } from "./workspace/env";
 import { workspaceConfigPath } from "./workspace/paths";
+import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
+import {
+  detectWorkerService,
+  installWorkerService,
+  LAUNCHD_PLIST_NAME,
+  manualServiceInstructions,
+  renderLaunchdPlist,
+  renderSystemdUnit,
+  SYSTEMD_UNIT_NAME,
+} from "./worker-service";
+import type {
+  RunCommandFn,
+  ServiceInstallResult,
+  ServiceState,
+  WorkerServiceDeps,
+} from "./worker-service";
+
+export { renderLaunchdPlist, renderSystemdUnit } from "./worker-service";
 
 export type PromptFn = (question: string) => Promise<string>;
 export type LogFn = (message: string) => void;
@@ -101,89 +127,6 @@ export function upsertEnvVars(content: string, vars: Record<string, string>): st
   return updated.join("\n");
 }
 
-/**
- * Render a systemd service unit for the worker.
- *
- * No stdout/stderr redirection here on purpose: the daemon tees its own
- * console output into the dashboard's capture files (see `worker-capture.ts`),
- * so custom units and shell wrappers need no redirect either — adding one
- * would hide the output from the dashboard.
- *
- * @param options - Binary path, working directory, and whether to run the direct webhook service
- */
-export function renderSystemdUnit(options: {
-  execPath: string;
-  projectDir: string;
-  listen?: boolean;
-}): string {
-  const command = options.listen ? "webhook serve" : "worker";
-  const quote = (value: string) =>
-    /^[A-Za-z0-9_./:-]+$/.test(value)
-      ? value.replace(/%/g, "%%")
-      : `"${value.replace(/%/g, "%%").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  return `[Unit]
-Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${quote(options.projectDir)}
-ExecStart=${quote(options.execPath)} ${command}
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-`;
-}
-
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-/**
- * Render a per-user macOS launchd agent for the workspace worker.
- *
- * Like the systemd unit, this does not redirect stdout/stderr: the worker
- * self-captures into the dashboard's log files (see `worker-capture.ts`).
- */
-export function renderLaunchdPlist(options: {
-  execPath: string;
-  workingDir: string;
-  label?: string;
-}): string {
-  const label = options.label ?? "com.devintern.worker";
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${escapeXml(label)}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${escapeXml(options.execPath)}</string>
-    <string>worker</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${escapeXml(options.workingDir)}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-</dict>
-</plist>
-`;
-}
-
 /** Generate a webhook signing secret (hex, 32 bytes). */
 export function generateWebhookSecret(): string {
   return randomBytes(32).toString("hex");
@@ -219,6 +162,8 @@ export interface WorkerInitDeps {
     trackerType: string;
     log: LogFn;
   }) => Promise<boolean>;
+  /** Override individual relay target setup while exercising default init orchestration. */
+  runRelayConnect?: typeof connectRelayTarget;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
   /** Validate Sentry credentials and project access; returns the current issue count. */
@@ -233,8 +178,30 @@ export interface WorkerInitDeps {
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
   execPath?: string;
+  /** Runtime executable used to launch the worker entrypoint (tests). */
+  runtimePath?: string;
+  /** PATH inherited by the background service (tests). */
+  environmentPath?: string;
   /** File writer override for tests. */
   writeFile?: (path: string, content: string) => void;
+  /** Skip the background-service offer entirely (CLI `--no-service`). */
+  noService?: boolean;
+  /** Home directory for the user-level service paths (tests). */
+  homedir?: string;
+  /** POSIX uid used by `launchctl gui/<uid>` (tests). */
+  uid?: number;
+  /** Command runner used by the service install (tests). */
+  run?: RunCommandFn;
+  /** Override installed/running detection for the service step (tests). */
+  detectService?: () => Promise<ServiceState>;
+  /** Override the whole install-and-launch action (tests). */
+  installService?: (ctx: {
+    workspaceDir: string;
+    execPath: string;
+    runtimePath: string;
+    environmentPath: string;
+    log: LogFn;
+  }) => Promise<ServiceInstallResult>;
 }
 
 interface InitUserLike {
@@ -430,12 +397,15 @@ export function workspaceGitHubRepos(config: WorkspaceConfig): string[] {
   ];
 }
 
-async function defaultConnectRelay(options: {
-  projectRoot: string;
-  workspaceDir: string;
-  trackerType: string;
-  log: LogFn;
-}): Promise<boolean> {
+async function defaultConnectRelay(
+  options: {
+    projectRoot: string;
+    workspaceDir: string;
+    trackerType: string;
+    log: LogFn;
+  },
+  runConnect: typeof connectRelayTarget = connectRelayTarget,
+): Promise<boolean> {
   const getAccessToken = async () => {
     const user = await requireAuthenticatedUser(
       projectAuthConfig(options.projectRoot),
@@ -450,15 +420,33 @@ async function defaultConnectRelay(options: {
 
   if (repos.length > 0) {
     for (const repo of repos) {
-      const repoOk = (await connectRelayTarget("github", { ...deps, repo })) === 0;
+      const repoOk = (await runConnect("github", { ...deps, repo })) === 0;
       ok = repoOk && ok;
     }
   } else {
     options.log("   No GitHub remote detected; skipping GitHub relay registration.");
   }
 
+  const gitlabProjects = workspaceGitLabRelayProjects(workspace, options.workspaceDir);
+  if (gitlabProjects.length > 0) {
+    for (const project of gitlabProjects) {
+      const projectOk =
+        (await runConnect("gitlab", {
+          ...deps,
+          env: project.env,
+          gitlabProject: {
+            instanceUrl: project.instanceUrl,
+            projectPath: project.projectPath,
+          },
+        })) === 0;
+      ok = projectOk && ok;
+    }
+  } else {
+    options.log("   No GitLab remote detected; skipping GitLab relay registration.");
+  }
+
   if (options.trackerType !== "github" && options.trackerType !== "markdown") {
-    const trackerOk = (await connectRelayTarget(options.trackerType, deps)) === 0;
+    const trackerOk = (await runConnect(options.trackerType, deps)) === 0;
     ok = trackerOk && ok;
   }
 
@@ -486,6 +474,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
   try {
     log("👷 Setting up the unattended devintern worker.");
+    trackWorkerInitStarted();
 
     // 1. Reuse tracker config from `devintern init`, or run that subset.
     log("\n1️⃣  Tracker configuration");
@@ -494,12 +483,14 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       : await defaultEnsureTracker(cwd, prompt, log);
     if (!trackerType) {
       log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
+      trackWorkerInitFailed("tracker_setup_incomplete");
       return abort;
     }
     const capabilities = TRACKER_CAPABILITIES[trackerType];
     if (!supportsPolling(trackerType)) {
       log(`❌ Tracker '${trackerType}' does not support worker polling.`);
       log(`   Pollable trackers: ${trackersSupportingPolling().join(", ")}`);
+      trackWorkerInitFailed("tracker_not_pollable");
       return abort;
     }
     const trackerName = capabilities?.displayName ?? trackerType;
@@ -523,6 +514,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const workspace = await bootstrap({ cwd, log });
     if ("error" in workspace) {
       log(`❌ ${workspace.error}`);
+      trackWorkerInitFailed("workspace_error");
       return abort;
     }
     const workspaceDir = workspace.workspaceDir;
@@ -533,6 +525,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
           `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
         );
         log("   One worker workspace has one active tracker; keep its defaults unchanged.");
+        trackWorkerInitFailed("workspace_tracker_mismatch");
         return abort;
       }
     }
@@ -628,6 +621,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
     let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+    let relayConnect: RelayConnectOutcome = "skipped";
     log("\n7️⃣  Instant events (optional; polling always stays on)");
     const relayAnswer = (
       await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
@@ -663,7 +657,9 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
 
       if (user) {
-        const connectRelay = deps.connectRelay ?? defaultConnectRelay;
+        const connectRelay =
+          deps.connectRelay ??
+          ((options) => defaultConnectRelay(options, deps.runRelayConnect ?? connectRelayTarget));
         try {
           const connected = await connectRelay({
             projectRoot,
@@ -672,6 +668,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             log,
           });
           relayConnected = connected || hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+          relayConnect = connected ? "succeeded" : "partial";
           if (connected) {
             log(`✅ Relay pairing stored under ${workspaceDir}.`);
           } else {
@@ -680,6 +677,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
             );
           }
         } catch (error) {
+          relayConnect = "failed";
           log(`⚠️  Relay setup failed: ${(error as Error).message}`);
           log("   Polling still works; relay only improves event latency.");
         }
@@ -744,45 +742,141 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       }
     }
 
-    // 9. Write, but do not install, the native user-service definition. The
-    // foreground command remains an honest supported path on every platform.
+    // 9. Offer to install and launch the native user service. The foreground
+    // command remains an honest supported path on every platform, and a
+    // declined offer (or a failed automatic install) keeps the manual
+    // write-definition-and-print-instructions path alive.
     log("\n9️⃣  Background service (optional)");
-    const serviceAnswer = (await prompt("Write a background service definition? [Y/n]: "))
-      .trim()
-      .toLowerCase();
     const platform = deps.platform ?? process.platform;
     const writeFile = deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
-    const execPath = deps.execPath ?? process.argv[1] ?? "devintern";
-    if (serviceAnswer !== "n" && serviceAnswer !== "no") {
-      if (platform === "linux") {
-        const unitPath = join(workspaceDir, "devintern-worker.service");
-        writeFile(unitPath, renderSystemdUnit({ execPath, projectDir: workspaceDir }));
-        log(`💾 Wrote ${unitPath}`);
-        log("   Install as your user with:");
-        log("     mkdir -p ~/.config/systemd/user");
-        log(`     cp ${unitPath} ~/.config/systemd/user/devintern-worker.service`);
-        log("     systemctl --user daemon-reload");
-        log("     systemctl --user enable --now devintern-worker");
-      } else if (platform === "darwin") {
-        const plistPath = join(workspaceDir, "com.devintern.worker.plist");
-        writeFile(plistPath, renderLaunchdPlist({ execPath, workingDir: workspaceDir }));
-        log(`💾 Wrote ${plistPath}`);
-        log("   Install for your macOS user with:");
-        log("     mkdir -p ~/Library/LaunchAgents");
-        log(`     cp ${plistPath} ~/Library/LaunchAgents/com.devintern.worker.plist`);
-        log(
-          "     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.devintern.worker.plist",
-        );
-      } else {
+    const execPath = deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern");
+    const runtimePath = deps.runtimePath ?? process.execPath;
+    const environmentPath = deps.environmentPath ?? process.env.PATH ?? "";
+    let serviceRunning = false;
+    let serviceInstall: ServiceInstallOutcome =
+      platform !== "linux" && platform !== "darwin"
+        ? "unavailable"
+        : deps.noService
+          ? "skipped"
+          : "declined";
+
+    const printManualServicePath = () => {
+      if (platform !== "linux" && platform !== "darwin") {
         log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
+        return;
       }
+      if (platform === "linux") {
+        const unitPath = join(workspaceDir, SYSTEMD_UNIT_NAME);
+        writeFile(
+          unitPath,
+          renderSystemdUnit({ execPath, projectDir: workspaceDir, runtimePath, environmentPath }),
+        );
+        log(`💾 Wrote ${unitPath}`);
+      } else {
+        const plistPath = join(workspaceDir, LAUNCHD_PLIST_NAME);
+        writeFile(
+          plistPath,
+          renderLaunchdPlist({ execPath, workingDir: workspaceDir, runtimePath, environmentPath }),
+        );
+        log(`💾 Wrote ${plistPath}`);
+      }
+      log("   Install it yourself with:");
+      for (const line of manualServiceInstructions({ platform, workspaceDir })) {
+        log(`     ${line}`);
+      }
+    };
+
+    if (platform !== "linux" && platform !== "darwin") {
+      log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
+    } else if (deps.noService) {
+      log("   Skipped (--no-service); `devintern worker` runs the same daemon in a terminal.");
     } else {
-      log("   Service skipped; `devintern worker` runs the same daemon in this terminal.");
+      const serviceDeps: WorkerServiceDeps = {
+        platform,
+        homedir: deps.homedir,
+        uid: deps.uid,
+        run: deps.run,
+      };
+      const state = deps.detectService
+        ? await deps.detectService()
+        : await detectWorkerService(serviceDeps);
+      let accepted = false;
+      if (state.installed && !state.managed) {
+        serviceRunning = state.active;
+        serviceInstall = "existing";
+        log("⚠️  The installed service has custom settings and will not be overwritten.");
+        printManualServicePath();
+      } else if (state.installed) {
+        const offer = state.active ? "restart and update" : "update";
+        const bootSuffix = platform === "linux" ? " and ensure it starts at boot" : "";
+        const answer = (
+          await prompt(
+            `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
+          )
+        )
+          .trim()
+          .toLowerCase();
+        accepted = answer !== "n" && answer !== "no";
+      } else {
+        const action =
+          platform === "linux"
+            ? "Install and start the background service at boot now? [Y/n]: "
+            : "Install and start the background service now? [Y/n]: ";
+        const answer = (await prompt(action)).trim().toLowerCase();
+        accepted = answer !== "n" && answer !== "no";
+      }
+      if (state.installed && !state.managed) {
+        // Leave custom definitions and their running processes untouched.
+      } else if (!accepted) {
+        printManualServicePath();
+      } else {
+        const result = deps.installService
+          ? await deps.installService({
+              workspaceDir,
+              execPath,
+              runtimePath,
+              environmentPath,
+              log,
+            })
+          : await installWorkerService(
+              { workspaceDir, execPath, runtimePath, environmentPath },
+              serviceDeps,
+            );
+        if (result.ok) {
+          serviceRunning = true;
+          serviceInstall = result.updated ? "updated" : "installed";
+          log(
+            result.updated
+              ? "✅ devintern-worker service updated and restarted."
+              : "✅ devintern-worker service installed and running.",
+          );
+          log("   Open http://localhost:4400 to verify worker status and runs.");
+          if (result.warning) {
+            log(`⚠️  ${result.warning}`);
+          }
+          log(
+            platform === "linux"
+              ? result.warning
+                ? "   Run `loginctl enable-linger` to start the worker at boot before login."
+                : "   User lingering was enabled so the service starts at boot and survives logout."
+              : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
+          );
+        } else {
+          serviceInstall = "failed";
+          log(`❌ Could not install the service automatically: ${result.error}`);
+          log("   Nothing was left half-installed. Install it manually:");
+          printManualServicePath();
+        }
+      }
     }
 
     log("\n🎉 Worker setup complete!");
     log("\n📝 Next steps:");
-    log("   1. Run `devintern worker`.");
+    if (serviceRunning) {
+      log("   1. The worker is already running as your user service.");
+    } else {
+      log("   1. Run `devintern worker`.");
+    }
     log("   2. Open http://localhost:4400 to see worker status and runs.");
     log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
     if (githubAppOutcome === "skipped") {
@@ -800,6 +894,13 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         log("   See the advanced GitHub integration guide if this installation must stay offline.");
       }
     }
+
+    trackWorkerInitCompleted({
+      tracker: trackerType,
+      relayConnect,
+      serviceInstall,
+      githubApp: githubAppOutcome,
+    });
     return { ok: true };
   } finally {
     rl?.close();

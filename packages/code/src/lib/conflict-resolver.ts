@@ -20,9 +20,12 @@
  */
 
 import { runAgent } from "./address-review";
+import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
 import { GitHubAppAuth } from "./github-app-auth";
 import { GitHubReviewsClient } from "./github-reviews";
 import type { PullRequestInfo } from "./github-reviews";
+import { GitLabReviewsClient } from "./gitlab-reviews";
+import { resolveGitLabCodeHostConfig } from "./pr-client";
 import { Utils } from "./utils";
 
 export interface ResolveConflictsOptions {
@@ -72,12 +75,28 @@ export interface ResolveConflictsResult {
 }
 
 /** Parse an `owner/repo` + PR number out of a GitHub PR URL. */
-function parsePrUrl(prUrl: string): { owner: string; repo: string; prNumber: number } {
-  const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  if (!match) {
-    throw new Error(`Not a GitHub PR URL: ${prUrl}`);
-  }
-  return { owner: match[1], repo: match[2], prNumber: parseInt(match[3], 10) };
+interface ChangeRequestInfo {
+  state: string;
+  head: { ref: string; sha: string; repo?: { full_name: string } | null };
+  base: { ref: string; sha: string };
+  mergeability: "mergeable" | "conflicts" | "behind" | "checking" | "blocked" | "unknown";
+}
+
+function githubChangeRequest(pr: PullRequestInfo): ChangeRequestInfo {
+  const state = pr.mergeable_state;
+  return {
+    state: pr.state,
+    head: pr.head,
+    base: pr.base,
+    mergeability:
+      state === "dirty"
+        ? "conflicts"
+        : state === "behind"
+          ? "behind"
+          : !state || state === "unknown"
+            ? "checking"
+            : "mergeable",
+  };
 }
 
 /** Build the agent prompt for resolving a conflicted merge. */
@@ -189,7 +208,12 @@ export type FailureKind =
   /** The push was accepted, but GitHub could not confirm a healthy PR. */
   | "landed-but-unconfirmed";
 
-function failureCommentBody(kind: FailureKind, baseRef: string, detail: string): string {
+function failureCommentBody(
+  kind: FailureKind,
+  baseRef: string,
+  detail: string,
+  providerLabel = "code host",
+): string {
   switch (kind) {
     case "setup":
       return `⚠️ devintern tried to sync this branch with \`${baseRef}\` but could not start safely (${detail}). No changes were made; manual resolution needed.`;
@@ -198,7 +222,7 @@ function failureCommentBody(kind: FailureKind, baseRef: string, detail: string):
     case "push-failed":
       return `⚠️ devintern resolved this branch's merge conflicts with \`${baseRef}\` but could not publish the merge to this PR (${detail}). No changes landed on the PR; manual action needed.`;
     case "landed-but-unconfirmed":
-      return `⚠️ devintern pushed a merge of \`${baseRef}\` into this branch, but GitHub still reports a problem with the PR (${detail}). The merge commit is on the branch — please re-run conflict resolution or check the PR state manually.`;
+      return `⚠️ devintern pushed a merge of \`${baseRef}\` into this branch, but ${providerLabel} still reports a problem with the change request (${detail}). The merge commit is on the branch — please re-run conflict resolution or check its state manually.`;
   }
 }
 
@@ -256,7 +280,7 @@ type PushVerification =
  * non-clear answer would produce false alarms.
  */
 async function verifyPushLandedOnPr(params: {
-  fetchPr: () => Promise<PullRequestInfo>;
+  fetchPr: () => Promise<ChangeRequestInfo>;
   pushedSha: string;
   attempts: number;
   delayMs: number;
@@ -267,7 +291,7 @@ async function verifyPushLandedOnPr(params: {
     if (i > 0 && params.delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, params.delayMs));
     }
-    let pr: PullRequestInfo;
+    let pr: ChangeRequestInfo;
     try {
       pr = await params.fetchPr();
     } catch (error) {
@@ -279,13 +303,13 @@ async function verifyPushLandedOnPr(params: {
       pending = { status: "head-moved", headSha: pr.head?.sha ?? "" };
       continue;
     }
-    const state = pr.mergeable_state;
-    // Missing/unknown means GitHub is still recomputing after the push.
-    if (!state || state === "unknown") {
-      pending = { status: "unverified", reason: "mergeable state stayed unknown" };
+    const state = pr.mergeability;
+    // Providers compute mergeability asynchronously after a push.
+    if (state === "checking" || state === "unknown") {
+      pending = { status: "unverified", reason: "mergeability stayed unknown" };
       continue;
     }
-    if (state === "dirty") {
+    if (state === "conflicts") {
       // Could be a stale computation or a base that moved again mid-run;
       // let the window decide rather than the first answer.
       pending = { status: "dirty" };
@@ -315,7 +339,7 @@ function isTransientPushRejection(message: string): boolean {
  * Catch one PR branch up with its base, resolving conflicts with the agent
  * when needed.
  *
- * @param prUrl - GitHub PR URL
+ * @param prUrl - GitHub PR or configured GitLab MR URL
  * @param options - Push/comment suppression and injected agent runner
  */
 export async function resolveConflictsOnPr(
@@ -325,17 +349,74 @@ export async function resolveConflictsOnPr(
   const { verbose = false, noPush = false, noComment = false, cwd } = options;
   const agentRunner = options.agentRunner ?? runAgent;
 
-  const { owner, repo, prNumber } = parsePrUrl(prUrl);
-  console.log(`🔀 Resolving merge conflicts on ${owner}/${repo}#${prNumber}`);
+  const identity = parseChangeRequestUrl(prUrl, {
+    gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+  });
+  if (!identity || identity.provider === "bitbucket") {
+    throw new Error(`Not a supported pull-request or merge-request URL: ${prUrl}`);
+  }
+  const provider = identity.provider;
+  const [owner = "", repo = ""] = identity.projectPath.split("/");
+  const prNumber = identity.number;
+  const changeLabel = identity.provider === "gitlab" ? "MR" : "PR";
+  console.log(
+    `🔀 Resolving merge conflicts on ${identity.projectPath}${identity.provider === "gitlab" ? "!" : "#"}${prNumber}`,
+  );
 
   let githubClient: GitHubReviewsClient | undefined;
   const getClient = () => (githubClient ??= new GitHubReviewsClient());
+  let gitlabClient: GitLabReviewsClient | undefined;
+  if (identity.provider === "gitlab") {
+    const config = resolveGitLabCodeHostConfig(identity.instanceUrl);
+    if (!config.ok) throw new Error(config.message);
+    gitlabClient = new GitLabReviewsClient(config.token, config.instanceUrl, {
+      caFile: config.caFile,
+      proxy: config.proxy,
+    });
+  }
   const postComment =
     options.prCommenter ??
-    ((body: string) => getClient().postPullRequestComment(owner, repo, prNumber, body));
-  const fetchPrNow = options.fetchPr ?? (() => getClient().getPullRequest(owner, repo, prNumber));
+    (identity.provider === "gitlab"
+      ? (body: string) =>
+          gitlabClient!.postMergeRequestNote(
+            identity.projectId ?? identity.projectPath,
+            prNumber,
+            body,
+          )
+      : (body: string) => getClient().postPullRequestComment(owner, repo, prNumber, body));
+  const fetchPrNow = async (): Promise<ChangeRequestInfo> => {
+    if (options.fetchPr) {
+      return githubChangeRequest(await options.fetchPr(owner, repo, prNumber));
+    }
+    if (identity.provider === "gitlab") {
+      const mr = await gitlabClient!.getChangeRequest(identity.projectPath, prNumber);
+      return { ...mr, state: mr.state === "opened" ? "open" : mr.state };
+    }
+    return githubChangeRequest(await getClient().getPullRequest(owner, repo, prNumber));
+  };
 
   let baseRef = "";
+
+  if (provider === "gitlab" && !options.fetchPr) {
+    const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
+      cwd,
+    });
+    const remote = remoteResult.success
+      ? parseGitRemoteUrl(remoteResult.output.trim(), {
+          gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+          gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
+        })
+      : null;
+    if (
+      remote?.provider !== "gitlab" ||
+      remote.instanceUrl !== identity.instanceUrl ||
+      remote.projectPath !== identity.projectPath
+    ) {
+      throw new Error(
+        `The current origin does not match GitLab project ${identity.projectPath} on ${identity.instanceUrl}.`,
+      );
+    }
+  }
 
   async function failWith(kind: FailureKind, message: string): Promise<ResolveConflictsResult> {
     console.error(`❌ ${message}`);
@@ -344,24 +425,29 @@ export async function resolveConflictsOnPr(
       // form is posted where the public can read it.
       await postOutcomeComment(
         postComment,
-        failureCommentBody(kind, baseRef, sanitizeErrorForPublicComment(message)),
+        failureCommentBody(
+          kind,
+          baseRef,
+          sanitizeErrorForPublicComment(message),
+          provider === "gitlab" ? "GitLab" : "GitHub",
+        ),
       );
     }
     return { outcome: "failed", message, failureKind: kind };
   }
 
-  const pr = await fetchPrNow(owner, repo, prNumber);
+  const pr = await fetchPrNow();
 
   if (pr.state !== "open") {
-    return { outcome: "skipped", message: `PR is ${pr.state}` };
+    return { outcome: "skipped", message: `${changeLabel} is ${pr.state}` };
   }
   if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
-    return { outcome: "deferred", message: "PR head changed before execution" };
+    return { outcome: "deferred", message: `${changeLabel} head changed before execution` };
   }
   if (options.expectedBaseSha && pr.base.sha !== options.expectedBaseSha) {
-    return { outcome: "deferred", message: "PR base changed before execution" };
+    return { outcome: "deferred", message: `${changeLabel} base changed before execution` };
   }
-  const baseRepo = `${owner}/${repo}`;
+  const baseRepo = identity.projectPath;
   if (pr.head.repo && pr.head.repo.full_name !== baseRepo) {
     return {
       outcome: "skipped",
@@ -405,7 +491,7 @@ export async function resolveConflictsOnPr(
       }
 
       // Commit attribution for the merge commit (matches address-review).
-      if (!process.env.GITHUB_TOKEN) {
+      if (identity.provider === "github" && !process.env.GITHUB_TOKEN) {
         const appAuth = GitHubAppAuth.fromEnvironment();
         if (appAuth) {
           try {
@@ -446,11 +532,22 @@ export async function resolveConflictsOnPr(
         });
         if (fetchedBase.success && fetchedBase.output.trim() !== options.expectedBaseSha) {
           console.log(
-            `ℹ️  GitHub reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
+            `ℹ️  ${identity.provider === "gitlab" ? "GitLab" : "GitHub"} reports base ${baseRef} at ${options.expectedBaseSha.slice(0, 7)} but ` +
               `origin/${baseRef} is at ${fetchedBase.output.trim().slice(0, 7)}; syncing to the actual tip`,
           );
         }
       }
+
+      // Worktree preparation installs dependencies, and installers can rewrite
+      // tracked files (e.g. `bun install` normalizing `bun.lock`), leaving the
+      // tree dirty. `git merge` then refuses to start ("local changes would be
+      // overwritten"), even though there is nothing to preserve in this
+      // disposable worktree. Discard uncommitted tracked changes before
+      // merging; untracked install output (node_modules) is left intact.
+      await Utils.executeGitCommand(["reset", "--hard", "HEAD"], {
+        verbose: false,
+        cwd: workDir,
+      });
 
       const mergeTarget = `origin/${baseRef}`;
       const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
@@ -559,9 +656,16 @@ export async function resolveConflictsOnPr(
         return { outcome, message: "merge committed (push skipped)" };
       }
 
-      // Refresh the remote head immediately before pushing and use it as the
-      // atomic lease (`--force-with-lease`) even when no explicit expectation
-      // was provided — an interactive run gets the same race protection.
+      if (identity.provider === "gitlab") {
+        const current = await fetchPrNow();
+        if (current.state !== "open" || current.head.sha !== pr.head.sha) {
+          return { outcome: "deferred", message: "MR state or head changed before push" };
+        }
+      }
+
+      // Refresh the remote head immediately before pushing. The push remains
+      // a regular fast-forward update: a concurrent branch move is rejected
+      // and handled below, never overwritten with a force push.
       const headFetch = await Utils.executeGitCommand(
         ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
         { cwd: workDir, verbose },
@@ -580,8 +684,8 @@ export async function resolveConflictsOnPr(
         return { outcome: "deferred", message: "PR head changed before push" };
       }
 
-      // The exact lease makes the head check above atomic with the push. The
-      // push helper also verifies that HEAD descends from the leased commit.
+      // The push helper verifies that HEAD descends from the expected remote
+      // commit; Git's normal fast-forward check closes the race after that.
       const pushOnce = () =>
         Utils.pushCurrentBranch({
           cwd: workDir,
@@ -689,7 +793,7 @@ export async function resolveConflictsOnPr(
       // commit is missing" alarm on the PR.
       const verification: PushVerification = pushedSha
         ? await verifyPushLandedOnPr({
-            fetchPr: () => fetchPrNow(owner, repo, prNumber),
+            fetchPr: fetchPrNow,
             pushedSha,
             attempts: options.verifyAttempts ?? DEFAULT_VERIFY_ATTEMPTS,
             delayMs: options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
@@ -702,19 +806,19 @@ export async function resolveConflictsOnPr(
       if (verification.status === "head-moved") {
         return await failWith(
           "landed-but-unconfirmed",
-          `the PR head does not include the pushed merge commit (GitHub reports ${verification.headSha.slice(0, 7) || "no head"})`,
+          `the ${changeLabel} head does not include the pushed merge commit (${identity.provider === "gitlab" ? "GitLab" : "GitHub"} reports ${verification.headSha.slice(0, 7) || "no head"})`,
         );
       }
       if (verification.status === "dirty") {
         return await failWith(
           "landed-but-unconfirmed",
-          "GitHub still reports merge conflicts after the push (the base likely advanced again); re-run resolve-conflicts",
+          `${identity.provider === "gitlab" ? "GitLab" : "GitHub"} still reports merge conflicts after the push (the base likely advanced again); re-run resolve-conflicts`,
         );
       }
 
       if (verification.status === "unverified") {
         console.warn(
-          `⚠️  Could not confirm PR state after push (${verification.reason}); the remote accepted the merge commit.`,
+          `⚠️  Could not confirm ${changeLabel} state after push (${verification.reason}); the remote accepted the merge commit.`,
         );
       }
       if (!noComment) {
@@ -726,8 +830,8 @@ export async function resolveConflictsOnPr(
           : `conflicts with ${baseRef} resolved and pushed`;
       const verifiedNote =
         verification.status === "clear"
-          ? "; verified conflict-free on the PR"
-          : "; GitHub has not confirmed mergeability yet";
+          ? `; verified conflict-free on the ${changeLabel}`
+          : `; ${identity.provider === "gitlab" ? "GitLab" : "GitHub"} has not confirmed mergeability yet`;
       console.log(`✅ ${baseMessage}${verifiedNote}`);
       return { outcome, message: `${baseMessage}${verifiedNote}` };
     }

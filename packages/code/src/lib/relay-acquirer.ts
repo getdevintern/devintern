@@ -21,16 +21,38 @@ import type { WebhookQueue } from "./webhook-queue";
 import type { WorkerState } from "./worker-state";
 import type { Acquirer } from "../worker";
 
-export type RelayEventType = "pr.review_submitted" | "pr.comment_created" | "task.changed";
+export type RelayEventType =
+  | "pr.review_submitted"
+  | "pr.comment_created"
+  | "task.changed"
+  | "change.feedback"
+  | "change.changed"
+  | "ci.changed";
+
+export interface RelayCodeHostIdentity {
+  provider: "github" | "gitlab";
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+}
 
 export interface RelayEnvelope {
+  version?: 1 | 2;
   seq: number;
   source: string;
   /** Stable team slug for team-scoped tracker deliveries. Absent on legacy envelopes and PRs. */
   team?: string;
   eventType: RelayEventType;
   repo?: string;
-  ref: { pr?: number; commentId?: number; task?: string };
+  codeHost?: RelayCodeHostIdentity;
+  ref: {
+    pr?: number;
+    commentId?: number;
+    task?: string;
+    change?: number;
+    branch?: string;
+    headSha?: string;
+  };
   deliveryId: string;
   ts: string;
 }
@@ -47,6 +69,8 @@ export interface RelayHandlers {
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
   /** Tracker task changed → re-evaluate the matching team/default source. */
   evaluateTask(taskKey: string, trackerSource: string, team?: string): Promise<void>;
+  /** Provider-neutral change hint; implementation must re-fetch authoritative state. */
+  reconcileCodeHost?(envelope: RelayEnvelope & { codeHost: RelayCodeHostIdentity }): Promise<void>;
 }
 
 export interface RelayAcquirerOptions {
@@ -221,6 +245,22 @@ export class RelayAcquirer implements Acquirer {
           }
           return;
         }
+        case "change.feedback":
+        case "change.changed":
+        case "ci.changed": {
+          if (
+            envelope.version !== 2 ||
+            !envelope.codeHost ||
+            envelope.codeHost.provider !== envelope.source ||
+            (!envelope.ref.change && !envelope.ref.branch && !envelope.ref.headSha)
+          ) {
+            return;
+          }
+          await handlers.reconcileCodeHost?.(
+            envelope as RelayEnvelope & { codeHost: RelayCodeHostIdentity },
+          );
+          return;
+        }
         default:
           if (this.options.verbose) {
             console.log(`   [relay] ignoring unknown event type ${envelope.eventType as string}`);
@@ -233,6 +273,8 @@ export class RelayAcquirer implements Acquirer {
         externalId,
         repo: envelope.repo,
         prNumber: envelope.ref.pr,
+        codeHostProvider: envelope.codeHost?.provider,
+        codeHostProject: envelope.codeHost?.projectPath,
         stage: "dispatch",
       });
       console.warn(

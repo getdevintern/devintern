@@ -1,7 +1,7 @@
 /**
  * Claude Code harness.
  *
- * CLI: claude -p <prompt> [--dangerously-skip-permissions] [--model <model>] [--max-turns N]
+ * CLI: claude -p <prompt> [--dangerously-skip-permissions] [--model <model>] [--effort <level>] [--max-turns N]
  *
  * `-p` takes the prompt as its value (non-interactive / print mode).
  *
@@ -35,12 +35,18 @@ export class ClaudeCodeHarness implements AgentHarness {
   readonly supportsMaxTurns = true;
   /** Print mode accepts `--output-format json` (single JSON envelope, result in `result`). */
   readonly supportsStructuredOutput = true;
+  /**
+   * Effort applies via the dedicated `--effort` flag (session-scoped;
+   * accepted levels include low/medium/high — extra levels like `xhigh` are
+   * clamped per model, so the shared `AgentEffort` union is always valid).
+   */
+  readonly supportsEffort = true;
 
   /**
    * Build `claude` CLI flags for non-interactive (`-p`) execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`, `maxTurns`,
-   *   and `structuredOutput`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`, `effort`,
+   *   `maxTurns`, and `structuredOutput`.
    * @returns Args excluding the prompt (runner supplies `-p` via {@link promptFlag}).
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -60,6 +66,10 @@ export class ClaudeCodeHarness implements AgentHarness {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+
+    if (options.effort) {
+      args.push("--effort", options.effort);
     }
 
     if (options.maxTurns !== undefined) {
