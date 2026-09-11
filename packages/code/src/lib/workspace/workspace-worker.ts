@@ -1686,14 +1686,19 @@ export async function buildFleetEventAcquirers(options: {
     acquirers.push(gitlabPoller);
     intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
 
-    const gitlabCiRows = new Map<string, import("../worker-state").AgentPr>();
+    const gitlabCiRows = new Map<string, Map<number, import("../worker-state").AgentPr>>();
     const gitlabCiSnapshots = new Map<
       string,
       { sha: string; snapshot: import("../gitlab-reviews").GitLabCiSnapshot }
     >();
     const ciKey = (mr: import("../worker-state").AgentPr) => `${mr.instanceUrl}:${mr.projectPath}`;
-    const resolveCi = (key: string) => {
-      const mr = gitlabCiRows.get(key);
+    const ciRow = (key: string, number?: number) => {
+      const rows = gitlabCiRows.get(key);
+      // Project/SHA-scoped reads can use any row; MR operations require the exact IID.
+      return number === undefined ? rows?.values().next().value : rows?.get(number);
+    };
+    const resolveCi = (key: string, number?: number) => {
+      const mr = ciRow(key, number);
       if (!mr) throw new Error("GitLab MR is no longer registered");
       const client = clientForGitLabMr(mr);
       if (!client) throw new Error("GitLab code-host profile is unavailable");
@@ -1706,8 +1711,8 @@ export async function buildFleetEventAcquirers(options: {
       queue: state.queue,
       namespace: "gitlab",
       ciProviderLabel: "GitLab job trace",
-      feedbackRepository: (key) => gitlabCiRows.get(key)?.projectPath ?? key,
-      describeChange: (key, n) => `${gitlabCiRows.get(key)?.projectPath ?? key}!${n}`,
+      feedbackRepository: (key) => ciRow(key)?.projectPath ?? key,
+      describeChange: (key, n) => `${ciRow(key)?.projectPath ?? key}!${n}`,
       escalationRecoveryText: "Push a new commit and I will take another look.",
       watchedChanges: () => {
         gitlabCiRows.clear();
@@ -1716,12 +1721,14 @@ export async function buildFleetEventAcquirers(options: {
           .filter((mr) => mr.provider === "gitlab" && Boolean(resolveGitLabRepo(mr)))
           .map((mr) => {
             const key = ciKey(mr);
-            gitlabCiRows.set(key, mr);
+            const rows = gitlabCiRows.get(key) ?? new Map();
+            rows.set(mr.changeNumber, mr);
+            gitlabCiRows.set(key, rows);
             return { repo: key, prNumber: mr.changeNumber };
           });
       },
-      markClosed: (key) => {
-        const mr = gitlabCiRows.get(key);
+      markClosed: (key, n) => {
+        const mr = ciRow(key, n);
         if (mr) {
           state.workerState.markAgentChangeRequestClosed({
             provider: mr.provider,
@@ -1735,7 +1742,7 @@ export async function buildFleetEventAcquirers(options: {
       },
       github: {
         fetchPr: async (key, n) => {
-          const { mr, client } = resolveCi(key);
+          const { mr, client } = resolveCi(key, n);
           try {
             const current = await client.getChangeRequest(mr.projectPath, n);
             return {
@@ -1796,12 +1803,12 @@ export async function buildFleetEventAcquirers(options: {
           return client.getJobTraces(mr.projectPath, snapshot?.jobIds ?? []);
         },
         postComment: async (key, n, body) => {
-          const { mr, client } = resolveCi(key);
+          const { mr, client } = resolveCi(key, n);
           await client.postMergeRequestNote(mr.projectId ?? mr.projectPath, n, body);
         },
       },
-      fixPr: async (key, _n, feedbackPath, expectedHeadSha) => {
-        const { mr, client } = resolveCi(key);
+      fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
+        const { mr, client } = resolveCi(key, n);
         const current = await client.getChangeRequest(mr.projectPath, mr.changeNumber);
         if (current.state !== "opened" || current.head.sha !== expectedHeadSha) return false;
         const repo = resolveGitLabRepo(mr);

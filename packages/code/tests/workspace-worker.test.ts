@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -20,8 +20,10 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
-import { createTaskSupervisor } from "../src/lib/task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
+import { CiFailureWatcherAcquirer } from "../src/lib/ci-failure-watcher-acquirer";
+import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
 import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
@@ -470,6 +472,109 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
+  test.each(["closed", "repair"])(
+    "GitLab CI keeps same-project MR identities separate: %s",
+    async (scenario) => {
+      const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
+      mkdirSync(workspaceDir, { recursive: true });
+      const state = openWorkspaceState(workspaceDir);
+      const config = parseWorkspaceConfig(`
+[workspace]
+ci_failure_fix = true
+[defaults]
+tracker = "markdown"
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/widgets.git"
+[repos.env]
+DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true"
+GITLAB_CODE_HOST_TOKEN = "test-token"
+GITLAB_CODE_HOST_URL = "https://gitlab.com"
+GITLAB_CODE_HOST_CA_FILE = ""
+GITLAB_CODE_HOST_PROXY = ""
+`);
+      for (const number of [17, 18]) {
+        state.workerState.recordAgentChangeRequest({
+          provider: "gitlab",
+          instanceUrl: "https://gitlab.com",
+          projectId: "42",
+          projectPath: "acme/widgets",
+          number,
+          webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+        });
+      }
+      const fetched: number[] = [];
+      const getChange = spyOn(GitLabReviewsClient.prototype, "getChangeRequest").mockImplementation(
+        async (_project, number) => {
+          fetched.push(number);
+          return {
+            number,
+            title: `MR ${number}`,
+            state: scenario === "closed" && number === 17 ? "closed" : "opened",
+            head: { ref: `fix-${number}`, sha: "shared-head-sha" },
+            base: { ref: "main", sha: "base" },
+            mergeability: "mergeable",
+            webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+          };
+        },
+      );
+      const getCi = spyOn(GitLabReviewsClient.prototype, "getCiSnapshot").mockResolvedValue({
+        state: scenario === "repair" ? "failure" : "success",
+        failures:
+          scenario === "repair"
+            ? [{ externalId: "job:42:123", name: "test", conclusion: "failure" }]
+            : [],
+        jobIds: [123],
+      });
+      const getLogs = spyOn(GitLabReviewsClient.prototype, "getJobTraces").mockResolvedValue(
+        "test failed",
+      );
+      const scheduled: string[] = [];
+      try {
+        const acquirers = await buildFleetEventAcquirers({
+          config,
+          workspaceDir,
+          state,
+          repoManager: new FakeRepoManager(workspaceDir),
+          searchTasks: async () => ({ tasks: [] }),
+          query: "status=todo",
+          intervalSeconds: 60,
+          supervisor: {
+            async schedule(request) {
+              scheduled.push(request.label ?? "");
+              throw new JobNotStartedError();
+            },
+            updateLimits() {},
+            async drain() {},
+          },
+        });
+        const watcher = acquirers.find((item) => item instanceof CiFailureWatcherAcquirer);
+        expect(watcher).toBeInstanceOf(CiFailureWatcherAcquirer);
+        await (watcher as CiFailureWatcherAcquirer).tick();
+        if (scenario === "closed") {
+          expect(
+            state.workerState.listOpenAgentChangeRequests().map((mr) => mr.changeNumber),
+          ).toEqual([18]);
+          expect(scheduled).toEqual([]);
+        } else {
+          // Same SHA deliberately prevents the head guard from masking incorrect MR selection.
+          expect(fetched).toEqual([17, 17, 18, 18]);
+          expect(scheduled).toEqual(["acme/widgets!17", "acme/widgets!18"]);
+          expect(
+            state.workerState.getCiFixState("https://gitlab.com:acme/widgets", 17)
+              .consecutiveFailures,
+          ).toBe(0);
+        }
+      } finally {
+        getChange.mockRestore();
+        getCi.mockRestore();
+        getLogs.mockRestore();
+        state.close();
+        rmSync(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
     const workspaceDir = join(
       tmpdir(),
