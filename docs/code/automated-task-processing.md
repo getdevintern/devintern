@@ -16,7 +16,7 @@ devintern worker init
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers verified relay pairing through the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access). GitHub pairing is enabled only after the relay verifies the App installation and requested repository; skipped pairing is reminded in the summary. The wizard then offers to install and start the user-level service (systemd on Linux, launchd on macOS) so setup ends with the worker running — open http://localhost:4400 to see it. Air-gapped/no-relay installations use the separate customer-owned App workflow.
+`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers zero-port relay pairing for detected GitHub and GitLab code hosts. GitHub uses the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access); GitLab uses an automatically created and tested project hook while its API token remains local. Skipped or failed pairing leaves polling active and is reminded in the summary. The wizard then offers to install and start the user-level service (systemd on Linux, launchd on macOS) so setup ends with the worker running — open http://localhost:4400 to see it. Air-gapped/no-relay GitHub installations use the separate customer-owned App workflow.
 
 Keep the worker running and use [working windows](#working-windows-quiet-hours) when you want to control when it may pick up new tasks.
 
