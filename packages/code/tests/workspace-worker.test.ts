@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -20,8 +20,10 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/change-detector";
-import { RunCoordinator } from "../src/lib/run-coordinator";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
+import { CiFailureWatcherAcquirer } from "../src/lib/ci-failure-watcher-acquirer";
+import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
 import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`
@@ -140,7 +142,6 @@ describe("createWorkspaceTaskAcquirer", () => {
         ran.push({ taskKey, args, cwd: opts.cwd, env: opts.env });
         return runResult;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
   beforeEach(() => {
@@ -218,9 +219,9 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(state.skips.list()[0]).toMatchObject({ reason: "unrouted", candidates: [] });
   });
 
-  test("the repo run lock is held during execution and released after", async () => {
+  test("task execution no longer holds the legacy whole-run repo lock", async () => {
     tasks = [{ key: "T-5", updated: "u1", labels: ["backend"] }];
-    let lockedDuringRun = false;
+    let lockAvailableDuringRun = false;
     const acquirer = createWorkspaceTaskAcquirer({
       config: CONFIG,
       workspaceDir,
@@ -233,35 +234,55 @@ describe("createWorkspaceTaskAcquirer", () => {
       query: "status=todo",
       intervalSeconds: 3600,
       runTask: async () => {
-        lockedDuringRun = !createRepoRunLock("backend", workspaceDir).acquire().success;
+        const independent = createRepoRunLock("backend", workspaceDir);
+        lockAvailableDuringRun = independent.acquire().success;
+        independent.release();
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
-    expect(lockedDuringRun).toBe(true);
-    // Released afterwards.
-    const after = createRepoRunLock("backend", workspaceDir).acquire();
-    expect(after.success).toBe(true);
+    expect(lockAvailableDuringRun).toBe(true);
   });
 
-  test("a task deferred by a busy repo retries on the next poll", async () => {
+  test("the legacy repo lock no longer defers task admission", async () => {
     tasks = [{ key: "T-6", updated: "u1", labels: ["backend"] }];
     const heldLock = createRepoRunLock("backend", workspaceDir);
     expect(heldLock.acquire().success).toBe(true);
     const acquirer = makeAcquirer();
 
     await acquirer.tick();
-    expect(ran).toHaveLength(0);
-    expect(state.workerState.getCursor("markdown")).toBeNull();
-    expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(false);
-
-    heldLock.release();
-    await acquirer.tick();
     expect(ran.map((run) => run.taskKey)).toEqual(["T-6"]);
     expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
     expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
+    heldLock.release();
+  });
+
+  test("a supervisor drain defers a task and rolls back its polling claim", async () => {
+    tasks = [{ key: "T-7", updated: "u1", labels: ["backend"] }];
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    await supervisor.drain();
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      supervisor,
+      runTask: async () => {
+        throw new Error("must not run");
+      },
+    });
+
+    await acquirer.tick();
+
+    expect(state.workerState.getCursor("markdown")).toBeNull();
+    expect(state.queue.hasProcessed("markdown", "task:T-7:u1")).toBe(false);
   });
 });
 
@@ -282,8 +303,8 @@ describe("createFleetTaskExecutor serialization", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test("with a coordinator, task runs wait for held agent slots (account-global limits)", async () => {
-    const coordinator = new RunCoordinator();
+  test("task runs wait for held supervisor slots", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     let agentStarted = false;
     const executor = createFleetTaskExecutor({
       config: CONFIG,
@@ -295,34 +316,72 @@ describe("createFleetTaskExecutor serialization", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
-      coordinator,
+      supervisor,
     });
 
-    // A scheduled estimation sweep holds the process-level slot first.
-    const releaseEstimation = await coordinator.acquire();
+    let releaseBlocker!: () => void;
+    const blocker = supervisor.schedule({
+      id: "blocker",
+      source: "test",
+      kind: "estimation",
+      checkoutClass: "workspace",
+      run: () =>
+        new Promise<void>((resolve) => {
+          releaseBlocker = resolve;
+        }),
+    });
     const routable = toRoutableTask({ key: "T-C1", labels: ["backend"], components: [] });
     const running = executor("T-C1", routable);
 
     await new Promise((resolve) => setTimeout(resolve, 30));
-    // Repo preparation may proceed, but no agent process starts while the
-    // estimation sweep holds the account-global slot.
     expect(agentStarted).toBe(false);
-    expect(repoManager.calls).toContain("worktree:backend:T-C1");
+    expect(repoManager.calls).not.toContain("worktree:backend:T-C1");
 
-    releaseEstimation();
-    await running;
+    releaseBlocker();
+    await Promise.all([blocker, running]);
     expect(agentStarted).toBe(true);
   });
 
-  test("without a coordinator, runs start immediately (unchanged legacy behavior)", async () => {
+  test("two same-repository tasks overlap when the per-repo cap is two", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      supervisor,
+      runTask: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return true;
+      },
+    });
+    const routable = toRoutableTask({ key: "T", labels: ["backend"], components: [] });
+
+    const first = executor("T-1", routable);
+    const second = executor("T-2", routable);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(peak).toBe(2);
+
+    release();
+    await Promise.all([first, second]);
+  });
+
+  test("without an injected supervisor, a focused executor uses config limits", async () => {
     const executor = createFleetTaskExecutor({
       config: CONFIG,
       workspaceDir,
       skips: state.skips,
       repoManager,
       runTask: async () => true,
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
     const routable = toRoutableTask({ key: "T-C2", labels: ["backend"], components: [] });
     const result = await executor("T-C2", routable);
@@ -338,7 +397,6 @@ describe("createFleetTaskExecutor serialization", () => {
         skips: state.skips,
         repoManager,
         runTask: async () => true,
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       },
       { repo: "frontend", extraArgs: ["--force"] },
     );
@@ -362,7 +420,6 @@ describe("createFleetTaskExecutor serialization", () => {
           observed = { args, env: options.env };
           return true;
         },
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       },
       {
         repo: "backend",
@@ -415,6 +472,109 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
+  test.each(["closed", "repair"])(
+    "GitLab CI keeps same-project MR identities separate: %s",
+    async (scenario) => {
+      const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
+      mkdirSync(workspaceDir, { recursive: true });
+      const state = openWorkspaceState(workspaceDir);
+      const config = parseWorkspaceConfig(`
+[workspace]
+ci_failure_fix = true
+[defaults]
+tracker = "markdown"
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/widgets.git"
+[repos.env]
+DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true"
+GITLAB_CODE_HOST_TOKEN = "test-token"
+GITLAB_CODE_HOST_URL = "https://gitlab.com"
+GITLAB_CODE_HOST_CA_FILE = ""
+GITLAB_CODE_HOST_PROXY = ""
+`);
+      for (const number of [17, 18]) {
+        state.workerState.recordAgentChangeRequest({
+          provider: "gitlab",
+          instanceUrl: "https://gitlab.com",
+          projectId: "42",
+          projectPath: "acme/widgets",
+          number,
+          webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+        });
+      }
+      const fetched: number[] = [];
+      const getChange = spyOn(GitLabReviewsClient.prototype, "getChangeRequest").mockImplementation(
+        async (_project, number) => {
+          fetched.push(number);
+          return {
+            number,
+            title: `MR ${number}`,
+            state: scenario === "closed" && number === 17 ? "closed" : "opened",
+            head: { ref: `fix-${number}`, sha: "shared-head-sha" },
+            base: { ref: "main", sha: "base" },
+            mergeability: "mergeable",
+            webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+          };
+        },
+      );
+      const getCi = spyOn(GitLabReviewsClient.prototype, "getCiSnapshot").mockResolvedValue({
+        state: scenario === "repair" ? "failure" : "success",
+        failures:
+          scenario === "repair"
+            ? [{ externalId: "job:42:123", name: "test", conclusion: "failure" }]
+            : [],
+        jobIds: [123],
+      });
+      const getLogs = spyOn(GitLabReviewsClient.prototype, "getJobTraces").mockResolvedValue(
+        "test failed",
+      );
+      const scheduled: string[] = [];
+      try {
+        const acquirers = await buildFleetEventAcquirers({
+          config,
+          workspaceDir,
+          state,
+          repoManager: new FakeRepoManager(workspaceDir),
+          searchTasks: async () => ({ tasks: [] }),
+          query: "status=todo",
+          intervalSeconds: 60,
+          supervisor: {
+            async schedule(request) {
+              scheduled.push(request.label ?? "");
+              throw new JobNotStartedError();
+            },
+            updateLimits() {},
+            async drain() {},
+          },
+        });
+        const watcher = acquirers.find((item) => item instanceof CiFailureWatcherAcquirer);
+        expect(watcher).toBeInstanceOf(CiFailureWatcherAcquirer);
+        await (watcher as CiFailureWatcherAcquirer).tick();
+        if (scenario === "closed") {
+          expect(
+            state.workerState.listOpenAgentChangeRequests().map((mr) => mr.changeNumber),
+          ).toEqual([18]);
+          expect(scheduled).toEqual([]);
+        } else {
+          // Same SHA deliberately prevents the head guard from masking incorrect MR selection.
+          expect(fetched).toEqual([17, 17, 18, 18]);
+          expect(scheduled).toEqual(["acme/widgets!17", "acme/widgets!18"]);
+          expect(
+            state.workerState.getCiFixState("https://gitlab.com:acme/widgets", 17)
+              .consecutiveFailures,
+          ).toBe(0);
+        }
+      } finally {
+        getChange.mockRestore();
+        getCi.mockRestore();
+        getLogs.mockRestore();
+        state.close();
+        rmSync(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
     const workspaceDir = join(
       tmpdir(),
@@ -550,7 +710,7 @@ remote = "https://forgejo.example/acme/forgejo.git"
 });
 
 describe("resolveWorkspaceAutomationContext", () => {
-  test("does not prepare the repository when its run lock is unavailable", async () => {
+  test("prepares the repository without the legacy whole-run lock", async () => {
     const workspaceDir = join(
       tmpdir(),
       `ws-automation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -568,14 +728,10 @@ describe("resolveWorkspaceAutomationContext", () => {
       CONFIG,
       workspaceDir,
       repoManager,
-      () => ({
-        acquire: () => ({ success: false, message: "busy" }),
-        release() {},
-      }),
     );
 
-    expect(context).toBeNull();
-    expect(repoManager.calls).toEqual([]);
+    expect(context?.repo).toBe("backend");
+    expect(repoManager.calls).toContain("base:backend");
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 

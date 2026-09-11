@@ -94,6 +94,9 @@ export interface CiConditionalResult<T> {
   notModified: boolean;
 }
 
+/** Outcome of requesting one CI repair from the workspace executor. */
+export type CiFixResult = boolean | "deferred";
+
 export interface CiFailureWatcherAcquirerOptions {
   intervalSeconds: number;
   workerState: WorkerState;
@@ -108,7 +111,7 @@ export interface CiFailureWatcherAcquirerOptions {
     prNumber: number,
     feedbackPath: string,
     expectedHeadSha: string,
-  ) => Promise<boolean>;
+  ) => Promise<CiFixResult>;
   /** Max consecutive failed autofix attempts per PR (default 3). */
   maxAttempts?: number;
   /** Live workspace switch; false suppresses all GitHub polling and fixes. */
@@ -242,6 +245,7 @@ export function runCiFixViaCli(
     webUrl?: string;
     serializationKey?: string;
     expectedHeadSha?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<boolean> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
@@ -250,6 +254,11 @@ export function runCiFixViaCli(
     prNumber,
     () =>
       new Promise((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve(false);
+          return;
+        }
+        const detached = process.platform !== "win32";
         const child = spawn(
           process.execPath,
           [
@@ -264,12 +273,43 @@ export function runCiFixViaCli(
             stdio: "inherit",
             cwd: opts.cwd,
             env: opts.env ?? process.env,
+            detached,
           },
         );
-        child.on("close", (code) => resolve(code === 0));
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        let settled = false;
+        const abort = () => {
+          if (child.pid === undefined) return;
+          try {
+            if (detached) process.kill(-child.pid, "SIGTERM");
+            else child.kill("SIGTERM");
+          } catch {
+            // The child may already have exited.
+          }
+          killTimer = setTimeout(() => {
+            try {
+              if (detached) process.kill(-child.pid!, "SIGKILL");
+              else child.kill("SIGKILL");
+            } catch {
+              // The child may already have exited.
+            }
+          }, 5_000);
+          killTimer.unref?.();
+        };
+        const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
+          opts.signal?.removeEventListener("abort", abort);
+          if (killTimer) clearTimeout(killTimer);
+          resolve(ok);
+        };
+        opts.signal?.addEventListener("abort", abort, { once: true });
+        child.on("close", (code) => {
+          finish(code === 0);
+        });
         child.on("error", (error) => {
           console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);
-          resolve(false);
+          finish(false);
         });
       }),
   );
@@ -658,12 +698,19 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     writeFileSync(feedbackPath, JSON.stringify(feedback));
 
     try {
-      let ok = false;
+      let result: CiFixResult = false;
       try {
-        ok = await this.options.fixPr(repo, prNumber, feedbackPath, headSha);
+        result = await this.options.fixPr(repo, prNumber, feedbackPath, headSha);
       } catch (error) {
         console.warn(`⚠️  [${this.name}] CI fix invocation failed: ${(error as Error).message}`);
       }
+      if (result === "deferred") {
+        console.log(
+          `⏳ [${this.name}] ${repo}#${prNumber} CI fix deferred before execution; retry budget preserved`,
+        );
+        return "active";
+      }
+      const ok = result;
       state.consecutiveFailures += 1;
       if (ok) {
         for (const failure of fresh) {

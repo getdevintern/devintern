@@ -275,6 +275,30 @@ DEVINTERN_VERBOSE=1
 
 This logs every API call, response, and retry attempt to the console. Leave it unset (the default) for quiet operation.
 
+## Auto-Review Loop
+
+With `--create-pr --auto-review`, the CLI critiques its own PR, applies fixes, and re-reviews until the review is approved, no important issues remain, or the iteration cap is reached. The cap is a ceiling, not a quota: most runs stop earlier on approval. How many iterations actually ran is recorded in the run record (`auto_review` stage) and in `auto-review-summary.json` in the task's output directory.
+
+One setting controls every auto-review path (direct CLI runs, workspace/worker runs, and the webhook server):
+
+```bash
+# .devintern-code/.env (or the workspace .env, or the shell)
+AUTO_REVIEW_ITERATIONS=3
+```
+
+or per run:
+
+```bash
+devintern PROJ-123 --create-pr --auto-review --auto-review-iterations 3
+```
+
+- **Default: `2`** review–fix cycles (lowered from 5 — most PRs converge in 1–2 passes or start thrashing, and every extra round is another agent run before a human sees the PR).
+- `1` means a single review pass with one fix round and no re-review. `0` is invalid, not "unlimited".
+- The CLI flag wins over the env var when both are set.
+- Invalid values (non-numeric or less than 1) are rejected with a clear error and the loop does not start.
+- Workers inherit the same setting: either include `--auto-review-iterations N` in `[defaults].worker_task_args` or set `AUTO_REVIEW_ITERATIONS` in the worker environment. Reloading `workspace.toml` applies a changed cap to subsequent tasks only.
+- The webhook server reads the same `AUTO_REVIEW_ITERATIONS` env var. The old webhook-only `WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS` still works as a deprecated fallback and prints a warning; migrate to the unified name.
+
 ## Error Reporting
 
 The CLI reports errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
@@ -296,14 +320,24 @@ Set this in your shell environment or in `.devintern-code/.env`.
 
 ## Anonymous Usage Analytics
 
-The CLI sends one anonymous usage event per run to DevIntern's PostHog project so we can understand popularity and which features are used. It never sends task content, code, repository names, file paths, or credentials — only:
+The CLI sends anonymous usage events to DevIntern's PostHog project (using the official PostHog Node SDK) so we can understand popularity, which features are used, and where setup gets stuck. It never sends task content, code, repository names, file paths, or credentials — only:
 
-- CLI version, OS, architecture
-- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- CLI version, OS, architecture, and whether the session runs in CI
+- Active tracker type (e.g. `jira`, `linear`), run mode (tasks / query / estimate), and the `worker connect` target (e.g. `github`, `sentry`)
 - Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
-- Whether the session runs in CI
+- Low-cardinality outcome categories: setup/run results (`ok`, `warn`, `fail`, reasons like "missing tracker credentials" or "no agent CLI"), readiness check names and statuses (`bun`, `git`, `agent`, `tracker`, `auth`, `license`), and worker mode/connect outcomes
 
-A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`. Analytics are disabled automatically when running from source. To opt out, either:
+Events emitted along the activation path:
+
+- `cli_run`, `task_run` — a CLI run starts and how its interactive task run ends
+- `setup_started` / `setup_completed` / `setup_declined` / `setup_failed` — `devintern init` (interactive or `--yes`) and the first-run rescue offer, including whether sign-in succeeded, was skipped, or failed
+- `doctor_run` — the `devintern doctor` (and init readiness) summary with per-check `ok`/`warn`/`fail` statuses
+- `login_result` — `devintern login` outcome (provider name only, e.g. `github`)
+- `worker_init_started` / `worker_init_completed` / `worker_init_failed` — worker wizard steps: relay connect (skipped/succeeded/partial/failed), service install, GitHub App
+- `worker_connect`, `worker_started`, `worker_task_run` — standalone connect runs, worker startup, and terminal worker task outcomes
+- `analytics_opt_out` — sent once, anonymously, the run after `analytics.enabled: false` is set (so opt-outs drop out of the funnel); suppressed entirely when `DEVINTERN_TELEMETRY_DISABLED` is also set, so the env kill-switch guarantees zero outbound analytics traffic
+
+A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`; events never create person profiles. Analytics are disabled automatically when running from source (no build-time API key). To opt out, either:
 
 ```bash
 # Shell or .devintern-code/.env
@@ -318,7 +352,7 @@ or set in `.devintern-code/settings.json`:
 }
 ```
 
-See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above; setting `DEVINTERN_TELEMETRY_DISABLED` instead sends nothing at all. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
 
 ## Readiness Check
 
@@ -417,6 +451,7 @@ Applies to every unattended worker surface — fleet task polling, PR review add
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
 - Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
+- If the persisted active harness is no longer part of `AGENT_HARNESS` (for example after shortening the chain), startup warns once and stores the highest-priority available entry as the new active harness, so later restarts do not repeat the stale-harness warning.
 - Which harness executed each run is recorded in run records, and `/health` on the webhook server reports the active harness, the chain, and open limit windows.
 
 Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.

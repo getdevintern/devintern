@@ -13,6 +13,7 @@ import path from "path";
 
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/github-app-setup";
+import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
 import {
   configureWorkerOperatingPolicy,
   generateWebhookSecret,
@@ -122,9 +123,11 @@ describe("runWorkerInit", () => {
   let tempDir: string;
   let workspaceDir: string;
   let logs: string[];
+  let telemetryDir: string;
   const savedTracker = process.env.TASK_TRACKER;
   const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
   const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
+  const savedConfigDir = process.env[ANALYTICS_CONFIG_DIR_ENV];
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-worker-init-"));
@@ -143,6 +146,11 @@ describe("runWorkerInit", () => {
   });
 
   afterEach(() => {
+    setAnalyticsCaptureForTests(undefined);
+    delete process.env.POSTHOG_API_KEY;
+    if (savedConfigDir === undefined) delete process.env[ANALYTICS_CONFIG_DIR_ENV];
+    else process.env[ANALYTICS_CONFIG_DIR_ENV] = savedConfigDir;
+    if (telemetryDir) rmSync(telemetryDir, { recursive: true, force: true });
     if (savedTracker === undefined) delete process.env.TASK_TRACKER;
     else process.env.TASK_TRACKER = savedTracker;
     if (savedWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
@@ -169,6 +177,16 @@ describe("runWorkerInit", () => {
       homedir: tempDir,
       ...overrides,
     };
+  }
+
+  /** Pin analytics to a throwaway config dir and record captured events. */
+  function stubAnalytics(): Array<{ event?: string; properties?: Record<string, unknown> }> {
+    telemetryDir = path.join(tempDir, "telemetry");
+    process.env.POSTHOG_API_KEY = "phc_test";
+    process.env[ANALYTICS_CONFIG_DIR_ENV] = telemetryDir;
+    const recorded: Array<{ event?: string; properties?: Record<string, unknown> }> = [];
+    setAnalyticsCaptureForTests({ capture: (payload) => recorded.push(payload) });
+    return recorded;
   }
 
   test("fails when tracker setup does not finish", async () => {
@@ -303,6 +321,49 @@ describe("runWorkerInit", () => {
     const result = await runWorkerInit(deps([], { ensureTracker: async () => "not-a-tracker" }));
     expect(result.ok).toBe(false);
     expect(logs.join("\n")).toContain("does not support worker polling");
+  });
+
+  test("emits started and failed events when tracker setup does not finish", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => null }));
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "tracker_setup_incomplete" });
+  });
+
+  test("emits worker_init_failed with tracker_not_pollable for an unknown tracker", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps([], { ensureTracker: async () => "not-a-tracker" }));
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "tracker_not_pollable" });
+  });
+
+  test("emits worker_init_failed with workspace_error when the workspace write fails", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(
+      deps([], { bootstrapWorkspace: async () => ({ error: "cannot write workspace" }) }),
+    );
+    expect(result.ok).toBe(false);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_failed"]);
+    expect(recorded[1]?.properties).toMatchObject({ reason: "workspace_error" });
+  });
+
+  test("emits started and completed events with per-step outcomes", async () => {
+    const recorded = stubAnalytics();
+    const result = await runWorkerInit(deps(["status=todo"]));
+    expect(result.ok).toBe(true);
+    await Promise.resolve();
+    expect(recorded.map((e) => e.event)).toEqual(["worker_init_started", "worker_init_completed"]);
+    expect(recorded[1]?.properties).toMatchObject({
+      tracker: "markdown",
+      relay_connect: "skipped",
+      service_install: "declined",
+      github_app: "unavailable",
+    });
   });
 
   test("connects signed-in users and stores relay state in the workspace", async () => {

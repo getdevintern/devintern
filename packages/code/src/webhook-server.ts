@@ -65,6 +65,10 @@ import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/auto-review-loop";
 import {
+  DEFAULT_AUTO_REVIEW_ITERATIONS,
+  resolveAutoReviewIterationsIfEnabled,
+} from "./lib/auto-review-config";
+import {
   handlePingEvent,
   isGitHubIP,
   parseEventType,
@@ -91,7 +95,10 @@ const DEFAULT_CONFIG: WebhookServerConfig = {
   gitlabWebhookSecret: process.env.GITLAB_WEBHOOK_SECRET || "",
   gitlabWebhookSigningToken: process.env.GITLAB_WEBHOOK_SIGNING_TOKEN || "",
   autoReview: process.env.WEBHOOK_AUTO_REVIEW === "true",
-  autoReviewMaxIterations: parseInt(process.env.WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS || "5", 10),
+  // Placeholder replaced in startWebhookServer with the unified cap resolved
+  // from AUTO_REVIEW_ITERATIONS (or the deprecated webhook-only alias) when
+  // auto-review is enabled or an explicit override was provided.
+  autoReviewMaxIterations: DEFAULT_AUTO_REVIEW_ITERATIONS,
   validateIp: process.env.WEBHOOK_VALIDATE_IP === "true",
   debug: process.env.WEBHOOK_DEBUG === "true",
 };
@@ -1726,9 +1733,27 @@ async function sendResponse(res: ServerResponse, response: Response): Promise<vo
 export async function startWebhookServer(
   config: Partial<WebhookServerConfig> = {},
 ): Promise<import("http").Server> {
+  // Unified auto-review iteration cap: explicit config override > the shared
+  // AUTO_REVIEW_ITERATIONS env var (with the deprecated WEBHOOK_* alias as a
+  // warned fallback) > the shared default. Mirroring the CLI, resolution is
+  // gated on auto-review being enabled: an invalid value stops startup only
+  // when the loop would actually run (or an explicit override was passed);
+  // otherwise the cap is unused and env vars are ignored.
+  let autoReviewIterations: number;
+  try {
+    autoReviewIterations = resolveAutoReviewIterationsIfEnabled(
+      config.autoReviewMaxIterations,
+      config.autoReview ?? DEFAULT_CONFIG.autoReview,
+    );
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
+
   const finalConfig: WebhookServerConfig = {
     ...DEFAULT_CONFIG,
     ...config,
+    autoReviewMaxIterations: autoReviewIterations,
   };
 
   // Validate configuration
