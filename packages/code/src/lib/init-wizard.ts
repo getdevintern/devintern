@@ -32,6 +32,8 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, resolveConfigDir, upsertEnvVars } from "@devintern/utils";
+import type { SetupSignInStatus, SetupSource } from "./analytics";
+import { trackSetupCompleted, trackSetupFailed, trackSetupStarted } from "./analytics";
 import {
   GITHUB_PR_DOCS,
   GITHUB_PR_TOKEN_STEP,
@@ -41,6 +43,7 @@ import {
   scaffoldProject,
 } from "./init-scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "./readiness";
+import type { ReadinessCheck } from "./readiness";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 
 export { isInteractive };
@@ -71,6 +74,11 @@ export interface InitWizardDeps {
   signIn?: () => Promise<InitWizardUserLike | null>;
   /** Installed agent CLIs; defaults to PATH probing of every harness. */
   listInstalledAgents?: () => Array<{ name: string; displayName: string }>;
+  /**
+   * Which entry point opened the wizard — `init` command or the first-run
+   * rescue offer — recorded on setup analytics events.
+   */
+  source?: SetupSource;
 }
 
 /** Supabase auth config matching what the CLI uses at runtime. */
@@ -86,13 +94,16 @@ function wizardSupabaseConfig(cwd: string): SupabaseAuthConfig {
  * Post-scaffold onboarding: detect the agent CLI, offer inline sign-in, and
  * finish with a readiness checklist so the first `devintern TASK-KEY` cannot
  * fail on something init could have caught.
+ *
+ * @returns The sign-in outcome and readiness checks (when collectible) for
+ *   the setup analytics event
  */
 async function runPostSetup(
   cwd: string,
   prompt: PromptFn,
   log: (message: string) => void,
   deps: InitWizardDeps,
-): Promise<void> {
+): Promise<{ signedIn: SetupSignInStatus; checks?: ReadinessCheck[] }> {
   // Agent CLI availability
   const agents =
     deps.listInstalledAgents?.() ??
@@ -118,6 +129,7 @@ async function runPostSetup(
   } catch {
     user = null;
   }
+  let signedIn: SetupSignInStatus = "skipped";
   if (!user) {
     const answer = await prompt(
       "\nSign in to DevIntern now? Enables worker connect and license entitlements. [Y/n] ",
@@ -130,13 +142,16 @@ async function runPostSetup(
           return login(supabaseConfig, resolved);
         });
       try {
-        const signedIn = await signIn();
-        if (signedIn) {
-          log(`✅ Signed in as ${signedIn.email || signedIn.id}`);
+        const signedUp = await signIn();
+        if (signedUp) {
+          log(`✅ Signed in as ${signedUp.email || signedUp.id}`);
+          signedIn = "success";
         } else {
+          signedIn = "failed";
           log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
         }
       } catch (error) {
+        signedIn = "failed";
         log(
           `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
             "   Run 'devintern login' before using worker connect or licensed features.",
@@ -145,13 +160,15 @@ async function runPostSetup(
     }
   } else {
     log(`✅ Signed in as ${user.email || user.id}`);
+    signedIn = "success";
   }
 
   // Readiness checklist over the freshly written configuration
+  let checks: ReadinessCheck[] | undefined;
   try {
     const envPath = join(findProjectRoot({ startDir: cwd }), ".devintern-code", ".env");
     const envRecord = parseEnvContent(readFileSync(envPath, "utf8"));
-    const checks = await collectReadinessChecks({
+    checks = await collectReadinessChecks({
       env: { ...process.env, ...envRecord },
       envPath,
     });
@@ -163,6 +180,7 @@ async function runPostSetup(
   } catch {
     // Summary is best-effort; never fail init over it.
   }
+  return { signedIn, checks };
 }
 
 /** Run the interactive init wizard end to end. */
@@ -192,12 +210,19 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
   }
 
   try {
+    trackSetupStarted(deps.source ?? "init");
     const result = await runTrackerSetup(prompt, log, probe, cwd);
     if (!result) {
+      trackSetupFailed("scaffold_refused");
       return;
     }
 
-    await runPostSetup(cwd, prompt, log, deps);
+    const postSetup = await runPostSetup(cwd, prompt, log, deps);
+    trackSetupCompleted({
+      tracker: result.trackerId,
+      signedIn: postSetup.signedIn,
+      checks: postSetup.checks,
+    });
 
     log("\n🎉 Project initialized successfully!");
     log("\n📝 Next steps:");

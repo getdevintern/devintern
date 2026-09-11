@@ -54,6 +54,12 @@ import {
   isAnonymousIdNewlyCreated,
   RUN_ORIGIN_ENV,
   track,
+  trackDoctorRun,
+  trackInteractiveTaskRun,
+  trackLoginResult,
+  trackSetupCompleted,
+  trackSetupStarted,
+  trackWorkerConnect,
   trackWorkerTaskRun,
 } from "./lib/analytics";
 import type { AnalyticsPropValue } from "./lib/analytics";
@@ -273,6 +279,9 @@ async function initializeProject(): Promise<void> {
   if (!scaffoldProject()) {
     return;
   }
+  // Non-interactive setup still counts toward the activation funnel; the
+  // wizard records its own started/completed pair when prompts are available.
+  trackSetupStarted("init");
 
   // Surface installed sandbox providers so users know isolation is available.
   try {
@@ -302,6 +311,8 @@ async function initializeProject(): Promise<void> {
     "      - The file includes examples for Jira, Linear, Trello, GitHub, Azure DevOps, and Asana",
   );
   console.log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
+
+  trackSetupCompleted({ signedIn: "skipped" });
 }
 
 /**
@@ -530,13 +541,15 @@ function loadSupabaseConfig() {
  * Enforce a license result inside the CLI. `requireLicense` throws a
  * `LicenseCheckError` on failure (library code must never kill the host
  * process); the CLI converts that into its standard failed-check exit code 1
- * after the failure details were already printed to stderr.
+ * after the failure details were already printed to stderr. The exit flushes
+ * pending analytics so events captured earlier in the run (e.g. `cli_run`)
+ * are not dropped.
  */
-function enforceLicenseOrExit(result: LicenseCheckResult): void {
+async function enforceLicenseOrExit(result: LicenseCheckResult): Promise<void> {
   try {
     requireLicense(result);
   } catch (error) {
-    if (error instanceof LicenseCheckError) process.exit(1);
+    if (error instanceof LicenseCheckError) await flushAnalyticsAndExit(1);
     throw error;
   }
 }
@@ -601,7 +614,7 @@ async function runWebhookServeCommand(args: string[]): Promise<void> {
     supabaseConfig: loadSupabaseConfig(),
     requireAutomation: true,
   });
-  enforceLicenseOrExit(licenseResult);
+  await enforceLicenseOrExit(licenseResult);
 
   const { startWebhookServer } = await import("./webhook-server");
   await startWebhookServer({ port, host });
@@ -632,6 +645,7 @@ if (process.argv[2] === "init") {
     } else {
       await initializeProject();
     }
+    await flushAnalytics();
     process.exit(0);
   })();
 } else if (process.argv[2] === "worker") {
@@ -640,8 +654,27 @@ if (process.argv[2] === "init") {
     // `devintern worker connect ...` — configure relay-backed integrations or
     // a directly polled Sentry error monitor.
     if (process.argv[3] === "connect") {
-      const { runWorkerConnectCommand } = await import("./lib/worker-connect");
-      const exitCode = await runWorkerConnectCommand(process.argv.slice(4));
+      const { runWorkerConnectCommand, parseConnectArgs, WORKER_CONNECT_TARGETS } =
+        await import("./lib/worker-connect");
+      const connectArgs = process.argv.slice(4);
+      // Parse once and hand the result to the command, so attribution and
+      // execution cannot drift. Arg errors (`--team` with no value) and
+      // unknown targets stay out of analytics: the command reports them, and
+      // tracking only allowlisted targets keeps the funnel low-cardinality.
+      const parsed = parseConnectArgs(connectArgs);
+      const shouldTrack =
+        !parsed.error &&
+        !parsed.help &&
+        parsed.target !== "status" &&
+        WORKER_CONNECT_TARGETS.has(parsed.target);
+      const exitCode = await runWorkerConnectCommand(connectArgs, { parsed });
+      if (shouldTrack) {
+        await trackWorkerConnect({
+          target: parsed.target,
+          outcome: exitCode === 0 ? "succeeded" : "failed",
+        });
+      }
+      await flushAnalytics();
       process.exit(exitCode);
     }
 
@@ -740,6 +773,7 @@ if (process.argv[2] === "init") {
           return license.valid ? null : license.message;
         },
       });
+      await flushAnalytics();
       process.exit(result.ok ? 0 : 1);
     }
 
@@ -847,7 +881,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    enforceLicenseOrExit(licenseResult);
+    await enforceLicenseOrExit(licenseResult);
 
     const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
     await runWorkspaceWorker({
@@ -903,7 +937,7 @@ if (process.argv[2] === "init") {
       supabaseConfig,
       requireAutomation: true,
     });
-    enforceLicenseOrExit(licenseResult);
+    await enforceLicenseOrExit(licenseResult);
 
     const { startDashboardServer } = await import("./dashboard-server");
     const server = startDashboardServer({ port, host });
@@ -1112,9 +1146,13 @@ if (process.argv[2] === "init") {
       const resolved = await resolveLogin(process.argv);
       const user = await login(supabaseConfig, resolved);
       console.log(`✅ Signed in as ${user.email || user.id}`);
+      await trackLoginResult({ outcome: "succeeded", method: resolved.method });
+      await flushAnalytics();
       process.exit(0);
     } catch (error) {
       console.error(`❌ ${(error as Error).message}`);
+      await trackLoginResult({ outcome: "failed" });
+      await flushAnalytics();
       process.exit(1);
     }
   })();
@@ -1179,6 +1217,12 @@ if (process.argv[2] === "init") {
     } else {
       console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
     }
+    await trackDoctorRun({
+      checks,
+      hasFailures: report.hasFailures,
+      hasWarnings: report.hasWarnings,
+    });
+    await flushAnalytics();
     process.exit(report.hasFailures ? 1 : 0);
   })();
 } else if (process.argv[2] === "whoami") {
@@ -1406,16 +1450,21 @@ if (options.verbose) {
  *
  * Supports `TASK_TRACKER=jira` (default), `trello`, or `markdown`.
  *
+ * Exit paths flush pending analytics first so events captured earlier in the
+ * run (`cli_run`, `setup_declined`/`setup_failed` from the first-run rescue)
+ * are delivered instead of dying with the process.
+ *
  * @throws Exits the process when variables are missing
  */
-function validateEnvironment(): void {
+async function validateEnvironment(): Promise<void> {
   const trackerType = (process.env.TASK_TRACKER || "jira").toLowerCase();
   const capabilities = TRACKER_CAPABILITIES[trackerType];
 
   if (!capabilities) {
     console.error(`❌ Unsupported task tracker: "${trackerType}"`);
     console.error(`   Supported values: ${supportedTrackers().join(", ")}`);
-    process.exit(1);
+    await flushAnalyticsAndExit(1);
+    return;
   }
 
   const missing = capabilities.requiredEnv.filter((key) => !process.env[key]);
@@ -1423,7 +1472,7 @@ function validateEnvironment(): void {
     console.error(`❌ Missing required ${capabilities.displayName} environment variables:`);
     missing.forEach((key) => console.error(`   - ${key}`));
     printMissingEnvHelp();
-    process.exit(1);
+    await flushAnalyticsAndExit(1);
   }
 }
 
@@ -1477,7 +1526,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     const markdownInput = isMarkdownFilePath(taskKey);
 
     if (!markdownInput) {
-      validateEnvironment();
+      await validateEnvironment();
     }
 
     const tracker = new TaskTrackerManager().getClient(taskKey);
@@ -2097,7 +2146,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           lockManager.release();
         }
         writeUsageLimitHint(error);
-        process.exit(USAGE_LIMIT_EXIT_CODE);
+        await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
       }
       console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
       // The ticket may already be "In Progress": leave feedback and move it
@@ -2113,7 +2162,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       if (lockManager) {
         lockManager.release();
       }
-      process.exit(0);
+      await flushAnalyticsAndExit(0);
     }
 
     const err = error as Error;
@@ -2145,6 +2194,15 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     if (totalTasks > 1) {
       throw error;
     }
+    if (!isWorkerTaskProcess()) {
+      await trackInteractiveTaskRun({
+        tracker: getActiveTrackerType(),
+        outcome: "failed",
+        taskCount: 1,
+        runMode: options.query ? "query" : "tasks",
+      });
+      await flushAnalytics();
+    }
     await flushErrorTracking();
     process.exit(1);
   }
@@ -2152,6 +2210,15 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
 // Global lock manager instance
 let lockManager: LockManager | null = null;
+
+/**
+ * Flush queued analytics events, then exit. `flushAnalytics` is bounded by its
+ * own timeout, so a hung network call can never stall the exit.
+ */
+async function flushAnalyticsAndExit(exitCode: number): Promise<never> {
+  await flushAnalytics();
+  process.exit(exitCode);
+}
 
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 async function main(): Promise<void> {
@@ -2209,13 +2276,12 @@ async function main(): Promise<void> {
     if (needsTrackerEnv) {
       const firstRun = await ensureTrackerEnvConfigured({
         automated: isAutomatedEnvironment(),
-        runWizard: () => runInitWizard(),
         reloadEnv: () => {
           loadedEnvPath = loadEnvironment(options.envFile);
         },
       });
       if (firstRun === "failed") {
-        validateEnvironment();
+        await validateEnvironment();
       }
     }
 
@@ -2228,7 +2294,7 @@ async function main(): Promise<void> {
         supabaseConfig,
         requireAutomation: true,
       });
-      enforceLicenseOrExit(licenseResult);
+      await enforceLicenseOrExit(licenseResult);
     }
 
     // Pull latest changes from remote (unless git is disabled)
@@ -2299,7 +2365,7 @@ async function main(): Promise<void> {
       console.error("     devintern --query \"project = PROJ AND status = 'To Do'\"");
       console.error("     devintern ./tasks/feature-spec.md --no-git");
       console.error("     devintern ./epic.md ./subtask-a.md --no-git");
-      process.exit(1);
+      await flushAnalyticsAndExit(1);
     }
 
     // Estimation mode: separate code path
@@ -2441,13 +2507,13 @@ async function main(): Promise<void> {
                 lockManager.release();
               }
               writeUsageLimitHint(error);
-              process.exit(USAGE_LIMIT_EXIT_CODE);
+              await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
             }
             console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
             if (lockManager) {
               lockManager.release();
             }
-            process.exit(0);
+            await flushAnalyticsAndExit(0);
           }
 
           estimationResults.failed++;
@@ -2521,7 +2587,7 @@ async function main(): Promise<void> {
               lockManager.release();
             }
             writeUsageLimitHint(error);
-            process.exit(USAGE_LIMIT_EXIT_CODE);
+            await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
           }
           const remaining = tasksToProcess.length - i - 1;
           console.warn(
@@ -2531,7 +2597,7 @@ async function main(): Promise<void> {
           if (lockManager) {
             lockManager.release();
           }
-          process.exit(0);
+          await flushAnalyticsAndExit(0);
         }
 
         results.failed++;
@@ -2542,6 +2608,18 @@ async function main(): Promise<void> {
 
         console.log("⚠️  Continuing with remaining tasks...\n");
       }
+    }
+
+    // One outcome event per interactive run marks the activation funnel's
+    // "first successful task" step; worker subprocesses instead report
+    // `worker_task_run` so the two paths stay comparable.
+    if (!isWorkerTaskProcess() && tasksToProcess.length > 0) {
+      await trackInteractiveTaskRun({
+        tracker: activeTrackerType,
+        outcome: results.failed === 0 ? "succeeded" : results.successful > 0 ? "partial" : "failed",
+        taskCount: tasksToProcess.length,
+        runMode: options.query ? "query" : "tasks",
+      });
     }
 
     // Print summary for batch operations
@@ -4386,7 +4464,7 @@ process.on("unhandledRejection", (error: Error) => {
   if (lockManager) {
     lockManager.release();
   }
-  void flushErrorTracking().finally(() => process.exit(1));
+  void Promise.all([flushErrorTracking(), flushAnalytics()]).finally(() => process.exit(1));
 });
 
 // Handle process termination signals
@@ -4415,7 +4493,9 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   if (lockManager) {
     lockManager.release();
   }
-  // Bounded; pending crash/handled-error events get a chance to send.
+  // Bounded; pending crash/handled-error and queued analytics events get a
+  // chance to send before the process is torn down.
+  await flushAnalytics();
   await flushErrorTracking();
   process.exit(exitCode);
 }
@@ -4439,7 +4519,7 @@ process.on("uncaughtException", (error: Error) => {
   if (lockManager) {
     lockManager.release();
   }
-  void flushErrorTracking().finally(() => process.exit(1));
+  void Promise.all([flushErrorTracking(), flushAnalytics()]).finally(() => process.exit(1));
 });
 
 // Run the main function (only if not running a subcommand)

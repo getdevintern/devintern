@@ -320,14 +320,24 @@ Set this in your shell environment or in `.devintern-code/.env`.
 
 ## Anonymous Usage Analytics
 
-The CLI sends one anonymous usage event per run to DevIntern's PostHog project so we can understand popularity and which features are used. It never sends task content, code, repository names, file paths, or credentials — only:
+The CLI sends anonymous usage events to DevIntern's PostHog project (using the official PostHog Node SDK) so we can understand popularity, which features are used, and where setup gets stuck. It never sends task content, code, repository names, file paths, or credentials — only:
 
-- CLI version, OS, architecture
-- Active tracker type (e.g. `jira`, `linear`) and run mode (tasks / query / estimate)
+- CLI version, OS, architecture, and whether the session runs in CI
+- Active tracker type (e.g. `jira`, `linear`), run mode (tasks / query / estimate), and the `worker connect` target (e.g. `github`, `sentry`)
 - Task count and boolean feature flags (`--create-pr`, `--auto-review`, `--estimate`, sandbox provider)
-- Whether the session runs in CI
+- Low-cardinality outcome categories: setup/run results (`ok`, `warn`, `fail`, reasons like "missing tracker credentials" or "no agent CLI"), readiness check names and statuses (`bun`, `git`, `agent`, `tracker`, `auth`, `license`), and worker mode/connect outcomes
 
-A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`. Analytics are disabled automatically when running from source. To opt out, either:
+Events emitted along the activation path:
+
+- `cli_run`, `task_run` — a CLI run starts and how its interactive task run ends
+- `setup_started` / `setup_completed` / `setup_declined` / `setup_failed` — `devintern init` (interactive or `--yes`) and the first-run rescue offer, including whether sign-in succeeded, was skipped, or failed
+- `doctor_run` — the `devintern doctor` (and init readiness) summary with per-check `ok`/`warn`/`fail` statuses
+- `login_result` — `devintern login` outcome (provider name only, e.g. `github`)
+- `worker_init_started` / `worker_init_completed` / `worker_init_failed` — worker wizard steps: relay connect (skipped/succeeded/partial/failed), service install, GitHub App
+- `worker_connect`, `worker_started`, `worker_task_run` — standalone connect runs, worker startup, and terminal worker task outcomes
+- `analytics_opt_out` — sent once, anonymously, the run after `analytics.enabled: false` is set (so opt-outs drop out of the funnel); suppressed entirely when `DEVINTERN_TELEMETRY_DISABLED` is also set, so the env kill-switch guarantees zero outbound analytics traffic
+
+A random anonymous ID is generated once per project and stored in `.devintern-code/telemetry.json`; events never create person profiles. Analytics are disabled automatically when running from source (no build-time API key). To opt out, either:
 
 ```bash
 # Shell or .devintern-code/.env
@@ -342,7 +352,7 @@ or set in `.devintern-code/settings.json`:
 }
 ```
 
-See [devintern.com/privacy](https://devintern.com/privacy/) for details.
+The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above; setting `DEVINTERN_TELEMETRY_DISABLED` instead sends nothing at all. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
 
 ## Readiness Check
 
