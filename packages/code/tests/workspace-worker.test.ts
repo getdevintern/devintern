@@ -25,7 +25,7 @@ import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-superv
 import { toRoutableTask } from "../src/lib/workspace/router";
 import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
-import { saveRelayState } from "../src/lib/relay-connect";
+import { saveRelayState } from "../src/lib/relay/connect";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]

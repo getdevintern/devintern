@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { saveRelayState } from "../src/lib/relay-connect";
+import { saveRelayState } from "../src/lib/relay/connect";
 import { runWorkerConnectCommand } from "../src/lib/worker-connect";
 
 describe("runWorkerConnectCommand", () => {

@@ -14,7 +14,7 @@ import type {
   SignatureVerificationResult,
   WebhookEventType,
   WebhookProcessingResult,
-} from "../types/github-webhooks";
+} from "../../../types/github-webhooks";
 
 /**
  * Verify a GitHub webhook payload signature (HMAC-SHA256).
