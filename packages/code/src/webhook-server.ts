@@ -1518,6 +1518,12 @@ async function runAgentHarnessForReview(
   });
 
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: Parameters<typeof resolve>[0]): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     (async () => {
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
@@ -1594,7 +1600,7 @@ async function runAgentHarnessForReview(
 
       agent.on("error", (error: NodeJS.ErrnoException) => {
         clearTimeout(timeout);
-        resolve({
+        settle({
           success: false,
           message: `Failed to run Agent: ${error.message}`,
         });
@@ -1612,7 +1618,7 @@ async function runAgentHarnessForReview(
         const output = stdoutOutput + stderrOutput;
 
         if (timedOut) {
-          resolve({
+          settle({
             success: false,
             message: `Agent timed out after ${timeoutMinutes} minutes`,
             output,
@@ -1624,7 +1630,7 @@ async function runAgentHarnessForReview(
           }
           // A usage/rate limit is account-global — surface it so the caller can
           // pause the queue until reset rather than treating it as a task failure.
-          resolve({
+          settle({
             success: false,
             message: `Agent hit a usage limit${usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""}`,
             output,
@@ -1636,20 +1642,20 @@ async function runAgentHarnessForReview(
           if (matchedLine) {
             console.log(`   Matched output: ${matchedLine}`);
           }
-          resolve({
+          settle({
             success: false,
             message: "Agent reached max turns limit",
             output,
             maxTurnsReached: true,
           });
         } else if (code === 0) {
-          resolve({
+          settle({
             success: true,
             message: "Agent completed successfully",
             output,
           });
         } else {
-          resolve({
+          settle({
             success: false,
             message: `Agent exited with code ${code}`,
             output,
@@ -1658,7 +1664,7 @@ async function runAgentHarnessForReview(
         }
       });
     })().catch((error) => {
-      resolve({
+      settle({
         success: false,
         message: `Failed to run Agent: ${error instanceof Error ? error.message : String(error)}`,
       });
