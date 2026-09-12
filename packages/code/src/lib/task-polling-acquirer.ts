@@ -95,8 +95,19 @@ export async function runTaskViaCli(
   const result = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
+        let settled = false;
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        let abort: (() => void) | undefined;
+        const finish = (code: number) => {
+          if (settled) return;
+          settled = true;
+          if (abort) opts.signal?.removeEventListener("abort", abort);
+          if (killTimer) clearTimeout(killTimer);
+          // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
+          resolve(code);
+        };
         if (opts.signal?.aborted) {
-          resolve(1);
+          finish(1);
           return;
         }
         const detached = process.platform !== "win32";
@@ -106,9 +117,7 @@ export async function runTaskViaCli(
           env,
           detached,
         });
-        let killTimer: ReturnType<typeof setTimeout> | undefined;
-        let settled = false;
-        const abort = () => {
+        abort = () => {
           if (child.pid === undefined) return;
           try {
             if (detached) process.kill(-child.pid, "SIGTERM");
@@ -125,13 +134,6 @@ export async function runTaskViaCli(
             }
           }, 5_000);
           killTimer.unref?.();
-        };
-        const finish = (code: number) => {
-          if (settled) return;
-          settled = true;
-          opts.signal?.removeEventListener("abort", abort);
-          if (killTimer) clearTimeout(killTimer);
-          resolve(code);
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {
