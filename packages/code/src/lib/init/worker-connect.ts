@@ -3,19 +3,19 @@
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 
-import { Utils } from "./utils";
-import { parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
+import { Utils } from "../utils";
+import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host/index";
 import {
   connectRelayTarget,
   hasGitHubRelayRegistration,
   hasGitLabRelayRegistration,
   loadRelayState,
-} from "./relay/connect";
-import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay/connect";
-import { loadWorkspaceConfig } from "./workspace/config";
-import type { WorkspaceConfig } from "./workspace/config";
-import { buildRepoEnv, buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";
-import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./workspace/paths";
+} from "../relay/connect";
+import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "../relay/connect";
+import { loadWorkspaceConfig } from "../workspace/config";
+import type { WorkspaceConfig } from "../workspace/config";
+import { buildRepoEnv, buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "../workspace/env";
+import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentrySetupPromptFn, SentryValidationOptions } from "./worker-sentry-setup";
 

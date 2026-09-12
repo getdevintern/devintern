@@ -5,10 +5,10 @@ import { join } from "path";
 
 import { parseEnvContent } from "@devintern/task-trackers";
 
-import { DEFAULT_SENTRY_BASE_URL, SentryClient } from "./observability/sentry-client";
-import { loadWorkspaceConfig } from "./workspace/config";
-import { writeSentryErrorMonitor } from "./workspace/init";
-import { workspaceConfigPath, workspaceEnvPath } from "./workspace/paths";
+import { DEFAULT_SENTRY_BASE_URL, SentryClient } from "../observability/sentry-client";
+import { loadWorkspaceConfig } from "../workspace/config";
+import { writeSentryErrorMonitor } from "../workspace/init";
+import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 
 export type SentrySetupPromptFn = (question: string) => Promise<string>;
 export type SentrySetupLogFn = (message: string) => void;

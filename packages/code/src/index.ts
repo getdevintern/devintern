@@ -74,9 +74,9 @@ import { TaskFormatter } from "./lib/task/formatter";
 import type { RetryPromptContext } from "./lib/task/formatter";
 import { resolveOutputDir } from "./lib/config/output-dir";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
-import { scaffoldProject } from "./lib/init-scaffold";
-import { isInteractive, runInitWizard } from "./lib/init-wizard";
-import { ensureTrackerEnvConfigured } from "./lib/first-run";
+import { scaffoldProject } from "./lib/init/scaffold";
+import { isInteractive, runInitWizard } from "./lib/init/wizard";
+import { ensureTrackerEnvConfigured } from "./lib/init/first-run";
 import { TaskTrackerManager } from "./lib/trackers/manager";
 import type { TaskTrackerClient } from "./lib/trackers/client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
@@ -642,7 +642,7 @@ if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
       if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
-        const { runInitUpgrade } = await import("./lib/init-wizard");
+        const { runInitUpgrade } = await import("./lib/init/wizard");
         await runInitUpgrade();
       } else {
         await runInitWizard();
@@ -660,7 +660,7 @@ if (process.argv[2] === "init") {
     // a directly polled Sentry error monitor.
     if (process.argv[3] === "connect") {
       const { runWorkerConnectCommand, parseConnectArgs, WORKER_CONNECT_TARGETS } =
-        await import("./lib/worker-connect");
+        await import("./lib/init/worker-connect");
       const connectArgs = process.argv.slice(4);
       // Parse once and hand the result to the command, so attribution and
       // execution cannot drift. Arg errors (`--team` with no value) and
@@ -754,8 +754,8 @@ if (process.argv[2] === "init") {
         process.exit(0);
       }
       loadedEnvPath = loadEnvironment();
-      const { runWorkerInit } = await import("./lib/worker-init");
-      const { isInteractive } = await import("./lib/init-wizard");
+      const { runWorkerInit } = await import("./lib/init/worker-init");
+      const { isInteractive } = await import("./lib/init/wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
         console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");

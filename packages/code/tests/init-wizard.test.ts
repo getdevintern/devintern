@@ -8,8 +8,8 @@ import {
   buildEnvExample,
   renderEnvFile,
   scaffoldProject,
-} from "../src/lib/init-scaffold";
-import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init-wizard";
+} from "../src/lib/init/scaffold";
+import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init/wizard";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
