@@ -44,7 +44,7 @@ import { isMarkdownFilePath } from "@devintern/task-trackers";
 import type { ProjectSettings } from "../types/settings";
 import type { FailureAttemptRecorder } from "./failure-feedback";
 import { reportTaskFailure } from "./failure-feedback";
-import type { RunRecord, RunStore } from "./run-recorder";
+import type { RunRecord, RunStore } from "./state/run-recorder";
 import type { TaskTrackerClient } from "./task-tracker-client";
 
 /** Reason posted on tickets whose run was orphaned by a dead worker. */

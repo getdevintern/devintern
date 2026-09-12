@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import path from "path";
 
 import { reportTaskFailure } from "../src/lib/failure-feedback";
-import { RetryStateStore, hashDescription } from "../src/lib/retry-state";
+import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 import type { TaskTrackerClient } from "../src/lib/task-tracker-client";
 import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
 

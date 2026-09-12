@@ -5,7 +5,7 @@ import { join } from "path";
 
 import { UsageLimitError } from "@devintern/agent-harness";
 
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
   resetWorkerFailover,
   runWithFailover,

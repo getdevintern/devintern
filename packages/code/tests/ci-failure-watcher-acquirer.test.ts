@@ -13,8 +13,8 @@ import type {
 import { createGitHubCiProvider } from "../src/lib/code-host/github/ci-provider";
 import type { CiConditionalResult } from "../src/lib/code-host/ci-provider";
 import type { CiFixResult } from "../src/lib/acquirers/ci-failure-watcher";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 describe("truncateCiLogs", () => {
   test("returns null for empty input", () => {

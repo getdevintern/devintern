@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
-import { RetryStateStore, hashDescription } from "../src/lib/retry-state";
+import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 
 describe("RetryStateStore", () => {
   let tempDir: string;

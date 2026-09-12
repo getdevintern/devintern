@@ -14,9 +14,9 @@ import type {
   PolledReview,
 } from "../src/lib/acquirers/review-polling";
 import type { CronOrIntervalSchedule } from "../src/lib/automation-config";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { RunStore } from "../src/lib/run-recorder";
-import { WorkerState } from "../src/lib/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { WorkerState } from "../src/lib/state/worker-state";
 import type { ConflictResolutionMode } from "../src/lib/workspace/config";
 
 describe("ReviewPollingAcquirer", () => {

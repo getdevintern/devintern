@@ -10,7 +10,7 @@ import {
 } from "../src/lib/sentry-client";
 import type { SentryIssue } from "../src/lib/sentry-client";
 import { ErrorMonitorAcquirer } from "../src/lib/acquirers/error-monitor";
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
 function issue(overrides: Partial<SentryIssue> = {}): SentryIssue {
   return {

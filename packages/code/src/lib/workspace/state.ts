@@ -20,9 +20,9 @@ import { dirname, join } from "path";
 
 import { LockManager } from "../lock-manager";
 import { parseEnvInteger } from "../env-integer";
-import { configureSqliteConnection } from "../sqlite";
-import { WebhookQueue } from "../webhook-queue";
-import { WorkerState } from "../worker-state";
+import { configureSqliteConnection } from "../state/sqlite";
+import { WebhookQueue } from "../state/webhook-queue";
+import { WorkerState } from "../state/worker-state";
 import { locksDir, resolveWorkspaceDir, workspaceDbPath } from "./paths";
 
 /** Reason a task was not routed to any repo. */

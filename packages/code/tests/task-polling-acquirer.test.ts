@@ -7,8 +7,8 @@ import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detect
 import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
 import type { ReadyTask } from "../src/lib/acquirers/task-polling";
 import type { PickupGate } from "../src/lib/schedule";
-import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/worker-state";
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);

@@ -101,11 +101,11 @@ import {
   recordRunPr,
   recordRunStage,
   recordRunTicket,
-} from "./lib/run-recorder";
-import type { RunStatus } from "./lib/run-recorder";
+} from "./lib/state/run-recorder";
+import type { RunStatus } from "./lib/state/run-recorder";
 import { buildTicketUrl } from "./lib/ticket-url";
-import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
-import { shouldSkipRetry } from "./lib/retry-gate";
+import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/state/retry-state";
+import { shouldSkipRetry } from "./lib/state/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { reportTaskFailure } from "./lib/failure-feedback";
 import {
@@ -114,7 +114,7 @@ import {
   USAGE_LIMIT_EXIT_CODE,
   writeUsageLimitHint,
 } from "./lib/usage-limit-protocol";
-import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
+import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/state/worker-state";
 import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";

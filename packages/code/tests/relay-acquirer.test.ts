@@ -5,8 +5,8 @@ import { tmpdir } from "os";
 
 import { RelayAcquirer } from "../src/lib/relay/acquirer";
 import type { RelayEnvelope } from "../src/lib/relay/acquirer";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 const RELAY_URL = "http://relay.test";
 

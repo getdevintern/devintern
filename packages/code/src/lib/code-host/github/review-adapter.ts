@@ -1,6 +1,6 @@
 import type { ChangeRequestIdentity } from "../index";
 import type { ReviewAdapter } from "../review-provider";
-import { WorkerState } from "../../worker-state";
+import { WorkerState } from "../../state/worker-state";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,

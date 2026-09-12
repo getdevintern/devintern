@@ -3,7 +3,7 @@ import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../task-supervisor";
 import type { JobKind, TaskSupervisor } from "../task-supervisor";
-import type { AgentPr } from "../worker-state";
+import type { AgentPr } from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./workspace-worker";
@@ -54,7 +54,7 @@ export async function buildGitLabFleetAcquirers(options: {
   // watches only provider-aware rows registered after successful MR creation.
   const { parseGitLabHostAliases, parseGitRemoteUrl, resolveGitLabCodeHostConfig } =
     await import("../code-host");
-  const resolveGitLabRepo = (mr: import("../worker-state").AgentPr) =>
+  const resolveGitLabRepo = (mr: import("../state/worker-state").AgentPr) =>
     config.repos.find((repo) => {
       const env = buildRepoEnv(repo, workspaceDir);
       const remote = parseGitRemoteUrl(repo.remote, {
@@ -89,7 +89,7 @@ export async function buildGitLabFleetAcquirers(options: {
     const { GitLabReviewsClient } = await import("../code-host/gitlab/reviews");
     const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
       await import("../acquirers/review-polling");
-    const clientForGitLabMr = (mr: import("../worker-state").AgentPr) => {
+    const clientForGitLabMr = (mr: import("../state/worker-state").AgentPr) => {
       const repo = resolveGitLabRepo(mr);
       if (!repo) return null;
       const env = buildRepoEnv(repo, workspaceDir);
@@ -170,8 +170,9 @@ export async function buildGitLabFleetAcquirers(options: {
     acquirers.push(gitlabPoller);
     intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
 
-    const gitlabCiRows = new Map<string, Map<number, import("../worker-state").AgentPr>>();
-    const ciKey = (mr: import("../worker-state").AgentPr) => `${mr.instanceUrl}:${mr.projectPath}`;
+    const gitlabCiRows = new Map<string, Map<number, import("../state/worker-state").AgentPr>>();
+    const ciKey = (mr: import("../state/worker-state").AgentPr) =>
+      `${mr.instanceUrl}:${mr.projectPath}`;
     const ciRow = (key: string, number?: number) => {
       const rows = gitlabCiRows.get(key);
       // Project/SHA-scoped reads can use any row; MR operations require the exact IID.

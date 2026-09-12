@@ -1,6 +1,6 @@
 import type { CiProvider } from "../ci-provider";
 import type { GitLabCiSnapshot, GitLabReviewsClient } from "./reviews";
-import type { AgentPr } from "../../worker-state";
+import type { AgentPr } from "../../state/worker-state";
 
 /** MR operations require an exact IID; CI and traces are scoped to project/SHA. */
 export function createGitLabCiProvider(

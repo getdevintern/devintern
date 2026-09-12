@@ -25,7 +25,7 @@ import type {
 
 import { HarnessFailover } from "./harness-failover";
 import type { FailoverOutcome } from "./harness-failover";
-import type { WebhookQueue } from "./webhook-queue";
+import type { WebhookQueue } from "./state/webhook-queue";
 import {
   RATE_LIMIT_FALLBACK_MS,
   readUsageLimitHint,

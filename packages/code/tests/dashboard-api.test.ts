@@ -12,10 +12,10 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "../src/lib/dashboard-api";
-import { RunStore } from "../src/lib/run-recorder";
-import type { RunStats } from "../src/lib/run-recorder";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunStats } from "../src/lib/state/run-recorder";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 import { isLoopbackDashboardHost, startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;

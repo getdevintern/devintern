@@ -33,8 +33,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
 
-import type { WebhookQueue } from "../webhook-queue";
-import type { WorkerState } from "../worker-state";
+import type { WebhookQueue } from "../state/webhook-queue";
+import type { WorkerState } from "../state/worker-state";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { serializePrRun } from "./review-polling";

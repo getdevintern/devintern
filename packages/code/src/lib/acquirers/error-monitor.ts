@@ -8,7 +8,7 @@
  */
 
 import type { TaskExecutionResult } from "./task-polling";
-import type { WebhookQueue } from "../webhook-queue";
+import type { WebhookQueue } from "../state/webhook-queue";
 import type { Acquirer } from "../../worker";
 import type { ErrorMonitorConfig } from "../workspace/config";
 import { SentryClient } from "../sentry-client";

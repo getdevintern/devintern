@@ -10,7 +10,7 @@ import {
   reconcileOpenAgentPrs,
 } from "../src/lib/review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../src/lib/review/agent-pr-reconciler";
-import { WorkerState } from "../src/lib/worker-state";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 describe("agent PR reconciler", () => {
   let dbPath: string;
