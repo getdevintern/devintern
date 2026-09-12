@@ -245,8 +245,7 @@ export async function createEngine(
     label: string,
     prompt: string,
     validate: (value: unknown) => value is T,
-    failureMessage: string,
-    invalidMessage: string,
+    messages: { failure: string; invalid: string },
     events?: EngineCallEvents,
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
@@ -278,7 +277,7 @@ export async function createEngine(
           stage: "agent",
           error: new EngineError(
             "agent-failed",
-            failureMessage,
+            messages.failure,
             result.stderr.trim() || "Unknown agent error",
             dumpFile ?? undefined,
           ),
@@ -286,7 +285,7 @@ export async function createEngine(
       }
 
       try {
-        return { ok: true, payload: extractJsonPayload(result.stdout, validate, invalidMessage) };
+        return { ok: true, payload: extractJsonPayload(result.stdout, validate, messages.invalid) };
       } catch (error) {
         if (!(error instanceof EngineError)) throw error;
         return { ok: false, stage: "parse", error, rawResult: result };
@@ -397,8 +396,10 @@ export async function createEngine(
           "story-generation",
           prompt,
           isStoryPayload,
-          "Failed to generate story from source",
-          "Missing required fields: summary and description",
+          {
+            failure: "Failed to generate story from source",
+            invalid: "Missing required fields: summary and description",
+          },
           events,
           agentFiles,
         );
@@ -429,8 +430,7 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         "story-edit",
         prompt,
         isStoryPayload,
-        "Failed to update story",
-        "Missing required fields in update",
+        { failure: "Failed to update story", invalid: "Missing required fields in update" },
         events,
       );
     },
@@ -451,8 +451,7 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         "decomposition",
         prompt,
         isDecompositionPayload,
-        "Failed to decompose story",
-        "Expected subtasks array in response",
+        { failure: "Failed to decompose story", invalid: "Expected subtasks array in response" },
         events,
       );
       return payload.subtasks;

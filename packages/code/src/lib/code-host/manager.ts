@@ -99,20 +99,25 @@ export class PRManager {
    * @param sourceBranch - Head/feature branch name
    * @param targetBranch - Base branch (default `main`)
    * @param implementationSummary - Optional summary appended to PR body
-   * @param labels - Labels to apply to the PR; defaults to the comma-separated
-   *   `PR_LABELS` environment variable
-   * @param targetBranchExplicit - Whether the user supplied --pr-target-branch
-   * @param requestedTargetBranch - Original explicit target before Git fallback resolution
+   * @param options - PR metadata: `labels` (defaults to the comma-separated
+   *   `PR_LABELS` environment variable), `targetBranchExplicit` (whether the
+   *   user supplied --pr-target-branch), and `requestedTargetBranch` (original
+   *   explicit target before Git fallback resolution)
    */
   async createPullRequest(
     task: Task | JiraIssue,
     sourceBranch: string,
     targetBranch = "main",
     implementationSummary?: string,
-    labels: string[] = parsePrLabels(process.env.PR_LABELS),
-    targetBranchExplicit = true,
-    requestedTargetBranch?: string,
+    options: {
+      labels?: string[];
+      targetBranchExplicit?: boolean;
+      requestedTargetBranch?: string;
+    } = {},
   ): Promise<PRResult> {
+    const labels = options.labels ?? parsePrLabels(process.env.PR_LABELS);
+    const targetBranchExplicit = options.targetBranchExplicit ?? true;
+    const requestedTargetBranch = options.requestedTargetBranch;
     const repoInfo = await this.detectRepository();
 
     if (repoInfo.platform === "unknown") {
