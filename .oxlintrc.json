@@ -147,9 +147,7 @@
       // `complexity`/`max-statements` error ratchet; they stay warnings so new
       // violations elsewhere fail CI. Remove a file here once it is split.
       "files": [
-        "packages/agent-harness/src/resolver.ts",
         "packages/code/src/index.ts",
-        "packages/code/src/lib/code-host/gitlab/webhook.ts",
         "packages/code/src/lib/init/worker-connect.ts",
         "packages/code/src/lib/init/worker-init.ts",
         "packages/code/src/lib/relay/connect.ts",
@@ -157,9 +155,7 @@
         "packages/code/src/webhook-server.ts",
         "packages/pm/index.ts",
         "packages/pm/lib/components/interactive.tsx",
-        "packages/pm/lib/init.ts",
-        "packages/pm/lib/parse-args.ts",
-        "packages/utils/src/cli-auto-update.ts"
+        "packages/pm/lib/parse-args.ts"
       ],
       "rules": {
         "complexity": ["warn", 30],
