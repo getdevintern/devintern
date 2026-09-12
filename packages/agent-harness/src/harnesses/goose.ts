@@ -22,7 +22,11 @@ export class GooseHarness implements AgentHarness {
   readonly promptFlag = "-t";
   /** No native plan/read-only enforcement documented for headless `goose run`. */
   readonly supportedModes = [] as const;
-  /** `--output-format json` emits structured session/results output after completion. */
+  /**
+   * `--output-format json` emits one pretty-printed `{messages, metadata}`
+   * document after completion (verified against upstream
+   * `crates/goose-cli/src/session/mod.rs` `JsonOutput`).
+   */
   readonly supportsStructuredOutput = true;
 
   /**

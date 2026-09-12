@@ -5,6 +5,8 @@
  * any Node host (CLI, Electron main process, tests).
  */
 
+import type { StructuredRunStats } from "@devintern/agent-harness";
+
 export type SourceType = "figma" | "log" | "prompt";
 export type PromptStyle = "technical" | "pm";
 
@@ -40,6 +42,14 @@ export interface ProjectRef {
 export interface EngineCallEvents {
   /** Raw agent output chunk as it streams. */
   onAgentChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /**
+   * Token usage and cost reported by the harness's structured (JSON)
+   * envelope (e.g. Claude Code `usage`/`total_cost_usd`, Codex
+   * `turn.completed`). Fired at most once per successful agent call in
+   * structured mode; plain-text runs and envelopes without usage stats
+   * never fire it.
+   */
+  onAgentUsage?: (stats: StructuredRunStats) => void;
 }
 
 export type EngineErrorCode = "agent-failed" | "parse-failed" | "backend-failed";
