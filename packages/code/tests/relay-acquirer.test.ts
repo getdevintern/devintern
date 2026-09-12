@@ -13,7 +13,7 @@ const RELAY_URL = "http://relay.test";
 interface HandlerLog {
   addressed: [string, number][];
   comments: [string, number, number][];
-  tasks: Array<[string, string]>;
+  tasks: Array<[string, string, string?]>;
   codeHosts: RelayEnvelope[];
 }
 
@@ -101,8 +101,8 @@ describe("RelayAcquirer", () => {
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
         },
-        evaluateTask: async (taskKey, trackerSource) => {
-          log.tasks.push([taskKey, trackerSource]);
+        evaluateTask: async (taskKey, trackerSource, team) => {
+          log.tasks.push([taskKey, trackerSource, team]);
         },
         reconcileCodeHost: async (event) => {
           log.codeHosts.push(event);
@@ -135,6 +135,7 @@ describe("RelayAcquirer", () => {
         seq: 3,
         eventType: "task.changed",
         source: "jira",
+        team: "platform",
         repo: undefined,
         ref: { task: "PROJ-7" },
         deliveryId: "c",
@@ -153,7 +154,8 @@ describe("RelayAcquirer", () => {
 
     expect(log.addressed).toEqual([["acme/webapp", 5]]);
     expect(log.comments).toEqual([["acme/webapp", 6, 99]]);
-    expect(log.tasks).toEqual([["PROJ-7", "jira"]]);
+    expect(log.tasks).toEqual([["PROJ-7", "jira", "platform"]]);
+    expect(queue.hasProcessed("relay", "jira:platform:c")).toBe(true);
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("3");
     expect(requests[0]).toContain("cursor=0");
     expect(authHeaders[0]).toBe("Bearer drt_test_token");

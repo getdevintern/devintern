@@ -58,8 +58,8 @@ Options:
   -h, --help           Display this help message
 
 Tracker targets use the selected team's env_file/inline env over the workspace
-.env. A target used by multiple teams is polling-only until relay registrations
-carry team identity. With no target, GitHub and GitLab code hosts are connected.`;
+.env. Team-scoped registrations let multiple teams use the same tracker. With no
+target, GitHub and GitLab code hosts are connected.`;
 
 export interface WorkerConnectCommandDeps {
   workspaceDir?: string;
@@ -387,15 +387,15 @@ function resolveTrackerTeamEnv(
   workspaceDir: string,
   target: RelayConnectTarget,
   requestedTeam: string | undefined,
-): { error: string } | { env?: Record<string, string | undefined> } {
+): { error: string } | { env?: Record<string, string | undefined>; team?: string } {
   const matchingTeams = config.teams.filter(
     (team) => team.tracker.toLowerCase() === target.toLowerCase(),
   );
-  if (matchingTeams.length > 1) {
+  if (matchingTeams.length > 1 && !requestedTeam) {
     return {
       error:
         `${matchingTeams.length} teams use ${target} (${matchingTeams.map((team) => team.name).join(", ")}). ` +
-        "The relay identifies tracker type but not team registration, so this source remains polling-only.",
+        "Select one with --team <name>.",
     };
   }
   const selectedTeam = requestedTeam
@@ -411,7 +411,10 @@ function resolveTrackerTeamEnv(
     return {};
   }
   console.log(`🔗 Connecting ${target} for team '${selectedTeam.name}'.`);
-  return { env: { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) } };
+  return {
+    env: { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) },
+    team: selectedTeam.name,
+  };
 }
 
 /** Print relay status plus any workspace repos/projects still missing registrations. */
@@ -557,6 +560,7 @@ export async function runWorkerConnectCommand(
       return 1;
     }
     if (teamEnv.env) connectDeps.env = teamEnv.env;
+    if (teamEnv.team) connectDeps.team = teamEnv.team;
   }
 
   if (target === "status") {

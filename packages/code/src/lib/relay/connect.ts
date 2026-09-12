@@ -33,8 +33,12 @@ export const RELAY_BOT_LOGIN = "devintern-ai";
 export interface RelayRegistration {
   kind: "repo" | "source" | "code-host";
   key: string;
+  /** Stable workspace team slug for team-scoped tracker registrations. */
+  team?: string;
   createdAt: number;
   lastEventAt: number | null;
+  /** Envelopes currently buffered for this registration, when reported by status. */
+  buffered?: number;
   provider?: string;
   instanceUrl?: string;
   projectId?: string;
@@ -252,6 +256,8 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   workingDir: string;
   /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
   repo?: string;
+  /** Stable workspace team slug for tracker registration. */
+  team?: string;
   /** GitLab project selected from workspace.toml by the fleet orchestrator. */
   gitlabProject?: { instanceUrl: string; projectPath: string };
   /** Remove the exact remembered GitLab hook and relay route instead of connecting it. */
@@ -652,6 +658,7 @@ export async function connectGitHubRepo(options: {
  */
 export async function registerRelaySource(options: {
   source: string;
+  team?: string;
   accessToken: string;
   secret?: string;
   workingDir?: string;
@@ -672,6 +679,7 @@ export async function registerRelaySource(options: {
     {
       action: "register-source",
       source: options.source,
+      team: options.team,
       secret: options.secret,
     },
     deps,
@@ -682,6 +690,22 @@ export async function registerRelaySource(options: {
   }
 
   const data = (await response.json()) as ConnectResponse & { ingestUrl: string };
+  if (options.team) {
+    const registration = data.registrations.find(
+      (candidate) =>
+        candidate.kind === "source" &&
+        (candidate.team === options.team || candidate.key === `${options.source}:${options.team}`),
+    );
+    if (!registration) {
+      throw new Error(
+        "relay does not support team-scoped tracker registrations; " +
+          "upgrade the relay control plane before using this CLI",
+      );
+    }
+    // Accept the transitional compound-key representation while always
+    // persisting an explicit team dimension for current state readers.
+    registration.team = options.team;
+  }
   const state = mergeConnectState(workingDir, relayUrl, data, relayToken);
   return { ingestUrl: data.ingestUrl, state };
 }
@@ -701,6 +725,8 @@ function formatTimestamp(epochMs: number | null): string {
 interface RelayConnectOptions {
   accessToken: string;
   workingDir: string;
+  /** Stable workspace team slug for team-scoped tracker registration. */
+  team?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
 }
@@ -728,7 +754,11 @@ async function connectStatusTarget(
       console.log("   No registrations yet. Run: devintern worker connect");
     }
     for (const reg of status.registrations) {
-      console.log(`   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`);
+      const team = reg.team ? ` (team: ${reg.team})` : "";
+      const buffered = reg.buffered === undefined ? "" : `, buffered: ${reg.buffered}`;
+      console.log(
+        `   - ${reg.kind}:${reg.key}${team} (last event: ${formatTimestamp(reg.lastEventAt)}${buffered})`,
+      );
     }
     return 0;
   } catch (error) {
@@ -1029,6 +1059,7 @@ export async function connectRelayTarget(
   const connectOpts: RelayConnectOptions = {
     accessToken,
     workingDir,
+    team: deps.team,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
   };

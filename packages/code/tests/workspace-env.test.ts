@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -7,6 +7,7 @@ import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/work
 import {
   buildErrorMonitorEnv,
   buildRepoEnv,
+  buildTeamEnv,
   gitHubSlugFromRemote,
   parseEnvFile,
 } from "../src/lib/workspace/env";
@@ -136,5 +137,33 @@ describe("buildRepoEnv", () => {
     writeFileSync(path, "# comment\n\nA=1\nB='two'\nC=a=b\nBROKEN\n");
     expect(parseEnvFile(path)).toEqual({ A: "1", B: "two", C: "a=b" });
     expect(parseEnvFile(join(workspaceDir, "missing.env"))).toEqual({});
+  });
+});
+
+describe("buildTeamEnv", () => {
+  test("projects tracker/team-namespaced workspace credentials", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "ws-team-env-"));
+    try {
+      writeFileSync(
+        join(workspaceDir, ".env"),
+        "JIRA_PLATFORM_URL=https://platform.atlassian.net\n" +
+          "JIRA_PLATFORM_EMAIL=platform@example.com\n" +
+          "JIRA_PLATFORM_API_TOKEN=platform-token\n" +
+          "JIRA_GROWTH_URL=https://growth.atlassian.net\n",
+      );
+      const team: TeamConfig = {
+        name: "platform",
+        tracker: "jira",
+        taskQuery: "project = PLAT",
+        env: {},
+      };
+
+      const env = buildTeamEnv(team, workspaceDir);
+      expect(env.JIRA_BASE_URL).toBe("https://platform.atlassian.net");
+      expect(env.JIRA_EMAIL).toBe("platform@example.com");
+      expect(env.JIRA_API_TOKEN).toBe("platform-token");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });

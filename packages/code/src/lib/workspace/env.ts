@@ -119,6 +119,33 @@ function teamLayerEnv(team: TeamConfig, workspaceDir: string): Record<string, st
   return { ...teamFileEnv, ...team.env };
 }
 
+/** Convert a team name to the uppercase env namespace used in workspace `.env`. */
+function teamEnvNamespace(teamName: string): string {
+  return teamName.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+}
+
+/**
+ * Project tracker/team-namespaced workspace variables onto the normal tracker
+ * variable names. For example, `JIRA_PLATFORM_API_TOKEN` becomes
+ * `JIRA_API_TOKEN` for team `platform`. `JIRA_PLATFORM_URL` is also accepted
+ * as the concise alias for the existing `JIRA_BASE_URL` setting.
+ */
+function namespacedTeamEnv(
+  workspaceEnv: Record<string, string>,
+  team: TeamConfig,
+): Record<string, string> {
+  const trackerPrefix = team.tracker.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+  const namespace = `${trackerPrefix}_${teamEnvNamespace(team.name)}_`;
+  const projected: Record<string, string> = {};
+  for (const [key, value] of Object.entries(workspaceEnv)) {
+    if (!key.startsWith(namespace)) continue;
+    const suffix = key.slice(namespace.length);
+    projected[`${trackerPrefix}_${suffix}`] = value;
+    if (trackerPrefix === "JIRA" && suffix === "URL") projected.JIRA_BASE_URL = value;
+  }
+  return projected;
+}
+
 /**
  * Compose a team's own credential environment: workspace `.env`, then the
  * team's `env_file`, then inline team overrides.
@@ -133,8 +160,10 @@ export function buildTeamEnv(
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
 ): Record<string, string> {
+  const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   return {
-    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+    ...workspaceEnv,
+    ...namespacedTeamEnv(workspaceEnv, team),
     ...teamLayerEnv(team, workspaceDir),
   };
 }
