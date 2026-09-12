@@ -7,14 +7,14 @@ import {
   AUTOMATION_ID_ENV,
   AUTOMATION_ORIGIN_ENV,
   MAX_TIMER_DELAY_MS,
-} from "../src/lib/automation-acquirer";
-import { AutomationStateStore } from "../src/lib/automation-state";
+} from "../src/lib/automation/acquirer";
+import { AutomationStateStore } from "../src/lib/automation/state";
 import {
   estimationCliArgs,
   estimationRunEnv,
   EstimationAcquirer,
-} from "../src/lib/estimation-acquirer";
-import type { EstimationConfig } from "../src/lib/estimation-config";
+} from "../src/lib/automation/estimation-acquirer";
+import type { EstimationConfig } from "../src/lib/automation/estimation-config";
 
 function intervalEntry(id: string, overrides: Partial<EstimationConfig> = {}): EstimationConfig {
   return {

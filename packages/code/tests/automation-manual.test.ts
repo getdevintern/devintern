@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { loadStandaloneAutomationActions } from "../src/lib/automation-manual";
+import { loadStandaloneAutomationActions } from "../src/lib/automation/manual";
 import { workerTaskArgs } from "../src/lib/acquirers/task-polling";
 
 describe("standalone dashboard automation actions", () => {

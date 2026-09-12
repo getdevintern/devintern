@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseEstimationEntries } from "../src/lib/estimation-config";
+import { parseEstimationEntries } from "../src/lib/automation/estimation-config";
 
 function firstError(value: unknown): string {
   const { errors } = parseEstimationEntries(value);

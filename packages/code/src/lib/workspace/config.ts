@@ -6,12 +6,12 @@ import {
   trackersSupportingEstimate,
   trackersSupportingPolling,
 } from "../trackers/capabilities";
-import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
-import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
+import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation/config";
+import type { AutomationConfig, CronOrIntervalSchedule } from "../automation/config";
 import { parseWorkerScheduleSection } from "../worker/schedule";
 import type { WorkerScheduleConfig } from "../worker/schedule";
-import { parseEstimationEntries } from "../estimation-config";
-import type { EstimationConfig } from "../estimation-config";
+import { parseEstimationEntries } from "../automation/estimation-config";
+import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
 
 /** When automatic conflict resolution on the agent's PRs runs. */

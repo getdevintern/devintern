@@ -3,9 +3,9 @@ import {
   AUTOMATION_ORIGIN_ENV,
   AutomationAcquirer,
   spawnAutomationProcess,
-} from "./automation-acquirer";
-import type { AutomationRunContext, SpawnedAutomationRun } from "./automation-acquirer";
-import type { AutomationConfig } from "./automation-config";
+} from "./acquirer";
+import type { AutomationRunContext, SpawnedAutomationRun } from "./acquirer";
+import type { AutomationConfig } from "./config";
 import type { EstimationConfig } from "./estimation-config";
 
 /** Value of the run-origin marker that attributes CLI runs to scheduled estimation. */

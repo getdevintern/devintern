@@ -14,7 +14,7 @@ import type {
 } from "../src/lib/observability/dashboard-api";
 import { startDashboardServer } from "../src/dashboard-server";
 import { RunStore } from "../src/lib/state/run-recorder";
-import type { AutomationScheduleStatus } from "../src/lib/automation-acquirer";
+import type { AutomationScheduleStatus } from "../src/lib/automation/acquirer";
 
 const ACTOR: NonNullable<AutomationRunDeps["resolveActor"]> = async () => ({
   email: "dev@example.com",

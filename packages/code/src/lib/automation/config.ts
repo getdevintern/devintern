@@ -3,7 +3,7 @@ import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
 
-import { parseToml } from "./workspace/toml";
+import { parseToml } from "../workspace/toml";
 
 export interface AutomationConfig {
   id: string;
