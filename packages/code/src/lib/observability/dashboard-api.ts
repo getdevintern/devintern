@@ -28,7 +28,7 @@ import type {
   RunStats,
   RunStatus,
 } from "../state/run-recorder";
-import type { ScheduleSnapshot } from "../schedule";
+import type { ScheduleSnapshot } from "../worker/schedule";
 import {
   isRunRetriable,
   RunRetryAuditStore,

@@ -19,7 +19,7 @@ import { createFleetTaskExecutor } from "../src/lib/workspace/workspace-worker";
 import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import { createTaskSupervisor } from "../src/lib/task-supervisor";
+import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]

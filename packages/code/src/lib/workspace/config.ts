@@ -8,8 +8,8 @@ import {
 } from "../trackers/capabilities";
 import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
 import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
-import { parseWorkerScheduleSection } from "../schedule";
-import type { WorkerScheduleConfig } from "../schedule";
+import { parseWorkerScheduleSection } from "../worker/schedule";
+import type { WorkerScheduleConfig } from "../worker/schedule";
 import { parseEstimationEntries } from "../estimation-config";
 import type { EstimationConfig } from "../estimation-config";
 import { parseToml } from "./toml";

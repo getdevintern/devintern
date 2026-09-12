@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
-import type { HostCheckoutClass } from "../src/lib/task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
+import type { HostCheckoutClass } from "../src/lib/worker/supervisor";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

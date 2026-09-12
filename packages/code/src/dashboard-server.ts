@@ -47,7 +47,7 @@ export interface DashboardServerOptions {
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
-  scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
+  scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
   /**
    * Retry execution mode (default `spawn`). The workspace worker passes
    * `schedule` so dashboard retries are drained through the fleet pipeline;

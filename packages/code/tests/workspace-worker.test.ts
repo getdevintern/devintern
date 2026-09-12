@@ -21,7 +21,7 @@ import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
 import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";

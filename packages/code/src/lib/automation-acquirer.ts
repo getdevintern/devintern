@@ -13,12 +13,12 @@ import { automationTaskArgs, nextScheduleOccurrence } from "./automation-config"
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./acquirers/task-polling";
 import { RUN_ORIGIN_ENV } from "./observability/analytics";
-import { getWorkerFailover } from "./worker-failover";
+import { getWorkerFailover } from "./worker/failover";
 import {
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
-} from "./usage-limit-protocol";
+} from "./worker/usage-limit-protocol";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
 export const AUTOMATION_ORIGIN_ENV = RUN_ORIGIN_ENV;

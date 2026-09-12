@@ -32,8 +32,8 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
 import { GitHubReviewsClient } from "./lib/code-host/github/reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/state/webhook-queue";
-import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover";
-import type { WorkerFailover } from "./lib/worker-failover";
+import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker/failover";
+import type { WorkerFailover } from "./lib/worker/failover";
 import { WorkerState } from "./lib/state/worker-state";
 import type { AgentPr } from "./lib/state/worker-state";
 import {

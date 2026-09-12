@@ -113,7 +113,7 @@ import {
   isWorkerChild,
   USAGE_LIMIT_EXIT_CODE,
   writeUsageLimitHint,
-} from "./lib/usage-limit-protocol";
+} from "./lib/worker/usage-limit-protocol";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/state/worker-state";
 import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
