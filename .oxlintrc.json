@@ -158,7 +158,6 @@
         "packages/code/src/lib/review/address.ts",
         "packages/code/src/lib/review/conflict-resolver.ts",
         "packages/code/src/lib/utils.ts",
-        "packages/code/src/lib/workspace/config.ts",
         "packages/code/src/webhook-server.ts",
         "packages/pm-desktop/src/renderer/src/App.tsx",
         "packages/pm-desktop/src/renderer/src/components/AnalyticsSettings.tsx",
