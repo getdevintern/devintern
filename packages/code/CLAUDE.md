@@ -22,6 +22,34 @@ This file provides guidance to Claude Code when working with this repository.
 
 1. Webhook receives review → 2. Check bot mention → 3. Queue review → 4. Switch worktree to PR branch → 5. Fetch comments → 6. Run Claude → 7. Commit fixes → 8. Push & reply
 
+### Module layout (`src/lib`)
+
+Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability *is*), and provider folders appear inside a context only where that provider genuinely multiplies.
+
+This repo has two independent provider axes — task trackers and code hosts — and two change vectors: capability work and provider work. A single-axis tree always fails one of them. The commit history is provider-divergent and GitLab-heavy, so provider code should be co-located at the leaf, while neutral contracts stay discoverable at the context root.
+
+Rules:
+
+- **Top level = context, not vendor.** Never `lib/github/` — `github` is both a task tracker (`trackers/github/`) and a code host (`code-host/github/`).
+- **Provider folder only at ≥3 files** in that context; below that, keep `github-*.ts` siblings next to the neutral contract.
+- **Neutral contracts + shared helpers live at the context root** (`code-host/provider.ts`, `code-host/shared/`), never inside a provider folder — this also avoids `import/no-cycle`.
+- **Provider-neutral capabilities stay concern-based** (`relay`, `worker`, `state`, `observability`, review orchestration) and earn provider folders only if they grow them.
+- **One primary export per file.** Multi-class files (`pr-client.ts`, `schedule.ts`, `run-retry.ts`) are split one-class-per-file when their context folder lands.
+
+Target shape (extends the existing `trackers/<provider>/` and `workspace/` precedent):
+
+```
+lib/
+  code-host/            # context
+    provider.ts         # neutral contract: CodeHostProvider, CodeHostRepository, …
+    shared/             # PRInfo/PRResult, title/body builders, label parsing
+    github/             # PR client, review adapter, CI provider, reviews, push probe, app auth
+    gitlab/             # MR client, review adapter, CI provider, reviews, webhook(+admin), config
+    bitbucket/          # PR client
+  trackers/             # existing; already context-first/provider-second
+  acquirers/  review/  relay/  worker/  state/  observability/  task/  agent/  config/
+```
+
 ### Configuration
 
 **Environment Variables (.devintern-code/.env):**
