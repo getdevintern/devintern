@@ -29,7 +29,7 @@ import {
 import { RunStore } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
-import type { TaskTrackerClient } from "../task-tracker-client";
+import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import {
@@ -94,7 +94,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     let tracker: TaskTrackerClient | undefined;
     if (hasTaskOrphans && (config.teams?.length ?? 0) === 0) {
       try {
-        const { TaskTrackerManager } = await import("../task-tracker-manager");
+        const { TaskTrackerManager } = await import("../trackers/manager");
         tracker = new TaskTrackerManager().getClient();
       } catch (error) {
         console.warn(
@@ -954,7 +954,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Tracker identities and credentials are startup-only. Queries and fixed
   // team repo mappings stay live through lookups against the shared config.
   const { TaskTrackerManager, createTrackerClient, trackerRequiredEnv } =
-    await import("../task-tracker-manager");
+    await import("../trackers/manager");
   const { createChangeDetector } = await import("../acquirers/change-detector");
   const sources: FleetSourceRuntime[] = [];
 

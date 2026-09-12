@@ -5,7 +5,7 @@ import {
   supportsPolling,
   trackersSupportingEstimate,
   trackersSupportingPolling,
-} from "../tracker-capabilities";
+} from "../trackers/capabilities";
 import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
 import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
 import { parseWorkerScheduleSection } from "../schedule";

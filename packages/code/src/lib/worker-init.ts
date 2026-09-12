@@ -47,7 +47,7 @@ import {
   TRACKER_CAPABILITIES,
   supportsPolling,
   trackersSupportingPolling,
-} from "./tracker-capabilities";
+} from "./trackers/capabilities";
 import {
   ensureWorkspaceAndAddRepo,
   writeWorkerOperatingPolicy,

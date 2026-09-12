@@ -13,9 +13,9 @@
  * Best-effort throughout: feedback must never mask the original error.
  */
 
-import type { TaskTrackerClient } from "./task-tracker-client";
-import { recordIncompleteAttempt } from "./state/retry-state";
-import { formatProcessingFailureMarkdown } from "./trackers/shared/markdown-comment-formatter";
+import type { TaskTrackerClient } from "../trackers/client";
+import { recordIncompleteAttempt } from "../state/retry-state";
+import { formatProcessingFailureMarkdown } from "../trackers/shared/markdown-comment-formatter";
 
 /** How to record the attempt for the retry gate (lib/retry-state.ts). */
 export interface FailureAttemptRecorder {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildTicketUrl } from "../src/lib/ticket-url";
+import { buildTicketUrl } from "../src/lib/task/ticket-url";
 
 describe("buildTicketUrl", () => {
   test("derives a Jira browse URL from JIRA_BASE_URL", () => {

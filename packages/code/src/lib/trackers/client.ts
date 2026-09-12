@@ -15,7 +15,7 @@ import type {
   LinkedResource,
   Task,
   TaskTrackerCommentContent,
-} from "../types/task-tracker";
+} from "../../types/task-tracker";
 
 export interface TaskTrackerClient {
   // ------------------------------------------------------------------

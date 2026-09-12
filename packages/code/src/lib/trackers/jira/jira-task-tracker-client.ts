@@ -26,7 +26,7 @@ import type {
   Task,
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../../task-tracker-client";
+import type { TaskTrackerClient } from "../client";
 import { JiraFormatter } from "./jira-formatter";
 
 export class JiraTaskTrackerClient implements TaskTrackerClient {
