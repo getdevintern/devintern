@@ -4,9 +4,9 @@
  * Handles fetching and responding to PR review comments via the GitHub API.
  */
 
-import type { GitHubReviewComment, ProcessedReviewComment } from "../types/github-webhooks";
-import { GitHubAppAuth } from "./github-app-auth";
-import { Utils } from "./utils";
+import type { GitHubReviewComment, ProcessedReviewComment } from "../../../types/github-webhooks";
+import { GitHubAppAuth } from "./app-auth";
+import { Utils } from "../../utils";
 
 export interface ReviewsClientConfig {
   token?: string;

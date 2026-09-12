@@ -53,14 +53,15 @@
     "react/display-name": "error",
     "react/hook-use-state": "error",
 
-    // Complexity / size metrics. `max-depth` and `max-params` are enforced as
-    // errors (both clean); `complexity` stays a warning until the remaining
-    // long functions are split. The size rules stay off for now.
+    // Complexity / size metrics. `max-depth`, `max-params`, and
+    // `max-classes-per-file` are enforced as errors (all clean); `complexity`
+    // stays a warning until the remaining long functions are split. The size
+    // rules stay off for now.
     "complexity": ["warn", 30],
     "max-depth": ["error", 6],
     "max-params": ["error", 7],
     "max-nested-callbacks": ["warn", 10],
-    "max-classes-per-file": ["warn", 3],
+    "max-classes-per-file": ["error", 3],
     "max-lines": "off",
     "max-lines-per-function": "off",
     "max-statements": "off",

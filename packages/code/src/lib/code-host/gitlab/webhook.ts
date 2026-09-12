@@ -2,7 +2,7 @@
 
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 
-import { normalizeCodeHostUrl } from "./code-host";
+import { normalizeCodeHostUrl } from "../index";
 
 export type GitLabWebhookKind = "feedback" | "lifecycle" | "sync" | "ci" | "ignored";
 

@@ -1,6 +1,6 @@
 import type { AtlassianDocument, JiraIssue } from "../../types/jira";
 import type { Task } from "../../types/task-tracker";
-import { GitHubAppAuth } from "../github-app-auth";
+import { GitHubAppAuth } from "./github/app-auth";
 import { BitbucketPRClient } from "./bitbucket/pr-client";
 import { GitHubPRClient } from "./github/pr-client";
 import { GitLabMRClient } from "./gitlab/mr-client";

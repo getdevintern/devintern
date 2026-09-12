@@ -24,7 +24,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 
 import { runAgent } from "./address-review";
 import { parseChangeRequestUrl } from "./code-host";
-import type { PullRequestInfo } from "./github-reviews";
+import type { PullRequestInfo } from "./code-host/github/reviews";
 import { Utils } from "./utils";
 
 export interface ResolveConflictsOptions {

@@ -36,7 +36,7 @@ import {
   reconcileOpenAgentPrs,
 } from "./agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
-import { isGitHubAuthError } from "./github-reviews";
+import { isGitHubAuthError } from "./code-host/github/reviews";
 import { nextScheduleOccurrence } from "./automation-config";
 import type { CronOrIntervalSchedule } from "./automation-config";
 import { parseEnvInteger } from "./env-integer";

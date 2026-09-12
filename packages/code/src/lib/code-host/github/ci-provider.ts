@@ -3,7 +3,7 @@ import type {
   CiConditionalResult,
   CiObservation,
   CiFailure as PendingFailure,
-} from "./ci-provider";
+} from "../ci-provider";
 export interface PolledCiPr {
   state: string;
   head?: {

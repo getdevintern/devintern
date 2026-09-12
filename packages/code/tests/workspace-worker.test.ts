@@ -24,7 +24,7 @@ import type { ChangeDetector } from "../src/lib/change-detector";
 import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
 import { CiFailureWatcherAcquirer } from "../src/lib/ci-failure-watcher-acquirer";
-import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
+import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay-connect";
 
 const CONFIG = parseWorkspaceConfig(`

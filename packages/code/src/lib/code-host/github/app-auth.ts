@@ -1,6 +1,6 @@
 import { createSign } from "crypto";
 import { readFileSync } from "fs";
-import { Utils } from "./utils";
+import { Utils } from "../../utils";
 
 export interface GitHubAppConfig {
   appId: string;

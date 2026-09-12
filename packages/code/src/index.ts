@@ -73,7 +73,7 @@ import {
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
-import { GitHubAppAuth } from "./lib/github-app-auth";
+import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
 import { ensureTrackerEnvConfigured } from "./lib/first-run";

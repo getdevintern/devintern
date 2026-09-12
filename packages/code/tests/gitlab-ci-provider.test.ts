@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { createGitLabCiProvider } from "../src/lib/gitlab-ci-provider";
+import { createGitLabCiProvider } from "../src/lib/code-host/gitlab/ci-provider";
 import type { AgentPr } from "../src/lib/worker-state";
-import type { GitLabReviewsClient, GitLabCiSnapshot } from "../src/lib/gitlab-reviews";
+import type { GitLabReviewsClient, GitLabCiSnapshot } from "../src/lib/code-host/gitlab/reviews";
 
 function fixture(state: GitLabCiSnapshot["state"] = "failure") {
   const calls: Array<[string, number | undefined]> = [];

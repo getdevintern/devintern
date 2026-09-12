@@ -1,4 +1,4 @@
-import { createGitHubCiProvider } from "../github-ci-provider";
+import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 /**
  * Worker workspace (fleet) mode.
  *
@@ -53,7 +53,7 @@ import { WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
-import { probePushAccess } from "../github-push-probe";
+import { probePushAccess } from "../code-host/github/push-probe";
 import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
 import { automationTaskArgs } from "../automation-config";
@@ -1257,7 +1257,7 @@ export async function buildFleetEventAcquirers(options: {
   // follow-up GitHub reads/writes stay local and authenticate with the user's
   // GITHUB_TOKEN. Without a relay, preserve the customer-owned App-first path
   // for air-gapped/direct installations (with PAT fallback).
-  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../github-reviews");
+  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../code-host/github/reviews");
   process.env[GITHUB_AUTH_MODE_ENV] = usesHostedApp ? "token-only" : "app-first";
 
   if (usesHostedApp) {
@@ -1279,7 +1279,7 @@ export async function buildFleetEventAcquirers(options: {
     ? Boolean(process.env.GITHUB_TOKEN)
     : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
-  let github: import("../github-reviews").GitHubReviewsClient | undefined;
+  let github: import("../code-host/github/reviews").GitHubReviewsClient | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
     | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
@@ -1311,7 +1311,7 @@ export async function buildFleetEventAcquirers(options: {
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
-    const { isGitHubNotFound } = await import("../github-reviews");
+    const { isGitHubNotFound } = await import("../code-host/github/reviews");
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,
@@ -1395,7 +1395,7 @@ export async function buildFleetEventAcquirers(options: {
         },
         fetchWorkflowRuns: async (repo, sha, etag) => {
           const result = await gh.conditionalGet<{
-            workflow_runs: import("../github-reviews").WorkflowRunSummary[];
+            workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
           }>(
             `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
             ownerOf(repo),

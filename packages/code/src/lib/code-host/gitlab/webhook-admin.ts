@@ -2,8 +2,8 @@
 
 import { readFileSync } from "fs";
 
-import { normalizeCodeHostUrl } from "./code-host";
-import { Utils } from "./utils";
+import { normalizeCodeHostUrl } from "../index";
+import { Utils } from "../../utils";
 
 const MAINTAINER_ACCESS_LEVEL = 40;
 const MANAGED_HOOK_NAME = "DevIntern Relay";

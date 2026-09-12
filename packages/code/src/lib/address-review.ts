@@ -1,4 +1,4 @@
-import { createReviewAdapter } from "./review-provider-factory";
+import { createReviewAdapter } from "./code-host/review-provider-factory";
 import { assertCurrentGitLabOrigin } from "./change-origin";
 /**
  * Address Review Command

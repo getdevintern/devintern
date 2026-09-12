@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createReviewAdapter } from "../src/lib/review-provider-factory";
-import { GitHubReviewsClient } from "../src/lib/github-reviews";
-import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
-import type { GitLabReviewContext } from "../src/lib/gitlab-reviews";
+import { createReviewAdapter } from "../src/lib/code-host/review-provider-factory";
+import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
+import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
+import type { GitLabReviewContext } from "../src/lib/code-host/gitlab/reviews";
 import { WorkerState } from "../src/lib/worker-state";
 
 let dir: string;

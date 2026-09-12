@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { Acquirer } from "../../worker";
-import { createGitLabCiProvider } from "../gitlab-ci-provider";
+import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../task-supervisor";
 import type { JobKind, TaskSupervisor } from "../task-supervisor";
 import type { AgentPr } from "../worker-state";
@@ -86,7 +86,7 @@ export async function buildGitLabFleetAcquirers(options: {
     const { CiFailureWatcherAcquirer, runCiFixViaCli } =
       await import("../ci-failure-watcher-acquirer");
     const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
-    const { GitLabReviewsClient } = await import("../gitlab-reviews");
+    const { GitLabReviewsClient } = await import("../code-host/gitlab/reviews");
     const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
       await import("../review-polling-acquirer");
     const clientForGitLabMr = (mr: import("../worker-state").AgentPr) => {

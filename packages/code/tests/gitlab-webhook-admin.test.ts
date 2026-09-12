@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { GitLabWebhookAdminClient } from "../src/lib/gitlab-webhook-admin";
+import { GitLabWebhookAdminClient } from "../src/lib/code-host/gitlab/webhook-admin";
 
 interface Call {
   url: string;

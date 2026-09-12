@@ -1,14 +1,14 @@
-import type { ChangeRequestIdentity } from "./code-host";
-import type { ReviewAdapter } from "./review-provider";
-import { WorkerState } from "./worker-state";
+import type { ChangeRequestIdentity } from "../index";
+import type { ReviewAdapter } from "../review-provider";
+import { WorkerState } from "../../worker-state";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,
   ProcessedConversationComment,
-} from "../types/github-webhooks";
-import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
-import { GitHubAppAuth } from "./github-app-auth";
-import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "./mention-sweep-acquirer";
+} from "../../../types/github-webhooks";
+import { GitHubReviewsClient, resolveGitHubAuthMode } from "./reviews";
+import { GitHubAppAuth } from "./app-auth";
+import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "../../mention-sweep-acquirer";
 /**
  * Metadata of the review a run will act on.
  */

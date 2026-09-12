@@ -37,7 +37,7 @@ import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
-} from "./github-app-setup";
+} from "./code-host/github/app-setup";
 import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./code-host";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";

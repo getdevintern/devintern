@@ -29,8 +29,8 @@ import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
 import { initSentryOnce } from "./lib/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
-import { GitHubAppAuth } from "./lib/github-app-auth";
-import { GitHubReviewsClient } from "./lib/github-reviews";
+import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
+import { GitHubReviewsClient } from "./lib/code-host/github/reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
 import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover";
 import type { WorkerFailover } from "./lib/worker-failover";
@@ -42,10 +42,10 @@ import {
   normalizeGitLabWebhook,
   verifyGitLabWebhookSignature,
   verifyGitLabWebhookToken,
-} from "./lib/gitlab-webhook";
-import type { GitLabWebhookEvent } from "./lib/gitlab-webhook";
+} from "./lib/code-host/gitlab/webhook";
+import type { GitLabWebhookEvent } from "./lib/code-host/gitlab/webhook";
 import { normalizeCodeHostUrl, resolveGitLabCodeHostConfig } from "./lib/code-host";
-import { GitLabReviewsClient } from "./lib/gitlab-reviews";
+import { GitLabReviewsClient } from "./lib/code-host/gitlab/reviews";
 import { runCiFixViaCli } from "./lib/ci-failure-watcher-acquirer";
 import {
   runAddressReviewUrlViaCli,

@@ -1,7 +1,7 @@
-import type { ChangeRequestIdentity } from "./code-host";
+import type { ChangeRequestIdentity } from "./index";
 import type { ReviewAdapter } from "./review-provider";
-import { createGitHubReviewAdapter } from "./github-review-adapter";
-import { createGitLabReviewAdapter } from "./gitlab-review-adapter";
+import { createGitHubReviewAdapter } from "./github/review-adapter";
+import { createGitLabReviewAdapter } from "./gitlab/review-adapter";
 
 export function createReviewAdapter(
   identity: ChangeRequestIdentity,

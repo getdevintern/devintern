@@ -16,7 +16,7 @@
  * token, so an under-scoped PAT silently overrides a working `gho_…` login.
  */
 
-import { Utils } from "./utils";
+import { Utils } from "../../utils";
 
 export type PushProbeStatus = "ok" | "permission" | "network" | "unknown";
 

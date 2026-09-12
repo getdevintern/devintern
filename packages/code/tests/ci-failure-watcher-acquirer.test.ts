@@ -9,9 +9,9 @@ import type {
   PolledCiPr,
   WatchedStatusState,
   WatchedWorkflowRun,
-} from "../src/lib/github-ci-provider";
-import { createGitHubCiProvider } from "../src/lib/github-ci-provider";
-import type { CiConditionalResult } from "../src/lib/ci-provider";
+} from "../src/lib/code-host/github/ci-provider";
+import { createGitHubCiProvider } from "../src/lib/code-host/github/ci-provider";
+import type { CiConditionalResult } from "../src/lib/code-host/ci-provider";
 import type { CiFixResult } from "../src/lib/ci-failure-watcher-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
