@@ -7,15 +7,7 @@
  * registered review, lifecycle, synchronization, and CI work.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import { tmpdir } from "os";
@@ -82,7 +74,6 @@ import type {
   IssueCommentEvent,
   PingEvent,
   ProcessedReviewComment,
-  ProcessedReviewFeedback,
   PullRequestReviewEvent,
   WebhookServerConfig,
 } from "./types/github-webhooks";
@@ -313,7 +304,7 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
   let payload: unknown;
   try {
     payload = JSON.parse(rawBody);
-  } catch (error) {
+  } catch {
     return jsonResponse({ error: "Invalid JSON payload" }, 400);
   }
 
@@ -865,7 +856,7 @@ async function markCommentsAsAddressed(
   owner: string,
   repo: string,
   comments: ProcessedReviewComment[],
-  verbose = false,
+  _verbose = false,
 ): Promise<void> {
   if (comments.length === 0) {
     return;

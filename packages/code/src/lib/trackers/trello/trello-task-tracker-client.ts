@@ -6,7 +6,7 @@
  */
 
 import { TrelloClient } from "@devintern/task-trackers";
-import type { TrelloAction, TrelloAttachment, TrelloCardDetail } from "@devintern/task-trackers";
+import type { TrelloAction, TrelloCardDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,

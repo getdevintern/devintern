@@ -220,7 +220,7 @@ export class GitHubReviewsClient {
    * @param repo - Repository name (unused for App auth)
    * @returns Bot login (e.g. `my-app[bot]`), or `null` for PAT/non-bot users
    */
-  async getBotUsername(owner: string, repo: string): Promise<string | null> {
+  async getBotUsername(_owner: string, _repo: string): Promise<string | null> {
     try {
       // For GitHub App auth, get the app info directly
       if (this.appAuth) {
@@ -252,7 +252,7 @@ export class GitHubReviewsClient {
       }
 
       return null;
-    } catch (error) {
+    } catch {
       // Failed to determine bot username, return null
       return null;
     }
@@ -849,7 +849,7 @@ export class GitHubReviewsClient {
         content,
         sha: data.sha,
       };
-    } catch (error) {
+    } catch {
       // File might not exist in this ref
       return null;
     }

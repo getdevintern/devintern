@@ -5,7 +5,7 @@ import {
   createAuthCallbackServer,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
 } from "./auth-callback";
-import { loginMethodLabel, promptForEmail, resolveLogin } from "./login-provider";
+import { loginMethodLabel, promptForEmail } from "./login-provider";
 import type { ResolvedLogin, OAuthProvider } from "./login-provider";
 import {
   isRemoteCliSession,
@@ -15,7 +15,7 @@ import {
   resolveAuthCallbackPort,
   writeTextFile,
 } from "./runtime";
-import type { AuthenticatedUser, LoginMethod, SupabaseAuthConfig } from "./types";
+import type { AuthenticatedUser, SupabaseAuthConfig } from "./types";
 
 export type { AuthenticatedUser, LoginMethod, OAuthProvider, SupabaseAuthConfig } from "./types";
 export {

@@ -13,7 +13,7 @@ import { transitionIssueStatus } from "../shared/issue-status-policy";
  */
 
 import { GitHubClient } from "@devintern/task-trackers";
-import type { GitHubIssue, GitHubIssueComment } from "@devintern/task-trackers";
+import type { GitHubIssue } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,

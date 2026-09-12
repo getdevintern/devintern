@@ -40,8 +40,6 @@ const FILE_NAMES: Record<WorkerCaptureStream, string> = {
 /** Rename a capture file to `<name>.1` once it grows past this size. */
 export const WORKER_CAPTURE_ROTATE_BYTES = 8 * 1024 * 1024;
 
-type ConsoleKeys = "log" | "info" | "debug" | "warn" | "error";
-
 interface Originals {
   log: typeof console.log;
   info: typeof console.info;

@@ -9,7 +9,7 @@
  */
 
 import { execSync } from "child_process";
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
+import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
   UsageLimitError,
@@ -180,7 +180,7 @@ function getPRDiff(baseBranch: string, workingDir: string): string {
       encoding: "utf-8",
       stdio: "pipe",
     });
-  } catch (fetchError) {
+  } catch {
     // Try a broader fetch if specific branch fetch fails
     console.log(`⚠️  Specific branch fetch failed, trying full fetch...`);
     try {
