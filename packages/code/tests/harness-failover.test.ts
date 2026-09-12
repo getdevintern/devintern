@@ -6,7 +6,7 @@ import { join } from "path";
 import { getHarness } from "@devintern/agent-harness";
 import type { HarnessChainEntry } from "@devintern/agent-harness";
 
-import { HarnessFailover } from "../src/lib/harness-failover";
+import { HarnessFailover } from "../src/lib/agent/harness-failover";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
 /** Build a chain entry from a registered harness name. */

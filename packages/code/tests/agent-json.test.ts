@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseAgentJsonObject } from "../src/lib/agent-json";
+import { parseAgentJsonObject } from "../src/lib/agent/json";
 
 describe("parseAgentJsonObject", () => {
   test("parses fenced JSON", () => {
