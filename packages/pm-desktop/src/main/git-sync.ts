@@ -219,6 +219,47 @@ export function softDirtyOverwriteMessage(action: "update" | "branch-switch"): s
     : "Can't switch branches: a setup file change would be overwritten. Ask someone on your team to save or fix that change, then try again.";
 }
 
+/** Map a failed `merge --ff-only <upstream>` into the corresponding sync status. */
+function mergeFailureStatus(
+  detail: string,
+  softDirty: boolean,
+  branch: string | undefined,
+  ahead: number,
+  behind: number,
+): ProjectGitSyncStatus {
+  const nonFf =
+    /not possible to fast-forward|diverged|refusing to merge|Need to specify/i.test(detail) ||
+    /Cannot fast-forward/i.test(detail);
+  if (isWouldOverwriteMergeFailure(detail)) {
+    return {
+      kind: "error",
+      softDirty,
+      branch,
+      ahead,
+      behind,
+      fetched: true,
+      message: softDirty
+        ? softDirtyOverwriteMessage("update")
+        : detail
+          ? `Couldn't get updates. ${detail}`
+          : "Couldn't get updates — your local edits would be overwritten.",
+    };
+  }
+  return {
+    kind: nonFf ? "diverged" : "error",
+    softDirty,
+    branch,
+    ahead,
+    behind,
+    fetched: true,
+    message: nonFf
+      ? `Can't get updates yet (${behind} waiting). Ask someone on your team to help merge the branches, then try again.`
+      : detail
+        ? `Couldn't get updates. ${detail}`
+        : "Couldn't get updates.",
+  };
+}
+
 /**
  * Fetch from the configured upstream and optionally fast-forward when the tree
  * is clean or PM soft-dirty. Soft-dirty never blocks the update for gating —
@@ -356,38 +397,13 @@ export async function syncProjectFromRemote(
   // soft-dirty .gitignore changes ("cannot pull with rebase").
   const merge = await git(gitRoot, ["merge", "--ff-only", upstream]);
   if (merge.code !== 0) {
-    const detail = (merge.stderr || merge.stdout).trim();
-    const nonFf =
-      /not possible to fast-forward|diverged|refusing to merge|Need to specify/i.test(detail) ||
-      /Cannot fast-forward/i.test(detail);
-    if (isWouldOverwriteMergeFailure(detail)) {
-      return {
-        kind: "error",
-        softDirty,
-        branch,
-        ahead,
-        behind,
-        fetched: true,
-        message: softDirty
-          ? softDirtyOverwriteMessage("update")
-          : detail
-            ? `Couldn't get updates. ${detail}`
-            : "Couldn't get updates — your local edits would be overwritten.",
-      };
-    }
-    return {
-      kind: nonFf ? "diverged" : "error",
+    return mergeFailureStatus(
+      (merge.stderr || merge.stdout).trim(),
       softDirty,
       branch,
       ahead,
       behind,
-      fetched: true,
-      message: nonFf
-        ? `Can't get updates yet (${behind} waiting). Ask someone on your team to help merge the branches, then try again.`
-        : detail
-          ? `Couldn't get updates. ${detail}`
-          : "Couldn't get updates.",
-    };
+    );
   }
 
   return {

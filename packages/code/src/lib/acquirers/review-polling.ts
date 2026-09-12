@@ -763,7 +763,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     pollFeedback: boolean,
     prefetched?: ConditionalResult<PolledPr>,
   ): Promise<void> {
-    const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
+    const { workerState, github, addressPr, resolveConflicts } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged/gone PRs. When the
     //    reconciliation pass already fetched this PR, its result is reused
@@ -799,12 +799,37 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     if (!pollFeedback) return;
 
-    let actionable = false;
-
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
+    // 3. Inline review comments since the last seen timestamp.
+    // Both passes must run (each advances its own cursor), so no short-circuit.
+    const reviewed = await this.collectActionableReviews(repo, prNumber);
+    const commented = await this.collectActionableComments(repo, prNumber, watchedSinceMs);
+    if (!reviewed && !commented) {
+      return;
+    }
+
+    console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
+    const ok = await addressPr(repo, prNumber);
+    if (ok === "deferred") {
+      console.log(
+        `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
+      );
+    } else {
+      console.log(
+        ok
+          ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
+          : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
+      );
+    }
+  }
+
+  /** Mark unprocessed human `changes_requested` reviews as actionable. */
+  private async collectActionableReviews(repo: string, prNumber: number): Promise<boolean> {
+    const { workerState, queue, github } = this.options;
     const reviewsSource = `github:reviews:${repo}#${prNumber}`;
     const reviewsCursor = workerState.getCursor(reviewsSource);
     const reviewsResult = await github.fetchReviews(repo, prNumber, reviewsCursor?.etag);
+    let actionable = false;
     if (!reviewsResult.notModified && reviewsResult.data) {
       if (reviewsResult.etag) {
         workerState.setCursor(reviewsSource, "reviews", reviewsResult.etag);
@@ -821,13 +846,22 @@ export class ReviewPollingAcquirer implements Acquirer {
         actionable = true;
       }
     }
+    return actionable;
+  }
 
-    // 3. Inline review comments since the last seen timestamp.
+  /** Mark unprocessed non-bot inline comments as actionable and advance the cursor. */
+  private async collectActionableComments(
+    repo: string,
+    prNumber: number,
+    watchedSinceMs: number,
+  ): Promise<boolean> {
+    const { workerState, queue, github } = this.options;
     const commentsSource = `github:prcomments:${repo}#${prNumber}`;
     const commentsCursor = workerState.getCursor(commentsSource);
     const sinceIso = commentsCursor?.cursorValue ?? new Date(watchedSinceMs).toISOString();
     const comments = await github.fetchReviewCommentsSince(repo, prNumber, sinceIso);
     let maxCreatedAt = sinceIso;
+    let actionable = false;
     for (const comment of comments) {
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
@@ -845,24 +879,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     if (maxCreatedAt !== sinceIso) {
       workerState.setCursor(commentsSource, maxCreatedAt);
     }
-
-    if (!actionable) {
-      return;
-    }
-
-    console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
-    const ok = await addressPr(repo, prNumber);
-    if (ok === "deferred") {
-      console.log(
-        `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
-      );
-    } else {
-      console.log(
-        ok
-          ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
-          : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
-      );
-    }
+    return actionable;
   }
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {

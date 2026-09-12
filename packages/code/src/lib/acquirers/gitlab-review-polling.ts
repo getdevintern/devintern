@@ -119,25 +119,7 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
     try {
       snapshot = await client.getPollingSnapshot(mr.projectId ?? mr.projectPath, mr.changeNumber);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/GitLab API error \((403|404)\)/.test(message)) {
-        this.options.workerState.markAgentChangeRequestClosed(this.identity(mr));
-        console.log(
-          `🧹 [${this.name}] ${mr.projectPath}!${mr.changeNumber} is inaccessible; unwatching`,
-        );
-        return;
-      }
-      this.recordFailure(key, now);
-      captureError(error, {
-        acquirer: this.name,
-        provider: "gitlab",
-        repo: mr.projectPath,
-        prNumber: mr.changeNumber,
-        stage: "poll-mr",
-      });
-      console.warn(
-        `⚠️  [${this.name}] polling ${mr.projectPath}!${mr.changeNumber} failed: ${message}`,
-      );
+      this.handlePollError(mr, key, now, error);
       return;
     }
 
@@ -150,45 +132,9 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
       return;
     }
 
-    if (
-      this.options.resolveMr &&
-      (this.options.shouldResolve?.() ?? true) &&
-      (snapshot.mergeability === "conflicts" || snapshot.mergeability === "behind")
-    ) {
-      const syncRetryKey = `sync:${key}`;
-      const syncRetry = this.retries.get(syncRetryKey);
-      if (syncRetry && now < syncRetry.nextAt) return;
-      const syncKey = `sync:${key}:${snapshot.baseSha ?? "unknown"}:${snapshot.headSha}`;
-      if (!this.options.queue.hasProcessed(SOURCE, syncKey)) {
-        const outcome = await this.options.resolveMr(mr, {
-          headSha: snapshot.headSha,
-          baseSha: snapshot.baseSha,
-        });
-        if (outcome.outcome === "failed" || outcome.outcome === "deferred") {
-          this.recordFailure(syncRetryKey, now);
-        } else {
-          this.options.queue.markProcessed(SOURCE, syncKey);
-          this.retries.delete(syncRetryKey);
-        }
-        // Re-fetch provider state on the next tick before considering feedback.
-        return;
-      }
-    }
+    if (await this.maybeSyncConflicts(mr, snapshot, key, now)) return;
 
-    const candidates = [] as GitLabPollingSnapshot["feedback"];
-    for (const feedback of snapshot.feedback) {
-      if (new Date(feedback.createdAt).getTime() < mr.createdAt) continue;
-      if (this.allowlist.size > 0 && !this.allowlist.has(feedback.author.username.toLowerCase())) {
-        continue;
-      }
-      if (this.options.queue.hasProcessed(SOURCE, this.eventId(mr, feedback.noteId))) continue;
-      const assigned = snapshot.assignedReviewerIds.includes(feedback.author.id);
-      const accessLevel = assigned
-        ? 30
-        : await client.getMemberAccessLevel(mr.projectId ?? mr.projectPath, feedback.author.id);
-      if (accessLevel === null || accessLevel < 30) continue;
-      candidates.push(feedback);
-    }
+    const candidates = await this.collectFeedbackCandidates(mr, snapshot, client);
     if (candidates.length === 0) {
       this.retries.delete(key);
       return;
@@ -210,6 +156,87 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
         ? `⏳ [${this.name}] ${mr.projectPath}!${mr.changeNumber} deferred; retry scheduled`
         : `⚠️  [${this.name}] ${mr.projectPath}!${mr.changeNumber} feedback run failed; retry scheduled`,
     );
+  }
+
+  /** Report a failed poll, unwatching when the MR is no longer accessible. */
+  private handlePollError(mr: AgentPr, key: string, now: number, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/GitLab API error \((403|404)\)/.test(message)) {
+      this.options.workerState.markAgentChangeRequestClosed(this.identity(mr));
+      console.log(
+        `🧹 [${this.name}] ${mr.projectPath}!${mr.changeNumber} is inaccessible; unwatching`,
+      );
+      return;
+    }
+    this.recordFailure(key, now);
+    captureError(error, {
+      acquirer: this.name,
+      provider: "gitlab",
+      repo: mr.projectPath,
+      prNumber: mr.changeNumber,
+      stage: "poll-mr",
+    });
+    console.warn(
+      `⚠️  [${this.name}] polling ${mr.projectPath}!${mr.changeNumber} failed: ${message}`,
+    );
+  }
+
+  /**
+   * Sync an MR that is in conflict or behind when resolution is enabled.
+   *
+   * @returns true when the poll should stop and re-check provider state next tick
+   */
+  private async maybeSyncConflicts(
+    mr: AgentPr,
+    snapshot: GitLabPollingSnapshot,
+    key: string,
+    now: number,
+  ): Promise<boolean> {
+    const needsSync = snapshot.mergeability === "conflicts" || snapshot.mergeability === "behind";
+    if (!this.options.resolveMr || !(this.options.shouldResolve?.() ?? true) || !needsSync) {
+      return false;
+    }
+    const syncRetryKey = `sync:${key}`;
+    const syncRetry = this.retries.get(syncRetryKey);
+    if (syncRetry && now < syncRetry.nextAt) return true;
+    const syncKey = `sync:${key}:${snapshot.baseSha ?? "unknown"}:${snapshot.headSha}`;
+    if (this.options.queue.hasProcessed(SOURCE, syncKey)) return false;
+
+    const outcome = await this.options.resolveMr(mr, {
+      headSha: snapshot.headSha,
+      baseSha: snapshot.baseSha,
+    });
+    if (outcome.outcome === "failed" || outcome.outcome === "deferred") {
+      this.recordFailure(syncRetryKey, now);
+    } else {
+      this.options.queue.markProcessed(SOURCE, syncKey);
+      this.retries.delete(syncRetryKey);
+    }
+    // Re-fetch provider state on the next tick before considering feedback.
+    return true;
+  }
+
+  /** Collect unprocessed review notes whose author is an eligible reviewer. */
+  private async collectFeedbackCandidates(
+    mr: AgentPr,
+    snapshot: GitLabPollingSnapshot,
+    client: GitLabPollingClient,
+  ): Promise<GitLabPollingSnapshot["feedback"]> {
+    const candidates: GitLabPollingSnapshot["feedback"] = [];
+    for (const feedback of snapshot.feedback) {
+      if (new Date(feedback.createdAt).getTime() < mr.createdAt) continue;
+      if (this.allowlist.size > 0 && !this.allowlist.has(feedback.author.username.toLowerCase())) {
+        continue;
+      }
+      if (this.options.queue.hasProcessed(SOURCE, this.eventId(mr, feedback.noteId))) continue;
+      const assigned = snapshot.assignedReviewerIds.includes(feedback.author.id);
+      const accessLevel = assigned
+        ? 30
+        : await client.getMemberAccessLevel(mr.projectId ?? mr.projectPath, feedback.author.id);
+      if (accessLevel === null || accessLevel < 30) continue;
+      candidates.push(feedback);
+    }
+    return candidates;
   }
 
   private recordFailure(key: string, now: number): void {

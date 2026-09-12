@@ -726,18 +726,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     process.exit(1);
   }
 
-  // Shared workspace values serve GitHub/review consumers and the legacy
-  // single-defaults tracker. Team clients use explicit composed env maps.
-  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
-    process.env[key] = value;
-  }
-  const multiTeam = config.teams.length > 0;
-  if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
-  // In-process consumers (dashboard, run records) follow the fleet DB.
-  process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
-
-  const initialQuery = config.defaults.taskQuery;
-  const intervalSeconds = config.defaults.pollIntervalSeconds;
+  const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
@@ -747,24 +736,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (
-    !multiTeam &&
-    !initialQuery &&
-    config.automations.length === 0 &&
-    config.estimations.length === 0 &&
-    !config.errorMonitors.some((source) => source.enabled)
-  ) {
-    if (retryQueue.hasPending()) {
-      console.warn(
-        "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
-      );
-    } else {
-      console.error(
-        "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
-      );
-      process.exit(1);
-    }
-  }
+  assertWorkspaceHasWork(config, retryQueue, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   startWorkerFailover({
@@ -1176,6 +1148,59 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
     acquirers,
   );
+}
+
+/** Export shared workspace values into `process.env` and return derived defaults. */
+function applyWorkspaceEnv(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+): { multiTeam: boolean; initialQuery: string | undefined; intervalSeconds: number } {
+  // Shared workspace values serve GitHub/review consumers and the legacy
+  // single-defaults tracker. Team clients use explicit composed env maps.
+  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
+    process.env[key] = value;
+  }
+  const multiTeam = config.teams.length > 0;
+  if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
+  // In-process consumers (dashboard, run records) follow the fleet DB.
+  process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  return {
+    multiTeam,
+    initialQuery: config.defaults.taskQuery,
+    intervalSeconds: config.defaults.pollIntervalSeconds,
+  };
+}
+
+/**
+ * Exit when workspace mode has no work configured.
+ *
+ * Scheduled dashboard retries are the one exception: the worker can still run
+ * to drain them.
+ */
+function assertWorkspaceHasWork(
+  config: WorkspaceConfig,
+  retryQueue: ScheduledRetryStore,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): void {
+  const hasWork =
+    multiTeam ||
+    initialQuery ||
+    config.automations.length > 0 ||
+    config.estimations.length > 0 ||
+    config.errorMonitors.some((source) => source.enabled);
+  if (hasWork) return;
+
+  if (retryQueue.hasPending()) {
+    console.warn(
+      "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+    );
+    return;
+  }
+  console.error(
+    "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+  );
+  process.exit(1);
 }
 
 /**

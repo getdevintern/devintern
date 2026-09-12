@@ -209,27 +209,15 @@ interface InitUserLike {
   email: string | null;
 }
 
-export async function configureWorkerOperatingPolicy(ctx: {
-  workspaceDir: string;
-  prompt: PromptFn;
-  log: LogFn;
-}): Promise<void> {
-  const current = loadWorkspaceConfig(workspaceConfigPath(ctx.workspaceDir));
-  const yesNo = async (question: string, fallback: boolean): Promise<boolean> => {
-    for (;;) {
-      const answer = (await ctx.prompt(question)).trim().toLowerCase();
-      if (!answer) return fallback;
-      if (answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no") return false;
-      ctx.log("   Enter y or n.");
-    }
-  };
-
-  const ciFailureFix = await yesNo(
-    `Automatically repair failing CI on worker-created PRs? [${current.workspace.ciFailureFix ? "Y/n" : "y/N"}]: `,
-    current.workspace.ciFailureFix,
-  );
-
+/** Prompt for the conflict-resolution mode and, when scheduled, its cadence. */
+async function promptConflictPolicy(
+  ctx: { workspaceDir: string; prompt: PromptFn; log: LogFn },
+  current: WorkspaceConfig,
+): Promise<{
+  conflictResolution: WorkspaceConfig["workspace"]["conflictResolution"];
+  conflictResolutionCron?: string;
+  conflictResolutionInterval?: string;
+}> {
   let conflictResolution = current.workspace.conflictResolution;
   for (;;) {
     const answer = (
@@ -277,6 +265,71 @@ export async function configureWorkerOperatingPolicy(ctx: {
     }
   }
 
+  return { conflictResolution, conflictResolutionCron, conflictResolutionInterval };
+}
+
+/** Prompt for active-hours windows and timezone. */
+async function promptActiveSchedule(
+  ctx: { workspaceDir: string; prompt: PromptFn; log: LogFn },
+  currentSchedule: WorkspaceConfig["worker"]["schedule"],
+): Promise<{ activeWindows: string[]; blockedWindows: string[]; timezone: string }> {
+  const existingWindows =
+    currentSchedule?.active.map((window) => window.spec).join(",") || "22:00-06:00";
+  let activeWindows: string[] = [];
+  for (;;) {
+    activeWindows = (
+      (await ctx.prompt(`Active windows, comma-separated [${existingWindows}]: `)).trim() ||
+      existingWindows
+    )
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    try {
+      activeWindows.forEach(parseTimeWindowSpec);
+      break;
+    } catch (error) {
+      ctx.log(`   ${(error as Error).message}`);
+    }
+  }
+
+  const blockedWindows = currentSchedule?.blocked.map((window) => window.spec) ?? [];
+  const existingTimezone = currentSchedule?.timezone ?? "";
+  let timezone = "";
+  for (;;) {
+    timezone =
+      (await ctx.prompt(`Timezone [${existingTimezone || "worker machine local"}]: `)).trim() ||
+      existingTimezone;
+    if (!timezone || isValidTimeZone(timezone)) break;
+    ctx.log(`   "${timezone}" is not a valid IANA timezone.`);
+  }
+
+  return { activeWindows, blockedWindows, timezone };
+}
+
+export async function configureWorkerOperatingPolicy(ctx: {
+  workspaceDir: string;
+  prompt: PromptFn;
+  log: LogFn;
+}): Promise<void> {
+  const current = loadWorkspaceConfig(workspaceConfigPath(ctx.workspaceDir));
+  const yesNo = async (question: string, fallback: boolean): Promise<boolean> => {
+    for (;;) {
+      const answer = (await ctx.prompt(question)).trim().toLowerCase();
+      if (!answer) return fallback;
+      if (answer === "y" || answer === "yes") return true;
+      if (answer === "n" || answer === "no") return false;
+      ctx.log("   Enter y or n.");
+    }
+  };
+
+  const ciFailureFix = await yesNo(
+    `Automatically repair failing CI on worker-created PRs? [${current.workspace.ciFailureFix ? "Y/n" : "y/N"}]: `,
+    current.workspace.ciFailureFix,
+  );
+
+  const { conflictResolution, conflictResolutionCron, conflictResolutionInterval } =
+    await promptConflictPolicy(ctx, current);
+
   const currentSchedule = current.worker.schedule;
   const limitPickup = await yesNo(
     `Limit new-task pickup to active hours? [${currentSchedule ? "Y/n" : "y/N"}]: `,
@@ -286,32 +339,10 @@ export async function configureWorkerOperatingPolicy(ctx: {
   let blockedWindows: string[] = [];
   let timezone = "";
   if (limitPickup) {
-    const existingWindows =
-      currentSchedule?.active.map((window) => window.spec).join(",") || "22:00-06:00";
-    for (;;) {
-      activeWindows = (
-        (await ctx.prompt(`Active windows, comma-separated [${existingWindows}]: `)).trim() ||
-        existingWindows
-      )
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-      try {
-        activeWindows.forEach(parseTimeWindowSpec);
-        break;
-      } catch (error) {
-        ctx.log(`   ${(error as Error).message}`);
-      }
-    }
-    blockedWindows = currentSchedule?.blocked.map((window) => window.spec) ?? [];
-    const existingTimezone = currentSchedule?.timezone ?? "";
-    for (;;) {
-      timezone =
-        (await ctx.prompt(`Timezone [${existingTimezone || "worker machine local"}]: `)).trim() ||
-        existingTimezone;
-      if (!timezone || isValidTimeZone(timezone)) break;
-      ctx.log(`   "${timezone}" is not a valid IANA timezone.`);
-    }
+    ({ activeWindows, blockedWindows, timezone } = await promptActiveSchedule(
+      ctx,
+      currentSchedule,
+    ));
   }
 
   writeWorkerOperatingPolicy(ctx.workspaceDir, {
