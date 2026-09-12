@@ -53,20 +53,17 @@
     "react/display-name": "error",
     "react/hook-use-state": "error",
 
-    // Complexity / size metrics. `max-depth`, `max-params`,
-    // `max-nested-callbacks`, and `max-classes-per-file` are enforced as errors
-    // (all clean). `complexity` and `max-statements` are errors globally, with
-    // pre-existing offenders grandfathered as warnings in the
-    // `legacy-complexity-baseline` override; shrink that list as files are split.
-    // `max-lines` and `max-lines-per-function` stay off for now.
+    // Complexity / size metrics. All are enforced as errors globally. The
+    // `size-ratchet-baseline` overrides below exempt the current largest files
+    // and functions; shrink those lists as the files/functions are split.
     "complexity": ["error", 30],
     "max-depth": ["error", 6],
     "max-params": ["error", 6],
     "max-nested-callbacks": ["error", 5],
     "max-classes-per-file": ["error", 3],
-    "max-lines": "off",
-    "max-lines-per-function": "off",
-    "max-statements": ["error", 200],
+    "max-lines": ["error", 1500],
+    "max-lines-per-function": ["error", 500],
+    "max-statements": ["error", 110],
 
     // Import hygiene rules: error so bad imports fail pre-commit/CI (DEV-65).
     "import/no-cycle": "error",
@@ -142,6 +139,34 @@
     "jsdoc/require-returns-type": "off"
   },
   "overrides": [
+    {
+      // Ratchet baseline: files larger than the 1500-line cap. Split a file and
+      // remove its entry to lock in the tighter limit.
+      "files": [
+        "packages/code/src/lib/utils.ts",
+        "packages/code/src/webhook-server.ts",
+        "packages/code/src/lib/workspace/workspace-worker.ts",
+        "packages/pm/lib/components/interactive.tsx",
+        "packages/task-trackers/src/clients/jira.ts"
+      ],
+      "rules": {
+        "max-lines": "off"
+      }
+    },
+    {
+      // Ratchet baseline: files containing a function longer than the 500-line
+      // cap. Split the function and remove its entry to lock in the tighter limit.
+      "files": [
+        "packages/code/src/index.ts",
+        "packages/code/src/lib/agent/run-harness.ts",
+        "packages/pm-desktop/src/main/ipc.ts",
+        "packages/pm-desktop/src/renderer/src/App.tsx",
+        "packages/pm/lib/components/interactive.tsx"
+      ],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
     {
       "files": ["**/*.{test,spec}.{ts,tsx,js,jsx}", "**/test/**", "**/tests/**"],
       "rules": {
