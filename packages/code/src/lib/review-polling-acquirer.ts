@@ -278,28 +278,17 @@ export function runAddressReviewViaCli(
 export function runAddressReviewUrlViaCli(
   webUrl: string,
   serializationKey: string,
-  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    signal?: AbortSignal;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
+  } = {},
 ): Promise<TaskExecutionResult> {
-  return serializePrRun(serializationKey, 0, async () => {
-    const status = await runWithFailover(
-      (env) =>
-        new Promise<number>((resolve) => {
-          const child = spawn(process.execPath, [process.argv[1], "address-review", webUrl], {
-            stdio: ["inherit", "inherit", "inherit"],
-            cwd: opts.cwd,
-            env,
-          });
-          child.on("close", (code) => resolve(code ?? 1));
-          child.on("error", (error) => {
-            captureError(error, { command: "address-review", webUrl, stage: "spawn" });
-            console.error(`❌ Failed to spawn address-review for ${webUrl}: ${error.message}`);
-            resolve(1);
-          });
-        }),
-      opts.env ?? process.env,
-    );
-    return cliResultToTaskResult(status);
-  });
+  return serializePrRun(serializationKey, 0, () =>
+    runSubcommandViaCli("address-review", serializationKey, 0, { ...opts, webUrl }),
+  );
 }
 
 /**
@@ -343,6 +332,9 @@ export function runResolveConflictsUrlViaCli(
     expectedHeadSha?: string;
     expectedBaseSha?: string;
     timeoutMs?: number;
+    signal?: AbortSignal;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
   } = {},
 ): Promise<AutomaticResolveResult> {
   return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
@@ -525,9 +517,12 @@ async function runSubcommandViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    webUrl?: string;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
   } = {},
 ): Promise<TaskExecutionResult> {
-  const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
+  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   const status = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
@@ -535,12 +530,16 @@ async function runSubcommandViaCli(
           resolve(1);
           return;
         }
-        const child = spawn(process.execPath, [process.argv[1], subcommand, prUrl], {
-          stdio: ["inherit", "inherit", "inherit"],
-          cwd: opts.cwd,
-          env,
-          detached: process.platform !== "win32",
-        });
+        const child = spawn(
+          process.execPath,
+          [opts.entrypoint ?? process.argv[1], subcommand, prUrl],
+          {
+            stdio: opts.outputStdio ?? "inherit",
+            cwd: opts.cwd,
+            env,
+            detached: process.platform !== "win32",
+          },
+        );
         const abort = () => killProcessTree(child);
         let settled = false;
         const finish = (code: number) => {

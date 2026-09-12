@@ -1621,18 +1621,21 @@ export async function buildFleetEventAcquirers(options: {
       addressMr: async (mr) => {
         const repo = resolveGitLabRepo(mr);
         if (!repo) return false;
-        await repoManager.ensureBareClone(repo);
-        await repoManager.fetch(repo.name);
-        const base = await repoManager.ensureBaseWorktree(repo);
-        const invoke = () =>
-          runAddressReviewUrlViaCli(
+        const invoke = async (signal?: AbortSignal) => {
+          if (signal?.aborted) throw new JobNotStartedError();
+          await repoManager.ensureBareClone(repo);
+          await repoManager.fetch(repo.name);
+          const base = await repoManager.ensureBaseWorktree(repo);
+          return runAddressReviewUrlViaCli(
             mr.webUrl,
             `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             {
               cwd: base,
+              signal,
               env: buildRepoEnv(repo, workspaceDir),
             },
           );
+        };
         if (!options.supervisor) return invoke();
         try {
           return await options.supervisor.schedule({
@@ -1655,20 +1658,23 @@ export async function buildFleetEventAcquirers(options: {
       resolveMr: async (mr, expected) => {
         const repo = resolveGitLabRepo(mr);
         if (!repo) return { outcome: "skipped", message: "repository is not configured" };
-        await repoManager.ensureBareClone(repo);
-        await repoManager.fetch(repo.name);
-        const base = await repoManager.ensureBaseWorktree(repo);
-        const invoke = () =>
-          runResolveConflictsUrlViaCli(
+        const invoke = async (signal?: AbortSignal) => {
+          if (signal?.aborted) throw new JobNotStartedError();
+          await repoManager.ensureBareClone(repo);
+          await repoManager.fetch(repo.name);
+          const base = await repoManager.ensureBaseWorktree(repo);
+          return runResolveConflictsUrlViaCli(
             mr.webUrl,
             `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             {
               cwd: base,
+              signal,
               env: buildRepoEnv(repo, workspaceDir),
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
             },
           );
+        };
         if (!options.supervisor) return invoke();
         try {
           return await options.supervisor.schedule({
