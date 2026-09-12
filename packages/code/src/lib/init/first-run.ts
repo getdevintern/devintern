@@ -10,8 +10,8 @@
  */
 
 import type { LogFn } from "@devintern/task-trackers";
-import { trackSetupDeclined, trackSetupFailed } from "./observability/analytics";
-import { TRACKER_CAPABILITIES } from "./trackers/capabilities";
+import { trackSetupDeclined, trackSetupFailed } from "../observability/analytics";
+import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
 /** Outcome of the first-run configuration check. */
 export type FirstRunOutcome = "ready" | "failed";
@@ -90,7 +90,7 @@ export async function ensureTrackerEnvConfigured(
   const runWizard =
     deps.runWizard ??
     (async () => {
-      const { runInitWizard } = await import("./init-wizard");
+      const { runInitWizard } = await import("./wizard");
       await runInitWizard({ source: "rescue" });
     });
   await runWizard();

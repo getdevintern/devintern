@@ -31,32 +31,32 @@ import {
   trackWorkerInitCompleted,
   trackWorkerInitFailed,
   trackWorkerInitStarted,
-} from "./observability/analytics";
-import type { RelayConnectOutcome, ServiceInstallOutcome } from "./observability/analytics";
+} from "../observability/analytics";
+import type { RelayConnectOutcome, ServiceInstallOutcome } from "../observability/analytics";
 import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
-} from "./code-host/github/app-setup";
-import { runTrackerSetup } from "./init-wizard";
-import { PRManager } from "./code-host";
-import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay/connect";
-import { parseCronOrIntervalSchedule } from "./automation/config";
-import { isValidTimeZone, parseTimeWindowSpec } from "./worker/schedule";
+} from "../code-host/github/app-setup";
+import { runTrackerSetup } from "./wizard";
+import { PRManager } from "../code-host/index";
+import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
+import { parseCronOrIntervalSchedule } from "../automation/config";
+import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
   trackersSupportingPolling,
-} from "./trackers/capabilities";
+} from "../trackers/capabilities";
 import {
   ensureWorkspaceAndAddRepo,
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
-} from "./workspace/init";
-import { loadWorkspaceConfig } from "./workspace/config";
-import type { WorkspaceConfig } from "./workspace/config";
-import { gitHubSlugFromRemote } from "./workspace/env";
-import { workspaceConfigPath } from "./workspace/paths";
+} from "../workspace/init";
+import { loadWorkspaceConfig } from "../workspace/config";
+import type { WorkspaceConfig } from "../workspace/config";
+import { gitHubSlugFromRemote } from "../workspace/env";
+import { workspaceConfigPath } from "../workspace/paths";
 import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
@@ -68,15 +68,15 @@ import {
   renderLaunchdPlist,
   renderSystemdUnit,
   SYSTEMD_UNIT_NAME,
-} from "./worker/service";
+} from "../worker/service";
 import type {
   RunCommandFn,
   ServiceInstallResult,
   ServiceState,
   WorkerServiceDeps,
-} from "./worker/service";
+} from "../worker/service";
 
-export { renderLaunchdPlist, renderSystemdUnit } from "./worker/service";
+export { renderLaunchdPlist, renderSystemdUnit } from "../worker/service";
 
 export type PromptFn = (question: string) => Promise<string>;
 export type LogFn = (message: string) => void;

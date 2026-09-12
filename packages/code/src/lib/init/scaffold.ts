@@ -9,7 +9,7 @@ import { join, resolve } from "path";
 import { findProjectRoot } from "@devintern/utils";
 import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
 import type { EnvPromptStep } from "@devintern/task-trackers";
-import { TRACKER_CAPABILITIES } from "./trackers/capabilities";
+import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
 export type { EnvPromptStep };
 

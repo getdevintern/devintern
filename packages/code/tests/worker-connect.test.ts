@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { saveRelayState } from "../src/lib/relay/connect";
-import { runWorkerConnectCommand } from "../src/lib/worker-connect";
+import { runWorkerConnectCommand } from "../src/lib/init/worker-connect";
 
 describe("runWorkerConnectCommand", () => {
   let workspaceDir: string;

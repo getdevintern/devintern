@@ -32,12 +32,12 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, resolveConfigDir, upsertEnvVars } from "@devintern/utils";
-import type { SetupSignInStatus, SetupSource } from "./observability/analytics";
+import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
   trackSetupCompleted,
   trackSetupFailed,
   trackSetupStarted,
-} from "./observability/analytics";
+} from "../observability/analytics";
 import {
   GITHUB_PR_DOCS,
   GITHUB_PR_TOKEN_STEP,
@@ -45,10 +45,10 @@ import {
   TRACKER_SETUP,
   renderEnvFile,
   scaffoldProject,
-} from "./init-scaffold";
-import { collectReadinessChecks, renderReadinessReport } from "./observability/readiness";
-import type { ReadinessCheck } from "./observability/readiness";
-import { TRACKER_CAPABILITIES } from "./trackers/capabilities";
+} from "./scaffold";
+import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
+import type { ReadinessCheck } from "../observability/readiness";
+import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
 export { isInteractive };
 

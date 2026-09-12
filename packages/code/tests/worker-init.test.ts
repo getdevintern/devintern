@@ -25,7 +25,7 @@ import {
   runWorkerInit,
   upsertEnvVars,
   workspaceGitHubRepos,
-} from "../src/lib/worker-init";
+} from "../src/lib/init/worker-init";
 
 describe("upsertEnvVars", () => {
   test("appends new keys under a worker section", () => {
