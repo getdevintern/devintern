@@ -148,12 +148,7 @@
       // violations elsewhere fail CI. Remove a file here once it is split.
       "files": [
         "packages/code/src/index.ts",
-        "packages/code/src/lib/init/worker-connect.ts",
-        "packages/code/src/lib/init/worker-init.ts",
-        "packages/code/src/lib/relay/connect.ts",
-        "packages/pm/index.ts",
-        "packages/pm/lib/components/interactive.tsx",
-        "packages/pm/lib/parse-args.ts"
+        "packages/pm/index.ts"
       ],
       "rules": {
         "complexity": ["warn", 30],
