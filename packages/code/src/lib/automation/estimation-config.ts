@@ -1,6 +1,6 @@
 import { CronExpressionParser } from "cron-parser";
 
-import { parseAutomationInterval } from "./automation-config";
+import { parseAutomationInterval } from "./config";
 
 /**
  * One workspace `[[estimations]]` entry: a scheduled story-point sweep.

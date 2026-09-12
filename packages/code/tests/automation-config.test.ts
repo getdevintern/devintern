@@ -6,7 +6,7 @@ import {
   parseAutomationConfig,
   parseAutomationInterval,
   parseCronOrIntervalSchedule,
-} from "../src/lib/automation-config";
+} from "../src/lib/automation/config";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 
 describe("automation configuration", () => {

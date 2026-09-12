@@ -26,7 +26,7 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
-import type { DashboardAutomationActions } from "./lib/automation-acquirer";
+import type { DashboardAutomationActions } from "./lib/automation/acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 const LOOPBACK_DASHBOARD_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);

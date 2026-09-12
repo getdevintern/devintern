@@ -17,8 +17,8 @@ import type {
   AutomationScheduleStatus,
   DashboardAutomationActions,
   ManualTriggerOutcome,
-} from "../automation-acquirer";
-import { loadStandaloneAutomationActions } from "../automation-manual";
+} from "../automation/acquirer";
+import { loadStandaloneAutomationActions } from "../automation/manual";
 import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
 import type {

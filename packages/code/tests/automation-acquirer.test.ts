@@ -14,10 +14,10 @@ import {
   resolveAutomationRunArgs,
   spawnAutomationProcess,
   writeAutomationTaskFile,
-} from "../src/lib/automation-acquirer";
-import { automationTaskArgs } from "../src/lib/automation-config";
-import { AutomationStateStore } from "../src/lib/automation-state";
-import type { AutomationConfig } from "../src/lib/automation-config";
+} from "../src/lib/automation/acquirer";
+import { automationTaskArgs } from "../src/lib/automation/config";
+import { AutomationStateStore } from "../src/lib/automation/state";
+import type { AutomationConfig } from "../src/lib/automation/config";
 
 describe("AutomationAcquirer", () => {
   describe("resolveAutomationRunArgs", () => {

@@ -15,22 +15,18 @@
  * to the worker's embedded dashboard.
  */
 
-import { loadSingleRepoAutomations, automationTaskArgs } from "./automation-config";
-import type { AutomationConfig } from "./automation-config";
-import {
-  AUTOMATION_ID_ENV,
-  MANUAL_ORIGIN_ENV_VALUE,
-  spawnManualAutomationRun,
-} from "./automation-acquirer";
+import { loadSingleRepoAutomations, automationTaskArgs } from "./config";
+import type { AutomationConfig } from "./config";
+import { AUTOMATION_ID_ENV, MANUAL_ORIGIN_ENV_VALUE, spawnManualAutomationRun } from "./acquirer";
 import type {
   AutomationRunContext,
   AutomationScheduleStatus,
   DashboardAutomationActions,
   ManualTriggerOutcome,
   SpawnedAutomationRun,
-} from "./automation-acquirer";
-import { RUN_ORIGIN_ENV } from "./observability/analytics";
-import { workerTaskArgs } from "./acquirers/task-polling";
+} from "./acquirer";
+import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import { workerTaskArgs } from "../acquirers/task-polling";
 
 /** Test-only spawn override so manual-run tests never launch a real CLI. */
 export interface StandaloneAutomationOptions {
