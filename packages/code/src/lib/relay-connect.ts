@@ -17,7 +17,7 @@ import { dirname, join, resolve } from "path";
 import { saveGitHubAppRecord } from "./github-app-setup";
 import { GitLabWebhookAdminClient } from "./gitlab-webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "./gitlab-webhook-admin";
-import { resolveGitLabCodeHostConfig } from "./pr-client";
+import { resolveGitLabCodeHostConfig } from "./code-host";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 

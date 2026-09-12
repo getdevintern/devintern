@@ -6,8 +6,8 @@ import {
   GitLabMRClient,
   isGitLabCodeHostEnabled,
   resolveGitLabCodeHostConfig,
-} from "../src/lib/pr-client";
-import type { PRInfo } from "../src/lib/pr-client";
+} from "../src/lib/code-host";
+import type { PRInfo } from "../src/lib/code-host";
 
 const originalFetch = globalThis.fetch;
 

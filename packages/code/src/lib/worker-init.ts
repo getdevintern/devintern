@@ -39,7 +39,7 @@ import {
   loadGitHubAppRecord,
 } from "./github-app-setup";
 import { runTrackerSetup } from "./init-wizard";
-import { PRManager } from "./pr-client";
+import { PRManager } from "./code-host";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay-connect";
 import { parseCronOrIntervalSchedule } from "./automation-config";
 import { isValidTimeZone, parseTimeWindowSpec } from "./schedule";
