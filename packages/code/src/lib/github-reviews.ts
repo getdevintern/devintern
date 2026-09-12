@@ -103,6 +103,18 @@ export interface WorkflowRunSummary {
   html_url?: string;
 }
 
+/** Target and content for a new inline review comment. */
+export interface CreateReviewCommentOptions {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  body: string;
+  commitId: string;
+  path: string;
+  line: number;
+  side?: "LEFT" | "RIGHT";
+}
+
 /**
  * Whether an error thrown by a GitHub API client call is an HTTP 404
  * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
@@ -529,25 +541,10 @@ export class GitHubReviewsClient {
   /**
    * Create a new inline review comment on a diff line.
    *
-   * @param owner - Repository owner
-   * @param repo - Repository name
-   * @param prNumber - Pull request number
-   * @param body - Comment markdown body
-   * @param commitId - HEAD commit SHA for the comment anchor
-   * @param path - File path in the diff
-   * @param line - Line number in the diff
-   * @param side - Diff side (`LEFT` or `RIGHT`)
+   * @param options - Comment target and content
    */
-  async createReviewComment(
-    owner: string,
-    repo: string,
-    prNumber: number,
-    body: string,
-    commitId: string,
-    path: string,
-    line: number,
-    side: "LEFT" | "RIGHT" = "RIGHT",
-  ): Promise<GitHubReviewComment> {
+  async createReviewComment(options: CreateReviewCommentOptions): Promise<GitHubReviewComment> {
+    const { owner, repo, prNumber, body, commitId, path, line, side = "RIGHT" } = options;
     return this.apiRequest<GitHubReviewComment>(
       "POST",
       `/repos/${owner}/${repo}/pulls/${prNumber}/comments`,

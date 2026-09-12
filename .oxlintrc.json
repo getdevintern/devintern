@@ -53,12 +53,12 @@
     "react/display-name": "error",
     "react/hook-use-state": "error",
 
-    // Code complexity / size metrics, tuned to flag genuine outliers rather than
-    // every moderately long function. The size rules stay off for now; flip them on
-    // once the remaining outliers (complexity >= 30, > 7 params, depth 7) are split.
+    // Complexity / size metrics. `max-depth` and `max-params` are enforced as
+    // errors (both clean); `complexity` stays a warning until the remaining
+    // long functions are split. The size rules stay off for now.
     "complexity": ["warn", 30],
-    "max-depth": ["warn", 6],
-    "max-params": ["warn", 7],
+    "max-depth": ["error", 6],
+    "max-params": ["error", 7],
     "max-nested-callbacks": ["warn", 10],
     "max-classes-per-file": ["warn", 3],
     "max-lines": "off",
