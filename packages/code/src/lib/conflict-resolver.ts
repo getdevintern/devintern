@@ -1,3 +1,5 @@
+import { createConflictChangeAdapter } from "./conflict-change-adapter";
+import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**
  * Merge-conflict resolution for the agent's own PRs.
  *
@@ -21,11 +23,7 @@
 
 import { runAgent } from "./address-review";
 import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
-import { GitHubAppAuth } from "./github-app-auth";
-import { GitHubReviewsClient } from "./github-reviews";
 import type { PullRequestInfo } from "./github-reviews";
-import { GitLabReviewsClient } from "./gitlab-reviews";
-import { resolveGitLabCodeHostConfig } from "./pr-client";
 import { Utils } from "./utils";
 
 export interface ResolveConflictsOptions {
@@ -72,31 +70,6 @@ export interface ResolveConflictsResult {
   message: string;
   /** How far a failed resolution got; determines whether the PR was touched. */
   failureKind?: FailureKind;
-}
-
-/** Parse an `owner/repo` + PR number out of a GitHub PR URL. */
-interface ChangeRequestInfo {
-  state: string;
-  head: { ref: string; sha: string; repo?: { full_name: string } | null };
-  base: { ref: string; sha: string };
-  mergeability: "mergeable" | "conflicts" | "behind" | "checking" | "blocked" | "unknown";
-}
-
-function githubChangeRequest(pr: PullRequestInfo): ChangeRequestInfo {
-  const state = pr.mergeable_state;
-  return {
-    state: pr.state,
-    head: pr.head,
-    base: pr.base,
-    mergeability:
-      state === "dirty"
-        ? "conflicts"
-        : state === "behind"
-          ? "behind"
-          : !state || state === "unknown"
-            ? "checking"
-            : "mergeable",
-  };
 }
 
 /** Build the agent prompt for resolving a conflicted merge. */
@@ -356,44 +329,14 @@ export async function resolveConflictsOnPr(
     throw new Error(`Not a supported pull-request or merge-request URL: ${prUrl}`);
   }
   const provider = identity.provider;
-  const [owner = "", repo = ""] = identity.projectPath.split("/");
   const prNumber = identity.number;
   const changeLabel = identity.provider === "gitlab" ? "MR" : "PR";
   console.log(
     `🔀 Resolving merge conflicts on ${identity.projectPath}${identity.provider === "gitlab" ? "!" : "#"}${prNumber}`,
   );
 
-  let githubClient: GitHubReviewsClient | undefined;
-  const getClient = () => (githubClient ??= new GitHubReviewsClient());
-  let gitlabClient: GitLabReviewsClient | undefined;
-  if (identity.provider === "gitlab") {
-    const config = resolveGitLabCodeHostConfig(identity.instanceUrl);
-    if (!config.ok) throw new Error(config.message);
-    gitlabClient = new GitLabReviewsClient(config.token, config.instanceUrl, {
-      caFile: config.caFile,
-      proxy: config.proxy,
-    });
-  }
-  const postComment =
-    options.prCommenter ??
-    (identity.provider === "gitlab"
-      ? (body: string) =>
-          gitlabClient!.postMergeRequestNote(
-            identity.projectId ?? identity.projectPath,
-            prNumber,
-            body,
-          )
-      : (body: string) => getClient().postPullRequestComment(owner, repo, prNumber, body));
-  const fetchPrNow = async (): Promise<ChangeRequestInfo> => {
-    if (options.fetchPr) {
-      return githubChangeRequest(await options.fetchPr(owner, repo, prNumber));
-    }
-    if (identity.provider === "gitlab") {
-      const mr = await gitlabClient!.getChangeRequest(identity.projectPath, prNumber);
-      return { ...mr, state: mr.state === "opened" ? "open" : mr.state };
-    }
-    return githubChangeRequest(await getClient().getPullRequest(owner, repo, prNumber));
-  };
+  const adapter = createConflictChangeAdapter(identity, options);
+  const { postComment, fetchChange: fetchPrNow } = adapter;
 
   let baseRef = "";
 
@@ -490,21 +433,7 @@ export async function resolveConflictsOnPr(
         }
       }
 
-      // Commit attribution for the merge commit (matches address-review).
-      if (identity.provider === "github" && !process.env.GITHUB_TOKEN) {
-        const appAuth = GitHubAppAuth.fromEnvironment();
-        if (appAuth) {
-          try {
-            const author = await appAuth.getGitAuthor();
-            await Utils.executeGitCommand(["config", "user.name", author.name], { cwd: workDir });
-            await Utils.executeGitCommand(["config", "user.email", author.email], {
-              cwd: workDir,
-            });
-          } catch {
-            // Local git config applies.
-          }
-        }
-      }
+      await adapter.configureCommitAuthor(workDir);
 
       // A merge needs the common ancestor. Repos can be shallow from CI-style
       // checkouts or from older devintern versions whose review fetch used
