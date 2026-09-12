@@ -20,6 +20,7 @@ export interface ActiveTaskContext {
 export const runContext = {
   options: undefined as unknown as ProgramOptions,
   resolvedAgent: undefined as unknown as ResolvedHarness,
+  autoReviewIterationCap: undefined as number | undefined,
   lockManager: null as LockManager | null,
   activeTaskContext: null as ActiveTaskContext | null,
 };
