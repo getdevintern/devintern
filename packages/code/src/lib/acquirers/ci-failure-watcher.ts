@@ -411,52 +411,18 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
   }
 
-  /** Poll a single PR; triggers at most one fix attempt per poll. */
-  private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
-    const { workerState, provider, verbose } = this.options;
-
-    // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
-    const prSource = `${this.namespace}:cipr:${repo}#${prNumber}`;
-    const prCursor = workerState.getCursor(prSource);
-    const prResult = await provider.fetchChange(repo, prNumber, prCursor?.etag);
-    if (prResult.gone) {
-      this.markClosed(repo, prNumber);
-      return "removed";
-    }
-    if (!prResult.notModified) {
-      if (prResult.etag) {
-        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
-      }
-      if (prResult.data && prResult.data.state !== "open") {
-        console.log(
-          `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${prResult.data.state}; unwatching`,
-        );
-        this.markClosed(repo, prNumber);
-        return "removed";
-      }
-    }
-
-    const headSha = prResult.notModified ? prCursor?.cursorValue : prResult.data?.headSha;
-    if (!headSha) {
-      return "active";
-    }
-
-    // Fork PRs: Actions usually does not run in the base repository for the
-    // fork head. Skip quietly instead of burning requests or commenting.
-    const headRepo = prResult.data?.headRepository;
-    if (headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) {
-      if (verbose) {
-        console.log(
-          `   [${this.name}] ${this.describe(repo, prNumber)} is a fork PR (${headRepo}); skipping`,
-        );
-      }
-      return "active";
-    }
-
+  /** ETag-cached CI stream fetch; aggregate the observation for this head SHA. */
+  private async collectCiObservations(
+    repo: string,
+    prNumber: number,
+    headSha: string,
+    prResult: Awaited<ReturnType<CiProvider["fetchChange"]>>,
+  ): Promise<{ pending: PendingFailure[]; ciChanged: boolean; fullyGreen: boolean }> {
+    const { workerState } = this.options;
     const pending: PendingFailure[] = [];
     const states: CiAggregateState[] = [];
     let ciChanged = !prResult.notModified;
-    for (const stream of provider.streams) {
+    for (const stream of this.options.provider.streams) {
       const source = `${this.namespace}:${stream.key}:${repo}#${prNumber}`;
       const cursor = workerState.getCursor(source);
       const cached = parseSnapshot(cursor?.cursorValue);
@@ -487,22 +453,23 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       states.every((state) => state === "success" || state === "empty") &&
       states.some((state) => state === "success");
     if (fullyGreen) this.resetRetryBudget(repo, prNumber, "CI passed");
+    return { pending, ciChanged, fullyGreen };
+  }
 
-    // 4. Split failures into fresh vs already-handled. Mark only after a
-    // successful invocation so crashes/no-op runs remain retryable.
-    const fresh: PendingFailure[] = [];
-    for (const failure of pending) {
-      if (!this.options.queue.hasProcessed(this.source, failure.externalId)) {
-        fresh.push(failure);
-      }
-    }
-    if (pending.length === 0) {
-      return fullyGreen && !ciChanged ? "unchanged-green" : "active";
-    }
-
-    // 5. Retry cap & escalation bookkeeping — evaluated on every observation
-    // (fresh or not), so exhaustion escalates even when the failing run was
-    // already handled but the fix attempt produced no new CI run.
+  /**
+   * Enforce the retry cap and, when budget remains, gather logs and run one fix
+   * attempt. Evaluated on every observation so exhaustion escalates even when
+   * the failing run was already handled but produced no new CI run.
+   */
+  private async handleFreshCiFailures(params: {
+    repo: string;
+    prNumber: number;
+    headSha: string;
+    fresh: PendingFailure[];
+    pending: PendingFailure[];
+  }): Promise<PollOutcome> {
+    const { workerState, verbose } = this.options;
+    const { repo, prNumber, headSha, fresh, pending } = params;
     const state = workerState.getCiFixState(repo, prNumber);
     if (
       state.escalatedSha &&
@@ -541,7 +508,6 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         fresh.map((f) => f.name).join(", "),
     );
 
-    // 6. Gather failure-relevant logs and run one fix attempt.
     const logs = await this.collectLogs(repo, headSha);
     const feedback: CiFailureFeedback = {
       repository: this.options.feedbackRepository?.(repo) ?? repo,
@@ -594,6 +560,67 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       rmSync(feedbackDir, { recursive: true, force: true });
     }
     return "active";
+  }
+
+  /** Poll a single PR; triggers at most one fix attempt per poll. */
+  private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
+    const { workerState, provider, verbose } = this.options;
+
+    // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
+    const prSource = `${this.namespace}:cipr:${repo}#${prNumber}`;
+    const prCursor = workerState.getCursor(prSource);
+    const prResult = await provider.fetchChange(repo, prNumber, prCursor?.etag);
+    if (prResult.gone) {
+      this.markClosed(repo, prNumber);
+      return "removed";
+    }
+    if (!prResult.notModified) {
+      if (prResult.etag) {
+        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
+      }
+      if (prResult.data && prResult.data.state !== "open") {
+        console.log(
+          `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${prResult.data.state}; unwatching`,
+        );
+        this.markClosed(repo, prNumber);
+        return "removed";
+      }
+    }
+
+    const headSha = prResult.notModified ? prCursor?.cursorValue : prResult.data?.headSha;
+    if (!headSha) {
+      return "active";
+    }
+
+    // Fork PRs: Actions usually does not run in the base repository for the
+    // fork head. Skip quietly instead of burning requests or commenting.
+    const headRepo = prResult.data?.headRepository;
+    if (headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) {
+      if (verbose) {
+        console.log(
+          `   [${this.name}] ${this.describe(repo, prNumber)} is a fork PR (${headRepo}); skipping`,
+        );
+      }
+      return "active";
+    }
+
+    const { pending, ciChanged, fullyGreen } = await this.collectCiObservations(
+      repo,
+      prNumber,
+      headSha,
+      prResult,
+    );
+
+    // 4. Split failures into fresh vs already-handled. Mark only after a
+    // successful invocation so crashes/no-op runs remain retryable.
+    const fresh = pending.filter(
+      (failure) => !this.options.queue.hasProcessed(this.source, failure.externalId),
+    );
+    if (pending.length === 0) {
+      return fullyGreen && !ciChanged ? "unchanged-green" : "active";
+    }
+
+    return this.handleFreshCiFailures({ repo, prNumber, headSha, fresh, pending });
   }
 
   /** Schedule the next observation for CI that is still terminal green. */
