@@ -697,6 +697,304 @@ function formatTimestamp(epochMs: number | null): string {
   return epochMs === null ? "never" : new Date(epochMs).toLocaleString();
 }
 
+/** Relay connection options threaded to the low-level registration helpers. */
+interface RelayConnectOptions {
+  accessToken: string;
+  workingDir: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}
+
+/** Tracker sources whose connect flow shares the register-source + webhook shape. */
+type TrackerRelayTarget = Exclude<RelayConnectTarget, "github" | "gitlab" | "status">;
+
+interface TrackerConnectContext {
+  env: Record<string, string | undefined>;
+  connectOpts: RelayConnectOptions;
+}
+
+/** Print relay status and the registrations currently routed for this customer. */
+async function connectStatusTarget(
+  resolvedDeps: RelayConnectDeps,
+  accessToken: string,
+): Promise<number> {
+  try {
+    const { relayToken } = await ensureRelayToken(accessToken, resolvedDeps);
+    const status = await fetchRelayStatus({ relayToken, ...resolvedDeps });
+    console.log(`📡 Relay: ${resolveRelayUrl()}`);
+    console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
+    console.log(`   Buffered envelopes: ${status.buffered}`);
+    if (status.registrations.length === 0) {
+      console.log("   No registrations yet. Run: devintern worker connect");
+    }
+    for (const reg of status.registrations) {
+      console.log(`   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`);
+    }
+    return 0;
+  } catch (error) {
+    console.error(`❌ Relay status failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+/** Install or remove the managed GitLab project hook that feeds the relay. */
+async function connectGitLabTarget(
+  deps: WorkspaceRelayConnectDeps,
+  env: Record<string, string | undefined>,
+  connectOpts: RelayConnectOptions,
+): Promise<number> {
+  const identity = deps.gitlabProject;
+  if (!identity) {
+    console.error("❌ GitLab relay connection requires a workspace repository.");
+    return 1;
+  }
+  const codeHost = resolveGitLabCodeHostConfig(identity.instanceUrl, env);
+  const adminToken = env.GITLAB_WEBHOOK_ADMIN_TOKEN || (codeHost.ok ? codeHost.token : undefined);
+  if (!adminToken) {
+    console.error(
+      "❌ GITLAB_WEBHOOK_ADMIN_TOKEN is required to install project hooks; polling remains enabled.",
+    );
+    return 1;
+  }
+  try {
+    const admin =
+      deps.gitlabAdmin ??
+      new GitLabWebhookAdminClient(adminToken, identity.instanceUrl, {
+        caFile: codeHost.ok ? codeHost.caFile : env.GITLAB_CODE_HOST_CA_FILE,
+        proxy: codeHost.ok ? codeHost.proxy : env.GITLAB_CODE_HOST_PROXY,
+      });
+    const project = await admin.resolveMaintainedProject(identity.projectPath);
+    const projectId = String(project.id);
+    const previous = gitLabRelayRepository(
+      loadRelayState(connectOpts.workingDir),
+      identity.instanceUrl,
+      projectId,
+    );
+    if (deps.disconnectGitLab) {
+      if (!previous) {
+        console.log(`✅ ${project.path} has no remembered GitLab relay hook; polling remains on.`);
+        return 0;
+      }
+      await admin.deleteHook(project.id, previous.hookId);
+      await removeGitLabRelayRegistration({
+        registrationId: previous.registrationId,
+        ...connectOpts,
+      });
+      console.log(`✅ Disconnected ${project.path} from the relay; polling remains enabled.`);
+      return 0;
+    }
+    const begun = await beginGitLabRelayRegistration({
+      instanceUrl: identity.instanceUrl,
+      projectId,
+      projectPath: project.path,
+      ...connectOpts,
+    });
+    const { hook, standardSigning } = await admin.upsertRelayHook(
+      project.id,
+      {
+        ingestUrl: begun.ingestUrl,
+        signingToken: begun.signingToken,
+        legacySecret: begun.legacySecret,
+      },
+      previous?.hookId,
+    );
+    await admin.testHook(project.id, hook.id);
+    const state = await completeGitLabRelayRegistration({
+      registrationId: begun.registrationId,
+      hookId: hook.id,
+      instanceUrl: identity.instanceUrl,
+      projectId,
+      projectPath: project.path,
+      ...connectOpts,
+    });
+    console.log(`✅ Connected ${project.path} to the relay (${state.relayUrl})`);
+    console.log(
+      `   GitLab hook ${hook.id} verified with ${standardSigning ? "Standard Webhook signing" : "legacy secret-token authentication"}.`,
+    );
+    console.log("   Polling remains enabled as a fallback.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ GitLab relay connect failed: ${(error as Error).message}`);
+    console.error("   Polling remains enabled; fix access or connectivity and retry.");
+    return 1;
+  }
+}
+
+async function connectLinearTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+  const apiKey = env.LINEAR_API_KEY;
+  if (!apiKey) {
+    console.error("❌ LINEAR_API_KEY is required to register a Linear webhook.");
+    return 1;
+  }
+  try {
+    const secret = generateWebhookSecret();
+    const { ingestUrl } = await registerRelaySource({ source: "linear", secret, ...connectOpts });
+    const { LinearClient } = await import("@devintern/task-trackers");
+    const webhook = await new LinearClient({ apiKey }).createWebhook(ingestUrl, secret);
+    console.log(`✅ Linear webhook registered (${webhook.id}); Issue events now relay instantly.`);
+    console.log("   Undo in Linear: Settings > API > Webhooks.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Linear connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+async function connectAsanaTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+  const apiToken = env.ASANA_API_TOKEN;
+  const projectGid = env.ASANA_DEFAULT_PROJECT_GID;
+  if (!apiToken || !projectGid) {
+    console.error(
+      "❌ ASANA_API_TOKEN and ASANA_DEFAULT_PROJECT_GID are required to register an Asana webhook.",
+    );
+    return 1;
+  }
+  try {
+    const { ingestUrl } = await registerRelaySource({ source: "asana", ...connectOpts });
+    const { AsanaClient } = await import("@devintern/task-trackers");
+    // Asana handshakes with the relay during creation (X-Hook-Secret).
+    const webhook = await new AsanaClient({ apiToken }).createWebhook(projectGid, ingestUrl);
+    console.log(
+      `✅ Asana webhook registered (${webhook.gid}); task events on project ${projectGid} now relay instantly.`,
+    );
+    console.log("   Undo via the Asana API: DELETE /webhooks/" + webhook.gid);
+    return 0;
+  } catch (error) {
+    console.error(`❌ Asana connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+  const apiKey = env.TRELLO_API_KEY;
+  const apiToken = env.TRELLO_API_TOKEN;
+  const boardId = env.TRELLO_DEFAULT_BOARD_ID;
+  if (!apiKey || !apiToken || !boardId) {
+    console.error(
+      "❌ TRELLO_API_KEY, TRELLO_API_TOKEN, and TRELLO_DEFAULT_BOARD_ID are required to register a Trello webhook.",
+    );
+    return 1;
+  }
+  try {
+    const { ingestUrl } = await registerRelaySource({ source: "trello", ...connectOpts });
+    const { TrelloClient } = await import("@devintern/task-trackers");
+    const webhook = await new TrelloClient({ apiKey, apiToken }).createWebhook(ingestUrl, boardId);
+    console.log(
+      `✅ Trello webhook registered (${webhook.id}); card events on board ${boardId} now relay instantly.`,
+    );
+    console.log("   Delivery auth relies on the private ingest URL; keep it secret.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Trello connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+async function connectAzureDevOpsTarget({
+  env,
+  connectOpts,
+}: TrackerConnectContext): Promise<number> {
+  const organization = env.AZURE_DEVOPS_ORG;
+  const pat = env.AZURE_DEVOPS_PAT;
+  const project = env.AZURE_DEVOPS_PROJECT;
+  if (!organization || !pat || !project) {
+    console.error(
+      "❌ AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT are required to register Azure DevOps service hooks.",
+    );
+    return 1;
+  }
+  try {
+    const { ingestUrl } = await registerRelaySource({ source: "azure-devops", ...connectOpts });
+    const { AzureDevOpsClient } = await import("@devintern/task-trackers");
+    const client = new AzureDevOpsClient({ organization, pat, defaultProject: project });
+    const { ids } = await client.createWorkItemWebhooks(ingestUrl);
+    console.log(
+      `✅ Azure DevOps service hooks registered (${ids.join(", ")}); work item events on ${project} now relay instantly.`,
+    );
+    console.log("   Undo in Azure DevOps: Project settings > Service hooks.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Azure DevOps connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+async function connectJiraTarget({ connectOpts }: TrackerConnectContext): Promise<number> {
+  try {
+    const { ingestUrl } = await registerRelaySource({ source: "jira", ...connectOpts });
+    console.log("✅ Jira ingest URL registered. Jira webhooks need one-time admin setup:");
+    console.log("");
+    console.log("   1. Open Jira: Settings (gear) > System > WebHooks > Create a WebHook");
+    console.log(`   2. URL: ${ingestUrl}`);
+    console.log("   3. Events: Issue - created, updated (optionally scope with a JQL filter)");
+    console.log("   4. Save. Issue events now relay instantly.");
+    console.log("");
+    console.log("   Keep the URL secret; it authenticates deliveries for your account.");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Jira connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
+/** Tracker connect flows keyed by target; every entry shares the same signature. */
+const TRACKER_CONNECT_HANDLERS: Record<
+  TrackerRelayTarget,
+  (ctx: TrackerConnectContext) => Promise<number>
+> = {
+  linear: connectLinearTarget,
+  asana: connectAsanaTarget,
+  trello: connectTrelloTarget,
+  "azure-devops": connectAzureDevOpsTarget,
+  jira: connectJiraTarget,
+};
+
+/** Pair a workspace repository with the central DevIntern GitHub App. */
+async function connectGitHubTarget(
+  repo: string | undefined,
+  deps: WorkspaceRelayConnectDeps,
+  connectOpts: RelayConnectOptions,
+): Promise<number> {
+  if (!repo) {
+    console.error("❌ GitHub relay connection requires a workspace repository.");
+    return 1;
+  }
+  try {
+    let installUrl = "";
+    const state = await connectGitHubRepo({
+      repo,
+      ...connectOpts,
+      sleep: deps.sleep,
+      onInstallUrl(url) {
+        installUrl = url;
+        deps.onGitHubInstallUrl?.(url);
+        console.log("Open this URL to install and authorize the DevIntern GitHub App:");
+        console.log(`   ${url}`);
+        console.log("Waiting for GitHub verification...");
+      },
+    });
+    console.log(`✅ Connected ${repo} to the relay (${state.relayUrl})`);
+    console.log(`   Customer: ${state.customerId}`);
+    console.log(`   GitHub App authorization verified${installUrl ? "." : ""}`);
+    saveGitHubAppRecord(
+      {
+        repo: state.github?.repo.toLowerCase() ?? repo.toLowerCase(),
+        enabled: true,
+        connectedAt: new Date().toISOString(),
+        installationId: state.github?.installationId,
+        repositoryId: state.github?.repositoryId,
+      },
+      connectOpts.workingDir,
+    );
+    console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
+    console.log("   Run the worker as usual: devintern worker");
+    return 0;
+  } catch (error) {
+    console.error(`❌ Relay connect failed: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
 /**
  * Connect one relay target using workspace-scoped state.
  *
@@ -728,7 +1026,7 @@ export async function connectRelayTarget(
     return 1;
   }
 
-  const connectOpts = {
+  const connectOpts: RelayConnectOptions = {
     accessToken,
     workingDir,
     relayUrl: deps.relayUrl,
@@ -736,272 +1034,15 @@ export async function connectRelayTarget(
   };
 
   if (target === "status") {
-    try {
-      const { relayToken } = await ensureRelayToken(accessToken, resolvedDeps);
-      const status = await fetchRelayStatus({ relayToken, ...resolvedDeps });
-      console.log(`📡 Relay: ${resolveRelayUrl()}`);
-      console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
-      console.log(`   Buffered envelopes: ${status.buffered}`);
-      if (status.registrations.length === 0) {
-        console.log("   No registrations yet. Run: devintern worker connect");
-      }
-      for (const reg of status.registrations) {
-        console.log(
-          `   - ${reg.kind}:${reg.key} (last event: ${formatTimestamp(reg.lastEventAt)})`,
-        );
-      }
-      return 0;
-    } catch (error) {
-      console.error(`❌ Relay status failed: ${(error as Error).message}`);
-      return 1;
-    }
+    return connectStatusTarget(resolvedDeps, accessToken);
   }
-
   if (target === "gitlab") {
-    const identity = deps.gitlabProject;
-    if (!identity) {
-      console.error("❌ GitLab relay connection requires a workspace repository.");
-      return 1;
-    }
-    const codeHost = resolveGitLabCodeHostConfig(identity.instanceUrl, env);
-    const adminToken = env.GITLAB_WEBHOOK_ADMIN_TOKEN || (codeHost.ok ? codeHost.token : undefined);
-    if (!adminToken) {
-      console.error(
-        "❌ GITLAB_WEBHOOK_ADMIN_TOKEN is required to install project hooks; polling remains enabled.",
-      );
-      return 1;
-    }
-    try {
-      const admin =
-        deps.gitlabAdmin ??
-        new GitLabWebhookAdminClient(adminToken, identity.instanceUrl, {
-          caFile: codeHost.ok ? codeHost.caFile : env.GITLAB_CODE_HOST_CA_FILE,
-          proxy: codeHost.ok ? codeHost.proxy : env.GITLAB_CODE_HOST_PROXY,
-        });
-      const project = await admin.resolveMaintainedProject(identity.projectPath);
-      const projectId = String(project.id);
-      const previous = gitLabRelayRepository(
-        loadRelayState(workingDir),
-        identity.instanceUrl,
-        projectId,
-      );
-      if (deps.disconnectGitLab) {
-        if (!previous) {
-          console.log(
-            `✅ ${project.path} has no remembered GitLab relay hook; polling remains on.`,
-          );
-          return 0;
-        }
-        await admin.deleteHook(project.id, previous.hookId);
-        await removeGitLabRelayRegistration({
-          registrationId: previous.registrationId,
-          ...connectOpts,
-        });
-        console.log(`✅ Disconnected ${project.path} from the relay; polling remains enabled.`);
-        return 0;
-      }
-      const begun = await beginGitLabRelayRegistration({
-        instanceUrl: identity.instanceUrl,
-        projectId,
-        projectPath: project.path,
-        ...connectOpts,
-      });
-      const { hook, standardSigning } = await admin.upsertRelayHook(
-        project.id,
-        {
-          ingestUrl: begun.ingestUrl,
-          signingToken: begun.signingToken,
-          legacySecret: begun.legacySecret,
-        },
-        previous?.hookId,
-      );
-      await admin.testHook(project.id, hook.id);
-      const state = await completeGitLabRelayRegistration({
-        registrationId: begun.registrationId,
-        hookId: hook.id,
-        instanceUrl: identity.instanceUrl,
-        projectId,
-        projectPath: project.path,
-        ...connectOpts,
-      });
-      console.log(`✅ Connected ${project.path} to the relay (${state.relayUrl})`);
-      console.log(
-        `   GitLab hook ${hook.id} verified with ${standardSigning ? "Standard Webhook signing" : "legacy secret-token authentication"}.`,
-      );
-      console.log("   Polling remains enabled as a fallback.");
-      return 0;
-    } catch (error) {
-      console.error(`❌ GitLab relay connect failed: ${(error as Error).message}`);
-      console.error("   Polling remains enabled; fix access or connectivity and retry.");
-      return 1;
-    }
+    return connectGitLabTarget(deps, env, connectOpts);
   }
-
-  if (target === "linear") {
-    const apiKey = env.LINEAR_API_KEY;
-    if (!apiKey) {
-      console.error("❌ LINEAR_API_KEY is required to register a Linear webhook.");
-      return 1;
-    }
-    try {
-      const secret = generateWebhookSecret();
-      const { ingestUrl } = await registerRelaySource({
-        source: "linear",
-        secret,
-        ...connectOpts,
-      });
-      const { LinearClient } = await import("@devintern/task-trackers");
-      const webhook = await new LinearClient({ apiKey }).createWebhook(ingestUrl, secret);
-      console.log(
-        `✅ Linear webhook registered (${webhook.id}); Issue events now relay instantly.`,
-      );
-      console.log("   Undo in Linear: Settings > API > Webhooks.");
-      return 0;
-    } catch (error) {
-      console.error(`❌ Linear connect failed: ${(error as Error).message}`);
-      return 1;
-    }
+  if (target === "github") {
+    return connectGitHubTarget(repo, deps, connectOpts);
   }
-
-  if (target === "asana") {
-    const apiToken = env.ASANA_API_TOKEN;
-    const projectGid = env.ASANA_DEFAULT_PROJECT_GID;
-    if (!apiToken || !projectGid) {
-      console.error(
-        "❌ ASANA_API_TOKEN and ASANA_DEFAULT_PROJECT_GID are required to register an Asana webhook.",
-      );
-      return 1;
-    }
-    try {
-      const { ingestUrl } = await registerRelaySource({ source: "asana", ...connectOpts });
-      const { AsanaClient } = await import("@devintern/task-trackers");
-      // Asana handshakes with the relay during creation (X-Hook-Secret).
-      const webhook = await new AsanaClient({ apiToken }).createWebhook(projectGid, ingestUrl);
-      console.log(
-        `✅ Asana webhook registered (${webhook.gid}); task events on project ${projectGid} now relay instantly.`,
-      );
-      console.log("   Undo via the Asana API: DELETE /webhooks/" + webhook.gid);
-      return 0;
-    } catch (error) {
-      console.error(`❌ Asana connect failed: ${(error as Error).message}`);
-      return 1;
-    }
-  }
-
-  if (target === "trello") {
-    const apiKey = env.TRELLO_API_KEY;
-    const apiToken = env.TRELLO_API_TOKEN;
-    const boardId = env.TRELLO_DEFAULT_BOARD_ID;
-    if (!apiKey || !apiToken || !boardId) {
-      console.error(
-        "❌ TRELLO_API_KEY, TRELLO_API_TOKEN, and TRELLO_DEFAULT_BOARD_ID are required to register a Trello webhook.",
-      );
-      return 1;
-    }
-    try {
-      const { ingestUrl } = await registerRelaySource({ source: "trello", ...connectOpts });
-      const { TrelloClient } = await import("@devintern/task-trackers");
-      const webhook = await new TrelloClient({ apiKey, apiToken }).createWebhook(
-        ingestUrl,
-        boardId,
-      );
-      console.log(
-        `✅ Trello webhook registered (${webhook.id}); card events on board ${boardId} now relay instantly.`,
-      );
-      console.log("   Delivery auth relies on the private ingest URL; keep it secret.");
-      return 0;
-    } catch (error) {
-      console.error(`❌ Trello connect failed: ${(error as Error).message}`);
-      return 1;
-    }
-  }
-
-  if (target === "azure-devops") {
-    const organization = env.AZURE_DEVOPS_ORG;
-    const pat = env.AZURE_DEVOPS_PAT;
-    const project = env.AZURE_DEVOPS_PROJECT;
-    if (!organization || !pat || !project) {
-      console.error(
-        "❌ AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT are required to register Azure DevOps service hooks.",
-      );
-      return 1;
-    }
-    try {
-      const { ingestUrl } = await registerRelaySource({
-        source: "azure-devops",
-        ...connectOpts,
-      });
-      const { AzureDevOpsClient } = await import("@devintern/task-trackers");
-      const client = new AzureDevOpsClient({ organization, pat, defaultProject: project });
-      const { ids } = await client.createWorkItemWebhooks(ingestUrl);
-      console.log(
-        `✅ Azure DevOps service hooks registered (${ids.join(", ")}); work item events on ${project} now relay instantly.`,
-      );
-      console.log("   Undo in Azure DevOps: Project settings > Service hooks.");
-      return 0;
-    } catch (error) {
-      console.error(`❌ Azure DevOps connect failed: ${(error as Error).message}`);
-      return 1;
-    }
-  }
-
-  if (target === "jira") {
-    try {
-      const { ingestUrl } = await registerRelaySource({ source: "jira", ...connectOpts });
-      console.log("✅ Jira ingest URL registered. Jira webhooks need one-time admin setup:");
-      console.log("");
-      console.log("   1. Open Jira: Settings (gear) > System > WebHooks > Create a WebHook");
-      console.log(`   2. URL: ${ingestUrl}`);
-      console.log("   3. Events: Issue - created, updated (optionally scope with a JQL filter)");
-      console.log("   4. Save. Issue events now relay instantly.");
-      console.log("");
-      console.log("   Keep the URL secret; it authenticates deliveries for your account.");
-      return 0;
-    } catch (error) {
-      console.error(`❌ Jira connect failed: ${(error as Error).message}`);
-      return 1;
-    }
-  }
-
-  if (!repo) {
-    console.error("❌ GitHub relay connection requires a workspace repository.");
-    return 1;
-  }
-
-  try {
-    let installUrl = "";
-    const state = await connectGitHubRepo({
-      repo,
-      ...connectOpts,
-      sleep: deps.sleep,
-      onInstallUrl(url) {
-        installUrl = url;
-        deps.onGitHubInstallUrl?.(url);
-        console.log("Open this URL to install and authorize the DevIntern GitHub App:");
-        console.log(`   ${url}`);
-        console.log("Waiting for GitHub verification...");
-      },
-    });
-    console.log(`✅ Connected ${repo} to the relay (${state.relayUrl})`);
-    console.log(`   Customer: ${state.customerId}`);
-    console.log(`   GitHub App authorization verified${installUrl ? "." : ""}`);
-    saveGitHubAppRecord(
-      {
-        repo: state.github?.repo.toLowerCase() ?? repo.toLowerCase(),
-        enabled: true,
-        connectedAt: new Date().toISOString(),
-        installationId: state.github?.installationId,
-        repositoryId: state.github?.repositoryId,
-      },
-      workingDir,
-    );
-    console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
-    console.log("   Run the worker as usual: devintern worker");
-    return 0;
-  } catch (error) {
-    console.error(`❌ Relay connect failed: ${(error as Error).message}`);
-    return 1;
-  }
+  return TRACKER_CONNECT_HANDLERS[target as TrackerRelayTarget]({ env, connectOpts });
 }
 
 interface StatusResponse {

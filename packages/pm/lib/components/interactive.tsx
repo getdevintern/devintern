@@ -449,6 +449,7 @@ export async function runInteractiveMode(
       }, [state.projectKey, state.issueType]);
 
       useInput(
+        // oxlint-disable-next-line complexity -- global key router couples to scroll refs and the outer promise resolvers; extract a `wizardReducer`/`useWizardKeyInput` state machine instead of splitting its branches.
         (inputChar, key) => {
           if (key.ctrl && inputChar === "c") {
             exit();
@@ -906,6 +907,7 @@ export async function runInteractiveMode(
        *
        * @returns Step-specific Ink layout (including skip/recovery placeholders).
        */
+      // oxlint-disable-next-line complexity -- one switch over 15 wizard steps; split each case into a `<XStep>` subcomponent (shared StepShell + ScrollableMarkdownPane) rather than growing this function.
       const renderStep = () => {
         switch (state.step) {
           case "project":
