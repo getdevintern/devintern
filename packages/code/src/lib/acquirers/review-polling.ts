@@ -34,8 +34,8 @@ import {
   agentPrStateCursorSource,
   applyAgentPrFetch,
   reconcileOpenAgentPrs,
-} from "../agent-pr-reconciler";
-import type { ConditionalResult, PolledPr } from "../agent-pr-reconciler";
+} from "../review/agent-pr-reconciler";
+import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
 import { isGitHubAuthError } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation-config";
 import type { CronOrIntervalSchedule } from "../automation-config";

@@ -4,7 +4,7 @@
  * Formats PR review feedback into structured prompts for Agent.
  */
 
-import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../types/github-webhooks";
+import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../../types/github-webhooks";
 
 /**
  * Format structured PR review feedback into an agent prompt.

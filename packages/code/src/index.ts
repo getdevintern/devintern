@@ -69,7 +69,7 @@ import { parseAgentJsonObject } from "./lib/agent-json";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterations,
-} from "./lib/auto-review-config";
+} from "./lib/review/auto-review-config";
 import { TaskFormatter } from "./lib/task-formatter";
 import type { RetryPromptContext } from "./lib/task-formatter";
 import { resolveOutputDir } from "./lib/output-dir";
@@ -118,7 +118,7 @@ import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
 import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
-import { runAutoReviewLoop } from "./lib/auto-review-loop";
+import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
@@ -1045,7 +1045,7 @@ if (process.argv[2] === "init") {
     }
 
     // Import and run address-review
-    const { addressReview } = await import("./lib/address-review");
+    const { addressReview } = await import("./lib/review/address");
     try {
       await addressReview(prUrl, {
         noPush,
@@ -1118,7 +1118,7 @@ if (process.argv[2] === "init") {
       process.exit(1);
     }
 
-    const { resolveConflictsOnPr } = await import("./lib/conflict-resolver");
+    const { resolveConflictsOnPr } = await import("./lib/review/conflict-resolver");
     try {
       const result = await resolveConflictsOnPr(prUrl, {
         noPush,

@@ -36,7 +36,7 @@ import { spawn } from "child_process";
 import type { WebhookQueue } from "../webhook-queue";
 import type { WorkerState } from "../worker-state";
 import type { Acquirer } from "../../worker";
-import type { CiFailureFeedback } from "../review-formatter";
+import type { CiFailureFeedback } from "../review/formatter";
 import { serializePrRun } from "./review-polling";
 
 import type {

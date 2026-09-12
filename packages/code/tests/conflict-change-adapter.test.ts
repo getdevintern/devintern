@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { createConflictChangeAdapter } from "../src/lib/conflict-change-adapter";
+import { createConflictChangeAdapter } from "../src/lib/review/conflict-change-adapter";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 
 const savedFlag = process.env.DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST;

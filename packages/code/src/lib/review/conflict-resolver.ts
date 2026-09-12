@@ -1,4 +1,4 @@
-import { assertCurrentGitLabOrigin } from "./change-origin";
+import { assertCurrentGitLabOrigin } from "../change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**
@@ -22,10 +22,10 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
  * that lands mid-resolution is incorporated rather than fought.
  */
 
-import { runAgent } from "./address-review";
-import { parseChangeRequestUrl } from "./code-host";
-import type { PullRequestInfo } from "./code-host/github/reviews";
-import { Utils } from "./utils";
+import { runAgent } from "./address";
+import { parseChangeRequestUrl } from "../code-host/index";
+import type { PullRequestInfo } from "../code-host/github/reviews";
+import { Utils } from "../utils";
 
 export interface ResolveConflictsOptions {
   verbose?: boolean;
