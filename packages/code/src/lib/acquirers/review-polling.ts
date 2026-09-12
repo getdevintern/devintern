@@ -43,7 +43,7 @@ import { parseEnvInteger } from "../env-integer";
 import type { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
-import { cliResultToTaskResult, runWithFailover } from "../worker-failover";
+import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
 import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";

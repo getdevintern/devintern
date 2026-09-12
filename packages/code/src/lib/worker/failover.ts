@@ -23,9 +23,9 @@ import type {
   ResolvedHarnessChain,
 } from "@devintern/agent-harness";
 
-import { HarnessFailover } from "./agent/harness-failover";
-import type { FailoverOutcome } from "./agent/harness-failover";
-import type { WebhookQueue } from "./state/webhook-queue";
+import { HarnessFailover } from "../agent/harness-failover";
+import type { FailoverOutcome } from "../agent/harness-failover";
+import type { WebhookQueue } from "../state/webhook-queue";
 import {
   RATE_LIMIT_FALLBACK_MS,
   readUsageLimitHint,

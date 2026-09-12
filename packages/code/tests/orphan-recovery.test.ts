@@ -10,7 +10,7 @@ import {
   loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
-} from "../src/lib/orphan-recovery";
+} from "../src/lib/worker/orphan-recovery";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";

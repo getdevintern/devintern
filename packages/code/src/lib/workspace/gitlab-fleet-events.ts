@@ -1,8 +1,8 @@
 import { randomUUID } from "crypto";
 import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
-import { JobNotStartedError } from "../task-supervisor";
-import type { JobKind, TaskSupervisor } from "../task-supervisor";
+import { JobNotStartedError } from "../worker/supervisor";
+import type { JobKind, TaskSupervisor } from "../worker/supervisor";
 import type { AgentPr } from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";

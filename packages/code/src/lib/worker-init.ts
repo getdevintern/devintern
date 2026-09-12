@@ -42,7 +42,7 @@ import { runTrackerSetup } from "./init-wizard";
 import { PRManager } from "./code-host";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "./relay/connect";
 import { parseCronOrIntervalSchedule } from "./automation-config";
-import { isValidTimeZone, parseTimeWindowSpec } from "./schedule";
+import { isValidTimeZone, parseTimeWindowSpec } from "./worker/schedule";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
@@ -68,15 +68,15 @@ import {
   renderLaunchdPlist,
   renderSystemdUnit,
   SYSTEMD_UNIT_NAME,
-} from "./worker-service";
+} from "./worker/service";
 import type {
   RunCommandFn,
   ServiceInstallResult,
   ServiceState,
   WorkerServiceDeps,
-} from "./worker-service";
+} from "./worker/service";
 
-export { renderLaunchdPlist, renderSystemdUnit } from "./worker-service";
+export { renderLaunchdPlist, renderSystemdUnit } from "./worker/service";
 
 export type PromptFn = (question: string) => Promise<string>;
 export type LogFn = (message: string) => void;

@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
 import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
 import type { ReadyTask } from "../src/lib/acquirers/task-polling";
-import type { PickupGate } from "../src/lib/schedule";
+import type { PickupGate } from "../src/lib/worker/schedule";
 import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 

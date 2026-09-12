@@ -17,15 +17,15 @@ import { parseEnvInteger } from "../env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
-import { createPickupGate } from "../schedule";
-import type { PickupGate, ScheduleSnapshot } from "../schedule";
+import { createPickupGate } from "../worker/schedule";
+import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import {
   loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
-} from "../orphan-recovery";
+} from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
@@ -58,11 +58,11 @@ import { AutomationAcquirer } from "../automation-acquirer";
 import type { AutomationConfig } from "../automation-config";
 import { automationTaskArgs } from "../automation-config";
 import { EstimationAcquirer } from "../estimation-acquirer";
-import { createTaskSupervisor, JobNotStartedError } from "../task-supervisor";
-import type { TaskSupervisor } from "../task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation-acquirer";
 import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../observability/analytics";
-import { startWorkerFailover } from "../worker-failover";
+import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
