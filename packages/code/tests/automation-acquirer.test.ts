@@ -365,7 +365,7 @@ describe("AutomationAcquirer", () => {
     // heartbeat. Each beat renews the lease to now + 40ms, so it never lapses.
     for (let beat = 0; beat < 5; beat++) {
       now += 10;
-      for (const timer of [...heartbeatTimers]) timer.callback();
+      for (const timer of heartbeatTimers) timer.callback();
     }
 
     await second.start();

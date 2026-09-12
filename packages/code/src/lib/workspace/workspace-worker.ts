@@ -1517,7 +1517,7 @@ export async function buildFleetEventAcquirers(options: {
       options.reloadHooksOut.hooks = {
         reconcileMentionSweeps: () => {
           const wanted = new Set(fleetGitHubSlugs(config));
-          for (const [slug, sweep] of [...mentionSweeps]) {
+          for (const [slug, sweep] of mentionSweeps) {
             if (!wanted.has(slug)) {
               // A stale updater calling updateInterval on a stopped sweep
               // only mutates options (no timer) and is harmless.
