@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SupabaseAuthConfig } from "@devintern/auth";
-import { collectReadinessChecks, renderReadinessReport } from "../src/lib/readiness";
+import { collectReadinessChecks, renderReadinessReport } from "../src/lib/observability/readiness";
 
 const authConfig = {
   url: "https://example.supabase.co",

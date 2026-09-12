@@ -11,42 +11,42 @@
  * state instead of failing, so the dashboard always renders.
  */
 
-import { LockManager } from "./lock-manager";
-import type { LockStatus } from "./lock-manager";
+import { LockManager } from "../lock-manager";
+import type { LockStatus } from "../lock-manager";
 import type {
   AutomationScheduleStatus,
   DashboardAutomationActions,
   ManualTriggerOutcome,
-} from "./automation-acquirer";
-import { loadStandaloneAutomationActions } from "./automation-manual";
-import type { CodeHostProvider } from "./code-host";
-import { RunStore } from "./state/run-recorder";
+} from "../automation-acquirer";
+import { loadStandaloneAutomationActions } from "../automation-manual";
+import type { CodeHostProvider } from "../code-host/index";
+import { RunStore } from "../state/run-recorder";
 import type {
   RunOrigin,
   RunRecord,
   RunStageRecord,
   RunStats,
   RunStatus,
-} from "./state/run-recorder";
-import type { ScheduleSnapshot } from "./schedule";
+} from "../state/run-recorder";
+import type { ScheduleSnapshot } from "../schedule";
 import {
   isRunRetriable,
   RunRetryAuditStore,
   ScheduledRetryStore,
   spawnCliForceRetry,
-} from "./state/run-retry";
+} from "../state/run-retry";
 import type {
   RetryActor,
   RetryKind,
   RunRetryAuditEntry,
   SpawnedRetryProcess,
-} from "./state/run-retry";
+} from "../state/run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
-import { resolveQueueDbPath, WebhookQueue } from "./state/webhook-queue";
-import { resolveWorkspaceDir } from "./workspace/paths";
-import { WorkerState } from "./state/worker-state";
-import type { Cursor } from "./state/worker-state";
+import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
+import { resolveWorkspaceDir } from "../workspace/paths";
+import { WorkerState } from "../state/worker-state";
+import type { Cursor } from "../state/worker-state";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",

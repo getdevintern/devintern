@@ -14,7 +14,7 @@ import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
-import { ANALYTICS_CONFIG_DIR_ENV } from "../analytics";
+import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";

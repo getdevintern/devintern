@@ -18,7 +18,7 @@ import {
   resolveHarness,
 } from "@devintern/agent-harness";
 import type { SupabaseAuthConfig } from "@devintern/auth";
-import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
+import { TRACKER_CAPABILITIES } from "../tracker-capabilities";
 
 export type ReadinessStatus = "ok" | "warn" | "fail";
 

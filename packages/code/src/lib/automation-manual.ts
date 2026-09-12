@@ -29,7 +29,7 @@ import type {
   ManualTriggerOutcome,
   SpawnedAutomationRun,
 } from "./automation-acquirer";
-import { RUN_ORIGIN_ENV } from "./analytics";
+import { RUN_ORIGIN_ENV } from "./observability/analytics";
 import { workerTaskArgs } from "./acquirers/task-polling";
 
 /** Test-only spawn override so manual-run tests never launch a real CLI. */

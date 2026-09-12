@@ -61,7 +61,7 @@ import { EstimationAcquirer } from "../estimation-acquirer";
 import { createTaskSupervisor, JobNotStartedError } from "../task-supervisor";
 import type { TaskSupervisor } from "../task-supervisor";
 import type { AutomationRunContext } from "../automation-acquirer";
-import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
+import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker-failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 

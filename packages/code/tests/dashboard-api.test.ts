@@ -11,7 +11,7 @@ import {
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
-} from "../src/lib/dashboard-api";
+} from "../src/lib/observability/dashboard-api";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunStats } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";

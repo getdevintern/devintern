@@ -13,7 +13,10 @@ import path from "path";
 
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
-import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
+import {
+  ANALYTICS_CONFIG_DIR_ENV,
+  setAnalyticsCaptureForTests,
+} from "../src/lib/observability/analytics";
 import {
   configureWorkerOperatingPolicy,
   generateWebhookSecret,

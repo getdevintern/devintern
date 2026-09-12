@@ -27,7 +27,7 @@ import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn"
 import { parseEnvInteger } from "./lib/env-integer";
 import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { getSandbox } from "./lib/sandbox";
-import { initSentryOnce } from "./lib/sentry-init";
+import { initSentryOnce } from "./lib/observability/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
 import { GitHubReviewsClient } from "./lib/code-host/github/reviews";

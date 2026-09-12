@@ -10,7 +10,7 @@
  */
 
 import type { LogFn } from "@devintern/task-trackers";
-import { trackSetupDeclined, trackSetupFailed } from "./analytics";
+import { trackSetupDeclined, trackSetupFailed } from "./observability/analytics";
 import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
 
 /** Outcome of the first-run configuration check. */

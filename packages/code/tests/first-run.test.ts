@@ -2,7 +2,10 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
+import {
+  ANALYTICS_CONFIG_DIR_ENV,
+  setAnalyticsCaptureForTests,
+} from "../src/lib/observability/analytics";
 import { ensureTrackerEnvConfigured, missingTrackerEnv } from "../src/lib/first-run";
 
 // Snapshot the real wizard exports BEFORE any mock.module override so tests

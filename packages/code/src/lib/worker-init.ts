@@ -31,8 +31,8 @@ import {
   trackWorkerInitCompleted,
   trackWorkerInitFailed,
   trackWorkerInitStarted,
-} from "./analytics";
-import type { RelayConnectOutcome, ServiceInstallOutcome } from "./analytics";
+} from "./observability/analytics";
+import type { RelayConnectOutcome, ServiceInstallOutcome } from "./observability/analytics";
 import {
   GITHUB_APP_INSTALL_URL,
   hasGitHubAppCredentials,

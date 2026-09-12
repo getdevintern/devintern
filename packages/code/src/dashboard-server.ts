@@ -24,8 +24,8 @@ import {
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
-} from "./lib/dashboard-api";
-import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/dashboard-api";
+} from "./lib/observability/dashboard-api";
+import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation-acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;

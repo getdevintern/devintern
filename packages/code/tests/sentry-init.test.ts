@@ -14,7 +14,7 @@ mock.module("@sentry/node", () => ({
   flush: async () => true,
 }));
 
-const { initSentryOnce } = await import("../src/lib/sentry-init.ts");
+const { initSentryOnce } = await import("../src/lib/observability/sentry-init.ts");
 
 describe("initSentryOnce", () => {
   afterEach(() => {

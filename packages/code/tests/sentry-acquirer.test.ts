@@ -7,8 +7,8 @@ import {
   SENTRY_ACTION_FAILED_COMMENT,
   SENTRY_ACTION_SUCCEEDED_COMMENT,
   SentryClient,
-} from "../src/lib/sentry-client";
-import type { SentryIssue } from "../src/lib/sentry-client";
+} from "../src/lib/observability/sentry-client";
+import type { SentryIssue } from "../src/lib/observability/sentry-client";
 import { ErrorMonitorAcquirer } from "../src/lib/acquirers/error-monitor";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
