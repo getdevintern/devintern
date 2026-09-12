@@ -10,8 +10,8 @@ import {
   hasGitHubRelayRegistration,
   hasGitLabRelayRegistration,
   loadRelayState,
-} from "./relay-connect";
-import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay-connect";
+} from "./relay/connect";
+import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "./relay/connect";
 import { loadWorkspaceConfig } from "./workspace/config";
 import type { WorkspaceConfig } from "./workspace/config";
 import { buildRepoEnv, buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "./workspace/env";

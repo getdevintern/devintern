@@ -1237,7 +1237,7 @@ export async function buildFleetEventAcquirers(options: {
   } = await import("./fleet-events");
 
   const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
-    await import("../relay-connect");
+    await import("../relay/connect");
   const relayState = loadRelayState(workspaceDir);
   const relayToken = relayState?.relayToken;
   const relayUrl =
@@ -1578,7 +1578,7 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
-      const { RelayAcquirer } = await import("../relay-acquirer");
+      const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
         const execute = createFleetTaskExecutor(

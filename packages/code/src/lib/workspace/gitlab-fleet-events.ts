@@ -77,8 +77,8 @@ export async function buildGitLabFleetAcquirers(options: {
   });
   let reconcileGitLabRelay:
     | ((
-        envelope: import("../relay-acquirer").RelayEnvelope & {
-          codeHost: import("../relay-acquirer").RelayCodeHostIdentity;
+        envelope: import("../relay/acquirer").RelayEnvelope & {
+          codeHost: import("../relay/acquirer").RelayCodeHostIdentity;
         },
       ) => Promise<void>)
     | undefined;

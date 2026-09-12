@@ -68,7 +68,7 @@ import {
   RateLimiter,
   shouldProcessReview,
   verifyWebhookSignature,
-} from "./lib/webhook-handler";
+} from "./lib/code-host/github/webhook";
 import type {
   IssueCommentEvent,
   PingEvent,
