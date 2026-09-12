@@ -122,6 +122,29 @@ export function normalizeGitLabWebhook(
   payload: Record<string, unknown>,
 ): GitLabWebhookEvent | null {
   if (!eventName) return null;
+  const base = buildGitLabWebhookBase(eventName, payload);
+
+  if (eventName === "Note Hook") {
+    return normalizeNoteHook(base, payload);
+  }
+  if (eventName === "Merge Request Hook") {
+    return normalizeMergeRequestHook(base, payload);
+  }
+  if (eventName === "Pipeline Hook") {
+    return normalizePipelineHook(base, payload);
+  }
+  if (eventName === "Job Hook") {
+    return normalizeJobHook(base, payload);
+  }
+  return null;
+}
+
+type GitLabWebhookBase = Omit<GitLabWebhookEvent, "kind" | "state" | "failure" | "payload">;
+
+function buildGitLabWebhookBase(
+  eventName: string,
+  payload: Record<string, unknown>,
+): GitLabWebhookBase {
   const project = object(payload.project);
   const attributes = object(payload.object_attributes);
   const mergeRequest = object(payload.merge_request);
@@ -142,70 +165,81 @@ export function normalizeGitLabWebhook(
     string(attributes.sha) ??
     string(payload.sha) ??
     string(payload.build_sha);
-  const base = { eventName, projectId: projectId?.toString(), projectPath, iid, branch, headSha };
+  return { eventName, projectId: projectId?.toString(), projectPath, iid, branch, headSha };
+}
 
-  if (eventName === "Note Hook") {
-    const noteableType = string(attributes.noteable_type);
-    if (noteableType !== "MergeRequest" || !iid) {
-      return { ...base, kind: "ignored", payload };
-    }
-    return { ...base, kind: "feedback", payload };
+function normalizeNoteHook(
+  base: GitLabWebhookBase,
+  payload: Record<string, unknown>,
+): GitLabWebhookEvent {
+  const noteableType = string(object(payload.object_attributes).noteable_type);
+  if (noteableType !== "MergeRequest" || !base.iid) {
+    return { ...base, kind: "ignored", payload };
   }
+  return { ...base, kind: "feedback", payload };
+}
 
-  if (eventName === "Merge Request Hook") {
-    const state = string(attributes.state) ?? string(attributes.action);
-    if (state === "closed" || state === "merged" || state === "merge") {
-      return { ...base, kind: "lifecycle", state, payload };
-    }
-    const mergeability =
-      string(attributes.detailed_merge_status) ?? string(attributes.merge_status);
-    if (mergeability === "conflict" || mergeability === "cannot_be_merged") {
-      return { ...base, kind: "sync", state: "conflicts", payload };
-    }
-    if (mergeability === "need_rebase") {
-      return { ...base, kind: "sync", state: "behind", payload };
-    }
-    return { ...base, kind: "ignored", state, payload };
+function normalizeMergeRequestHook(
+  base: GitLabWebhookBase,
+  payload: Record<string, unknown>,
+): GitLabWebhookEvent {
+  const attributes = object(payload.object_attributes);
+  const state = string(attributes.state) ?? string(attributes.action);
+  if (state === "closed" || state === "merged" || state === "merge") {
+    return { ...base, kind: "lifecycle", state, payload };
   }
-
-  if (eventName === "Pipeline Hook") {
-    const status = string(attributes.status);
-    if (status !== "failed") return { ...base, kind: "ignored", state: status, payload };
-    const id = number(attributes.id);
-    return {
-      ...base,
-      kind: "ci",
-      state: status,
-      failure: {
-        externalId: `pipeline:${projectId ?? "unknown"}:${headSha ?? "unknown"}:${id ?? "unknown"}`,
-        name: string(attributes.name) ?? `pipeline-${id ?? "unknown"}`,
-        conclusion: status,
-        detailsUrl: string(attributes.url),
-      },
-      payload,
-    };
+  const mergeability = string(attributes.detailed_merge_status) ?? string(attributes.merge_status);
+  if (mergeability === "conflict" || mergeability === "cannot_be_merged") {
+    return { ...base, kind: "sync", state: "conflicts", payload };
   }
-
-  if (eventName === "Job Hook") {
-    const status = string(payload.build_status);
-    if (status !== "failed" || payload.build_allow_failure === true) {
-      return { ...base, kind: "ignored", state: status, payload };
-    }
-    const id = number(payload.build_id);
-    return {
-      ...base,
-      kind: "ci",
-      state: status,
-      failure: {
-        externalId: `job:${projectId ?? "unknown"}:${headSha ?? "unknown"}:${id ?? "unknown"}`,
-        name: string(payload.build_name) ?? `job-${id ?? "unknown"}`,
-        conclusion: status,
-      },
-      payload,
-    };
+  if (mergeability === "need_rebase") {
+    return { ...base, kind: "sync", state: "behind", payload };
   }
+  return { ...base, kind: "ignored", state, payload };
+}
 
-  return null;
+function normalizePipelineHook(
+  base: GitLabWebhookBase,
+  payload: Record<string, unknown>,
+): GitLabWebhookEvent {
+  const attributes = object(payload.object_attributes);
+  const status = string(attributes.status);
+  if (status !== "failed") return { ...base, kind: "ignored", state: status, payload };
+  const id = number(attributes.id);
+  return {
+    ...base,
+    kind: "ci",
+    state: status,
+    failure: {
+      externalId: `pipeline:${base.projectId ?? "unknown"}:${base.headSha ?? "unknown"}:${id ?? "unknown"}`,
+      name: string(attributes.name) ?? `pipeline-${id ?? "unknown"}`,
+      conclusion: status,
+      detailsUrl: string(attributes.url),
+    },
+    payload,
+  };
+}
+
+function normalizeJobHook(
+  base: GitLabWebhookBase,
+  payload: Record<string, unknown>,
+): GitLabWebhookEvent {
+  const status = string(payload.build_status);
+  if (status !== "failed" || payload.build_allow_failure === true) {
+    return { ...base, kind: "ignored", state: status, payload };
+  }
+  const id = number(payload.build_id);
+  return {
+    ...base,
+    kind: "ci",
+    state: status,
+    failure: {
+      externalId: `job:${base.projectId ?? "unknown"}:${base.headSha ?? "unknown"}:${id ?? "unknown"}`,
+      name: string(payload.build_name) ?? `job-${id ?? "unknown"}`,
+      conclusion: status,
+    },
+    payload,
+  };
 }
 
 function object(value: unknown): Record<string, unknown> {

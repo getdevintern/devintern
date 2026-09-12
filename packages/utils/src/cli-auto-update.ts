@@ -317,59 +317,14 @@ function packageManagerForKind(kind: InstallKind): "npm" | "bun" | null {
  */
 export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"updated" | "skipped"> {
   const log = config.log ?? ((message: string) => console.log(message));
-  const argv = config.argv ?? process.argv;
-  const env = config.env ?? process.env;
-  const now = config.now ?? Date.now;
-  const homeDir = config.homeDir ?? homedir();
-  const cachePath = config.cachePath ?? defaultCachePath(homeDir);
-  const checkIntervalMs = config.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
-  const currentVersion = config.currentVersion;
-
   try {
-    if (shouldSkipUpdateCheck({ argv, env, noUpdateEnv: config.noUpdateEnv })) {
+    const context = await prepareUpdateContext(config);
+    if (!context) {
       return "skipped";
     }
 
-    // Dev / unset version — never treat as stale.
-    if (!currentVersion || currentVersion === "0.0.0") {
-      return "skipped";
-    }
-
-    const scriptPath = config.scriptPath ?? argv[1] ?? "";
-    const installKind =
-      config.installKind ??
-      detectInstallKind({
-        scriptPath,
-        packageName: config.packageName,
-        homeDir,
-      });
-    const packageManager = packageManagerForKind(installKind);
-    if (!packageManager) {
-      return "skipped";
-    }
-
-    const cache = readCache(cachePath);
-    const entry = cache[config.packageName] ?? { checkedAt: 0 };
-    const age = now() - (entry.checkedAt || 0);
-    let latestVersion = entry.latestVersion;
-
-    if (age >= checkIntervalMs || !latestVersion) {
-      const fetched = await fetchLatestVersion(config.packageName, {
-        fetchFn: config.fetchFn,
-        timeoutMs: config.fetchTimeoutMs,
-      });
-      entry.checkedAt = now();
-      if (fetched) {
-        entry.latestVersion = fetched;
-        latestVersion = fetched;
-      }
-      cache[config.packageName] = entry;
-      writeCache(cachePath, cache);
-    }
-
-    if (!latestVersion || !isNewerVersion(latestVersion, currentVersion)) {
-      return "skipped";
-    }
+    const { packageManager, entry, latestVersion, installCmd } = context;
+    const env = config.env ?? process.env;
 
     // User already declined this exact version in a prior interactive prompt.
     if (entry.declinedVersion === latestVersion && config.isInteractive) {
@@ -382,39 +337,34 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
       (config.autoUpdateEnv != null &&
         (env[config.autoUpdateEnv] === "1" || env[config.autoUpdateEnv] === "true"));
 
-    const installCmd =
-      packageManager === "bun"
-        ? `bun install -g ${config.packageName}@${latestVersion}`
-        : `npm install -g ${config.packageName}@${latestVersion}`;
-
     let shouldInstall = false;
 
     if (config.isInteractive) {
-      log(`⬆  ${config.binName} ${latestVersion} is available (current: ${currentVersion}).`);
+      log(
+        `⬆  ${config.binName} ${latestVersion} is available (current: ${config.currentVersion}).`,
+      );
       const confirm = config.confirm ?? defaultConfirm;
       const accepted = await confirm(`Update ${config.binName} now?`);
       if (!accepted) {
         entry.declinedVersion = latestVersion;
-        cache[config.packageName] = entry;
-        writeCache(cachePath, cache);
+        persistCacheEntry(context, config.packageName, entry);
         log(`   Skipped. Update later with: ${installCmd}`);
         return "skipped";
       }
       shouldInstall = true;
     } else if (autoUpdate) {
       log(
-        `⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
+        `⬆  Auto-updating ${config.binName} ${config.currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
       );
       shouldInstall = true;
     } else {
       // Safe default for non-interactive: never mutate the global install.
       if (entry.notifiedVersion !== latestVersion) {
         log(
-          `ℹ  ${config.binName} ${latestVersion} is available (current: ${currentVersion}). Non-interactive session — skipping update. Run: ${installCmd}`,
+          `ℹ  ${config.binName} ${latestVersion} is available (current: ${config.currentVersion}). Non-interactive session — skipping update. Run: ${installCmd}`,
         );
         entry.notifiedVersion = latestVersion;
-        cache[config.packageName] = entry;
-        writeCache(cachePath, cache);
+        persistCacheEntry(context, config.packageName, entry);
       }
       return "skipped";
     }
@@ -429,7 +379,7 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
     });
 
     if (!ok) {
-      log(`⚠️  Failed to update ${config.binName}. Continuing with ${currentVersion}.`);
+      log(`⚠️  Failed to update ${config.binName}. Continuing with ${config.currentVersion}.`);
       log(`   Try manually: ${installCmd}`);
       return "skipped";
     }
@@ -440,14 +390,95 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
     entry.declinedVersion = undefined;
     entry.notifiedVersion = undefined;
     entry.latestVersion = latestVersion;
-    entry.checkedAt = now();
-    cache[config.packageName] = entry;
-    writeCache(cachePath, cache);
+    entry.checkedAt = context.now();
+    persistCacheEntry(context, config.packageName, entry);
 
     const reexec = config.reexecFn ?? defaultReexec;
-    reexec(argv);
+    reexec(config.argv ?? process.argv);
     return "updated";
   } catch {
     return "skipped";
   }
+}
+
+interface UpdateContext {
+  packageManager: "npm" | "bun";
+  entry: CacheEntry;
+  latestVersion: string;
+  installCmd: string;
+  cache: UpdateCache;
+  cachePath: string;
+  now: () => number;
+}
+
+/**
+ * Apply the skip checks, resolve the install kind, and read/fetch the latest
+ * version from the cache or npm registry.
+ *
+ * @param config - CLI update configuration.
+ * @returns Everything the caller needs to prompt/install, or `null` to skip.
+ */
+async function prepareUpdateContext(config: CliUpdateConfig): Promise<UpdateContext | null> {
+  const env = config.env ?? process.env;
+  const argv = config.argv ?? process.argv;
+  const now = config.now ?? Date.now;
+  const homeDir = config.homeDir ?? homedir();
+  const cachePath = config.cachePath ?? defaultCachePath(homeDir);
+
+  if (shouldSkipUpdateCheck({ argv, env, noUpdateEnv: config.noUpdateEnv })) {
+    return null;
+  }
+
+  // Dev / unset version — never treat as stale.
+  if (!config.currentVersion || config.currentVersion === "0.0.0") {
+    return null;
+  }
+
+  const scriptPath = config.scriptPath ?? argv[1] ?? "";
+  const installKind =
+    config.installKind ??
+    detectInstallKind({
+      scriptPath,
+      packageName: config.packageName,
+      homeDir,
+    });
+  const packageManager = packageManagerForKind(installKind);
+  if (!packageManager) {
+    return null;
+  }
+
+  const cache = readCache(cachePath);
+  const entry = cache[config.packageName] ?? { checkedAt: 0 };
+  const age = now() - (entry.checkedAt || 0);
+  let latestVersion = entry.latestVersion;
+
+  if (age >= (config.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS) || !latestVersion) {
+    const fetched = await fetchLatestVersion(config.packageName, {
+      fetchFn: config.fetchFn,
+      timeoutMs: config.fetchTimeoutMs,
+    });
+    entry.checkedAt = now();
+    if (fetched) {
+      entry.latestVersion = fetched;
+      latestVersion = fetched;
+    }
+    cache[config.packageName] = entry;
+    writeCache(cachePath, cache);
+  }
+
+  if (!latestVersion || !isNewerVersion(latestVersion, config.currentVersion)) {
+    return null;
+  }
+
+  const installCmd =
+    packageManager === "bun"
+      ? `bun install -g ${config.packageName}@${latestVersion}`
+      : `npm install -g ${config.packageName}@${latestVersion}`;
+
+  return { packageManager, entry, latestVersion, installCmd, cache, cachePath, now };
+}
+
+function persistCacheEntry(context: UpdateContext, packageName: string, entry: CacheEntry): void {
+  context.cache[packageName] = entry;
+  writeCache(context.cachePath, context.cache);
 }

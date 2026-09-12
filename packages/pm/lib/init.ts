@@ -47,69 +47,10 @@ export async function initializeProject(): Promise<void> {
   const envExamplePath = join(projectRoot, ".env.example");
   const envExampleContent = await readFile(envExamplePath);
 
-  // Check for existing .devintern-code configuration
-  const devinternCodeDir = join(cwd, ".devintern-code");
-  const devinternCodeEnvPath = join(devinternCodeDir, ".env");
-
-  let jiraBaseUrl = "";
-  let jiraEmail = "";
-  let jiraApiToken = "";
-  let agentHarness = "";
-  let agentCliPath = "";
-
-  try {
-    if (await pathExists(devinternCodeEnvPath)) {
-      console.log("📋 Found existing .devintern-code configuration");
-      const devinternCodeEnv = await readFile(devinternCodeEnvPath);
-
-      // Extract JIRA_* and agent configuration values
-      const lines = devinternCodeEnv.split("\n");
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith("#")) {
-          if (trimmed.startsWith("JIRA_BASE_URL=")) {
-            jiraBaseUrl = trimmed.split("=", 2)[1]?.trim() || "";
-          } else if (trimmed.startsWith("JIRA_EMAIL=")) {
-            jiraEmail = trimmed.split("=", 2)[1]?.trim() || "";
-          } else if (trimmed.startsWith("JIRA_API_TOKEN=")) {
-            jiraApiToken = trimmed.split("=", 2)[1]?.trim() || "";
-          } else if (trimmed.startsWith("AGENT_HARNESS=")) {
-            agentHarness = trimmed.split("=", 2)[1]?.trim() || "";
-          } else if (trimmed.startsWith("AGENT_CLI_PATH=")) {
-            agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
-          } else if (trimmed.startsWith("CLAUDE_CLI_PATH=")) {
-            agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
-          }
-        }
-      }
-
-      if (jiraBaseUrl || jiraEmail || jiraApiToken || agentCliPath) {
-        console.log("✅ Migrating configuration from .devintern-code");
-      }
-    }
-  } catch {
-    // No .devintern-code found, that's fine
-  }
+  const migrated = await readDevinternCodeConfig(cwd);
 
   // Replace values in .env.example with migrated values if available
-  let envContent = envExampleContent;
-  if (jiraBaseUrl) {
-    envContent = envContent.replace(/JIRA_BASE_URL=.*/, `JIRA_BASE_URL=${jiraBaseUrl}`);
-  }
-  if (jiraEmail) {
-    envContent = envContent.replace(/JIRA_EMAIL=.*/, `JIRA_EMAIL=${jiraEmail}`);
-  }
-  if (jiraApiToken) {
-    envContent = envContent.replace(/JIRA_API_TOKEN=.*/, `JIRA_API_TOKEN=${jiraApiToken}`);
-  }
-  if (agentHarness) {
-    envContent = envContent.replace(/AGENT_HARNESS=.*/, `AGENT_HARNESS=${agentHarness}`);
-  }
-  if (agentCliPath) {
-    // The example ships AGENT_CLI_PATH commented out (detection is the default).
-    // When migrating an explicit path, write it as an active line.
-    envContent = envContent.replace(/#?\s*AGENT_CLI_PATH=.*/, `AGENT_CLI_PATH=${agentCliPath}`);
-  }
+  const envContent = applyMigratedConfig(envExampleContent, migrated);
 
   // Write .env file
   await writeFile(envPath, envContent);
@@ -121,6 +62,93 @@ export async function initializeProject(): Promise<void> {
   console.log(`\nNext steps:`);
   console.log(`1. Edit .devintern-pm/.env with your configuration`);
   console.log(`2. Run devpm --interactive to create your first task`);
+}
+
+interface MigratedPmConfig {
+  jiraBaseUrl: string;
+  jiraEmail: string;
+  jiraApiToken: string;
+  agentHarness: string;
+  agentCliPath: string;
+}
+
+function emptyMigratedConfig(): MigratedPmConfig {
+  return { jiraBaseUrl: "", jiraEmail: "", jiraApiToken: "", agentHarness: "", agentCliPath: "" };
+}
+
+/**
+ * Read JIRA_* / AGENT_* values from an existing `.devintern-code/.env`, if any.
+ *
+ * @param cwd - Project directory to look in.
+ * @returns Migrated values, or empty strings when no config is found.
+ */
+async function readDevinternCodeConfig(cwd: string): Promise<MigratedPmConfig> {
+  const envPath = join(cwd, ".devintern-code", ".env");
+  try {
+    if (!(await pathExists(envPath))) {
+      return emptyMigratedConfig();
+    }
+
+    console.log("📋 Found existing .devintern-code configuration");
+    const content = await readFile(envPath);
+    const config = emptyMigratedConfig();
+
+    // Extract JIRA_* and agent configuration values
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      if (trimmed.startsWith("JIRA_BASE_URL=")) {
+        config.jiraBaseUrl = trimmed.split("=", 2)[1]?.trim() || "";
+      } else if (trimmed.startsWith("JIRA_EMAIL=")) {
+        config.jiraEmail = trimmed.split("=", 2)[1]?.trim() || "";
+      } else if (trimmed.startsWith("JIRA_API_TOKEN=")) {
+        config.jiraApiToken = trimmed.split("=", 2)[1]?.trim() || "";
+      } else if (trimmed.startsWith("AGENT_HARNESS=")) {
+        config.agentHarness = trimmed.split("=", 2)[1]?.trim() || "";
+      } else if (trimmed.startsWith("AGENT_CLI_PATH=")) {
+        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
+      } else if (trimmed.startsWith("CLAUDE_CLI_PATH=")) {
+        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
+      }
+    }
+
+    if (config.jiraBaseUrl || config.jiraEmail || config.jiraApiToken || config.agentCliPath) {
+      console.log("✅ Migrating configuration from .devintern-code");
+    }
+    return config;
+  } catch {
+    // No .devintern-code found, that's fine
+    return emptyMigratedConfig();
+  }
+}
+
+/**
+ * Apply migrated `.devintern-code` values onto the `.env.example` template.
+ *
+ * @param envContent - `.env.example` template contents.
+ * @param config - Migrated values to substitute.
+ * @returns Template with migrated values written in.
+ */
+function applyMigratedConfig(envContent: string, config: MigratedPmConfig): string {
+  let result = envContent;
+  if (config.jiraBaseUrl) {
+    result = result.replace(/JIRA_BASE_URL=.*/, `JIRA_BASE_URL=${config.jiraBaseUrl}`);
+  }
+  if (config.jiraEmail) {
+    result = result.replace(/JIRA_EMAIL=.*/, `JIRA_EMAIL=${config.jiraEmail}`);
+  }
+  if (config.jiraApiToken) {
+    result = result.replace(/JIRA_API_TOKEN=.*/, `JIRA_API_TOKEN=${config.jiraApiToken}`);
+  }
+  if (config.agentHarness) {
+    result = result.replace(/AGENT_HARNESS=.*/, `AGENT_HARNESS=${config.agentHarness}`);
+  }
+  if (config.agentCliPath) {
+    // The example ships AGENT_CLI_PATH commented out (detection is the default).
+    // When migrating an explicit path, write it as an active line.
+    result = result.replace(/#?\s*AGENT_CLI_PATH=.*/, `AGENT_CLI_PATH=${config.agentCliPath}`);
+  }
+  return result;
 }
 
 /**
