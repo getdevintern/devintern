@@ -209,6 +209,41 @@ interface InitUserLike {
   email: string | null;
 }
 
+/** Shared context threaded through the numbered wizard steps. */
+interface InitContext {
+  deps: WorkerInitDeps;
+  cwd: string;
+  projectRoot: string;
+  log: LogFn;
+  prompt: PromptFn;
+}
+
+type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
+
+interface TrackerSetup {
+  trackerType: string;
+  trackerName: string;
+  queryExample?: string;
+}
+
+interface WorkspaceSetup {
+  workspaceDir: string;
+  repoName?: string;
+}
+
+interface ServiceStepResult {
+  serviceRunning: boolean;
+  serviceInstall: ServiceInstallOutcome;
+}
+
+interface ServiceRuntime {
+  platform: NodeJS.Platform;
+  execPath: string;
+  runtimePath: string;
+  environmentPath: string;
+  deps: WorkerServiceDeps;
+}
+
 /** Prompt for the conflict-resolution mode and, when scheduled, its cadence. */
 async function promptConflictPolicy(
   ctx: { workspaceDir: string; prompt: PromptFn; log: LogFn },
@@ -485,6 +520,544 @@ async function defaultConnectRelay(
 }
 
 /**
+ * Step 1: reuse the tracker config from `devintern init`, or run that subset.
+ *
+ * @returns The resolved tracker plus its display metadata, or null to abort.
+ */
+async function resolveWorkerTracker(ctx: InitContext): Promise<TrackerSetup | null> {
+  ctx.log("\n1️⃣  Tracker configuration");
+  const trackerType = ctx.deps.ensureTracker
+    ? await ctx.deps.ensureTracker({ cwd: ctx.cwd, prompt: ctx.prompt, log: ctx.log })
+    : await defaultEnsureTracker(ctx.cwd, ctx.prompt, ctx.log);
+  if (!trackerType) {
+    ctx.log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
+    trackWorkerInitFailed("tracker_setup_incomplete");
+    return null;
+  }
+  if (!supportsPolling(trackerType)) {
+    ctx.log(`❌ Tracker '${trackerType}' does not support worker polling.`);
+    ctx.log(`   Pollable trackers: ${trackersSupportingPolling().join(", ")}`);
+    trackWorkerInitFailed("tracker_not_pollable");
+    return null;
+  }
+  const capabilities = TRACKER_CAPABILITIES[trackerType];
+  const trackerName = capabilities?.displayName ?? trackerType;
+  ctx.log(`   Using ${trackerName}.`);
+  return { trackerType, trackerName, queryExample: capabilities?.queryExample };
+}
+
+/**
+ * Step 2: write the workspace (importing this repo) and guard the one-tracker
+ * invariant when the workspace already existed.
+ *
+ * @returns The workspace directory, or null to abort.
+ */
+async function bootstrapWorkerWorkspace(
+  ctx: InitContext,
+  trackerType: string,
+): Promise<WorkspaceSetup | null> {
+  ctx.log("\n2️⃣  Workspace (one daemon; this repo first)");
+  const bootstrap =
+    ctx.deps.bootstrapWorkspace ??
+    (async (opts) => {
+      const result = await ensureWorkspaceAndAddRepo(opts.cwd, opts.log);
+      if (!result.ok) {
+        return { error: result.error };
+      }
+      return {
+        workspaceDir: result.workspaceDir,
+        created: result.created,
+        repoName: result.repoName,
+      };
+    });
+  const workspace = await bootstrap({ cwd: ctx.cwd, log: ctx.log });
+  if ("error" in workspace) {
+    ctx.log(`❌ ${workspace.error}`);
+    trackWorkerInitFailed("workspace_error");
+    return null;
+  }
+  if (workspace.created === false) {
+    const existing = loadWorkspaceConfig(workspaceConfigPath(workspace.workspaceDir));
+    if (existing.defaults.tracker !== trackerType) {
+      ctx.log(
+        `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
+      );
+      ctx.log("   One worker workspace has one active tracker; keep its defaults unchanged.");
+      trackWorkerInitFailed("workspace_tracker_mismatch");
+      return null;
+    }
+  }
+  return { workspaceDir: workspace.workspaceDir, repoName: workspace.repoName };
+}
+
+/**
+ * Step 3: prompt for the ready-tasks query and validate it with a live dry run.
+ *
+ * @returns The accepted query.
+ */
+async function promptReadyQuery(
+  ctx: InitContext,
+  trackerName: string,
+  queryExample: string | undefined,
+): Promise<string> {
+  ctx.log("\n3️⃣  Which tasks should the worker pick up?");
+  ctx.log("   The query uses the same language as 'devintern --query' for your tracker.");
+  if (queryExample) {
+    ctx.log(`   Example: ${queryExample}`);
+  }
+
+  let query = "";
+  for (;;) {
+    query = (await ctx.prompt("Ready-tasks query: ")).trim();
+    if (!query) {
+      ctx.log("❌ A query is required — it defines what 'ready for the agent' means.");
+      continue;
+    }
+    if (!ctx.deps.dryRunQuery) {
+      break;
+    }
+    try {
+      const count = await ctx.deps.dryRunQuery(query);
+      ctx.log(`✅ Query works: ${count} task(s) match right now.`);
+      if (count === 0) {
+        ctx.log("   (0 matches is fine if nothing is ready yet — the worker will poll.)");
+      }
+      break;
+    } catch (error) {
+      ctx.log(`❌ Query failed against ${trackerName}: ${(error as Error).message}`);
+      const retry = (await ctx.prompt("Edit the query and try again? [Y/n]: "))
+        .trim()
+        .toLowerCase();
+      if (retry === "n" || retry === "no") {
+        ctx.log("   Keeping the query as entered; fix it later in workspace.toml.");
+        break;
+      }
+    }
+  }
+  return query;
+}
+
+/** Step 5: opt-in Sentry auto-fix project for the first workspace repo. */
+async function runSentryStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  repoName: string | undefined,
+): Promise<void> {
+  ctx.log("\n5️⃣  Sentry auto-fixes (optional)");
+  ctx.log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
+  const answer = (
+    await ctx.prompt("Watch a Sentry project and create fixes for recurring errors? [y/N]: ")
+  )
+    .trim()
+    .toLowerCase();
+  if (answer === "y" || answer === "yes") {
+    await runWorkerSentrySetup({
+      workspaceDir,
+      repoName,
+      prompt: ctx.prompt,
+      log: ctx.log,
+      validateSentry: ctx.deps.validateSentry,
+    });
+  } else {
+    ctx.log("   Sentry auto-fixes skipped; add [[error_monitors]] to workspace.toml later.");
+  }
+}
+
+/** Step 6: license is reported but never aborts setup. */
+async function runLicenseStep(ctx: InitContext): Promise<void> {
+  if (!ctx.deps.checkAutomationLicense) return;
+  ctx.log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
+  try {
+    const failure = await ctx.deps.checkAutomationLicense();
+    if (failure === null) {
+      ctx.log("✅ Automation license OK.");
+    } else {
+      ctx.log(`⚠️  ${failure}`);
+      ctx.log("   The worker will refuse to start until this is fixed:");
+      ctx.log("   get a Supporter, Team, or Business key at https://devintern.com/pricing");
+      ctx.log("   and set LICENSE_KEY in .devintern-code/.env (or sign in).");
+    }
+  } catch (error) {
+    ctx.log(
+      `⚠️  License check errored (${(error as Error).message}); the worker re-checks at startup.`,
+    );
+  }
+}
+
+/**
+ * Resolve the signed-in user for relay onboarding, offering interactive login
+ * when no session exists.
+ *
+ * @returns The user, or null when the user declines or login fails.
+ */
+async function resolveRelayUser(ctx: InitContext): Promise<InitUserLike | null> {
+  const getUser = ctx.deps.getUser ?? defaultGetUser;
+  const signIn = ctx.deps.signIn ?? defaultSignIn;
+  let user: InitUserLike | null = null;
+  try {
+    user = await getUser(ctx.projectRoot);
+  } catch {
+    user = null;
+  }
+
+  if (user) {
+    ctx.log(`   Signed in as ${user.email || user.id}.`);
+    return user;
+  }
+
+  const loginAnswer = (await ctx.prompt("Sign in now to connect the relay? [Y/n]: "))
+    .trim()
+    .toLowerCase();
+  if (loginAnswer === "n" || loginAnswer === "no") {
+    return null;
+  }
+  try {
+    user = await signIn(ctx.projectRoot);
+    if (user) {
+      ctx.log(`✅ Signed in as ${user.email || user.id}.`);
+    }
+  } catch (error) {
+    ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
+  }
+  return user;
+}
+
+/**
+ * Step 7: relay pairing. Polling stays the correctness layer; relay only
+ * improves event latency.
+ */
+async function runRelayStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  trackerType: string,
+): Promise<{ relayConnected: boolean; relayConnect: RelayConnectOutcome }> {
+  let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+  let relayConnect: RelayConnectOutcome = "skipped";
+  ctx.log("\n7️⃣  Instant events (optional; polling always stays on)");
+  const answer = (
+    await ctx.prompt(
+      "React in seconds through the DevIntern relay, without opening a port? [Y/n]: ",
+    )
+  )
+    .trim()
+    .toLowerCase();
+  if (answer === "n" || answer === "no") {
+    ctx.log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
+    return { relayConnected, relayConnect };
+  }
+
+  const user = await resolveRelayUser(ctx);
+  if (!user) {
+    ctx.log("   Relay skipped. Run `devintern login`, then re-run `devintern worker init` later.");
+    return { relayConnected, relayConnect };
+  }
+
+  const connectRelay =
+    ctx.deps.connectRelay ??
+    ((options) => defaultConnectRelay(options, ctx.deps.runRelayConnect ?? connectRelayTarget));
+  try {
+    const connected = await connectRelay({
+      projectRoot: ctx.projectRoot,
+      workspaceDir,
+      trackerType,
+      log: ctx.log,
+    });
+    relayConnected = connected || hasGitHubRelayRegistration(loadRelayState(workspaceDir));
+    relayConnect = connected ? "succeeded" : "partial";
+    if (connected) {
+      ctx.log(`✅ Relay pairing stored under ${workspaceDir}.`);
+    } else {
+      ctx.log(
+        "⚠️  Some relay sources did not connect. Polling still works; retry with worker connect.",
+      );
+    }
+  } catch (error) {
+    relayConnect = "failed";
+    ctx.log(`⚠️  Relay setup failed: ${(error as Error).message}`);
+    ctx.log("   Polling still works; relay only improves event latency.");
+  }
+  return { relayConnected, relayConnect };
+}
+
+/** No-relay path: only a customer-owned App can deliver @mentions. */
+function runNoRelayGitHubAppStep(ctx: InitContext, githubRepo: string): GitHubAppOutcome {
+  ctx.log(`\n8️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+  if (hasGitHubAppCredentials()) {
+    ctx.log("✅ Customer-owned GitHub App credentials found in the environment.");
+    ctx.log("   The worker will use that App for polling, @mentions, and GitHub API calls.");
+    return "existing";
+  }
+  ctx.log("   Relay is not connected, so the hosted DevIntern App cannot deliver events here.");
+  ctx.log("   GITHUB_TOKEN still supports task PRs and review polling on the worker's own PRs.");
+  ctx.log("   For air-gapped @mentions or direct webhooks, configure a customer-owned GitHub App");
+  ctx.log("   with GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY_PATH/BASE64.");
+  return "skipped";
+}
+
+/** Relay path: verify the central DevIntern App installation for this repo. */
+function runRelayGitHubAppStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  githubRepo: string,
+): GitHubAppOutcome {
+  ctx.log(`\n8️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+  ctx.log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
+  ctx.log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
+  ctx.log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
+  const existing = loadGitHubAppRecord(workspaceDir, githubRepo);
+  if (
+    existing?.enabled &&
+    existing.repo === githubRepo.toLowerCase() &&
+    typeof existing.installationId === "number" &&
+    typeof existing.repositoryId === "number"
+  ) {
+    ctx.log(
+      `✅ GitHub App already verified for ${existing.repo} (${existing.connectedAt ?? "unknown date"}).`,
+    );
+    return "existing";
+  }
+  ctx.log("   No verified GitHub App pairing was recorded.");
+  ctx.log("   Run: devintern worker connect github");
+  ctx.log("   The relay verifies the installation before it enables event routing.");
+  return "skipped";
+}
+
+/**
+ * Step 8: GitHub App. Relay-backed workspaces install the central App and keep
+ * GitHub API access local through GITHUB_TOKEN; a customer-owned App is the
+ * advanced, no-relay path for air-gapped/direct installations only.
+ */
+async function runGitHubAppStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  relayConnected: boolean,
+): Promise<GitHubAppOutcome> {
+  const detectGithubRepo = ctx.deps.detectGithubRepo ?? detectGitHubRepo;
+  let githubRepo: string | null = null;
+  try {
+    githubRepo = await detectGithubRepo();
+  } catch {
+    githubRepo = null;
+  }
+
+  if (!githubRepo) {
+    ctx.log("\n8️⃣  GitHub App (@mentions)");
+    ctx.log("   No GitHub remote detected; skipping the GitHub App step.");
+    return "unavailable";
+  }
+  if (!relayConnected) {
+    return runNoRelayGitHubAppStep(ctx, githubRepo);
+  }
+  return runRelayGitHubAppStep(ctx, workspaceDir, githubRepo);
+}
+
+/** Ask whether to install/update the native user service. */
+async function confirmServiceInstall(
+  ctx: InitContext,
+  state: ServiceState,
+  platform: NodeJS.Platform,
+): Promise<boolean> {
+  if (state.installed) {
+    const offer = state.active ? "restart and update" : "update";
+    const bootSuffix = platform === "linux" ? " and ensure it starts at boot" : "";
+    const answer = (
+      await ctx.prompt(
+        `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
+      )
+    )
+      .trim()
+      .toLowerCase();
+    return answer !== "n" && answer !== "no";
+  }
+  const action =
+    platform === "linux"
+      ? "Install and start the background service at boot now? [Y/n]: "
+      : "Install and start the background service now? [Y/n]: ";
+  const answer = (await ctx.prompt(action)).trim().toLowerCase();
+  return answer !== "n" && answer !== "no";
+}
+
+/** Write the platform service definition and print the manual install steps. */
+function printManualServiceDefinition(
+  ctx: InitContext,
+  platform: NodeJS.Platform,
+  workspaceDir: string,
+  paths: { execPath: string; runtimePath: string; environmentPath: string },
+  writeFile: (path: string, content: string) => void,
+): void {
+  if (platform !== "linux" && platform !== "darwin") {
+    ctx.log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
+    return;
+  }
+  if (platform === "linux") {
+    const unitPath = join(workspaceDir, SYSTEMD_UNIT_NAME);
+    writeFile(
+      unitPath,
+      renderSystemdUnit({
+        execPath: paths.execPath,
+        projectDir: workspaceDir,
+        runtimePath: paths.runtimePath,
+        environmentPath: paths.environmentPath,
+      }),
+    );
+    ctx.log(`💾 Wrote ${unitPath}`);
+  } else {
+    const plistPath = join(workspaceDir, LAUNCHD_PLIST_NAME);
+    writeFile(
+      plistPath,
+      renderLaunchdPlist({
+        execPath: paths.execPath,
+        workingDir: workspaceDir,
+        runtimePath: paths.runtimePath,
+        environmentPath: paths.environmentPath,
+      }),
+    );
+    ctx.log(`💾 Wrote ${plistPath}`);
+  }
+  ctx.log("   Install it yourself with:");
+  for (const line of manualServiceInstructions({ platform, workspaceDir })) {
+    ctx.log(`     ${line}`);
+  }
+}
+
+/** Run the install/restart action and report its outcome. */
+async function installServiceStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  runtime: ServiceRuntime,
+  printManual: () => void,
+): Promise<ServiceStepResult> {
+  const { execPath, runtimePath, environmentPath } = runtime;
+  const result = ctx.deps.installService
+    ? await ctx.deps.installService({
+        workspaceDir,
+        execPath,
+        runtimePath,
+        environmentPath,
+        log: ctx.log,
+      })
+    : await installWorkerService(
+        { workspaceDir, execPath, runtimePath, environmentPath },
+        runtime.deps,
+      );
+
+  if (!result.ok) {
+    ctx.log(`❌ Could not install the service automatically: ${result.error}`);
+    ctx.log("   Nothing was left half-installed. Install it manually:");
+    printManual();
+    return { serviceRunning: false, serviceInstall: "failed" };
+  }
+
+  ctx.log(
+    result.updated
+      ? "✅ devintern-worker service updated and restarted."
+      : "✅ devintern-worker service installed and running.",
+  );
+  ctx.log("   Open http://localhost:4400 to verify worker status and runs.");
+  if (result.warning) {
+    ctx.log(`⚠️  ${result.warning}`);
+  }
+  ctx.log(
+    runtime.platform === "linux"
+      ? result.warning
+        ? "   Run `loginctl enable-linger` to start the worker at boot before login."
+        : "   User lingering was enabled so the service starts at boot and survives logout."
+      : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
+  );
+  return { serviceRunning: true, serviceInstall: result.updated ? "updated" : "installed" };
+}
+
+/**
+ * Step 9: offer to install and launch the native user service. The foreground
+ * command remains an honest supported path on every platform, and a declined
+ * offer (or a failed automatic install) keeps the manual
+ * write-definition-and-print-instructions path alive.
+ */
+async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<ServiceStepResult> {
+  ctx.log("\n9️⃣  Background service (optional)");
+  const platform = ctx.deps.platform ?? process.platform;
+  const writeFile = ctx.deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
+  const execPath = ctx.deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern");
+  const runtimePath = ctx.deps.runtimePath ?? process.execPath;
+  const environmentPath = ctx.deps.environmentPath ?? process.env.PATH ?? "";
+
+  if (platform !== "linux" && platform !== "darwin") {
+    ctx.log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
+    return { serviceRunning: false, serviceInstall: "unavailable" };
+  }
+  if (ctx.deps.noService) {
+    ctx.log("   Skipped (--no-service); `devintern worker` runs the same daemon in a terminal.");
+    return { serviceRunning: false, serviceInstall: "skipped" };
+  }
+
+  const printManual = () =>
+    printManualServiceDefinition(
+      ctx,
+      platform,
+      workspaceDir,
+      { execPath, runtimePath, environmentPath },
+      writeFile,
+    );
+  const runtime: ServiceRuntime = {
+    platform,
+    execPath,
+    runtimePath,
+    environmentPath,
+    deps: { platform, homedir: ctx.deps.homedir, uid: ctx.deps.uid, run: ctx.deps.run },
+  };
+  const state = ctx.deps.detectService
+    ? await ctx.deps.detectService()
+    : await detectWorkerService(runtime.deps);
+
+  if (state.installed && !state.managed) {
+    // Leave custom definitions and their running processes untouched.
+    ctx.log("⚠️  The installed service has custom settings and will not be overwritten.");
+    printManual();
+    return { serviceRunning: state.active, serviceInstall: "existing" };
+  }
+
+  const accepted = await confirmServiceInstall(ctx, state, platform);
+  if (!accepted) {
+    printManual();
+    return { serviceRunning: false, serviceInstall: "declined" };
+  }
+  return installServiceStep(ctx, workspaceDir, runtime, printManual);
+}
+
+/** Print the closing summary and the GitHub App / relay guidance. */
+function logWorkerNextSteps(
+  ctx: InitContext,
+  serviceRunning: boolean,
+  githubAppOutcome: GitHubAppOutcome,
+  relayConnected: boolean,
+): void {
+  ctx.log("\n🎉 Worker setup complete!");
+  ctx.log("\n📝 Next steps:");
+  if (serviceRunning) {
+    ctx.log("   1. The worker is already running as your user service.");
+  } else {
+    ctx.log("   1. Run `devintern worker`.");
+  }
+  ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
+  ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
+  if (githubAppOutcome !== "skipped") return;
+
+  if (relayConnected) {
+    ctx.log("\n⚠️  Central GitHub App events are not enabled:");
+    ctx.log(
+      `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
+    );
+    ctx.log(
+      "   on your repositories, then re-run `devintern worker init` (or `devintern worker connect`).",
+    );
+  } else {
+    ctx.log("\nℹ️  Running without relay or a custom GitHub App:");
+    ctx.log("   GITHUB_TOKEN polling still handles the worker's own PRs.");
+    ctx.log("   See the advanced GitHub integration guide if this installation must stay offline.");
+  }
+}
+
+/**
  * Run the guided worker setup.
  *
  * @returns ok when setup completed and the workspace was written
@@ -507,95 +1080,20 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     log("👷 Setting up the unattended devintern worker.");
     trackWorkerInitStarted();
 
+    const ctx: InitContext = { deps, cwd, projectRoot, log, prompt };
+
     // 1. Reuse tracker config from `devintern init`, or run that subset.
-    log("\n1️⃣  Tracker configuration");
-    const trackerType = deps.ensureTracker
-      ? await deps.ensureTracker({ cwd, prompt, log })
-      : await defaultEnsureTracker(cwd, prompt, log);
-    if (!trackerType) {
-      log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
-      trackWorkerInitFailed("tracker_setup_incomplete");
-      return abort;
-    }
-    const capabilities = TRACKER_CAPABILITIES[trackerType];
-    if (!supportsPolling(trackerType)) {
-      log(`❌ Tracker '${trackerType}' does not support worker polling.`);
-      log(`   Pollable trackers: ${trackersSupportingPolling().join(", ")}`);
-      trackWorkerInitFailed("tracker_not_pollable");
-      return abort;
-    }
-    const trackerName = capabilities?.displayName ?? trackerType;
-    log(`   Using ${trackerName}.`);
+    const tracker = await resolveWorkerTracker(ctx);
+    if (!tracker) return abort;
 
     // 2. Write a workspace (import this repo). Query lands after the dry run.
-    log("\n2️⃣  Workspace (one daemon; this repo first)");
-    const bootstrap =
-      deps.bootstrapWorkspace ??
-      (async (opts) => {
-        const result = await ensureWorkspaceAndAddRepo(opts.cwd, opts.log);
-        if (!result.ok) {
-          return { error: result.error };
-        }
-        return {
-          workspaceDir: result.workspaceDir,
-          created: result.created,
-          repoName: result.repoName,
-        };
-      });
-    const workspace = await bootstrap({ cwd, log });
-    if ("error" in workspace) {
-      log(`❌ ${workspace.error}`);
-      trackWorkerInitFailed("workspace_error");
-      return abort;
-    }
-    const workspaceDir = workspace.workspaceDir;
-    if (workspace.created === false) {
-      const existing = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-      if (existing.defaults.tracker !== trackerType) {
-        log(
-          `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
-        );
-        log("   One worker workspace has one active tracker; keep its defaults unchanged.");
-        trackWorkerInitFailed("workspace_tracker_mismatch");
-        return abort;
-      }
-    }
+    const workspace = await bootstrapWorkerWorkspace(ctx, tracker.trackerType);
+    if (!workspace) return abort;
+    const { workspaceDir, repoName } = workspace;
 
     // 3. Ready-tasks query, validated with a live dry run, then task_query.
-    log("\n3️⃣  Which tasks should the worker pick up?");
-    log("   The query uses the same language as 'devintern --query' for your tracker.");
-    if (capabilities?.queryExample) {
-      log(`   Example: ${capabilities.queryExample}`);
-    }
-
-    let query = "";
-    for (;;) {
-      query = (await prompt("Ready-tasks query: ")).trim();
-      if (!query) {
-        log("❌ A query is required — it defines what 'ready for the agent' means.");
-        continue;
-      }
-      if (!deps.dryRunQuery) {
-        break;
-      }
-      try {
-        const count = await deps.dryRunQuery(query);
-        log(`✅ Query works: ${count} task(s) match right now.`);
-        if (count === 0) {
-          log("   (0 matches is fine if nothing is ready yet — the worker will poll.)");
-        }
-        break;
-      } catch (error) {
-        log(`❌ Query failed against ${trackerName}: ${(error as Error).message}`);
-        const retry = (await prompt("Edit the query and try again? [Y/n]: ")).trim().toLowerCase();
-        if (retry === "n" || retry === "no") {
-          log("   Keeping the query as entered; fix it later in workspace.toml.");
-          break;
-        }
-      }
-    }
-
-    writeWorkspaceDefaults(workspaceDir, { tracker: trackerType, taskQuery: query });
+    const query = await promptReadyQuery(ctx, tracker.trackerName, tracker.queryExample);
+    writeWorkspaceDefaults(workspaceDir, { tracker: tracker.trackerType, taskQuery: query });
     log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
 
     // 4. Make consequential unattended behavior explicit instead of silently
@@ -610,326 +1108,29 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
     // 5. Optional production-error source. Tracker tasks remain the worker's
     // primary input; this adds a repo-pinned Sentry project alongside them.
-    log("\n5️⃣  Sentry auto-fixes (optional)");
-    log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
-    const sentryAnswer = (
-      await prompt("Watch a Sentry project and create fixes for recurring errors? [y/N]: ")
-    )
-      .trim()
-      .toLowerCase();
-    if (sentryAnswer === "y" || sentryAnswer === "yes") {
-      await runWorkerSentrySetup({
-        workspaceDir,
-        repoName: workspace.repoName,
-        prompt,
-        log,
-        validateSentry: deps.validateSentry,
-      });
-    } else {
-      log("   Sentry auto-fixes skipped; add [[error_monitors]] to workspace.toml later.");
-    }
+    await runSentryStep(ctx, workspaceDir, repoName);
 
     // 6. Automation license — any SKU; do not special-case workspace.
-    if (deps.checkAutomationLicense) {
-      log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
-      try {
-        const failure = await deps.checkAutomationLicense();
-        if (failure === null) {
-          log("✅ Automation license OK.");
-        } else {
-          log(`⚠️  ${failure}`);
-          log("   The worker will refuse to start until this is fixed:");
-          log("   get a Supporter, Team, or Business key at https://devintern.com/pricing");
-          log("   and set LICENSE_KEY in .devintern-code/.env (or sign in).");
-        }
-      } catch (error) {
-        log(
-          `⚠️  License check errored (${(error as Error).message}); the worker re-checks at startup.`,
-        );
-      }
-    }
+    await runLicenseStep(ctx);
 
     // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
-    let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
-    let relayConnect: RelayConnectOutcome = "skipped";
-    log("\n7️⃣  Instant events (optional; polling always stays on)");
-    const relayAnswer = (
-      await prompt("React in seconds through the DevIntern relay, without opening a port? [Y/n]: ")
-    )
-      .trim()
-      .toLowerCase();
-    if (relayAnswer !== "n" && relayAnswer !== "no") {
-      const getUser = deps.getUser ?? defaultGetUser;
-      const signIn = deps.signIn ?? defaultSignIn;
-      let user: InitUserLike | null = null;
-      try {
-        user = await getUser(projectRoot);
-      } catch {
-        user = null;
-      }
-
-      if (!user) {
-        const loginAnswer = (await prompt("Sign in now to connect the relay? [Y/n]: "))
-          .trim()
-          .toLowerCase();
-        if (loginAnswer !== "n" && loginAnswer !== "no") {
-          try {
-            user = await signIn(projectRoot);
-            if (user) {
-              log(`✅ Signed in as ${user.email || user.id}.`);
-            }
-          } catch (error) {
-            log(`⚠️  Sign-in failed: ${(error as Error).message}`);
-          }
-        }
-      } else {
-        log(`   Signed in as ${user.email || user.id}.`);
-      }
-
-      if (user) {
-        const connectRelay =
-          deps.connectRelay ??
-          ((options) => defaultConnectRelay(options, deps.runRelayConnect ?? connectRelayTarget));
-        try {
-          const connected = await connectRelay({
-            projectRoot,
-            workspaceDir,
-            trackerType,
-            log,
-          });
-          relayConnected = connected || hasGitHubRelayRegistration(loadRelayState(workspaceDir));
-          relayConnect = connected ? "succeeded" : "partial";
-          if (connected) {
-            log(`✅ Relay pairing stored under ${workspaceDir}.`);
-          } else {
-            log(
-              "⚠️  Some relay sources did not connect. Polling still works; retry with worker connect.",
-            );
-          }
-        } catch (error) {
-          relayConnect = "failed";
-          log(`⚠️  Relay setup failed: ${(error as Error).message}`);
-          log("   Polling still works; relay only improves event latency.");
-        }
-      } else {
-        log("   Relay skipped. Run `devintern login`, then re-run `devintern worker init` later.");
-      }
-    } else {
-      log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
-    }
+    const relay = await runRelayStep(ctx, workspaceDir, tracker.trackerType);
 
     // 8. GitHub App: relay-backed workspaces install the central App and keep
     // GitHub API access local through GITHUB_TOKEN. A customer-owned App is an
     // advanced, no-relay path for air-gapped/direct installations only.
-    let githubAppOutcome: "connected" | "existing" | "skipped" | "unavailable" = "unavailable";
-    const detectGithubRepo = deps.detectGithubRepo ?? detectGitHubRepo;
-    let githubRepo: string | null = null;
-    try {
-      githubRepo = await detectGithubRepo();
-    } catch {
-      githubRepo = null;
-    }
+    const githubAppOutcome = await runGitHubAppStep(ctx, workspaceDir, relay.relayConnected);
 
-    if (!githubRepo) {
-      log("\n8️⃣  GitHub App (@mentions)");
-      log("   No GitHub remote detected; skipping the GitHub App step.");
-    } else if (!relayConnected) {
-      log(`\n8️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
-      if (hasGitHubAppCredentials()) {
-        githubAppOutcome = "existing";
-        log("✅ Customer-owned GitHub App credentials found in the environment.");
-        log("   The worker will use that App for polling, @mentions, and GitHub API calls.");
-      } else {
-        githubAppOutcome = "skipped";
-        log("   Relay is not connected, so the hosted DevIntern App cannot deliver events here.");
-        log("   GITHUB_TOKEN still supports task PRs and review polling on the worker's own PRs.");
-        log(
-          "   For air-gapped @mentions or direct webhooks, configure a customer-owned GitHub App",
-        );
-        log("   with GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY_PATH/BASE64.");
-      }
-    } else {
-      log(`\n8️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
-      log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
-      log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
-      log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
-      const existing = loadGitHubAppRecord(workspaceDir, githubRepo);
-      if (
-        existing?.enabled &&
-        existing.repo === githubRepo.toLowerCase() &&
-        typeof existing.installationId === "number" &&
-        typeof existing.repositoryId === "number"
-      ) {
-        githubAppOutcome = "existing";
-        log(
-          `✅ GitHub App already verified for ${existing.repo} (${existing.connectedAt ?? "unknown date"}).`,
-        );
-      } else {
-        githubAppOutcome = "skipped";
-        log("   No verified GitHub App pairing was recorded.");
-        log("   Run: devintern worker connect github");
-        log("   The relay verifies the installation before it enables event routing.");
-      }
-    }
+    // 9. Offer to install and launch the native user service.
+    const service = await runServiceStep(ctx, workspaceDir);
 
-    // 9. Offer to install and launch the native user service. The foreground
-    // command remains an honest supported path on every platform, and a
-    // declined offer (or a failed automatic install) keeps the manual
-    // write-definition-and-print-instructions path alive.
-    log("\n9️⃣  Background service (optional)");
-    const platform = deps.platform ?? process.platform;
-    const writeFile = deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
-    const execPath = deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern");
-    const runtimePath = deps.runtimePath ?? process.execPath;
-    const environmentPath = deps.environmentPath ?? process.env.PATH ?? "";
-    let serviceRunning = false;
-    let serviceInstall: ServiceInstallOutcome =
-      platform !== "linux" && platform !== "darwin"
-        ? "unavailable"
-        : deps.noService
-          ? "skipped"
-          : "declined";
-
-    const printManualServicePath = () => {
-      if (platform !== "linux" && platform !== "darwin") {
-        log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
-        return;
-      }
-      if (platform === "linux") {
-        const unitPath = join(workspaceDir, SYSTEMD_UNIT_NAME);
-        writeFile(
-          unitPath,
-          renderSystemdUnit({ execPath, projectDir: workspaceDir, runtimePath, environmentPath }),
-        );
-        log(`💾 Wrote ${unitPath}`);
-      } else {
-        const plistPath = join(workspaceDir, LAUNCHD_PLIST_NAME);
-        writeFile(
-          plistPath,
-          renderLaunchdPlist({ execPath, workingDir: workspaceDir, runtimePath, environmentPath }),
-        );
-        log(`💾 Wrote ${plistPath}`);
-      }
-      log("   Install it yourself with:");
-      for (const line of manualServiceInstructions({ platform, workspaceDir })) {
-        log(`     ${line}`);
-      }
-    };
-
-    if (platform !== "linux" && platform !== "darwin") {
-      log(`   No generated service definition for ${platform}; run the worker in a terminal.`);
-    } else if (deps.noService) {
-      log("   Skipped (--no-service); `devintern worker` runs the same daemon in a terminal.");
-    } else {
-      const serviceDeps: WorkerServiceDeps = {
-        platform,
-        homedir: deps.homedir,
-        uid: deps.uid,
-        run: deps.run,
-      };
-      const state = deps.detectService
-        ? await deps.detectService()
-        : await detectWorkerService(serviceDeps);
-      let accepted = false;
-      if (state.installed && !state.managed) {
-        serviceRunning = state.active;
-        serviceInstall = "existing";
-        log("⚠️  The installed service has custom settings and will not be overwritten.");
-        printManualServicePath();
-      } else if (state.installed) {
-        const offer = state.active ? "restart and update" : "update";
-        const bootSuffix = platform === "linux" ? " and ensure it starts at boot" : "";
-        const answer = (
-          await prompt(
-            `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
-          )
-        )
-          .trim()
-          .toLowerCase();
-        accepted = answer !== "n" && answer !== "no";
-      } else {
-        const action =
-          platform === "linux"
-            ? "Install and start the background service at boot now? [Y/n]: "
-            : "Install and start the background service now? [Y/n]: ";
-        const answer = (await prompt(action)).trim().toLowerCase();
-        accepted = answer !== "n" && answer !== "no";
-      }
-      if (state.installed && !state.managed) {
-        // Leave custom definitions and their running processes untouched.
-      } else if (!accepted) {
-        printManualServicePath();
-      } else {
-        const result = deps.installService
-          ? await deps.installService({
-              workspaceDir,
-              execPath,
-              runtimePath,
-              environmentPath,
-              log,
-            })
-          : await installWorkerService(
-              { workspaceDir, execPath, runtimePath, environmentPath },
-              serviceDeps,
-            );
-        if (result.ok) {
-          serviceRunning = true;
-          serviceInstall = result.updated ? "updated" : "installed";
-          log(
-            result.updated
-              ? "✅ devintern-worker service updated and restarted."
-              : "✅ devintern-worker service installed and running.",
-          );
-          log("   Open http://localhost:4400 to verify worker status and runs.");
-          if (result.warning) {
-            log(`⚠️  ${result.warning}`);
-          }
-          log(
-            platform === "linux"
-              ? result.warning
-                ? "   Run `loginctl enable-linger` to start the worker at boot before login."
-                : "   User lingering was enabled so the service starts at boot and survives logout."
-              : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
-          );
-        } else {
-          serviceInstall = "failed";
-          log(`❌ Could not install the service automatically: ${result.error}`);
-          log("   Nothing was left half-installed. Install it manually:");
-          printManualServicePath();
-        }
-      }
-    }
-
-    log("\n🎉 Worker setup complete!");
-    log("\n📝 Next steps:");
-    if (serviceRunning) {
-      log("   1. The worker is already running as your user service.");
-    } else {
-      log("   1. Run `devintern worker`.");
-    }
-    log("   2. Open http://localhost:4400 to see worker status and runs.");
-    log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
-    if (githubAppOutcome === "skipped") {
-      if (relayConnected) {
-        log("\n⚠️  Central GitHub App events are not enabled:");
-        log(
-          `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
-        );
-        log(
-          "   on your repositories, then re-run `devintern worker init` (or `devintern worker connect`).",
-        );
-      } else {
-        log("\nℹ️  Running without relay or a custom GitHub App:");
-        log("   GITHUB_TOKEN polling still handles the worker's own PRs.");
-        log("   See the advanced GitHub integration guide if this installation must stay offline.");
-      }
-    }
+    logWorkerNextSteps(ctx, service.serviceRunning, githubAppOutcome, relay.relayConnected);
 
     trackWorkerInitCompleted({
-      tracker: trackerType,
-      relayConnect,
-      serviceInstall,
+      tracker: tracker.trackerType,
+      relayConnect: relay.relayConnect,
+      serviceInstall: service.serviceInstall,
       githubApp: githubAppOutcome,
     });
     return { ok: true };
