@@ -3,8 +3,15 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { DashboardData, handleAutomations, handleRunAutomation } from "../src/lib/dashboard-api";
-import type { AutomationRunDeps, DashboardAutomationView } from "../src/lib/dashboard-api";
+import {
+  DashboardData,
+  handleAutomations,
+  handleRunAutomation,
+} from "../src/lib/observability/dashboard-api";
+import type {
+  AutomationRunDeps,
+  DashboardAutomationView,
+} from "../src/lib/observability/dashboard-api";
 import { startDashboardServer } from "../src/dashboard-server";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { AutomationScheduleStatus } from "../src/lib/automation-acquirer";

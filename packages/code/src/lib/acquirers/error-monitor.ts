@@ -11,7 +11,7 @@ import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { Acquirer } from "../../worker";
 import type { ErrorMonitorConfig } from "../workspace/config";
-import { SentryClient } from "../sentry-client";
+import { SentryClient } from "../observability/sentry-client";
 
 /** Minimum normalized issue data needed by the shared acquirer. */
 export interface ErrorMonitorIssue {

@@ -40,7 +40,7 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
-import { initSentryOnce } from "./lib/sentry-init";
+import { initSentryOnce } from "./lib/observability/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
   captureError,
@@ -61,8 +61,8 @@ import {
   trackSetupStarted,
   trackWorkerConnect,
   trackWorkerTaskRun,
-} from "./lib/analytics";
-import type { AnalyticsPropValue } from "./lib/analytics";
+} from "./lib/observability/analytics";
+import type { AnalyticsPropValue } from "./lib/observability/analytics";
 import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
 import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
 import { parseAgentJsonObject } from "./lib/agent-json";
@@ -1218,7 +1218,8 @@ if (process.argv[2] === "init") {
   // Readiness doctor: everything needed for a first successful run, with a
   // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
   (async () => {
-    const { collectReadinessChecks, renderReadinessReport } = await import("./lib/readiness");
+    const { collectReadinessChecks, renderReadinessReport } =
+      await import("./lib/observability/readiness");
     loadedEnvPath = loadEnvironment();
     let supabaseConfig;
     try {

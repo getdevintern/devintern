@@ -10,7 +10,7 @@ import type {
   ErrorMonitorIssue,
   ErrorMonitorProvider,
   IssueValidity,
-} from "./acquirers/error-monitor";
+} from "../acquirers/error-monitor";
 
 export const DEFAULT_SENTRY_BASE_URL = "https://sentry.io";
 export const SENTRY_ACTION_SUCCEEDED_COMMENT =

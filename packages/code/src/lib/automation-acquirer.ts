@@ -12,7 +12,7 @@ import type { AutomationConfig } from "./automation-config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
 import { workerTaskArgs } from "./acquirers/task-polling";
-import { RUN_ORIGIN_ENV } from "./analytics";
+import { RUN_ORIGIN_ENV } from "./observability/analytics";
 import { getWorkerFailover } from "./worker-failover";
 import {
   readUsageLimitHint,
