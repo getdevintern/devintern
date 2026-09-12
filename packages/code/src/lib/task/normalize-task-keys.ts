@@ -7,11 +7,11 @@
  */
 
 import { parseTrelloCardReference } from "@devintern/task-trackers";
-import { parseAsanaTaskReference } from "./trackers/asana/asana-task-tracker-client";
-import { parseAzureDevOpsWorkItemReference } from "./trackers/azure-devops/azure-devops-task-tracker-client";
-import { parseGitHubIssueReference } from "./trackers/github/github-task-tracker-client";
-import { parseGitLabIssueReference } from "./trackers/gitlab/gitlab-task-tracker-client";
-import { parseLinearIssueReference } from "./trackers/linear/linear-task-tracker-client";
+import { parseAsanaTaskReference } from "../trackers/asana/asana-task-tracker-client";
+import { parseAzureDevOpsWorkItemReference } from "../trackers/azure-devops/azure-devops-task-tracker-client";
+import { parseGitHubIssueReference } from "../trackers/github/github-task-tracker-client";
+import { parseGitLabIssueReference } from "../trackers/gitlab/gitlab-task-tracker-client";
+import { parseLinearIssueReference } from "../trackers/linear/linear-task-tracker-client";
 
 /**
  * Rewrite each CLI task argument into the tracker-native id used for fetch.

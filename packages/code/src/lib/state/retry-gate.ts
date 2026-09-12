@@ -16,7 +16,7 @@
  * stuck ticket.
  */
 
-import type { TaskTrackerClient } from "../task-tracker-client";
+import type { TaskTrackerClient } from "../trackers/client";
 import type { Comment } from "../../types/task-tracker";
 import { hashDescription } from "./retry-state";
 import type { RetryState } from "./retry-state";

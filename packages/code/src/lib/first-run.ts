@@ -11,7 +11,7 @@
 
 import type { LogFn } from "@devintern/task-trackers";
 import { trackSetupDeclined, trackSetupFailed } from "./observability/analytics";
-import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
+import { TRACKER_CAPABILITIES } from "./trackers/capabilities";
 
 /** Outcome of the first-run configuration check. */
 export type FirstRunOutcome = "ready" | "failed";

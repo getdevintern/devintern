@@ -48,7 +48,7 @@ import {
 } from "./init-scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "./observability/readiness";
 import type { ReadinessCheck } from "./observability/readiness";
-import { TRACKER_CAPABILITIES } from "./tracker-capabilities";
+import { TRACKER_CAPABILITIES } from "./trackers/capabilities";
 
 export { isInteractive };
 

@@ -70,15 +70,15 @@ import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterations,
 } from "./lib/review/auto-review-config";
-import { TaskFormatter } from "./lib/task-formatter";
-import type { RetryPromptContext } from "./lib/task-formatter";
+import { TaskFormatter } from "./lib/task/formatter";
+import type { RetryPromptContext } from "./lib/task/formatter";
 import { resolveOutputDir } from "./lib/output-dir";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
 import { ensureTrackerEnvConfigured } from "./lib/first-run";
-import { TaskTrackerManager } from "./lib/task-tracker-manager";
-import type { TaskTrackerClient } from "./lib/task-tracker-client";
+import { TaskTrackerManager } from "./lib/trackers/manager";
+import type { TaskTrackerClient } from "./lib/trackers/client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
 import { isMarkdownTaskTracker } from "./lib/trackers/markdown/markdown-task-tracker-client";
 import type { MarkdownTaskRaw } from "./lib/trackers/markdown/markdown-task-tracker-client";
@@ -89,8 +89,8 @@ import {
   supportsQuery,
   trackersSupportingEstimate,
   trackersSupportingQuery,
-} from "./lib/tracker-capabilities";
-import { normalizeTaskKeys } from "./lib/normalize-task-keys";
+} from "./lib/trackers/capabilities";
+import { normalizeTaskKeys } from "./lib/task/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/code-host";
 import {
@@ -103,11 +103,11 @@ import {
   recordRunTicket,
 } from "./lib/state/run-recorder";
 import type { RunStatus } from "./lib/state/run-recorder";
-import { buildTicketUrl } from "./lib/ticket-url";
+import { buildTicketUrl } from "./lib/task/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/state/retry-state";
 import { shouldSkipRetry } from "./lib/state/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
-import { reportTaskFailure } from "./lib/failure-feedback";
+import { reportTaskFailure } from "./lib/task/failure-feedback";
 import {
   exitIfWorkerUsageLimit,
   isWorkerChild,

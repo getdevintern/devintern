@@ -11,15 +11,15 @@
  */
 
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import type { TaskTrackerClient } from "./task-tracker-client";
-import { JiraTaskTrackerClient } from "./trackers/jira/jira-task-tracker-client";
-import { AsanaTaskTrackerClient } from "./trackers/asana/asana-task-tracker-client";
-import { AzureDevOpsTaskTrackerClient } from "./trackers/azure-devops/azure-devops-task-tracker-client";
-import { GitHubTaskTrackerClient } from "./trackers/github/github-task-tracker-client";
-import { GitLabTaskTrackerClient } from "./trackers/gitlab/gitlab-task-tracker-client";
-import { LinearTaskTrackerClient } from "./trackers/linear/linear-task-tracker-client";
-import { MarkdownTaskTrackerClient } from "./trackers/markdown/markdown-task-tracker-client";
-import { TrelloTaskTrackerClient } from "./trackers/trello/trello-task-tracker-client";
+import type { TaskTrackerClient } from "./client";
+import { JiraTaskTrackerClient } from "./jira/jira-task-tracker-client";
+import { AsanaTaskTrackerClient } from "./asana/asana-task-tracker-client";
+import { AzureDevOpsTaskTrackerClient } from "./azure-devops/azure-devops-task-tracker-client";
+import { GitHubTaskTrackerClient } from "./github/github-task-tracker-client";
+import { GitLabTaskTrackerClient } from "./gitlab/gitlab-task-tracker-client";
+import { LinearTaskTrackerClient } from "./linear/linear-task-tracker-client";
+import { MarkdownTaskTrackerClient } from "./markdown/markdown-task-tracker-client";
+import { TrelloTaskTrackerClient } from "./trello/trello-task-tracker-client";
 
 /** Env var names each tracker reads its configuration/credentials from. */
 const TRACKER_ENV_KEYS: Record<string, string[]> = {

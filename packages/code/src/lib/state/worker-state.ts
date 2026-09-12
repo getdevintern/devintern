@@ -18,7 +18,7 @@ import { Database } from "bun:sqlite";
 import { parseChangeRequestUrl } from "../code-host/index";
 import type { ChangeRequestIdentity, CodeHostProvider } from "../code-host/index";
 import { configureSqliteConnection } from "./sqlite";
-import { buildTicketUrl } from "../ticket-url";
+import { buildTicketUrl } from "../task/ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
 export interface Cursor {

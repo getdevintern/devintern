@@ -42,10 +42,10 @@ import { join } from "path";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 
 import type { ProjectSettings } from "../types/settings";
-import type { FailureAttemptRecorder } from "./failure-feedback";
-import { reportTaskFailure } from "./failure-feedback";
+import type { FailureAttemptRecorder } from "./task/failure-feedback";
+import { reportTaskFailure } from "./task/failure-feedback";
 import type { RunRecord, RunStore } from "./state/run-recorder";
-import type { TaskTrackerClient } from "./task-tracker-client";
+import type { TaskTrackerClient } from "./trackers/client";
 
 /** Reason posted on tickets whose run was orphaned by a dead worker. */
 export const ORPHANED_RUN_REASON =

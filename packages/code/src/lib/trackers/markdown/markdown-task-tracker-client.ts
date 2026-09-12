@@ -25,7 +25,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../../task-tracker-client";
+import type { TaskTrackerClient } from "../client";
 
 export interface MarkdownTaskRaw {
   filePath: string;

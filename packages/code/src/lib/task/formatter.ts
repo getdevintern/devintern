@@ -2,7 +2,7 @@ import { writeFileSync } from "fs";
 import TurndownService from "turndown";
 import path from "path";
 import { convertADFToMarkdown } from "@devintern/task-trackers";
-import { FormattedTaskDetails, DetailedRelatedIssue } from "../types/task-tracker";
+import { FormattedTaskDetails, DetailedRelatedIssue } from "../../types/task-tracker";
 
 /** Converts tracker-native rich content (e.g. Jira ADF) to markdown for agent prompts. */
 export type RichContentConverter = (content: unknown) => string;
