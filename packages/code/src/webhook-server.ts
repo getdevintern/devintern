@@ -51,14 +51,14 @@ import {
   runAddressReviewUrlViaCli,
   runResolveConflictsUrlViaCli,
 } from "./lib/acquirers/review-polling";
-import { formatReviewPrompt } from "./lib/review-formatter";
+import { formatReviewPrompt } from "./lib/review/formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
-import { runAutoReviewLoop } from "./lib/auto-review-loop";
+import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterationsIfEnabled,
-} from "./lib/auto-review-config";
+} from "./lib/review/auto-review-config";
 import {
   handlePingEvent,
   isGitHubIP,

@@ -8,7 +8,7 @@ import type {
 } from "../../../types/github-webhooks";
 import { GitLabReviewsClient } from "./reviews";
 import { resolveGitLabCodeHostConfig } from "../index";
-import { extractAgentSummary } from "../../review-formatter";
+import { extractAgentSummary } from "../../review/formatter";
 
 export async function createGitLabReviewAdapter(
   identity: ChangeRequestIdentity,

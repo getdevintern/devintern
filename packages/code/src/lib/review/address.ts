@@ -1,5 +1,5 @@
-import { createReviewAdapter } from "./code-host/review-provider-factory";
-import { assertCurrentGitLabOrigin } from "./change-origin";
+import { createReviewAdapter } from "../code-host/review-provider-factory";
+import { assertCurrentGitLabOrigin } from "../change-origin";
 /**
  * Address Review Command
  *
@@ -16,15 +16,15 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import { readFileSync } from "fs";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
-import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
-import { parseChangeRequestUrl } from "./code-host";
-import { getSandbox } from "./sandbox";
-import { beginRun, endRun, recordRunStage } from "./run-recorder";
-import { formatCiFixPrompt, formatReviewPrompt } from "./review-formatter";
-import type { CiFailureFeedback } from "./review-formatter";
-import { GIT_CLEAN_ARGS, Utils } from "./utils";
-import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent-spawn";
+import { resolveAgentEffort, resolveAgentModel } from "../agent-model";
+import { parseChangeRequestUrl } from "../code-host/index";
+import { getSandbox } from "../sandbox";
+import { beginRun, endRun, recordRunStage } from "../run-recorder";
+import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
+import type { CiFailureFeedback } from "./formatter";
+import { GIT_CLEAN_ARGS, Utils } from "../utils";
+import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../git-hook-fixer";
 
 export interface AddressReviewOptions {
   noPush?: boolean;

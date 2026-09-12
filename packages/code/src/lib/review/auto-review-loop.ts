@@ -19,18 +19,18 @@ import {
   resolveExecutablePathWithRetry,
 } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
-import { parseAgentJsonObject } from "./agent-json";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
-import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
+import { parseAgentJsonObject } from "../agent-json";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent-spawn";
+import { resolveAgentEffort, resolveAgentModel } from "../agent-model";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
-import { getSandbox } from "./sandbox";
+import { getSandbox } from "../sandbox";
 import type {
   AutoReviewLoopOptions,
   AutoReviewLoopResult,
   ReviewFeedback,
   ReviewFeedbackItem,
   ReviewPriority,
-} from "../types/auto-review.js";
+} from "../../types/auto-review.js";
 
 const PRIORITY_WEIGHTS: Record<ReviewPriority, number> = {
   critical: 5,

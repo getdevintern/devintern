@@ -8,7 +8,7 @@ import {
   buildConflictPrompt,
   resolveConflictsOnPr,
   sanitizeErrorForPublicComment,
-} from "../src/lib/conflict-resolver";
+} from "../src/lib/review/conflict-resolver";
 import { Utils } from "../src/lib/utils";
 import type { PullRequestInfo } from "../src/lib/code-host/github/reviews";
 

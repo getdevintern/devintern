@@ -1,10 +1,10 @@
-import type { ChangeRequestIdentity } from "./code-host";
-import { GitHubReviewsClient } from "./code-host/github/reviews";
-import type { PullRequestInfo } from "./code-host/github/reviews";
-import { GitLabReviewsClient } from "./code-host/gitlab/reviews";
-import { resolveGitLabCodeHostConfig } from "./code-host";
-import { GitHubAppAuth } from "./code-host/github/app-auth";
-import { Utils } from "./utils";
+import type { ChangeRequestIdentity } from "../code-host/index";
+import { GitHubReviewsClient } from "../code-host/github/reviews";
+import type { PullRequestInfo } from "../code-host/github/reviews";
+import { GitLabReviewsClient } from "../code-host/gitlab/reviews";
+import { resolveGitLabCodeHostConfig } from "../code-host/index";
+import { GitHubAppAuth } from "../code-host/github/app-auth";
+import { Utils } from "../utils";
 
 /** State needed by the conflict workflow. */
 export interface ChangeRequestInfo {
