@@ -32,22 +32,26 @@ Rules:
 
 - **Top level = context, not vendor.** Never `lib/github/` — `github` is both a task tracker (`trackers/github/`) and a code host (`code-host/github/`).
 - **Provider folder only at ≥3 files** in that context; below that, keep `github-*.ts` siblings next to the neutral contract.
-- **Neutral contracts + shared helpers live at the context root** (`code-host/provider.ts`, `code-host/shared/`), never inside a provider folder — this also avoids `import/no-cycle`.
+- **Neutral contracts + shared helpers live at the context root** (`code-host/provider.ts`, `code-host/shared.ts`), never inside a provider folder — this also avoids `import/no-cycle`.
 - **Provider-neutral capabilities stay concern-based** (`relay`, `worker`, `state`, `observability`, review orchestration) and earn provider folders only if they grow them.
-- **One primary export per file.** Multi-class files (`pr-client.ts`, `schedule.ts`, `run-retry.ts`) are split one-class-per-file when their context folder lands.
+- **One primary export per file.** `pr-client.ts` was split one-class-per-file into `code-host/`; `worker/schedule.ts` (3 classes) and `state/run-retry.ts` (2 classes) are within the `max-classes-per-file` budget and can be split further if they grow.
 
-Target shape (extends the existing `trackers/<provider>/` and `workspace/` precedent):
+Current layout (context-first, provider-second; extends the `trackers/<provider>/` and `workspace/` precedent):
 
 ```
 lib/
-  code-host/            # context
-    provider.ts         # neutral contract: CodeHostProvider, CodeHostRepository, …
-    shared/             # PRInfo/PRResult, title/body builders, label parsing
-    github/             # PR client, review adapter, CI provider, reviews, push probe, app auth
-    gitlab/             # MR client, review adapter, CI provider, reviews, webhook(+admin), config
-    bitbucket/          # PR client
-  trackers/             # existing; already context-first/provider-second
-  acquirers/  review/  relay/  worker/  state/  observability/  task/  agent/  config/
+  code-host/                 # context
+    provider.ts              # neutral contract: CodeHostProvider, CodeHostRepository, …
+    shared.ts                # PRInfo/PRResult, title/body builders, label parsing
+    base-client.ts  manager.ts  index.ts
+    ci-provider.ts  review-provider.ts  review-provider-factory.ts  change-origin.ts
+    github/                  # PR client, review adapter, CI provider, reviews, push probe, app auth, webhook
+    gitlab/                  # MR client, review adapter, CI provider, reviews, webhook(+admin)
+    bitbucket/               # PR client
+  trackers/                  # client.ts / manager.ts / capabilities.ts at the root + <provider>/ dirs
+  acquirers/  review/  relay/  worker/  state/  observability/
+  task/  agent/  config/  init/  automation/
+  utils.ts  lock-manager.ts  # cross-cutting low-level helpers kept at the lib root
 ```
 
 ### Configuration
