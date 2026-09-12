@@ -6,7 +6,7 @@ import {
   runAddressReviewUrlViaCli,
   runResolveConflictsUrlViaCli,
   serializePrRun,
-} from "../src/lib/review-polling-acquirer";
+} from "../src/lib/acquirers/review-polling";
 
 test.each(["review", "conflict"] as const)("%s URL job stops on cancellation", async (kind) => {
   const dir = mkdtempSync(join(tmpdir(), "gitlab-cancel-"));

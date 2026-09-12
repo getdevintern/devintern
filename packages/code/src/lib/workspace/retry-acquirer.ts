@@ -14,7 +14,7 @@
 
 import type { Acquirer } from "../../worker";
 import type { ScheduledRetry, ScheduledRetryStore } from "../run-retry";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 

@@ -6,13 +6,13 @@ import { tmpdir } from "os";
 import {
   ReviewPollingAcquirer,
   runResolveConflictsViaCli,
-} from "../src/lib/review-polling-acquirer";
+} from "../src/lib/acquirers/review-polling";
 import type {
   ConditionalResult,
   PolledComment,
   PolledPr,
   PolledReview,
-} from "../src/lib/review-polling-acquirer";
+} from "../src/lib/acquirers/review-polling";
 import type { CronOrIntervalSchedule } from "../src/lib/automation-config";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { RunStore } from "../src/lib/run-recorder";

@@ -6,7 +6,11 @@
  * sentry.io and self-hosted Sentry (SENTRY_BASE_URL).
  */
 
-import type { ErrorMonitorIssue, ErrorMonitorProvider, IssueValidity } from "./error-monitor";
+import type {
+  ErrorMonitorIssue,
+  ErrorMonitorProvider,
+  IssueValidity,
+} from "./acquirers/error-monitor";
 
 export const DEFAULT_SENTRY_BASE_URL = "https://sentry.io";
 export const SENTRY_ACTION_SUCCEEDED_COMMENT =

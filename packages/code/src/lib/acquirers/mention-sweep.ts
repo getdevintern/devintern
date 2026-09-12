@@ -22,9 +22,9 @@
  * (old mentions are not dug up) and persist across restarts.
  */
 
-import type { WebhookQueue } from "./webhook-queue";
-import type { WorkerState } from "./worker-state";
-import type { Acquirer } from "../worker";
+import type { WebhookQueue } from "../webhook-queue";
+import type { WorkerState } from "../worker-state";
+import type { Acquirer } from "../../worker";
 
 export interface SweptComment {
   id: number;

@@ -14,9 +14,9 @@ import { dirname, join, resolve } from "path";
 import { randomUUID } from "crypto";
 
 import { parseEnvInteger } from "../env-integer";
-import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
-import type { ChangeDetector } from "../change-detector";
+import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
+import type { ChangeDetector } from "../acquirers/change-detector";
 import { createPickupGate } from "../schedule";
 import type { PickupGate, ScheduleSnapshot } from "../schedule";
 import type { WebhookQueue } from "../webhook-queue";
@@ -903,7 +903,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Error-monitor adapters share one provider-neutral acquirer. Each source
   // is pinned to a repo (and optionally a team), so projects with different
   // credentials cannot be dispatched into the wrong codebase.
-  const { ErrorMonitorAcquirer, createErrorMonitorProvider } = await import("../error-monitor");
+  const { ErrorMonitorAcquirer, createErrorMonitorProvider } =
+    await import("../acquirers/error-monitor");
   const errorTaskDir = join(workspaceDir, "error-fixes");
   for (const source of config.errorMonitors) {
     if (!source.enabled) continue;
@@ -954,7 +955,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // team repo mappings stay live through lookups against the shared config.
   const { TaskTrackerManager, createTrackerClient, trackerRequiredEnv } =
     await import("../task-tracker-manager");
-  const { createChangeDetector } = await import("../change-detector");
+  const { createChangeDetector } = await import("../acquirers/change-detector");
   const sources: FleetSourceRuntime[] = [];
 
   if (multiTeam) {
@@ -1310,7 +1311,7 @@ export async function buildFleetEventAcquirers(options: {
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
-    const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
+    const { ReviewPollingAcquirer } = await import("../acquirers/review-polling");
     const { isGitHubNotFound } = await import("../code-host/github/reviews");
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
@@ -1370,7 +1371,7 @@ export async function buildFleetEventAcquirers(options: {
 
     // CI failure repair uses the same durable agent-PR registry, repo
     // worktree, per-PR lock, and workspace supervisor as reviews.
-    const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
+    const { CiFailureWatcherAcquirer } = await import("../acquirers/ci-failure-watcher");
     const fixPr = createFleetCiFix(eventDeps);
     const ciWatcher = new CiFailureWatcherAcquirer({
       intervalSeconds,
@@ -1442,8 +1443,8 @@ export async function buildFleetEventAcquirers(options: {
     // namespaced by slug). The permission gate runs in the fleet handler.
     // Sweeps are map-managed so live config reloads can attach sweeps for
     // newly added repos and stop them for removed ones.
-    const { MentionSweepAcquirer } = await import("../mention-sweep-acquirer");
-    type MentionSweep = import("../mention-sweep-acquirer").MentionSweepAcquirer;
+    const { MentionSweepAcquirer } = await import("../acquirers/mention-sweep");
+    type MentionSweep = import("../acquirers/mention-sweep").MentionSweepAcquirer;
     const mentionSweeps = new Map<string, MentionSweep>();
     const createMentionSweep = (slug: string): MentionSweep => {
       const [repoOwner, repoName] = slug.split("/") as [string, string];
@@ -1578,7 +1579,7 @@ export async function buildFleetEventAcquirers(options: {
       );
     } else if (relayUrl) {
       const { RelayAcquirer } = await import("../relay-acquirer");
-      const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
+      const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
         const execute = createFleetTaskExecutor(
           {

@@ -1,4 +1,4 @@
-import { GitLabReviewPollingAcquirer } from "../src/lib/gitlab-review-polling-acquirer";
+import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
@@ -20,10 +20,10 @@ import {
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import type { ChangeDetector } from "../src/lib/change-detector";
+import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
 import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
-import { CiFailureWatcherAcquirer } from "../src/lib/ci-failure-watcher-acquirer";
+import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay-connect";
 

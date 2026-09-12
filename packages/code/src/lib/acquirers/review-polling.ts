@@ -34,19 +34,19 @@ import {
   agentPrStateCursorSource,
   applyAgentPrFetch,
   reconcileOpenAgentPrs,
-} from "./agent-pr-reconciler";
-import type { ConditionalResult, PolledPr } from "./agent-pr-reconciler";
-import { isGitHubAuthError } from "./code-host/github/reviews";
-import { nextScheduleOccurrence } from "./automation-config";
-import type { CronOrIntervalSchedule } from "./automation-config";
-import { parseEnvInteger } from "./env-integer";
-import type { RunStore } from "./run-recorder";
-import type { TaskExecutionResult } from "./task-polling-acquirer";
-import type { WebhookQueue } from "./webhook-queue";
-import { cliResultToTaskResult, runWithFailover } from "./worker-failover";
-import type { WorkerState } from "./worker-state";
-import type { ConflictResolutionMode } from "./workspace/config";
-import type { Acquirer } from "../worker";
+} from "../agent-pr-reconciler";
+import type { ConditionalResult, PolledPr } from "../agent-pr-reconciler";
+import { isGitHubAuthError } from "../code-host/github/reviews";
+import { nextScheduleOccurrence } from "../automation-config";
+import type { CronOrIntervalSchedule } from "../automation-config";
+import { parseEnvInteger } from "../env-integer";
+import type { RunStore } from "../run-recorder";
+import type { TaskExecutionResult } from "./task-polling";
+import type { WebhookQueue } from "../webhook-queue";
+import { cliResultToTaskResult, runWithFailover } from "../worker-failover";
+import type { WorkerState } from "../worker-state";
+import type { ConflictResolutionMode } from "../workspace/config";
+import type { Acquirer } from "../../worker";
 
 // The PR-state protocol types live with the reconciler, which shares them;
 // re-exported so poller consumers keep their existing import paths.

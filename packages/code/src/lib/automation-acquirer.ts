@@ -11,7 +11,7 @@ import type { Acquirer } from "../worker";
 import type { AutomationConfig } from "./automation-config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./automation-config";
 import { AutomationStateStore } from "./automation-state";
-import { workerTaskArgs } from "./task-polling-acquirer";
+import { workerTaskArgs } from "./acquirers/task-polling";
 import { RUN_ORIGIN_ENV } from "./analytics";
 import { getWorkerFailover } from "./worker-failover";
 import {

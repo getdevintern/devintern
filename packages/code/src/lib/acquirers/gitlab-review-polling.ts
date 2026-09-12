@@ -1,12 +1,12 @@
 /** Poll only DevIntern-registered GitLab MRs for actionable discussions. */
 
 import { captureError } from "@devintern/utils";
-import type { Acquirer } from "../worker";
-import type { TaskExecutionResult } from "./task-polling-acquirer";
-import type { AutomaticResolveResult } from "./review-polling-acquirer";
-import type { AgentPr, WorkerState } from "./worker-state";
-import type { WebhookQueue } from "./webhook-queue";
-import type { GitLabPollingSnapshot } from "./code-host/gitlab/reviews";
+import type { Acquirer } from "../../worker";
+import type { TaskExecutionResult } from "./task-polling";
+import type { AutomaticResolveResult } from "./review-polling";
+import type { AgentPr, WorkerState } from "../worker-state";
+import type { WebhookQueue } from "../webhook-queue";
+import type { GitLabPollingSnapshot } from "../code-host/gitlab/reviews";
 
 export interface GitLabPollingClient {
   getPollingSnapshot(project: string | number, iid: number): Promise<GitLabPollingSnapshot>;

@@ -9,8 +9,8 @@ import {
   botMentionCandidates,
   extractPrNumber,
   mentionsBot,
-} from "../src/lib/mention-sweep-acquirer";
-import type { SweptComment, SweptPrInfo } from "../src/lib/mention-sweep-acquirer";
+} from "../src/lib/acquirers/mention-sweep";
+import type { SweptComment, SweptPrInfo } from "../src/lib/acquirers/mention-sweep";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 

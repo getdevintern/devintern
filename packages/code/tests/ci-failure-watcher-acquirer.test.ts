@@ -3,7 +3,7 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/ci-failure-watcher-acquirer";
+import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/acquirers/ci-failure-watcher";
 import type {
   CiFailureWatcherGitHub,
   PolledCiPr,
@@ -12,7 +12,7 @@ import type {
 } from "../src/lib/code-host/github/ci-provider";
 import { createGitHubCiProvider } from "../src/lib/code-host/github/ci-provider";
 import type { CiConditionalResult } from "../src/lib/code-host/ci-provider";
-import type { CiFixResult } from "../src/lib/ci-failure-watcher-acquirer";
+import type { CiFixResult } from "../src/lib/acquirers/ci-failure-watcher";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 

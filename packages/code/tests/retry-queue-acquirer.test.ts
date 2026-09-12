@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 
 import { ScheduledRetryStore } from "../src/lib/run-retry";
 import { RetryQueueAcquirer } from "../src/lib/workspace/retry-acquirer";
-import type { TaskExecutionResult } from "../src/lib/task-polling-acquirer";
+import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
 describe("RetryQueueAcquirer", () => {
   let dir: string;

@@ -19,12 +19,12 @@
 import { spawn } from "child_process";
 
 import type { ChangeDetector } from "./change-detector";
-import type { PickupGate } from "./schedule";
-import { TASK_POLL_LAST_DRAIN_KEY } from "./worker-state";
-import type { WebhookQueue } from "./webhook-queue";
-import type { WorkerState } from "./worker-state";
-import type { Acquirer } from "../worker";
-import { cliResultToTaskResult, runWithFailover } from "./worker-failover";
+import type { PickupGate } from "../schedule";
+import { TASK_POLL_LAST_DRAIN_KEY } from "../worker-state";
+import type { WebhookQueue } from "../webhook-queue";
+import type { WorkerState } from "../worker-state";
+import type { Acquirer } from "../../worker";
+import { cliResultToTaskResult, runWithFailover } from "../worker-failover";
 
 export interface ReadyTask {
   key: string;
