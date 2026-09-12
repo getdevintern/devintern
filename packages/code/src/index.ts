@@ -92,7 +92,7 @@ import {
 } from "./lib/tracker-capabilities";
 import { normalizeTaskKeys } from "./lib/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
-import { PRManager } from "./lib/pr-client";
+import { PRManager } from "./lib/code-host";
 import {
   RunStore,
   beginRun,

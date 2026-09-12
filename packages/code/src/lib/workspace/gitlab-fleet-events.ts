@@ -52,8 +52,8 @@ export async function buildGitLabFleetAcquirers(options: {
 
   // GitLab polling is deliberately independent of GitHub credentials and
   // watches only provider-aware rows registered after successful MR creation.
-  const { parseGitLabHostAliases, parseGitRemoteUrl } = await import("../code-host");
-  const { resolveGitLabCodeHostConfig } = await import("../pr-client");
+  const { parseGitLabHostAliases, parseGitRemoteUrl, resolveGitLabCodeHostConfig } =
+    await import("../code-host");
   const resolveGitLabRepo = (mr: import("../worker-state").AgentPr) =>
     config.repos.find((repo) => {
       const env = buildRepoEnv(repo, workspaceDir);

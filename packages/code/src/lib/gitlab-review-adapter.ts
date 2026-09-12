@@ -7,7 +7,7 @@ import type {
   ProcessedConversationComment,
 } from "../types/github-webhooks";
 import { GitLabReviewsClient } from "./gitlab-reviews";
-import { resolveGitLabCodeHostConfig } from "./pr-client";
+import { resolveGitLabCodeHostConfig } from "./code-host";
 import { extractAgentSummary } from "./review-formatter";
 
 export async function createGitLabReviewAdapter(

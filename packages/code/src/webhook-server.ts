@@ -36,7 +36,6 @@ import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover
 import type { WorkerFailover } from "./lib/worker-failover";
 import { WorkerState } from "./lib/worker-state";
 import type { AgentPr } from "./lib/worker-state";
-import { normalizeCodeHostUrl } from "./lib/code-host";
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
@@ -45,7 +44,7 @@ import {
   verifyGitLabWebhookToken,
 } from "./lib/gitlab-webhook";
 import type { GitLabWebhookEvent } from "./lib/gitlab-webhook";
-import { resolveGitLabCodeHostConfig } from "./lib/pr-client";
+import { normalizeCodeHostUrl, resolveGitLabCodeHostConfig } from "./lib/code-host";
 import { GitLabReviewsClient } from "./lib/gitlab-reviews";
 import { runCiFixViaCli } from "./lib/ci-failure-watcher-acquirer";
 import {
