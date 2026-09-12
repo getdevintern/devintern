@@ -268,6 +268,9 @@ The endpoint verifies Standard Webhooks HMAC signatures with timestamp freshness
 
 Repository-wide GitLab mention discovery remains out of scope.
 
+GitLab review, conflict-resolution, and CI-repair jobs share the workspace supervisor. Checkout preparation waits for admission, and running subprocesses receive cancellation when the worker stops them. Jobs cancelled before admission do not prepare a checkout.
+
+
 ## Batch processing with --query
 
 Select multiple issues with familiar qualifiers — @devintern/code translates them to GitLab's [list issues](https://docs.gitlab.com/ee/api/issues.html#list-project-issues) filters. Queries are always scoped to `GITLAB_PROJECT`:
@@ -300,7 +303,7 @@ Self-hosted tokens only exist on their own instance — a gitlab.com token canno
 - **Attachments:** files embedded in issue bodies (`/uploads/...` links) are downloaded for the agent using your token; other external links stay as references.
 - **Status labels:** labels named in `settings.json` must already exist in the project. The error message lists available labels when one is missing.
 - **Comments:** use `--skip-comments` to skip issue comments and label transitions for a run.
-- **Merge-request automation:** creation, manual review addressing, and registered-MR polling are experimental. CI, conflict, mention, and webhook automation remain disabled until their provider-specific phases ship.
+- **Merge-request automation:** creation, manual review addressing, registered-MR polling, automatic conflict resolution, CI repair, hosted relay delivery, and direct webhooks are experimental. Broad mention discovery and scheduled conflict windows remain unsupported.
 
 ## Troubleshooting
 
