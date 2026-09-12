@@ -5,13 +5,14 @@ import { tmpdir } from "os";
 
 import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/ci-failure-watcher-acquirer";
 import type {
-  CiConditionalResult,
   CiFailureWatcherGitHub,
-  CiFixResult,
   PolledCiPr,
   WatchedStatusState,
   WatchedWorkflowRun,
-} from "../src/lib/ci-failure-watcher-acquirer";
+} from "../src/lib/github-ci-provider";
+import { createGitHubCiProvider } from "../src/lib/github-ci-provider";
+import type { CiConditionalResult } from "../src/lib/ci-provider";
+import type { CiFixResult } from "../src/lib/ci-failure-watcher-acquirer";
 import { WebhookQueue } from "../src/lib/webhook-queue";
 import { WorkerState } from "../src/lib/worker-state";
 
@@ -175,7 +176,7 @@ describe("CiFailureWatcherAcquirer", () => {
       intervalSeconds: 60,
       workerState,
       queue,
-      github,
+      provider: createGitHubCiProvider(github),
       fixPr: async (repo, n) => {
         fixed.push(`${repo}#${n}`);
         return overrides.fixResults?.shift() ?? true;
@@ -269,7 +270,7 @@ describe("CiFailureWatcherAcquirer", () => {
       intervalSeconds: 60,
       workerState,
       queue,
-      github: makeGithub(gh),
+      provider: createGitHubCiProvider(makeGithub(gh)),
       watchedChanges: () => [{ repo: key, prNumber: 17 }],
       namespace: "gitlab",
       fixPr: async (repo, n, _path, expectedHead) => {

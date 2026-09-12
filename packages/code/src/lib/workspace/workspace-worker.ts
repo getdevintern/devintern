@@ -1,3 +1,5 @@
+import { createGitHubCiProvider } from "../github-ci-provider";
+import { createGitLabCiProvider } from "../gitlab-ci-provider";
 /**
  * Worker workspace (fleet) mode.
  *
@@ -1376,7 +1378,7 @@ export async function buildFleetEventAcquirers(options: {
       enabled: () => config.workspace.ciFailureFix,
       workerState: state.workerState,
       queue: state.queue,
-      github: {
+      provider: createGitHubCiProvider({
         fetchPr: async (repo, n, etag) => {
           try {
             return await gh.conditionalGet(
@@ -1430,7 +1432,7 @@ export async function buildFleetEventAcquirers(options: {
         },
         postComment: (repo, n, body) =>
           gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
-      },
+      }),
       fixPr,
       verbose,
     });
@@ -1694,10 +1696,6 @@ export async function buildFleetEventAcquirers(options: {
     intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
 
     const gitlabCiRows = new Map<string, Map<number, import("../worker-state").AgentPr>>();
-    const gitlabCiSnapshots = new Map<
-      string,
-      { sha: string; snapshot: import("../gitlab-reviews").GitLabCiSnapshot }
-    >();
     const ciKey = (mr: import("../worker-state").AgentPr) => `${mr.instanceUrl}:${mr.projectPath}`;
     const ciRow = (key: string, number?: number) => {
       const rows = gitlabCiRows.get(key);
@@ -1747,73 +1745,7 @@ export async function buildFleetEventAcquirers(options: {
           });
         }
       },
-      github: {
-        fetchPr: async (key, n) => {
-          const { mr, client } = resolveCi(key, n);
-          try {
-            const current = await client.getChangeRequest(mr.projectPath, n);
-            return {
-              data: {
-                state: current.state === "opened" ? "open" : current.state,
-                head: { sha: current.head.sha, repo: { full_name: key } },
-              },
-              notModified: false,
-            };
-          } catch (error) {
-            if ((error as Error).message.includes("GitLab API error (404)")) {
-              return { data: null, notModified: false, gone: true };
-            }
-            throw error;
-          }
-        },
-        fetchWorkflowRuns: async (key, sha) => {
-          const { mr, client } = resolveCi(key);
-          const snapshot = await client.getCiSnapshot(mr.projectPath, sha);
-          gitlabCiSnapshots.set(key, { sha, snapshot });
-          const runs: import("../ci-failure-watcher-acquirer").WatchedWorkflowRun[] =
-            snapshot.failures.map((failure, index) => ({
-              id: index + 1,
-              externalId: `gitlab:${mr.instanceUrl}:${failure.externalId}`,
-              name: failure.name,
-              status: "completed",
-              conclusion: failure.conclusion,
-              html_url: failure.detailsUrl,
-            }));
-          if (runs.length === 0 && snapshot.state === "pending") {
-            runs.push({ id: 0, name: "GitLab pipeline", status: "running", conclusion: null });
-          } else if (runs.length === 0 && snapshot.state === "success") {
-            runs.push({
-              id: 0,
-              name: "GitLab pipeline",
-              status: "completed",
-              conclusion: "success",
-            });
-          }
-          return { data: runs, notModified: false };
-        },
-        fetchCommitStatus: async (key, sha) => {
-          const cached = gitlabCiSnapshots.get(key);
-          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
-          return {
-            data: {
-              state: snapshot?.state ?? "unknown",
-              total_count: snapshot?.state === "unknown" ? 0 : 1,
-              statuses: [],
-            },
-            notModified: false,
-          };
-        },
-        fetchFailingJobLogs: async (key, sha) => {
-          const { mr, client } = resolveCi(key);
-          const cached = gitlabCiSnapshots.get(key);
-          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
-          return client.getJobTraces(mr.projectPath, snapshot?.jobIds ?? []);
-        },
-        postComment: async (key, n, body) => {
-          const { mr, client } = resolveCi(key, n);
-          await client.postMergeRequestNote(mr.projectId ?? mr.projectPath, n, body);
-        },
-      },
+      provider: createGitLabCiProvider(resolveCi),
       fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
         const { mr, client } = resolveCi(key, n);
         const current = await client.getChangeRequest(mr.projectPath, mr.changeNumber);

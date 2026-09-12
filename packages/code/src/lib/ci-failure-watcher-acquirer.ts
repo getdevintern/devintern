@@ -1,6 +1,6 @@
 /**
- * CI failure watcher acquirer (worker Mode 1, Tier 1): watch GitHub Actions
- * workflow runs and commit statuses on the agent's own PRs and auto-fix
+ * CI failure watcher acquirer (worker Mode 1, Tier 1): watch provider CI
+ * checks on the agent's own PRs and auto-fix
  * failures, closing the loop from "agent opened PR" to "PR green".
  *
  * Each tick, for every open PR in the `agent_prs` registry:
@@ -39,60 +39,7 @@ import type { Acquirer } from "../worker";
 import type { CiFailureFeedback } from "./review-formatter";
 import { serializePrRun } from "./review-polling-acquirer";
 
-export interface PolledCiPr {
-  state: string;
-  head?: {
-    sha: string;
-    /** Head repository; differs from the base repo for fork PRs. */
-    repo?: { full_name: string } | null;
-  };
-}
-
-export interface WatchedWorkflowRun {
-  id: number;
-  /** Provider-native durable identifier when a numeric run id is insufficient. */
-  externalId?: string;
-  name?: string;
-  /** `queued`, `in_progress`, `waiting`, or `completed`. */
-  status: string;
-  /** Terminal outcome; null while still executing. */
-  conclusion: string | null;
-  html_url?: string;
-}
-
-export interface WatchedStatusState {
-  state: string;
-  total_count: number;
-  statuses: Array<{ id: number; state: string; context?: string; target_url?: string | null }>;
-}
-
-/** GitHub access used by the watcher (injected for tests). */
-export interface CiFailureWatcherGitHub {
-  fetchPr(repo: string, prNumber: number, etag?: string): Promise<CiConditionalResult<PolledCiPr>>;
-  fetchWorkflowRuns(
-    repo: string,
-    sha: string,
-    etag?: string,
-  ): Promise<CiConditionalResult<WatchedWorkflowRun[]>>;
-  fetchCommitStatus(
-    repo: string,
-    sha: string,
-    etag?: string,
-  ): Promise<CiConditionalResult<WatchedStatusState>>;
-  /**
-   * Fetch raw log text of the failing Actions jobs for a SHA (workflow runs
-   * → jobs → job-log endpoint). Returns null on 403/404/scope problems.
-   */
-  fetchFailingJobLogs(repo: string, sha: string): Promise<string | null>;
-  /** Best-effort escalation comment on the PR conversation. */
-  postComment(repo: string, prNumber: number, body: string): Promise<void>;
-}
-
-export interface CiConditionalResult<T> {
-  data: T | null;
-  etag?: string;
-  notModified: boolean;
-}
+import type { CiProvider, CiAggregateState, CiFailure as PendingFailure } from "./ci-provider";
 
 /** Outcome of requesting one CI repair from the workspace executor. */
 export type CiFixResult = boolean | "deferred";
@@ -101,7 +48,7 @@ export interface CiFailureWatcherAcquirerOptions {
   intervalSeconds: number;
   workerState: WorkerState;
   queue: WebhookQueue;
-  github: CiFailureWatcherGitHub;
+  provider: CiProvider;
   /**
    * Fix CI failures on one PR given a feedback JSON path (injected for
    * tests). Resolves success when the fix was committed and pushed.
@@ -315,15 +262,6 @@ export function runCiFixViaCli(
   );
 }
 
-interface PendingFailure {
-  externalId: string;
-  name: string;
-  conclusion: string | null;
-  detailsUrl?: string;
-}
-
-type CiAggregateState = "unknown" | "empty" | "pending" | "success" | "failure";
-
 interface CachedCiSnapshot {
   sha: string;
   state: CiAggregateState;
@@ -469,19 +407,19 @@ export class CiFailureWatcherAcquirer implements Acquirer {
 
   /** Poll a single PR; triggers at most one fix attempt per poll. */
   private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
-    const { workerState, github, verbose } = this.options;
+    const { workerState, provider, verbose } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
     const prSource = `${this.namespace}:cipr:${repo}#${prNumber}`;
     const prCursor = workerState.getCursor(prSource);
-    const prResult = await github.fetchPr(repo, prNumber, prCursor?.etag);
-    if ((prResult as CiConditionalResult<PolledCiPr> & { gone?: boolean }).gone) {
+    const prResult = await provider.fetchChange(repo, prNumber, prCursor?.etag);
+    if (prResult.gone) {
       this.markClosed(repo, prNumber);
       return "removed";
     }
     if (!prResult.notModified) {
       if (prResult.etag) {
-        workerState.setCursor(prSource, prResult.data?.head?.sha ?? "", prResult.etag);
+        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
       }
       if (prResult.data && prResult.data.state !== "open") {
         console.log(
@@ -492,14 +430,14 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       }
     }
 
-    const headSha = prResult.notModified ? prCursor?.cursorValue : prResult.data?.head?.sha;
+    const headSha = prResult.notModified ? prCursor?.cursorValue : prResult.data?.headSha;
     if (!headSha) {
       return "active";
     }
 
     // Fork PRs: Actions usually does not run in the base repository for the
     // fork head. Skip quietly instead of burning requests or commenting.
-    const headRepo = prResult.data?.head?.repo?.full_name;
+    const headRepo = prResult.data?.headRepository;
     if (headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) {
       if (verbose) {
         console.log(
@@ -510,121 +448,39 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     const pending: PendingFailure[] = [];
-    let actionsState: CiAggregateState = "unknown";
-    let statusState: CiAggregateState = "unknown";
-
-    // 2. GitHub Actions workflow runs (ETag-cached): terminal failures only.
-    // This API is available to fine-grained PATs with Actions: Read; unlike
-    // the Checks API, it does not require a GitHub App or classic PAT.
-    const actionsSource = `${this.namespace}:ciactions:${repo}#${prNumber}`;
-    const actionsCursor = workerState.getCursor(actionsSource);
-    const cachedActions = parseSnapshot(actionsCursor?.cursorValue);
-    const actionsResult = await github.fetchWorkflowRuns(
-      repo,
-      headSha,
-      cachedActions?.sha === headSha ? actionsCursor?.etag : undefined,
-    );
-    if (actionsResult.notModified && cachedActions?.sha === headSha) {
-      actionsState = cachedActions.state;
-      pending.push(...cachedActions.failures);
-    }
-    if (!actionsResult.notModified && actionsResult.data) {
-      let sawActionSuccess = false;
-      let sawActionPending = false;
-      const actionFailures: PendingFailure[] = [];
-      for (const run of actionsResult.data) {
-        if (run.status !== "completed") {
-          sawActionPending = true;
-          continue;
-        }
-        if (run.conclusion === "success") {
-          sawActionSuccess = true;
-          continue;
-        }
-        if (run.conclusion !== "failure" && run.conclusion !== "timed_out") {
-          continue;
-        }
-        actionFailures.push({
-          externalId: run.externalId ?? `action:${repo}#${prNumber}:${headSha}:${run.id}`,
-          name: run.name ?? `workflow-run-${run.id}`,
-          conclusion: run.conclusion,
-          detailsUrl: run.html_url,
-        });
-      }
-      actionsState =
-        actionFailures.length > 0
-          ? "failure"
-          : sawActionPending
-            ? "pending"
-            : actionsResult.data.length === 0
-              ? "empty"
-              : sawActionSuccess || actionsResult.data.every((run) => run.status === "completed")
-                ? "success"
-                : "unknown";
-      pending.push(...actionFailures);
-      workerState.setCursor(
-        actionsSource,
-        JSON.stringify({ sha: headSha, state: actionsState, failures: actionFailures }),
-        actionsResult.etag,
+    const states: CiAggregateState[] = [];
+    let ciChanged = !prResult.notModified;
+    for (const stream of provider.streams) {
+      const source = `${this.namespace}:${stream.key}:${repo}#${prNumber}`;
+      const cursor = workerState.getCursor(source);
+      const cached = parseSnapshot(cursor?.cursorValue);
+      const result = await stream.fetch(
+        repo,
+        prNumber,
+        headSha,
+        cached?.sha === headSha ? cursor?.etag : undefined,
       );
-    }
-
-    // 3. Combined commit status (ETag-cached): non-Actions reporters.
-    const statusSource = `${this.namespace}:cistatus:${repo}#${prNumber}`;
-    const statusCursor = workerState.getCursor(statusSource);
-    const cachedStatus = parseSnapshot(statusCursor?.cursorValue);
-    const statusResult = await github.fetchCommitStatus(
-      repo,
-      headSha,
-      cachedStatus?.sha === headSha ? statusCursor?.etag : undefined,
-    );
-    if (statusResult.notModified && cachedStatus?.sha === headSha) {
-      statusState = cachedStatus.state;
-      pending.push(...cachedStatus.failures);
-    }
-    if (!statusResult.notModified && statusResult.data) {
-      const statusFailures: PendingFailure[] = [];
-      for (const status of statusResult.data.statuses) {
-        if (status.state !== "failure" && status.state !== "error") {
-          continue;
-        }
-        statusFailures.push({
-          externalId: `check:${repo}#${prNumber}:${headSha}:status:${status.context ?? status.id}`,
-          name: status.context ?? `commit-status-${status.id}`,
-          conclusion: status.state,
-          detailsUrl: status.target_url ?? undefined,
-        });
+      ciChanged ||= !result.notModified;
+      const observation = result.notModified
+        ? cached?.sha === headSha
+          ? cached
+          : null
+        : result.data;
+      states.push(observation?.state ?? "unknown");
+      pending.push(...(observation?.failures ?? []));
+      if (!result.notModified && result.data) {
+        workerState.setCursor(
+          source,
+          JSON.stringify({ sha: headSha, ...result.data }),
+          result.etag,
+        );
       }
-      statusState =
-        statusFailures.length > 0
-          ? "failure"
-          : statusResult.data.total_count === 0
-            ? "empty"
-            : statusResult.data.state === "pending"
-              ? "pending"
-              : statusResult.data.state === "success"
-                ? "success"
-                : "unknown";
-      pending.push(...statusFailures);
-      workerState.setCursor(
-        statusSource,
-        JSON.stringify({ sha: headSha, state: statusState, failures: statusFailures }),
-        statusResult.etag,
-      );
     }
-
-    // Fully green observation: zero the attempt counter. A mixed result
-    // (some workflows pass, others fail) must NOT keep refunding the budget.
     const fullyGreen =
       pending.length === 0 &&
-      (actionsState === "success" || actionsState === "empty") &&
-      (statusState === "success" || statusState === "empty") &&
-      (actionsState === "success" || statusState === "success");
-    if (fullyGreen) {
-      this.resetRetryBudget(repo, prNumber, "CI passed");
-    }
-    const ciChanged =
-      !prResult.notModified || !actionsResult.notModified || !statusResult.notModified;
+      states.every((state) => state === "success" || state === "empty") &&
+      states.some((state) => state === "success");
+    if (fullyGreen) this.resetRetryBudget(repo, prNumber, "CI passed");
 
     // 4. Split failures into fresh vs already-handled. Mark only after a
     // successful invocation so crashes/no-op runs remain retryable.
@@ -758,13 +614,13 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.options.now?.() ?? Date.now();
   }
 
-  /** Collect an error-focused excerpt from failing GitHub Actions job logs. */
+  /** Collect an error-focused excerpt from failing provider job logs. */
   private async collectLogs(repo: string, headSha: string): Promise<string | null> {
-    const { github, verbose } = this.options;
+    const { provider, verbose } = this.options;
 
     let rawLogs: string | null = null;
     try {
-      rawLogs = await github.fetchFailingJobLogs(repo, headSha);
+      rawLogs = await provider.fetchFailingJobLogs(repo, headSha);
     } catch (error) {
       if (verbose) {
         console.warn(`   ⚠️  [${this.name}] job log fetch failed: ${(error as Error).message}`);
@@ -810,7 +666,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       (this.options.escalationRecoveryText ??
         "Push a new commit (or mention me) and I will take another look.");
     try {
-      await this.options.github.postComment(repo, prNumber, body);
+      await this.options.provider.postComment(repo, prNumber, body);
       console.log(
         `📣 [${this.name}] ${this.describe(repo, prNumber)}: posted escalation comment after ` +
           `${this.maxAttempts} failed attempt(s)`,
