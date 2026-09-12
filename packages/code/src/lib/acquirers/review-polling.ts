@@ -39,7 +39,7 @@ import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler"
 import { isGitHubAuthError } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation-config";
 import type { CronOrIntervalSchedule } from "../automation-config";
-import { parseEnvInteger } from "../env-integer";
+import { parseEnvInteger } from "../config/env-integer";
 import type { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";

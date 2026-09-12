@@ -1,5 +1,5 @@
 import { createReviewAdapter } from "../code-host/review-provider-factory";
-import { assertCurrentGitLabOrigin } from "../change-origin";
+import { assertCurrentGitLabOrigin } from "../code-host/change-origin";
 /**
  * Address Review Command
  *
@@ -19,7 +19,7 @@ import { readFileSync } from "fs";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
-import { getSandbox } from "../sandbox";
+import { getSandbox } from "../agent/sandbox";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";

@@ -39,7 +39,7 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
+import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/agent/sandbox";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
@@ -72,7 +72,7 @@ import {
 } from "./lib/review/auto-review-config";
 import { TaskFormatter } from "./lib/task/formatter";
 import type { RetryPromptContext } from "./lib/task/formatter";
-import { resolveOutputDir } from "./lib/output-dir";
+import { resolveOutputDir } from "./lib/config/output-dir";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
 import { scaffoldProject } from "./lib/init-scaffold";
 import { isInteractive, runInitWizard } from "./lib/init-wizard";
@@ -119,7 +119,7 @@ import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
-import { isAutomatedEnvironment } from "./lib/env-detector";
+import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
 // Version is injected at build time via --define flag, or read from package.json in dev

@@ -24,9 +24,9 @@ import {
 } from "@devintern/agent-harness";
 import type { ResolvedHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent/spawn";
-import { parseEnvInteger } from "./lib/env-integer";
+import { parseEnvInteger } from "./lib/config/env-integer";
 import { resolveAgentEffort, resolveAgentModel } from "./lib/agent/model";
-import { getSandbox } from "./lib/sandbox";
+import { getSandbox } from "./lib/agent/sandbox";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";

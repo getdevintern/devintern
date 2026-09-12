@@ -1,6 +1,6 @@
-import { parseGitRemoteUrl, parseGitLabHostAliases } from "./code-host";
-import type { ChangeRequestIdentity, GitRemoteParseOptions } from "./code-host";
-import { Utils } from "./utils";
+import { parseGitRemoteUrl, parseGitLabHostAliases } from "./index";
+import type { ChangeRequestIdentity, GitRemoteParseOptions } from "./index";
+import { Utils } from "../utils";
 
 /** Check the instance as well as the full namespace before operating on a checkout. */
 export function assertGitLabOrigin(
