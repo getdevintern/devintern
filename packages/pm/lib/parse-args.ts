@@ -38,32 +38,38 @@ export type ParsedArgs =
   | { connect: string };
 
 /**
- * Parse CLI arguments from an argv slice (typically `getArgs()`).
- *
- * @param argv - Raw argv without the node/bun binary and script path.
- * @returns Parsed task-creation args, `null` for interactive mode, a command sentinel,
- *   or exits the process on `--help`/validation errors.
+ * Canonical option names. Short aliases map onto the long form so the parse
+ * loop can test a single canonical name instead of a chain of `||` aliases.
  */
-export function parseArgs(argv: string[]): ParsedArgs {
-  const args = argv;
+const FLAG_ALIASES: Record<string, string> = {
+  "--figma": "figma",
+  "--log": "log",
+  "--prompt": "prompt",
+  "--epic": "epic",
+  "-e": "epic",
+  "--type": "type",
+  "-t": "type",
+  "--custom": "custom",
+  "-c": "custom",
+  "--attach": "attach",
+  "--style": "style",
+  "-s": "style",
+  "--model": "model",
+  "-m": "model",
+  "--effort": "effort",
+  "--harness": "harness",
+  "--decompose": "decompose",
+  "--confirm": "confirm",
+  "--verbose": "verbose",
+  "-v": "verbose",
+  "--no-update": "no-update",
+  "--version": "version",
+  "-V": "version",
+  "--yes": "yes",
+  "--no-interactive": "no-interactive",
+};
 
-  // Check for init command early
-  if (args.includes("init") || args.includes("--init")) {
-    return "init"; // Signal to run init
-  }
-  if (args.includes("login")) return "login";
-  if (args.includes("logout")) return "logout";
-  if (args.includes("whoami")) return "whoami";
-  if (args[0] === "serve") return "serve";
-  if (args[0] === "connect") return { connect: args[1] ?? "" };
-
-  // Check for interactive mode early
-  if (args.includes("--interactive")) {
-    return null; // Signal to use interactive mode
-  }
-
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
-    console.log(`
+const HELP_TEXT = `
 Usage: devpm init [--yes]
        devpm login [method|email]
        devpm logout
@@ -165,9 +171,75 @@ Examples:
   devpm --prompt "Implement OAuth login" --style technical --decompose
   devpm --prompt "..." --harness codex
   devpm --prompt "Refine checkout" --attach ./notes.md --attach ./shot.png
-    `);
+    `;
+
+/** Detect command sentinels (`init`, `login`, `serve`, …) before option parsing. */
+function detectCommand(args: string[]): ParsedArgs | undefined {
+  if (args.includes("init") || args.includes("--init")) return "init";
+  if (args.includes("login")) return "login";
+  if (args.includes("logout")) return "logout";
+  if (args.includes("whoami")) return "whoami";
+  if (args[0] === "serve") return "serve";
+  if (args[0] === "connect") return { connect: args[1] ?? "" };
+  return undefined;
+}
+
+/** Print usage and exit when help was requested or no args were supplied. */
+function showHelpIfRequested(args: string[]): void {
+  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+    console.log(HELP_TEXT);
     process.exit(0);
   }
+}
+
+/** Read the value following a flag, or exit with `message` when it is missing. */
+function readOptionValue(args: string[], index: number, message: string): string {
+  if (index + 1 >= args.length) {
+    console.error(message);
+    process.exit(1);
+  }
+  return args[index + 1]!;
+}
+
+/** Assign the single source input, rejecting a second source flag. */
+function assignSource(
+  current: SourceInput | undefined,
+  type: SourceInput["type"],
+  content: string,
+): SourceInput {
+  if (current) {
+    console.error("Error: Cannot specify multiple source types (--figma, --log, --prompt)");
+    process.exit(1);
+  }
+  return { type, content };
+}
+
+/** Validate a `--style` value, exiting on anything but `pm`/`technical`. */
+function parsePromptStyle(value: string): "technical" | "pm" {
+  if (value === "technical" || value === "pm") return value;
+  console.error('Error: --style must be either "technical" or "pm"');
+  process.exit(1);
+}
+
+/**
+ * Parse CLI arguments from an argv slice (typically `getArgs()`).
+ *
+ * @param argv - Raw argv without the node/bun binary and script path.
+ * @returns Parsed task-creation args, `null` for interactive mode, a command sentinel,
+ *   or exits the process on `--help`/validation errors.
+ */
+export function parseArgs(argv: string[]): ParsedArgs {
+  const args = argv;
+
+  const command = detectCommand(args);
+  if (command !== undefined) return command;
+
+  // Check for interactive mode early
+  if (args.includes("--interactive")) {
+    return null; // Signal to use interactive mode
+  }
+
+  showHelpIfRequested(args);
 
   let source: SourceInput | undefined;
   let epicKey: string | undefined;
@@ -180,129 +252,78 @@ Examples:
   let issueType = "Task"; // Default to Task
   const attachments: Array<{ path: string }> = [];
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (!arg) continue; // Skip undefined args (shouldn't happen but satisfies TS)
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i]!;
+    const flag = FLAG_ALIASES[arg] ?? arg;
+    let consumed = 1;
 
-    if (arg === "--figma") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --figma requires a URL");
-        process.exit(1);
-      }
-      if (source) {
-        console.error("Error: Cannot specify multiple source types (--figma, --log, --prompt)");
-        process.exit(1);
-      }
-      source = {
-        type: "figma",
-        content: args[i + 1]!,
-      };
-      i++; // Skip next arg
-    } else if (arg === "--log") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --log requires text content");
-        process.exit(1);
-      }
-      if (source) {
-        console.error("Error: Cannot specify multiple source types (--figma, --log, --prompt)");
-        process.exit(1);
-      }
-      source = {
-        type: "log",
-        content: args[i + 1]!,
-      };
-      i++; // Skip next arg
-    } else if (arg === "--prompt") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --prompt requires text content");
-        process.exit(1);
-      }
-      if (source) {
-        console.error("Error: Cannot specify multiple source types (--figma, --log, --prompt)");
-        process.exit(1);
-      }
-      source = {
-        type: "prompt",
-        content: args[i + 1]!,
-      };
-      i++; // Skip next arg
-    } else if (arg === "--epic" || arg === "-e") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --epic requires a value");
-        process.exit(1);
-      }
-      epicKey = args[i + 1]!; // Non-null assertion safe due to check above
-      i++; // Skip next arg
-    } else if (arg === "--type" || arg === "-t") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --type requires a value");
-        process.exit(1);
-      }
-      issueType = args[i + 1]!; // Non-null assertion safe due to check above
-      i++; // Skip next arg
-    } else if (arg === "--custom" || arg === "-c") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --custom requires a value");
-        process.exit(1);
-      }
-      customInstructions = args[i + 1]!; // Non-null assertion safe due to check above
-      i++; // Skip next arg
-    } else if (arg === "--attach") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --attach requires a file path");
-        process.exit(1);
-      }
-      attachments.push({ path: resolve(args[i + 1]!) });
-      i++;
-    } else if (arg === "--style" || arg === "-s") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --style requires a value");
-        process.exit(1);
-      }
-      const style = args[i + 1]!;
-      if (style !== "technical" && style !== "pm") {
-        console.error('Error: --style must be either "technical" or "pm"');
-        process.exit(1);
-      }
-      promptStyle = style;
-      i++; // Skip next arg
-    } else if (arg === "--model" || arg === "-m") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --model requires a value");
-        process.exit(1);
-      }
-      model = args[i + 1]!; // Non-null assertion safe due to check above
-      i++; // Skip next arg
-    } else if (arg === "--effort") {
+    if (flag === "figma") {
+      source = assignSource(
+        source,
+        "figma",
+        readOptionValue(args, i, "Error: --figma requires a URL"),
+      );
+      consumed = 2;
+    } else if (flag === "log") {
+      source = assignSource(
+        source,
+        "log",
+        readOptionValue(args, i, "Error: --log requires text content"),
+      );
+      consumed = 2;
+    } else if (flag === "prompt") {
+      source = assignSource(
+        source,
+        "prompt",
+        readOptionValue(args, i, "Error: --prompt requires text content"),
+      );
+      consumed = 2;
+    } else if (flag === "epic") {
+      epicKey = readOptionValue(args, i, "Error: --epic requires a value");
+      consumed = 2;
+    } else if (flag === "type") {
+      issueType = readOptionValue(args, i, "Error: --type requires a value");
+      consumed = 2;
+    } else if (flag === "custom") {
+      customInstructions = readOptionValue(args, i, "Error: --custom requires a value");
+      consumed = 2;
+    } else if (flag === "attach") {
+      const path = readOptionValue(args, i, "Error: --attach requires a file path");
+      attachments.push({ path: resolve(path) });
+      consumed = 2;
+    } else if (flag === "style") {
+      promptStyle = parsePromptStyle(readOptionValue(args, i, "Error: --style requires a value"));
+      consumed = 2;
+    } else if (flag === "model") {
+      model = readOptionValue(args, i, "Error: --model requires a value");
+      consumed = 2;
+    } else if (flag === "effort") {
       effort = parseEffortValue(args, i);
-      i++; // Skip next arg
-    } else if (arg === "--harness") {
+      consumed = 2;
+    } else if (flag === "harness") {
       // Consumed by extractHarnessFlags() before parseArgs() runs; the value
       // is validated exactly once in main(). Skip here to avoid treating it
       // as an unknown argument.
-      if (i + 1 >= args.length) {
-        console.error("Error: --harness requires a value");
-        process.exit(1);
-      }
-      i++;
-    } else if (arg === "--decompose") {
+      readOptionValue(args, i, "Error: --harness requires a value");
+      consumed = 2;
+    } else if (flag === "decompose") {
       decompose = true;
-    } else if (arg === "--confirm") {
+    } else if (flag === "confirm") {
       confirm = true;
-    } else if (arg === "--verbose" || arg === "-v") {
+    } else if (flag === "verbose") {
       // Handled before parseArgs() is called; skip here
-      continue;
-    } else if (arg === "--no-update" || arg === "--version" || arg === "-V") {
+    } else if (flag === "no-update" || flag === "version") {
       // Handled before parseArgs() / inside maybeOfferCliUpdate; skip here
-      continue;
-    } else if (arg === "--yes" || arg === "--no-interactive") {
+    } else if (flag === "yes" || flag === "no-interactive") {
       // Init-only flags; ignored outside init (init returns early above).
-      continue;
     } else {
       console.error(`Error: Unknown argument "${arg}"`);
       console.error("Use --help to see available options");
       process.exit(1);
     }
+
+    i += consumed;
   }
 
   if (!source) {
