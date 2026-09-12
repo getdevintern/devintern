@@ -53,15 +53,14 @@
     "react/display-name": "error",
     "react/hook-use-state": "error",
 
-    // Code complexity / size metrics. The size rules are intentionally off for now:
-    // they flag a handful of outliers (packages/code/src/index.ts alone is 4.5k lines,
-    // complexity 126, one 262-statement function, 20 params). Flip them on once those
-    // files are split, or they become a permanent wall of warnings.
-    "complexity": ["warn", 20],
-    "max-depth": ["warn", 5],
-    "max-params": ["warn", 5],
+    // Code complexity / size metrics, tuned to flag genuine outliers rather than
+    // every moderately long function. The size rules stay off for now; flip them on
+    // once the remaining outliers (complexity >= 30, > 7 params, depth 7) are split.
+    "complexity": ["warn", 30],
+    "max-depth": ["warn", 6],
+    "max-params": ["warn", 7],
     "max-nested-callbacks": ["warn", 10],
-    "max-classes-per-file": "warn",
+    "max-classes-per-file": ["warn", 3],
     "max-lines": "off",
     "max-lines-per-function": "off",
     "max-statements": "off",
@@ -146,8 +145,11 @@
         "react/no-array-index-key": "off",
         "import/no-named-as-default": "off",
         "import/no-named-as-default-member": "off",
-        // Long/nested tests are legitimate; keep the size metrics off here so the
-        // deferred rules above can be flipped on later without test noise.
+        // Long/nested tests are legitimate; keep the size/complexity metrics off
+        // here so the deferred rules above can be flipped on later without test noise.
+        "complexity": "off",
+        "max-depth": "off",
+        "max-params": "off",
         "max-lines": "off",
         "max-lines-per-function": "off",
         "max-statements": "off",
