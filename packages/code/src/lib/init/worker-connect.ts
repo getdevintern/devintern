@@ -235,6 +235,283 @@ export function workspaceGitLabRelayProjects(
   return [...projects.values()];
 }
 
+/** Validate the parsed flags; returns an error message or undefined when valid. */
+function validateConnectArgs(parsed: ParsedConnectArgs): string | undefined {
+  if (!WORKER_CONNECT_TARGETS.has(parsed.target)) {
+    return (
+      `Unsupported connect target '${parsed.target}'. ` +
+      "Available: github, gitlab, linear, asana, trello, azure-devops, jira, sentry, status."
+    );
+  }
+  if (
+    parsed.team &&
+    (parsed.target === "github" ||
+      parsed.target === "gitlab" ||
+      parsed.target === "all" ||
+      parsed.target === "status" ||
+      parsed.target === "sentry")
+  ) {
+    return "--team is only valid for tracker connect targets.";
+  }
+  if (parsed.repo && parsed.target !== "sentry") {
+    return "--repo is only valid for Sentry connect.";
+  }
+  if (parsed.disconnect && parsed.target !== "gitlab") {
+    return "--disconnect is only valid for the GitLab connect target.";
+  }
+  return undefined;
+}
+
+interface ConnectWorkspace {
+  workspaceDir: string;
+  configPath: string;
+  config: WorkspaceConfig;
+}
+
+/**
+ * Resolve the workspace/config paths, load `workspace.toml`, and layer the
+ * workspace `.env` under any existing shell values.
+ *
+ * @returns The resolved workspace, or an error message to print.
+ */
+function resolveConnectWorkspace(
+  parsed: ParsedConnectArgs,
+  deps: WorkerConnectCommandDeps,
+): ConnectWorkspace | { error: string } {
+  const selectedWorkspacePath = deps.workspacePath ?? parsed.workspacePath;
+  const workspaceDir =
+    deps.workspaceDir ??
+    (selectedWorkspacePath ? dirname(resolve(selectedWorkspacePath)) : resolveWorkspaceDir());
+  const configPath = selectedWorkspacePath
+    ? resolve(selectedWorkspacePath)
+    : workspaceConfigPath(workspaceDir);
+
+  if (!existsSync(configPath)) {
+    return {
+      error: `No workspace found at ${configPath}. Run \`devintern worker init\` first.`,
+    };
+  }
+
+  let config: WorkspaceConfig;
+  try {
+    config = loadWorkspaceConfig(configPath);
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+  return { workspaceDir, configPath, config };
+}
+
+/** Build relay-connect deps, memoizing a single access-token lookup. */
+function createWorkspaceConnectDeps(
+  deps: WorkerConnectCommandDeps,
+  workspaceDir: string,
+): WorkspaceRelayConnectDeps {
+  let accessTokenPromise: Promise<string> | undefined;
+  return {
+    workingDir: workspaceDir,
+    relayUrl: deps.relayUrl,
+    fetchImpl: deps.fetchImpl,
+    getAccessToken: deps.getAccessToken
+      ? () => (accessTokenPromise ??= deps.getAccessToken!())
+      : undefined,
+  };
+}
+
+/** Drive GitHub then GitLab connect for the `all` target, sharing one token lookup. */
+async function runAllConnectTargets(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  configPath: string,
+  deps: WorkerConnectCommandDeps,
+): Promise<number> {
+  let accessTokenPromise: Promise<string> | undefined;
+  const sharedDeps: WorkerConnectCommandDeps = {
+    ...deps,
+    parsed: undefined,
+    workspaceDir,
+    workspacePath: configPath,
+    getAccessToken: deps.getAccessToken
+      ? () => (accessTokenPromise ??= deps.getAccessToken!())
+      : undefined,
+  };
+  let failures = 0;
+  if (workspaceRelayRepos(config).length > 0) {
+    if ((await runWorkerConnectCommand(["github"], sharedDeps)) !== 0) failures++;
+  } else {
+    console.log("   No GitHub repositories found; skipping GitHub relay setup.");
+  }
+  if (workspaceGitLabRelayProjects(config, workspaceDir).length > 0) {
+    if ((await runWorkerConnectCommand(["gitlab"], sharedDeps)) !== 0) failures++;
+  } else {
+    console.log("   No GitLab repositories found; skipping GitLab relay setup.");
+  }
+  return failures === 0 ? 0 : 1;
+}
+
+/** Add or validate a Sentry error-monitor project. */
+async function runSentryConnectTarget(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  parsed: ParsedConnectArgs,
+  deps: WorkerConnectCommandDeps,
+): Promise<number> {
+  if (!deps.prompt && !process.stdin.isTTY) {
+    console.error("❌ 'devintern worker connect sentry' is interactive; run it in a terminal.");
+    return 1;
+  }
+  let repoName = parsed.repo;
+  if (!repoName && config.repos.length > 1) {
+    const remote = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
+      cwd: deps.cwd ?? process.cwd(),
+    });
+    if (remote.success) {
+      repoName = config.repos.find((repo) => repo.remote === remote.output.trim())?.name;
+    }
+  }
+  const result = await runWorkerSentrySetup({
+    workspaceDir,
+    repoName,
+    prompt: deps.prompt,
+    validateSentry: deps.validateSentry,
+  });
+  return result.ok ? 0 : 1;
+}
+
+/** Resolve a tracker target's team selection into an env overlay, or an error. */
+function resolveTrackerTeamEnv(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  target: RelayConnectTarget,
+  requestedTeam: string | undefined,
+): { error: string } | { env?: Record<string, string | undefined> } {
+  const matchingTeams = config.teams.filter(
+    (team) => team.tracker.toLowerCase() === target.toLowerCase(),
+  );
+  if (matchingTeams.length > 1) {
+    return {
+      error:
+        `${matchingTeams.length} teams use ${target} (${matchingTeams.map((team) => team.name).join(", ")}). ` +
+        "The relay identifies tracker type but not team registration, so this source remains polling-only.",
+    };
+  }
+  const selectedTeam = requestedTeam
+    ? config.teams.find((team) => team.name === requestedTeam)
+    : matchingTeams[0];
+  if (requestedTeam && !selectedTeam) {
+    return { error: `Unknown workspace team '${requestedTeam}'.` };
+  }
+  if (selectedTeam && selectedTeam.tracker.toLowerCase() !== target.toLowerCase()) {
+    return { error: `Team '${selectedTeam.name}' uses ${selectedTeam.tracker}, not ${target}.` };
+  }
+  if (!selectedTeam) {
+    return {};
+  }
+  console.log(`🔗 Connecting ${target} for team '${selectedTeam.name}'.`);
+  return { env: { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) } };
+}
+
+/** Print relay status plus any workspace repos/projects still missing registrations. */
+async function runStatusConnectTarget(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  runConnect: typeof connectRelayTarget,
+  connectDeps: WorkspaceRelayConnectDeps,
+): Promise<number> {
+  const result = await runConnect("status", connectDeps);
+  if (result !== 0) return result;
+
+  const missing = unverifiedWorkspaceRelayRepos(config, workspaceDir);
+  if (missing.length === 0) {
+    console.log("   All workspace GitHub repositories are verified.");
+  } else {
+    console.log(`   Unverified workspace repositories: ${missing.join(", ")}`);
+    console.log("   Run: devintern worker connect github");
+  }
+  const relayState = loadRelayState(workspaceDir);
+  const gitlabProjects = workspaceGitLabRelayProjects(config, workspaceDir);
+  const missingGitLab = gitlabProjects.filter(
+    (project) => !hasGitLabRelayRegistration(relayState, project.instanceUrl, project.projectPath),
+  );
+  if (gitlabProjects.length > 0 && missingGitLab.length === 0) {
+    console.log("   All workspace GitLab projects have local relay registrations.");
+  } else if (missingGitLab.length > 0) {
+    console.log(
+      `   GitLab projects without local relay registration: ${missingGitLab.map((project) => project.projectPath).join(", ")}`,
+    );
+    console.log("   Run: devintern worker connect gitlab");
+  }
+  return 0;
+}
+
+/** Install (or, with `--disconnect`, remove) relay hooks for every GitLab project. */
+async function runGitLabConnectTargets(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  disconnect: boolean,
+  runConnect: typeof connectRelayTarget,
+  connectDeps: WorkspaceRelayConnectDeps,
+): Promise<number> {
+  const projects = workspaceGitLabRelayProjects(config, workspaceDir);
+  if (projects.length === 0) {
+    console.error("❌ No GitLab repositories found in workspace.toml.");
+    return 1;
+  }
+  let failures = 0;
+  for (const project of projects) {
+    console.log(`🔗 Connecting GitLab project ${project.projectPath} (${project.repoName}).`);
+    const result = await runConnect("gitlab", {
+      ...connectDeps,
+      env: project.env,
+      gitlabProject: {
+        instanceUrl: project.instanceUrl,
+        projectPath: project.projectPath,
+      },
+      disconnectGitLab: disconnect,
+    });
+    if (result !== 0) failures++;
+  }
+  if (failures > 0) {
+    console.error(`❌ ${failures} GitLab project hook setup(s) failed; polling remains enabled.`);
+    return 1;
+  }
+  console.log("✅ All workspace GitLab projects are connected for relay delivery.");
+  return 0;
+}
+
+/** Verify every workspace GitHub repository, skipping ones already paired. */
+async function runGitHubConnectTargets(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  runConnect: typeof connectRelayTarget,
+  connectDeps: WorkspaceRelayConnectDeps,
+): Promise<number> {
+  const repos = workspaceRelayRepos(config);
+  if (repos.length === 0) {
+    console.error("❌ No GitHub repositories found in workspace.toml.");
+    return 1;
+  }
+  const state = loadRelayState(workspaceDir);
+  let failures = 0;
+  for (const repo of repos) {
+    if (hasGitHubRelayRegistration(state, repo)) {
+      console.log(`✅ ${repo} is already verified; skipping.`);
+      continue;
+    }
+    const result = await runConnect("github", { ...connectDeps, repo });
+    if (result !== 0) failures++;
+  }
+  if (failures > 0) {
+    console.error(`❌ ${failures} workspace repository pairing(s) failed.`);
+    return 1;
+  }
+  console.log("✅ All workspace GitHub repositories are verified for relay delivery.");
+  return 0;
+}
+
 /** Run the public, workspace-only `devintern worker connect` command. */
 export async function runWorkerConnectCommand(
   args: string[],
@@ -249,228 +526,53 @@ export async function runWorkerConnectCommand(
     console.error(`❌ ${parsed.error}`);
     return 1;
   }
-  if (!WORKER_CONNECT_TARGETS.has(parsed.target)) {
-    console.error(
-      `❌ Unsupported connect target '${parsed.target}'. ` +
-        "Available: github, gitlab, linear, asana, trello, azure-devops, jira, sentry, status.",
-    );
-    return 1;
-  }
-  if (
-    parsed.team &&
-    (parsed.target === "github" ||
-      parsed.target === "gitlab" ||
-      parsed.target === "all" ||
-      parsed.target === "status" ||
-      parsed.target === "sentry")
-  ) {
-    console.error("❌ --team is only valid for tracker connect targets.");
-    return 1;
-  }
-  if (parsed.repo && parsed.target !== "sentry") {
-    console.error("❌ --repo is only valid for Sentry connect.");
-    return 1;
-  }
-  if (parsed.disconnect && parsed.target !== "gitlab") {
-    console.error("❌ --disconnect is only valid for the GitLab connect target.");
+  const validationError = validateConnectArgs(parsed);
+  if (validationError) {
+    console.error(`❌ ${validationError}`);
     return 1;
   }
 
-  const selectedWorkspacePath = deps.workspacePath ?? parsed.workspacePath;
-  const workspaceDir =
-    deps.workspaceDir ??
-    (selectedWorkspacePath ? dirname(resolve(selectedWorkspacePath)) : resolveWorkspaceDir());
-  const configPath = selectedWorkspacePath
-    ? resolve(selectedWorkspacePath)
-    : workspaceConfigPath(workspaceDir);
+  const workspace = resolveConnectWorkspace(parsed, deps);
+  if ("error" in workspace) {
+    console.error(`❌ ${workspace.error}`);
+    return 1;
+  }
+  const { workspaceDir, configPath, config } = workspace;
   const runConnect = deps.runConnect ?? connectRelayTarget;
 
-  if (!existsSync(configPath)) {
-    console.error(`❌ No workspace found at ${configPath}. Run \`devintern worker init\` first.`);
-    return 1;
-  }
-
-  let config: WorkspaceConfig;
-  try {
-    config = loadWorkspaceConfig(configPath);
-  } catch (error) {
-    console.error(`❌ ${(error as Error).message}`);
-    return 1;
-  }
-
-  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
-
   if (parsed.target === "all") {
-    let accessTokenPromise: Promise<string> | undefined;
-    const sharedDeps: WorkerConnectCommandDeps = {
-      ...deps,
-      parsed: undefined,
-      workspaceDir,
-      workspacePath: configPath,
-      getAccessToken: deps.getAccessToken
-        ? () => (accessTokenPromise ??= deps.getAccessToken!())
-        : undefined,
-    };
-    let failures = 0;
-    if (workspaceRelayRepos(config).length > 0) {
-      if ((await runWorkerConnectCommand(["github"], sharedDeps)) !== 0) failures++;
-    } else {
-      console.log("   No GitHub repositories found; skipping GitHub relay setup.");
-    }
-    if (workspaceGitLabRelayProjects(config, workspaceDir).length > 0) {
-      if ((await runWorkerConnectCommand(["gitlab"], sharedDeps)) !== 0) failures++;
-    } else {
-      console.log("   No GitLab repositories found; skipping GitLab relay setup.");
-    }
-    return failures === 0 ? 0 : 1;
+    return runAllConnectTargets(config, workspaceDir, configPath, deps);
   }
-
   if (parsed.target === "sentry") {
-    if (!deps.prompt && !process.stdin.isTTY) {
-      console.error("❌ 'devintern worker connect sentry' is interactive; run it in a terminal.");
-      return 1;
-    }
-    let repoName = parsed.repo;
-    if (!repoName && config.repos.length > 1) {
-      const remote = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
-        cwd: deps.cwd ?? process.cwd(),
-      });
-      if (remote.success) {
-        repoName = config.repos.find((repo) => repo.remote === remote.output.trim())?.name;
-      }
-    }
-    const result = await runWorkerSentrySetup({
-      workspaceDir,
-      repoName,
-      prompt: deps.prompt,
-      validateSentry: deps.validateSentry,
-    });
-    return result.ok ? 0 : 1;
+    return runSentryConnectTarget(config, workspaceDir, parsed, deps);
   }
 
   const target = parsed.target as RelayConnectTarget;
+  const connectDeps = createWorkspaceConnectDeps(deps, workspaceDir);
 
-  let accessTokenPromise: Promise<string> | undefined;
-  const connectDeps: WorkspaceRelayConnectDeps = {
-    workingDir: workspaceDir,
-    relayUrl: deps.relayUrl,
-    fetchImpl: deps.fetchImpl,
-    getAccessToken: deps.getAccessToken
-      ? () => (accessTokenPromise ??= deps.getAccessToken!())
-      : undefined,
-  };
-
-  if (target !== "github" && target !== "gitlab" && target !== "status") {
-    const matchingTeams = config.teams.filter(
-      (team) => team.tracker.toLowerCase() === target.toLowerCase(),
-    );
-    if (matchingTeams.length > 1) {
-      console.error(
-        `❌ ${matchingTeams.length} teams use ${target} (${matchingTeams.map((team) => team.name).join(", ")}). ` +
-          "The relay identifies tracker type but not team registration, so this source remains polling-only.",
-      );
+  if (TRACKER_TARGETS.has(target)) {
+    const teamEnv = resolveTrackerTeamEnv(config, workspaceDir, target, parsed.team);
+    if ("error" in teamEnv) {
+      console.error(`❌ ${teamEnv.error}`);
       return 1;
     }
-    const selectedTeam = parsed.team
-      ? config.teams.find((team) => team.name === parsed.team)
-      : matchingTeams[0];
-    if (parsed.team && !selectedTeam) {
-      console.error(`❌ Unknown workspace team '${parsed.team}'.`);
-      return 1;
-    }
-    if (selectedTeam && selectedTeam.tracker.toLowerCase() !== target.toLowerCase()) {
-      console.error(`❌ Team '${selectedTeam.name}' uses ${selectedTeam.tracker}, not ${target}.`);
-      return 1;
-    }
-    if (selectedTeam) {
-      connectDeps.env = { ...process.env, ...buildTeamEnv(selectedTeam, workspaceDir) };
-      console.log(`🔗 Connecting ${target} for team '${selectedTeam.name}'.`);
-    }
+    if (teamEnv.env) connectDeps.env = teamEnv.env;
   }
 
   if (target === "status") {
-    const result = await runConnect("status", connectDeps);
-    if (result !== 0) return result;
-
-    const missing = unverifiedWorkspaceRelayRepos(config, workspaceDir);
-    if (missing.length === 0) {
-      console.log("   All workspace GitHub repositories are verified.");
-    } else {
-      console.log(`   Unverified workspace repositories: ${missing.join(", ")}`);
-      console.log("   Run: devintern worker connect github");
-    }
-    const relayState = loadRelayState(workspaceDir);
-    const gitlabProjects = workspaceGitLabRelayProjects(config, workspaceDir);
-    const missingGitLab = gitlabProjects.filter(
-      (project) =>
-        !hasGitLabRelayRegistration(relayState, project.instanceUrl, project.projectPath),
-    );
-    if (gitlabProjects.length > 0 && missingGitLab.length === 0) {
-      console.log("   All workspace GitLab projects have local relay registrations.");
-    } else if (missingGitLab.length > 0) {
-      console.log(
-        `   GitLab projects without local relay registration: ${missingGitLab.map((project) => project.projectPath).join(", ")}`,
-      );
-      console.log("   Run: devintern worker connect gitlab");
-    }
-    return 0;
+    return runStatusConnectTarget(config, workspaceDir, runConnect, connectDeps);
   }
-
   if (target === "gitlab") {
-    const projects = workspaceGitLabRelayProjects(config, workspaceDir);
-    if (projects.length === 0) {
-      console.error("❌ No GitLab repositories found in workspace.toml.");
-      return 1;
-    }
-    let failures = 0;
-    for (const project of projects) {
-      console.log(`🔗 Connecting GitLab project ${project.projectPath} (${project.repoName}).`);
-      const result = await runConnect("gitlab", {
-        ...connectDeps,
-        env: project.env,
-        gitlabProject: {
-          instanceUrl: project.instanceUrl,
-          projectPath: project.projectPath,
-        },
-        disconnectGitLab: parsed.disconnect,
-      });
-      if (result !== 0) failures++;
-    }
-    if (failures > 0) {
-      console.error(`❌ ${failures} GitLab project hook setup(s) failed; polling remains enabled.`);
-      return 1;
-    }
-    console.log("✅ All workspace GitLab projects are connected for relay delivery.");
-    return 0;
+    return runGitLabConnectTargets(
+      config,
+      workspaceDir,
+      parsed.disconnect,
+      runConnect,
+      connectDeps,
+    );
   }
-
-  if (target !== "github") {
-    return runConnect(target, connectDeps);
+  if (target === "github") {
+    return runGitHubConnectTargets(config, workspaceDir, runConnect, connectDeps);
   }
-
-  const repos = workspaceRelayRepos(config);
-  if (repos.length === 0) {
-    console.error("❌ No GitHub repositories found in workspace.toml.");
-    return 1;
-  }
-
-  const state = loadRelayState(workspaceDir);
-  let failures = 0;
-  for (const repo of repos) {
-    if (hasGitHubRelayRegistration(state, repo)) {
-      console.log(`✅ ${repo} is already verified; skipping.`);
-      continue;
-    }
-    const result = await runConnect("github", { ...connectDeps, repo });
-    if (result !== 0) failures++;
-  }
-
-  if (failures > 0) {
-    console.error(`❌ ${failures} workspace repository pairing(s) failed.`);
-    return 1;
-  }
-  console.log("✅ All workspace GitHub repositories are verified for relay delivery.");
-  return 0;
+  return runConnect(target, connectDeps);
 }
