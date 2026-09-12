@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { GitLabReviewPollingAcquirer } from "../src/lib/gitlab-review-polling-acquirer";
-import type { GitLabPollingClient } from "../src/lib/gitlab-review-polling-acquirer";
-import type { GitLabPollingSnapshot } from "../src/lib/gitlab-reviews";
-import type { AgentPr } from "../src/lib/worker-state";
+import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
+import type { GitLabPollingClient } from "../src/lib/acquirers/gitlab-review-polling";
+import type { GitLabPollingSnapshot } from "../src/lib/code-host/gitlab/reviews";
+import type { AgentPr } from "../src/lib/state/worker-state";
 
 function registered(overrides: Partial<AgentPr> = {}): AgentPr {
   return {

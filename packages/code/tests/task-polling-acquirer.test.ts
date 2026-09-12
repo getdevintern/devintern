@@ -3,12 +3,12 @@ import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { createMarkdownChangeDetector } from "../src/lib/change-detector";
-import { processedTaskId, TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
-import type { ReadyTask } from "../src/lib/task-polling-acquirer";
-import type { PickupGate } from "../src/lib/schedule";
-import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/worker-state";
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
+import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
+import type { ReadyTask } from "../src/lib/acquirers/task-polling";
+import type { PickupGate } from "../src/lib/worker/schedule";
+import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);

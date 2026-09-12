@@ -11,6 +11,22 @@
     }
   },
   "rules": {
+    "no-unused-vars": "error",
+    "unicorn/no-useless-spread": "error",
+
+    // False-positive / intentional-pattern rules: disabled repo-wide because no
+    // code change can clear them.
+    // - `oxc/const-comparisons` misreads `(x as A).key || (x as B).key` fallbacks.
+    // - `no-control-regex` flags ANSI-escape-stripping regexes by design.
+    // - `no-useless-escape` trips on escaped quotes inside example-config docs.
+    // - `jsdoc/empty-tags` / `jsdoc/check-tag-names` treat `@internal <text>` and
+    //   package names / `@mention` prose as JSDoc tags.
+    "oxc/const-comparisons": "off",
+    "no-control-regex": "off",
+    "no-useless-escape": "off",
+    "jsdoc/empty-tags": "off",
+    "jsdoc/check-tag-names": "off",
+
     "react/rules-of-hooks": "error",
     "react/exhaustive-deps": "error",
     "react/no-array-index-key": "error",
@@ -36,6 +52,21 @@
     "react/button-has-type": "error",
     "react/display-name": "error",
     "react/hook-use-state": "error",
+
+    // Complexity / size metrics. `max-depth`, `max-params`,
+    // `max-nested-callbacks`, and `max-classes-per-file` are enforced as errors
+    // (all clean). `complexity` and `max-statements` are errors globally, with
+    // pre-existing offenders grandfathered as warnings in the
+    // `legacy-complexity-baseline` override; shrink that list as files are split.
+    // `max-lines` and `max-lines-per-function` stay off for now.
+    "complexity": ["error", 30],
+    "max-depth": ["error", 6],
+    "max-params": ["error", 6],
+    "max-nested-callbacks": ["error", 5],
+    "max-classes-per-file": ["error", 3],
+    "max-lines": "off",
+    "max-lines-per-function": "off",
+    "max-statements": ["error", 200],
 
     // Import hygiene rules: error so bad imports fail pre-commit/CI (DEV-65).
     "import/no-cycle": "error",
@@ -70,27 +101,30 @@
     "import/extensions": "off",
     "import/max-dependencies": "off",
 
-    "promise/always-return": "warn",
+    // Stylistic promise rules are aspirational: this codebase legitimately wraps
+    // callback/timer/event APIs and uses `.then()` chains, so these fire broadly
+    // without signalling a defect. Disabled for now; they may be worth fixing in
+    // a dedicated async/await migration.
+    "promise/avoid-new": "off",
+    "promise/prefer-await-to-then": "off",
+    "promise/prefer-await-to-callbacks": "off",
+    "promise/always-return": "off",
+    "promise/param-names": "off",
+    "promise/no-promise-in-callback": "off",
+    "promise/no-nesting": "off",
+    "promise/catch-or-return": "off",
+    "promise/no-callback-in-promise": "off",
+    // Real correctness signals: kept on.
+    "promise/no-multiple-resolved": "error",
     "promise/no-new-statics": "warn",
     "promise/no-return-wrap": "warn",
-    "promise/no-callback-in-promise": "warn",
-    "promise/no-multiple-resolved": "warn",
-    "promise/no-promise-in-callback": "warn",
-    "promise/no-nesting": "warn",
-    "promise/prefer-await-to-callbacks": "warn",
-    "promise/prefer-await-to-then": "warn",
     "promise/prefer-catch": "warn",
-    "promise/catch-or-return": "warn",
     "promise/valid-params": "warn",
     "promise/no-return-in-finally": "warn",
-    "promise/avoid-new": "warn",
-    "promise/param-names": "warn",
     "promise/spec-only": "warn",
 
     "jsdoc/check-access": "warn",
     "jsdoc/check-property-names": "warn",
-    "jsdoc/check-tag-names": "warn",
-    "jsdoc/empty-tags": "warn",
     "jsdoc/no-defaults": "warn",
     "jsdoc/require-property": "warn",
     "jsdoc/require-property-description": "warn",
@@ -113,7 +147,16 @@
       "rules": {
         "react/no-array-index-key": "off",
         "import/no-named-as-default": "off",
-        "import/no-named-as-default-member": "off"
+        "import/no-named-as-default-member": "off",
+        // Long/nested tests are legitimate; keep the size/complexity metrics off
+        // here so the deferred rules above can be flipped on later without test noise.
+        "complexity": "off",
+        "max-depth": "off",
+        "max-params": "off",
+        "max-lines": "off",
+        "max-lines-per-function": "off",
+        "max-statements": "off",
+        "max-nested-callbacks": "off"
       }
     },
     {

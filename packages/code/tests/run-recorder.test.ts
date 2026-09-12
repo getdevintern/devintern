@@ -3,7 +3,7 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { RunStore } from "../src/lib/run-recorder";
+import { RunStore } from "../src/lib/state/run-recorder";
 
 describe("RunStore", () => {
   let dbPath: string;

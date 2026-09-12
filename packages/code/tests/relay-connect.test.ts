@@ -16,8 +16,8 @@ import {
   removeGitLabRelayRegistration,
   registerRelaySource,
   saveRelayState,
-} from "../src/lib/relay-connect";
-import type { RelayConnectState } from "../src/lib/relay-connect";
+} from "../src/lib/relay/connect";
+import type { RelayConnectState } from "../src/lib/relay/connect";
 
 const RELAY_URL = "http://relay.test";
 

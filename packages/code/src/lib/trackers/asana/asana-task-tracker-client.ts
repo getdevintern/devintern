@@ -10,7 +10,7 @@
  */
 
 import { AsanaClient, parseAsanaTaskFilters } from "@devintern/task-trackers";
-import type { AsanaStory, AsanaTaskDetail } from "@devintern/task-trackers";
+import type { AsanaTaskDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -20,7 +20,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../../task-tracker-client";
+import type { TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,

@@ -5,13 +5,13 @@ import {
   supportsPolling,
   trackersSupportingEstimate,
   trackersSupportingPolling,
-} from "../tracker-capabilities";
-import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation-config";
-import type { AutomationConfig, CronOrIntervalSchedule } from "../automation-config";
-import { parseWorkerScheduleSection } from "../schedule";
-import type { WorkerScheduleConfig } from "../schedule";
-import { parseEstimationEntries } from "../estimation-config";
-import type { EstimationConfig } from "../estimation-config";
+} from "../trackers/capabilities";
+import { parseAutomationEntries, parseCronOrIntervalSchedule } from "../automation/config";
+import type { AutomationConfig, CronOrIntervalSchedule } from "../automation/config";
+import { parseWorkerScheduleSection } from "../worker/schedule";
+import type { WorkerScheduleConfig } from "../worker/schedule";
+import { parseEstimationEntries } from "../automation/estimation-config";
+import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
@@ -336,6 +336,88 @@ export function parseWorkspaceConfig(
 
   const errors: string[] = [];
 
+  const workspace = parseWorkspaceSettings(document, errors);
+
+  const defaultsTable = asTable(document.defaults, "[defaults]", errors);
+  const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
+  const errorMonitorTables = asTableArray(document.error_monitors, "[[error_monitors]]", errors);
+
+  const { teams, teamNames } = parseTeamsSection(document, errors);
+
+  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
+  // brings its own (a [defaults].tracker alongside teams is still honored
+  // for any team that omits one).
+  if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
+    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+  }
+  if (tracker && !supportsPolling(tracker)) {
+    errors.push(
+      `[defaults].tracker "${tracker}" does not support polling. ` +
+        `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+    );
+  }
+  if (defaultsTable.estimate_query !== undefined) {
+    errors.push(
+      "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
+    );
+  }
+  if (defaultsTable.default_branch !== undefined) {
+    errors.push(
+      "[defaults].default_branch is not supported; set default_branch on an individual [[repos]] entry instead.",
+    );
+  }
+  const defaults = parseDefaultsSection(defaultsTable, errors);
+
+  applyTeamDefaults(teams, defaults, errors);
+
+  const { repos, repoNames } = parseReposSection(document, defaults.prLabels, errors);
+
+  validateTeamRepos(teams, repoNames, errors);
+
+  const errorMonitors = parseErrorMonitorsSection(
+    errorMonitorTables,
+    { repos, repoNames, teamNames, pollIntervalSeconds: defaults.pollIntervalSeconds },
+    errors,
+  );
+
+  const routing = parseRoutingSection(document, { repoNames, teamNames }, errors);
+
+  validateTeamRouting(teams, repos, routing, errors);
+
+  const automationResult = parseAutomationEntries(document.automations, {
+    sourceLabel,
+    repoNames,
+  });
+  errors.push(...automationResult.errors);
+
+  const workerTable = asTable(document.worker, "[worker]", errors);
+  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
+  errors.push(...schedule.errors);
+
+  const estimations = parseEstimationsSection(document, tracker, errors);
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
+  }
+
+  return {
+    workspace,
+    worker: { schedule: schedule.config },
+    defaults,
+    teams,
+    repos,
+    errorMonitors,
+    routing,
+    automations: automationResult.automations,
+    estimations,
+  };
+}
+
+/** Parse `[workspace]` / `[workspace.execution]` settings. */
+function parseWorkspaceSettings(
+  document: Record<string, unknown>,
+  errors: string[],
+): WorkspaceSettings {
   const workspaceTable = asTable(document.workspace, "[workspace]", errors);
   const executionTable = asTable(workspaceTable.execution, "[workspace.execution]", errors);
   const isolationRaw = readString(executionTable, "isolation", "[workspace.execution]", errors);
@@ -394,16 +476,28 @@ export function parseWorkspaceConfig(
   const ciFailureFix =
     readOptionalBoolean(workspaceTable, "ci_failure_fix", "[workspace]", errors) ??
     DEFAULT_CI_FAILURE_FIX;
+  const { conflictResolution, conflictSchedule } = parseConflictPolicy(workspaceTable, errors);
 
-  const conflictResolutionRaw = readString(
-    workspaceTable,
-    "conflict_resolution",
-    "[workspace]",
-    errors,
-  );
-  let conflictResolution = DEFAULT_CONFLICT_RESOLUTION;
+  return {
+    execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
+    worktreesTtlDays,
+    dashboard,
+    dashboardPort,
+    ciFailureFix,
+    conflictResolution,
+    conflictSchedule,
+  };
+}
+
+/** Parse `[workspace].conflict_resolution` and its optional schedule. */
+function parseConflictPolicy(
+  workspaceTable: Record<string, unknown>,
+  errors: string[],
+): { conflictResolution: ConflictResolutionMode; conflictSchedule?: CronOrIntervalSchedule } {
+  const raw = readString(workspaceTable, "conflict_resolution", "[workspace]", errors);
+  let conflictResolution: ConflictResolutionMode = DEFAULT_CONFLICT_RESOLUTION;
   let conflictSchedule: CronOrIntervalSchedule | undefined;
-  if (conflictResolutionRaw === "scheduled") {
+  if (raw === "scheduled") {
     conflictResolution = "scheduled";
     conflictSchedule = parseCronOrIntervalSchedule(
       workspaceTable,
@@ -414,23 +508,26 @@ export function parseWorkspaceConfig(
       },
       errors,
     );
-  } else if (conflictResolutionRaw === "disabled") {
+  } else if (raw === "disabled") {
     conflictResolution = "disabled";
-  } else if (conflictResolutionRaw && conflictResolutionRaw !== "auto") {
+  } else if (raw && raw !== "auto") {
     errors.push(`[workspace].conflict_resolution must be "auto", "scheduled", or "disabled".`);
   }
-  if (conflictResolutionRaw !== "scheduled") {
+  if (raw !== "scheduled") {
     for (const key of ["conflict_resolution_cron", "conflict_resolution_interval"] as const) {
       if (workspaceTable[key] !== undefined) {
         errors.push(`[workspace].${key} is only used when conflict_resolution = "scheduled".`);
       }
     }
   }
+  return { conflictResolution, conflictSchedule };
+}
 
-  const defaultsTable = asTable(document.defaults, "[defaults]", errors);
-  const tracker = readString(defaultsTable, "tracker", "[defaults]", errors);
-  const errorMonitorTables = asTableArray(document.error_monitors, "[[error_monitors]]", errors);
-
+/** Parse `[[teams]]` entries and collect their lowercased names. */
+function parseTeamsSection(
+  document: Record<string, unknown>,
+  errors: string[],
+): { teams: TeamConfig[]; teamNames: Set<string> } {
   const teams: TeamConfig[] = [];
   const teamNames = new Set<string>();
   for (const [index, table] of asTableArray(document.teams, "[[teams]]", errors).entries()) {
@@ -463,31 +560,16 @@ export function parseWorkspaceConfig(
       env: readEnvTable(table, label, errors),
     });
   }
+  return { teams, teamNames };
+}
 
-  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
-  // brings its own (a [defaults].tracker alongside teams is still honored
-  // for any team that omits one).
-  if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
-  }
-  if (tracker && !supportsPolling(tracker)) {
-    errors.push(
-      `[defaults].tracker "${tracker}" does not support polling. ` +
-        `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
-    );
-  }
-  if (defaultsTable.estimate_query !== undefined) {
-    errors.push(
-      "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
-    );
-  }
-  if (defaultsTable.default_branch !== undefined) {
-    errors.push(
-      "[defaults].default_branch is not supported; set default_branch on an individual [[repos]] entry instead.",
-    );
-  }
-  const defaults: WorkspaceDefaults = {
-    tracker: tracker ?? "",
+/** Parse the `[defaults]` table into fleet-wide defaults. */
+function parseDefaultsSection(
+  defaultsTable: Record<string, unknown>,
+  errors: string[],
+): WorkspaceDefaults {
+  return {
+    tracker: readString(defaultsTable, "tracker", "[defaults]", errors) ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
     workerTaskArgs: readString(defaultsTable, "worker_task_args", "[defaults]", errors),
     prLabels:
@@ -500,7 +582,14 @@ export function parseWorkspaceConfig(
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
   };
+}
 
+/** Fill each team's omitted tracker/query from `[defaults]`, reporting gaps. */
+function applyTeamDefaults(
+  teams: TeamConfig[],
+  defaults: WorkspaceDefaults,
+  errors: string[],
+): void {
   for (const team of teams) {
     if (!team.tracker) {
       team.tracker = defaults.tracker;
@@ -519,7 +608,14 @@ export function parseWorkspaceConfig(
       );
     }
   }
+}
 
+/** Parse `[[repos]]` entries and collect their names. */
+function parseReposSection(
+  document: Record<string, unknown>,
+  defaultPrLabels: string[] | undefined,
+  errors: string[],
+): { repos: RepoConfig[]; repoNames: Set<string> } {
   const repos: RepoConfig[] = [];
   const repoNames = new Set<string>();
   for (const [index, table] of asTableArray(document.repos, "[[repos]]", errors).entries()) {
@@ -549,13 +645,17 @@ export function parseWorkspaceConfig(
       defaultBranch: readString(table, "default_branch", label, errors),
       prLabels:
         table.pr_labels === undefined
-          ? defaults.prLabels
+          ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
   }
+  return { repos, repoNames };
+}
 
+/** Report teams whose fixed `repo` does not match a `[[repos]]` name. */
+function validateTeamRepos(teams: TeamConfig[], repoNames: Set<string>, errors: string[]): void {
   for (const team of teams) {
     if (team.repo && !repoNames.has(team.repo)) {
       errors.push(
@@ -563,15 +663,27 @@ export function parseWorkspaceConfig(
       );
     }
   }
+}
 
+/** Parse and validate `[[error_monitors]]` entries. */
+function parseErrorMonitorsSection(
+  tables: Record<string, unknown>[],
+  ctx: {
+    repos: RepoConfig[];
+    repoNames: Set<string>;
+    teamNames: Set<string>;
+    pollIntervalSeconds: number;
+  },
+  errors: string[],
+): ErrorMonitorConfig[] {
   const errorMonitors: ErrorMonitorConfig[] = [];
   const errorMonitorIds = new Set<string>();
-  for (const [index, table] of errorMonitorTables.entries()) {
+  for (const [index, table] of tables.entries()) {
     const label = `[[error_monitors]][${index}]`;
     const id = readString(table, "id", label, errors);
     const provider = readString(table, "provider", label, errors);
     const requestedRepo = readString(table, "repo", label, errors);
-    const repo = requestedRepo ?? (repos.length === 1 ? repos[0]?.name : undefined);
+    const repo = requestedRepo ?? (ctx.repos.length === 1 ? ctx.repos[0]?.name : undefined);
     const team = readString(table, "team", label, errors);
     const organization = readString(table, "organization", label, errors);
     const project = readString(table, "project", label, errors);
@@ -590,10 +702,10 @@ export function parseWorkspaceConfig(
     if (provider !== "sentry") errors.push(`${label}.provider must be "sentry".`);
     if (!repo) {
       errors.push(`${label}.repo is required in a workspace with multiple repositories.`);
-    } else if (!repoNames.has(repo)) {
+    } else if (!ctx.repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
-    if (team && !teamNames.has(team.toLowerCase())) {
+    if (team && !ctx.teamNames.has(team.toLowerCase())) {
       errors.push(`${label}.team "${team}" does not match any [[teams]] name.`);
     }
     if (!organization) errors.push(`${label}.organization is required for Sentry.`);
@@ -613,7 +725,7 @@ export function parseWorkspaceConfig(
         readOptionalInteger(table, "poll_interval", label, errors, {
           min: 1,
           message: `${label}.poll_interval must be a positive integer (seconds).`,
-        }) ?? defaults.pollIntervalSeconds,
+        }) ?? ctx.pollIntervalSeconds,
       minOccurrences:
         readOptionalInteger(table, "min_occurrences", label, errors, {
           min: 1,
@@ -629,7 +741,15 @@ export function parseWorkspaceConfig(
       env: readEnvTable(table, label, errors),
     });
   }
+  return errorMonitors;
+}
 
+/** Parse and validate `[[routing.rules]]` entries. */
+function parseRoutingSection(
+  document: Record<string, unknown>,
+  ctx: { repoNames: Set<string>; teamNames: Set<string> },
+  errors: string[],
+): RoutingRule[] {
   const routingTable = asTable(document.routing, "[routing]", errors);
   const routing: RoutingRule[] = [];
   for (const [index, table] of asTableArray(
@@ -643,13 +763,13 @@ export function parseWorkspaceConfig(
       errors.push(`${label}.repo is required.`);
       continue;
     }
-    if (!repoNames.has(repo)) {
+    if (!ctx.repoNames.has(repo)) {
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
     const team = readString(table, "team", label, errors);
-    if (team && !teamNames.has(team.toLowerCase())) {
+    if (team && !ctx.teamNames.has(team.toLowerCase())) {
       errors.push(
-        teamNames.size > 0
+        ctx.teamNames.size > 0
           ? `${label}.team "${team}" does not match any [[teams]] name.`
           : `${label}.team "${team}" is set but no [[teams]] are configured.`,
       );
@@ -666,7 +786,16 @@ export function parseWorkspaceConfig(
     }
     routing.push(rule);
   }
+  return routing;
+}
 
+/** Report team repo/routing combinations that are ambiguous or incomplete. */
+function validateTeamRouting(
+  teams: TeamConfig[],
+  repos: RepoConfig[],
+  routing: RoutingRule[],
+  errors: string[],
+): void {
   for (const team of teams) {
     if (team.repo && routing.some((rule) => rule.team?.toLowerCase() === team.name.toLowerCase())) {
       errors.push(
@@ -685,17 +814,14 @@ export function parseWorkspaceConfig(
       );
     }
   }
+}
 
-  const automationResult = parseAutomationEntries(document.automations, {
-    sourceLabel,
-    repoNames,
-  });
-  errors.push(...automationResult.errors);
-
-  const workerTable = asTable(document.worker, "[worker]", errors);
-  const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
-  errors.push(...schedule.errors);
-
+/** Parse `[[estimations]]` and check the fleet tracker supports `--estimate`. */
+function parseEstimationsSection(
+  document: Record<string, unknown>,
+  tracker: string | undefined,
+  errors: string[],
+): EstimationConfig[] {
   const estimationResult = parseEstimationEntries(document.estimations);
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
@@ -713,34 +839,7 @@ export function parseWorkspaceConfig(
       );
     }
   }
-
-  if (errors.length > 0) {
-    throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
-  }
-
-  return {
-    workspace: {
-      execution: {
-        isolation,
-        maxConcurrency,
-        maxConcurrencyPerRepo,
-      },
-      worktreesTtlDays,
-      dashboard,
-      dashboardPort,
-      ciFailureFix,
-      conflictResolution,
-      conflictSchedule,
-    },
-    worker: { schedule: schedule.config },
-    defaults,
-    teams,
-    repos,
-    errorMonitors,
-    routing,
-    automations: automationResult.automations,
-    estimations: estimationResult.estimations,
-  };
+  return estimationResult.estimations;
 }
 
 /**

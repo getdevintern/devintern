@@ -25,7 +25,7 @@ function loadProjectSettings(baseDir: string): ProjectSettings | null {
   try {
     const settingsContent = Bun.file(settingsFilePath);
     return settingsContent.json() as ProjectSettings;
-  } catch (error) {
+  } catch {
     return null;
   }
 }

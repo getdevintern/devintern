@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ABOUT_VERSION_UNAVAILABLE, AboutDialog } from "./components/AboutDialog.tsx";
+import { AboutDialog } from "./components/AboutDialog.tsx";
 import { ComposerForm } from "./components/ComposerForm.tsx";
 import { NoTicketsEmptyState } from "./components/NoTicketsEmptyState.tsx";
 import { OutputPanel } from "./components/OutputPanel.tsx";
@@ -21,40 +21,24 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DEFAULT_ISSUE_TYPES,
-  issueTypeIfNeedsReset,
-  resolveIssueTypes,
-} from "./lib/issue-types.ts";
-import { pruneSelectedLabels, selectionAfterLabelsFailure } from "./lib/labels.ts";
+import { issueTypeIfNeedsReset, resolveIssueTypes } from "./lib/issue-types.ts";
+import { pruneSelectedLabels } from "./lib/labels.ts";
 import { queryClient } from "./lib/query-client.ts";
-import { invalidateLabels, invalidateProjectQueries } from "./queries/invalidate.ts";
+import { invalidateProjectQueries } from "./queries/invalidate.ts";
 import { qk } from "./queries/keys.ts";
 import { seedProjectStatusCaches } from "./queries/seed.ts";
-import { useAppVersion } from "./queries/useAppVersion.ts";
-import { useCodeDiscoveryDismissed } from "./queries/useCodeDiscoveryDismissed.ts";
-import { useIssueTypes } from "./queries/useIssueTypes.ts";
-import { useLabels } from "./queries/useLabels.ts";
-import { useRecentProjects } from "./queries/useRecentProjects.ts";
-import { useToolValidation } from "./queries/useToolValidation.ts";
 import { isBusy } from "./state/app-store.ts";
 import { defaultComposerForProject } from "./state/composer-values.ts";
 import { useProjectStore } from "./state/project-store.ts";
 import { handleQuickCaptureEvent } from "./state/quick-capture-handler.ts";
-import {
-  useActiveTicket,
-  useAnyTicketBusy,
-  isContextBusy,
-  isTicketActionBlocked,
-} from "./state/selectors.ts";
+import { isContextBusy, isTicketActionBlocked } from "./state/selectors.ts";
 import {
   getActiveTicketFromStore,
   useTicketWorkspacesStore,
 } from "./state/ticket-workspaces-store.ts";
 import { nextTicketId } from "./state/ticket-workspaces.ts";
+import { useAppData } from "./state/useAppData.ts";
 import type { IpcError, ProjectStatus } from "../../shared/ipc-contract.ts";
-import { shouldShowCodeDiscovery } from "../../shared/code-discovery.ts";
-import { isToolValidationBlocking } from "../../shared/tool-validation.ts";
 
 let requestCounter = 0;
 const nextRequestId = () => `req-${++requestCounter}`;
@@ -63,42 +47,33 @@ function toError(error: IpcError | undefined): IpcError {
   return error ?? { code: "error", message: "Unknown error" };
 }
 
-function queryErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (
-    error &&
-    typeof error === "object" &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
-  }
-  return "Unknown error";
-}
-
 export function App() {
-  const status = useProjectStore((s) => s.status);
-  const loadingProject = useProjectStore((s) => s.loadingProject);
-  const updatingFromRemote = useProjectStore((s) => s.updatingFromRemote);
-  const chromeError = useProjectStore((s) => s.chromeError);
+  const {
+    status,
+    loadingProject,
+    chromeError,
+    activeTicket,
+    anyTicketBusy,
+    appVersion,
+    recentProjects,
+    toolsQuery,
+    toolsOk,
+    toolsBlocked,
+    toolsProbeFailed,
+    toolsError,
+    showToolsGate,
+    issueTypes,
+    labels,
+    labelsTruncated,
+    labelsError,
+    issueTypesQuery,
+    labelsQuery,
+    retryLabels,
+    showCodeDiscovery,
+    canOpenTicket,
+  } = useAppData();
+
   const [codeDiscoveryDismissError, setCodeDiscoveryDismissError] = useState<string | null>(null);
-
-  const activeTicket = useActiveTicket();
-  const anyTicketBusy = useAnyTicketBusy();
-
-  // Leaf queries (data fetching only; client state lives in the stores).
-  const appVersionQuery = useAppVersion();
-  const appVersion =
-    appVersionQuery.data ?? (appVersionQuery.isError ? ABOUT_VERSION_UNAVAILABLE : null);
-  const codeDiscoveryQuery = useCodeDiscoveryDismissed();
-  const codeDiscoveryDismissed = codeDiscoveryQuery.data ?? null;
-  const recentProjectsQuery = useRecentProjects();
-  const recentProjects = recentProjectsQuery.data ?? null;
-  const toolsQuery = useToolValidation();
-  const toolsOk = toolsQuery.data?.ok === true;
-  const toolsBlocked = isToolValidationBlocking(toolsQuery.data);
-  const toolsProbeFailed = toolsQuery.isError && !toolsOk;
-  const toolsError = toolsProbeFailed ? queryErrorMessage(toolsQuery.error) : null;
 
   /** Pending close when the ticket still has an agent/operation in flight. */
   const [closeConfirmId, setCloseConfirmId] = useState<string | null>(null);
@@ -388,85 +363,6 @@ export function App() {
     };
   }, [loadProject, toolsBlocked, toolsOk, toolsProbeFailed]);
 
-  // Active-ticket derivations used by the metadata hooks + composer pruning.
-  const activeTicketId = activeTicket?.id;
-  const activeProjectKey = activeTicket?.composer.projectKey;
-  const activeIssueType = activeTicket?.composer.issueType;
-  const projectDir = status?.projectDir ?? null;
-
-  // Tracker-scoped queries (issue types + labels). Keys are scoped by dir +
-  // projectKey so switching project dirs uses distinct cache entries. The
-  // default-key cache is seeded from ProjectStatus by seedProjectStatusCaches.
-  const metadataEnabled = !loadingProject && !updatingFromRemote && !!activeTicketId;
-  const issueTypesQuery = useIssueTypes(
-    projectDir,
-    activeProjectKey ?? null,
-    Boolean(status?.supportsIssueTypes) && metadataEnabled,
-  );
-  const labelsQuery = useLabels(
-    projectDir,
-    activeProjectKey ?? null,
-    Boolean(status?.supportsLabels) && metadataEnabled,
-  );
-  // Stable fallback reference — spreading would allocate a new array every render.
-  const issueTypes = issueTypesQuery.data ?? DEFAULT_ISSUE_TYPES;
-  const labels = labelsQuery.data?.labels ?? [];
-  const labelsTruncated = labelsQuery.data?.truncated ?? false;
-  const labelsError = labelsQuery.error ? labelsQuery.error.message : null;
-
-  // Reset the active ticket's issue type when the available list changes and
-  // the current selection is no longer valid.
-  useEffect(() => {
-    if (!activeTicketId || !issueTypesQuery.data) return;
-    const reset = issueTypeIfNeedsReset(activeIssueType, issueTypesQuery.data);
-    if (reset !== null) {
-      useTicketWorkspacesStore.getState().patchComposer(activeTicketId, { issueType: reset });
-    }
-  }, [activeTicketId, activeIssueType, issueTypesQuery.data]);
-
-  // Prune the active ticket's selected labels when the label catalog changes
-  // (new project key, refetch, capability toggle) or when labels fail to load.
-  // Reads the current selection from the store (getState) so the effect does
-  // not re-run on every chip toggle (which would loop through prune → patch).
-  useEffect(() => {
-    if (!activeTicketId) return;
-    const workspacesStore = useTicketWorkspacesStore.getState();
-    const ticket = workspacesStore.tickets.find((t) => t.id === activeTicketId);
-    const selected = ticket?.composer.labels ?? [];
-    if (!status?.supportsLabels) {
-      if (selected.length > 0) {
-        workspacesStore.patchComposer(activeTicketId, { labels: [] });
-      }
-      return;
-    }
-    const freeform = Boolean(status.supportsFreeformLabels);
-    if (labelsQuery.error) {
-      const cleared = selectionAfterLabelsFailure(selected, { keepOnFailure: freeform });
-      if (cleared.length !== selected.length) {
-        workspacesStore.patchComposer(activeTicketId, { labels: cleared });
-      }
-      return;
-    }
-    if (!labelsQuery.data) return;
-    const pruned = pruneSelectedLabels(selected, labelsQuery.data.labels, {
-      keepUnknown: freeform,
-    });
-    if (pruned.length !== selected.length || pruned.some((id, i) => id !== selected[i])) {
-      workspacesStore.patchComposer(activeTicketId, { labels: pruned });
-    }
-  }, [
-    activeTicketId,
-    labelsQuery.data,
-    labelsQuery.error,
-    status?.supportsLabels,
-    status?.supportsFreeformLabels,
-  ]);
-
-  const retryLabels = useCallback(() => {
-    if (!projectDir || !activeProjectKey) return;
-    invalidateLabels(queryClient, projectDir, activeProjectKey);
-  }, [projectDir, activeProjectKey]);
-
   const chooseProject = async () => {
     // Ignore while session switch, Update, or any agent run is already in progress.
     if (isContextBusy()) return;
@@ -571,8 +467,6 @@ export function App() {
       useProjectStore.getState().setUpdatingFromRemote(false);
     }
   }, [applyProjectStatus]);
-
-  const canOpenTicket = Boolean(status?.isGitRepository && status.configured);
 
   const openTicket = useCallback(() => {
     // Only fully ready projects (git + configured PM) should open ticket workspaces.
@@ -761,7 +655,7 @@ export function App() {
     />
   );
 
-  if (!toolsOk && (toolsQuery.isPending || toolsBlocked || toolsProbeFailed)) {
+  if (showToolsGate) {
     return (
       <>
         <RequiredToolsGate
@@ -797,14 +691,6 @@ export function App() {
       </>
     );
   }
-
-  const showCodeDiscovery =
-    codeDiscoveryDismissed !== null &&
-    shouldShowCodeDiscovery({
-      configured: status.configured,
-      hasCodeConfig: status.hasCodeConfig === true,
-      dismissed: codeDiscoveryDismissed,
-    });
 
   return (
     <div className="flex h-screen flex-col">

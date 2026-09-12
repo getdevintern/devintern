@@ -6,7 +6,7 @@ import {
   createGitHubChangeDetector,
   createJiraChangeDetector,
   createLinearChangeDetector,
-} from "../src/lib/change-detector";
+} from "../src/lib/acquirers/change-detector";
 
 function stubSearch(taskCount: number) {
   const queries: string[] = [];

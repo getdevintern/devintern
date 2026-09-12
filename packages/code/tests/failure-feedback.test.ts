@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
-import { reportTaskFailure } from "../src/lib/failure-feedback";
-import { RetryStateStore, hashDescription } from "../src/lib/retry-state";
-import type { TaskTrackerClient } from "../src/lib/task-tracker-client";
-import type { Comment, Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
+import { reportTaskFailure } from "../src/lib/task/failure-feedback";
+import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
 
 describe("reportTaskFailure", () => {
   let tempDir: string;

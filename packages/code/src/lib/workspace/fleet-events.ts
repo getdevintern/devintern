@@ -10,18 +10,18 @@
  * gating of its own.
  */
 
-import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
-import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
+import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../acquirers/review-polling";
+import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
 import { randomUUID } from "crypto";
-import type { CiFixResult } from "../ci-failure-watcher-acquirer";
-import type { AutomaticResolveResult } from "../review-polling-acquirer";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
+import type { CiFixResult } from "../acquirers/ci-failure-watcher";
+import type { AutomaticResolveResult } from "../acquirers/review-polling";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
-import { JobNotStartedError } from "../task-supervisor";
-import type { TaskSupervisor } from "../task-supervisor";
+import { JobNotStartedError } from "../worker/supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;

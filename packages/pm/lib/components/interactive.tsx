@@ -278,7 +278,7 @@ export async function runInteractiveMode(
       const [inputVersion, setInputVersion] = useState(0);
       const [issueTypes, setIssueTypes] = useState<string[]>(defaultIssueTypes);
       const orderedIssueTypes = orderIssueTypes(issueTypes);
-      const [isLoadingIssueTypes, setIsLoadingIssueTypes] = useState(false);
+      const [, setIsLoadingIssueTypes] = useState(false);
       const scrollViewRef = useRef<ScrollViewRef>(null);
       const sym = uiSymbols();
       const bufferedPreviewData = useRef<{ summary: string; description: string } | null>(null);
@@ -449,6 +449,7 @@ export async function runInteractiveMode(
       }, [state.projectKey, state.issueType]);
 
       useInput(
+        // oxlint-disable-next-line complexity -- global key router couples to scroll refs and the outer promise resolvers; extract a `wizardReducer`/`useWizardKeyInput` state machine instead of splitting its branches.
         (inputChar, key) => {
           if (key.ctrl && inputChar === "c") {
             exit();
@@ -770,6 +771,33 @@ export async function runInteractiveMode(
       };
 
       /**
+       * Resolve a y/n/Enter decision on the confirm and preview steps.
+       * Accepting completes the wizard; declining restarts at source-type.
+       */
+      const handleDecision = (
+        rawInput: string,
+        acceptStep: "generating" | "done",
+        clearPreview: boolean,
+      ) => {
+        const answer = rawInput.trim().toLowerCase();
+        if (!["y", "n", ""].includes(answer)) return;
+        if (answer === "y" || answer === "") {
+          setState((prev) => ({ ...prev, step: acceptStep }));
+          if (completePromiseResolve) {
+            completed = true;
+            completePromiseResolve(stateRef.current);
+          }
+          return;
+        }
+        setState((prev) => ({
+          ...prev,
+          step: "source-type",
+          ...(clearPreview ? { previewData: undefined } : {}),
+        }));
+        resetInput();
+      };
+
+      /**
        * Handles Enter on selection / yes-no steps (non text-input steps).
        * Agent and terminal steps ignore Enter so accidental keypresses never blank the UI.
        */
@@ -854,18 +882,7 @@ export async function runInteractiveMode(
             break;
 
           case "confirm":
-            if (["y", "n", ""].includes(trimmedInput.toLowerCase())) {
-              if (trimmedInput.toLowerCase() === "y" || trimmedInput === "") {
-                setState((prev) => ({ ...prev, step: "generating" }));
-                if (completePromiseResolve) {
-                  completed = true;
-                  completePromiseResolve(stateRef.current);
-                }
-              } else {
-                setState((prev) => ({ ...prev, step: "source-type" }));
-                resetInput();
-              }
-            }
+            handleDecision(trimmedInput, "generating", false);
             break;
 
           case "preview":
@@ -874,22 +891,7 @@ export async function runInteractiveMode(
             if (!state.previewData) {
               break;
             }
-            if (["y", "n", ""].includes(trimmedInput.toLowerCase())) {
-              if (trimmedInput.toLowerCase() === "y" || trimmedInput === "") {
-                setState((prev) => ({ ...prev, step: "done" }));
-                if (completePromiseResolve) {
-                  completed = true;
-                  completePromiseResolve(stateRef.current);
-                }
-              } else {
-                setState((prev) => ({
-                  ...prev,
-                  step: "source-type",
-                  previewData: undefined,
-                }));
-                resetInput();
-              }
-            }
+            handleDecision(trimmedInput, "done", true);
             break;
         }
       };
@@ -905,6 +907,7 @@ export async function runInteractiveMode(
        *
        * @returns Step-specific Ink layout (including skip/recovery placeholders).
        */
+      // oxlint-disable-next-line complexity -- one switch over 15 wizard steps; split each case into a `<XStep>` subcomponent (shared StepShell + ScrollableMarkdownPane) rather than growing this function.
       const renderStep = () => {
         switch (state.step) {
           case "project":

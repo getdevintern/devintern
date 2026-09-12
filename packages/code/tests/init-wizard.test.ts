@@ -8,9 +8,12 @@ import {
   buildEnvExample,
   renderEnvFile,
   scaffoldProject,
-} from "../src/lib/init-scaffold";
-import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init-wizard";
-import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
+} from "../src/lib/init/scaffold";
+import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init/wizard";
+import {
+  ANALYTICS_CONFIG_DIR_ENV,
+  setAnalyticsCaptureForTests,
+} from "../src/lib/observability/analytics";
 
 let tempDir: string;
 

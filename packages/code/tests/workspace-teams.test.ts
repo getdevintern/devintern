@@ -12,7 +12,7 @@ import {
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import type { ChangeDetector } from "../src/lib/change-detector";
+import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
 import {
   createFleetRelayTaskDispatcher,
   createFleetTaskEvaluator,

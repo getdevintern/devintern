@@ -7,15 +7,7 @@
  * registered review, lifecycle, synchronization, and CI work.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import { tmpdir } from "os";
@@ -31,43 +23,42 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { ResolvedHarness } from "@devintern/agent-harness";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
-import { parseEnvInteger } from "./lib/env-integer";
-import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
-import { getSandbox } from "./lib/sandbox";
-import { initSentryOnce } from "./lib/sentry-init";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent/spawn";
+import { parseEnvInteger } from "./lib/config/env-integer";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent/model";
+import { getSandbox } from "./lib/agent/sandbox";
+import { initSentryOnce } from "./lib/observability/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
-import { GitHubAppAuth } from "./lib/github-app-auth";
-import { GitHubReviewsClient } from "./lib/github-reviews";
-import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/webhook-queue";
-import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker-failover";
-import type { WorkerFailover } from "./lib/worker-failover";
-import { WorkerState } from "./lib/worker-state";
-import type { AgentPr } from "./lib/worker-state";
-import { normalizeCodeHostUrl } from "./lib/code-host";
+import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
+import { GitHubReviewsClient } from "./lib/code-host/github/reviews";
+import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/state/webhook-queue";
+import { ensureWorkerFailover, startWorkerFailover } from "./lib/worker/failover";
+import type { WorkerFailover } from "./lib/worker/failover";
+import { WorkerState } from "./lib/state/worker-state";
+import type { AgentPr } from "./lib/state/worker-state";
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
   normalizeGitLabWebhook,
   verifyGitLabWebhookSignature,
   verifyGitLabWebhookToken,
-} from "./lib/gitlab-webhook";
-import type { GitLabWebhookEvent } from "./lib/gitlab-webhook";
-import { resolveGitLabCodeHostConfig } from "./lib/pr-client";
-import { GitLabReviewsClient } from "./lib/gitlab-reviews";
-import { runCiFixViaCli } from "./lib/ci-failure-watcher-acquirer";
+} from "./lib/code-host/gitlab/webhook";
+import type { GitLabWebhookEvent } from "./lib/code-host/gitlab/webhook";
+import { normalizeCodeHostUrl, resolveGitLabCodeHostConfig } from "./lib/code-host";
+import { GitLabReviewsClient } from "./lib/code-host/gitlab/reviews";
+import { runCiFixViaCli } from "./lib/acquirers/ci-failure-watcher";
 import {
   runAddressReviewUrlViaCli,
   runResolveConflictsUrlViaCli,
-} from "./lib/review-polling-acquirer";
-import { formatReviewPrompt } from "./lib/review-formatter";
+} from "./lib/acquirers/review-polling";
+import { formatReviewPrompt } from "./lib/review/formatter";
 import { Utils } from "./lib/utils";
-import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
-import { runAutoReviewLoop } from "./lib/auto-review-loop";
+import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
+import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterationsIfEnabled,
-} from "./lib/auto-review-config";
+} from "./lib/review/auto-review-config";
 import {
   handlePingEvent,
   isGitHubIP,
@@ -77,12 +68,11 @@ import {
   RateLimiter,
   shouldProcessReview,
   verifyWebhookSignature,
-} from "./lib/webhook-handler";
+} from "./lib/code-host/github/webhook";
 import type {
   IssueCommentEvent,
   PingEvent,
   ProcessedReviewComment,
-  ProcessedReviewFeedback,
   PullRequestReviewEvent,
   WebhookServerConfig,
 } from "./types/github-webhooks";
@@ -313,7 +303,7 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
   let payload: unknown;
   try {
     payload = JSON.parse(rawBody);
-  } catch (error) {
+  } catch {
     return jsonResponse({ error: "Invalid JSON payload" }, 400);
   }
 
@@ -325,157 +315,19 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
 
   // Handle pull_request_review event
   if (eventType === "pull_request_review") {
-    const event = payload as PullRequestReviewEvent;
-
-    // Quick payload-only checks (no API calls — respond 200 fast)
-    // Accept "changes_requested" and plain "comment" reviews; the bot-mention
-    // gate (applied later in processReviewAsync) keeps commented reviews from
-    // firing unless @bot is mentioned.
-    if (event.review.state !== "changes_requested" && event.review.state !== "commented") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: state is "${event.review.state}" (only changes_requested/commented are processed)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: `state=${event.review.state}`,
-      });
-    }
-
-    if (event.review.user.type === "Bot") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: reviewer is a bot (${event.review.user.login})`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: "reviewer is a bot",
-      });
-    }
-
-    if (event.pull_request.state !== "open") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: PR is ${event.pull_request.state} (not open)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: `pr_state=${event.pull_request.state}`,
-      });
-    }
-
-    console.log(`\n🔔 Received ${event.review.state} review for PR #${event.pull_request.number}`);
-    console.log(`   Repository: ${event.repository.full_name}`);
-    console.log(`   Reviewer: ${event.review.user.login}`);
-
-    // Persist event to SQLite before processing (crash resilience)
-    let eventId: string | undefined;
-    if (webhookQueue) {
-      eventId = webhookQueue.enqueue("pull_request_review", event);
-      if (deliveryId) {
-        webhookQueue.markProcessed("github", deliveryId);
-      }
-      debugLog(config, `Persisted event ${eventId} to queue`);
-    }
-
-    // Add to queue for sequential processing (prevents race conditions)
-    // Bot mention check happens inside processReviewAsync after fetching comments
-    reviewQueue
-      .add(() => processReviewWithPersistence(eventId, event, config))
-      .catch((error) => {
-        console.error("❌ Error processing review:", error);
-      });
-
-    const duration = Date.now() - startTime;
-    return jsonResponse({
-      success: true,
-      message: "Review processing started",
-      eventId,
-      prNumber: event.pull_request.number,
-      repository: event.repository.full_name,
-      processingTime: `${duration}ms`,
-    });
+    return handlePullRequestReview(
+      payload as PullRequestReviewEvent,
+      config,
+      startTime,
+      deliveryId,
+    );
   }
 
   // Handle issue_comment event — top-level (conversation) comments on a PR.
   // Lets a user kick off devintern by commenting "@bot finish this" on their
   // own PR, without leaving a formal review.
   if (eventType === "issue_comment") {
-    const event = payload as IssueCommentEvent;
-
-    // Quick payload-only checks (no API calls — respond 200 fast)
-    if (event.action !== "created") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: action is "${event.action}" (only "created" is processed)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: `action=${event.action}`,
-      });
-    }
-
-    if (!event.issue.pull_request) {
-      console.log(`⏭️  Skipping comment on #${event.issue.number}: not on a pull request`);
-      return jsonResponse({
-        success: true,
-        message: "Comment is not on a pull request",
-        reason: "not_a_pull_request",
-      });
-    }
-
-    if (event.comment.user.type === "Bot") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: author is a bot (${event.comment.user.login})`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: "author is a bot",
-      });
-    }
-
-    if (event.issue.state !== "open") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: PR is ${event.issue.state} (not open)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: `pr_state=${event.issue.state}`,
-      });
-    }
-
-    console.log(`\n🔔 Received PR comment on #${event.issue.number}`);
-    console.log(`   Repository: ${event.repository.full_name}`);
-    console.log(`   Commenter: ${event.comment.user.login}`);
-
-    // Persist event to SQLite before processing (crash resilience)
-    let eventId: string | undefined;
-    if (webhookQueue) {
-      eventId = webhookQueue.enqueue("issue_comment", event);
-      if (deliveryId) {
-        webhookQueue.markProcessed("github", deliveryId);
-      }
-      debugLog(config, `Persisted event ${eventId} to queue`);
-    }
-
-    // Bot mention check happens inside processReviewAsync after fetching the PR.
-    reviewQueue
-      .add(() => processIssueCommentWithPersistence(eventId, event, config))
-      .catch((error) => {
-        console.error("❌ Error processing PR comment:", error);
-      });
-
-    const duration = Date.now() - startTime;
-    return jsonResponse({
-      success: true,
-      message: "Comment processing started",
-      eventId,
-      prNumber: event.issue.number,
-      repository: event.repository.full_name,
-      processingTime: `${duration}ms`,
-    });
+    return handleIssueComment(payload as IssueCommentEvent, config, startTime, deliveryId);
   }
 
   // Handle pull_request_review_comment event (individual inline diff comments).
@@ -490,6 +342,143 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
   }
 
   return jsonResponse({ error: "Unhandled event type" }, 400);
+}
+
+/** Build a 200 response for an event that was delivered but needs no work. */
+function skipResponse(message: string, reason: string): Response {
+  return jsonResponse({ success: true, message, reason });
+}
+
+/** Validate and enqueue a `pull_request_review` event. */
+async function handlePullRequestReview(
+  event: PullRequestReviewEvent,
+  config: WebhookServerConfig,
+  startTime: number,
+  deliveryId: string | null,
+): Promise<Response> {
+  // Quick payload-only checks (no API calls — respond 200 fast)
+  // Accept "changes_requested" and plain "comment" reviews; the bot-mention
+  // gate (applied later in processReviewAsync) keeps commented reviews from
+  // firing unless @bot is mentioned.
+  if (event.review.state !== "changes_requested" && event.review.state !== "commented") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: state is "${event.review.state}" (only changes_requested/commented are processed)`,
+    );
+    return skipResponse("Review does not require processing", `state=${event.review.state}`);
+  }
+
+  if (event.review.user.type === "Bot") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: reviewer is a bot (${event.review.user.login})`,
+    );
+    return skipResponse("Review does not require processing", "reviewer is a bot");
+  }
+
+  if (event.pull_request.state !== "open") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: PR is ${event.pull_request.state} (not open)`,
+    );
+    return skipResponse(
+      "Review does not require processing",
+      `pr_state=${event.pull_request.state}`,
+    );
+  }
+
+  console.log(`\n🔔 Received ${event.review.state} review for PR #${event.pull_request.number}`);
+  console.log(`   Repository: ${event.repository.full_name}`);
+  console.log(`   Reviewer: ${event.review.user.login}`);
+
+  // Persist event to SQLite before processing (crash resilience)
+  let eventId: string | undefined;
+  if (webhookQueue) {
+    eventId = webhookQueue.enqueue("pull_request_review", event);
+    if (deliveryId) {
+      webhookQueue.markProcessed("github", deliveryId);
+    }
+    debugLog(config, `Persisted event ${eventId} to queue`);
+  }
+
+  // Add to queue for sequential processing (prevents race conditions)
+  // Bot mention check happens inside processReviewAsync after fetching comments
+  reviewQueue
+    .add(() => processReviewWithPersistence(eventId, event, config))
+    .catch((error) => {
+      console.error("❌ Error processing review:", error);
+    });
+
+  return jsonResponse({
+    success: true,
+    message: "Review processing started",
+    eventId,
+    prNumber: event.pull_request.number,
+    repository: event.repository.full_name,
+    processingTime: `${Date.now() - startTime}ms`,
+  });
+}
+
+/** Validate and enqueue an `issue_comment` event on a pull request. */
+async function handleIssueComment(
+  event: IssueCommentEvent,
+  config: WebhookServerConfig,
+  startTime: number,
+  deliveryId: string | null,
+): Promise<Response> {
+  // Quick payload-only checks (no API calls — respond 200 fast)
+  if (event.action !== "created") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: action is "${event.action}" (only "created" is processed)`,
+    );
+    return skipResponse("Comment does not require processing", `action=${event.action}`);
+  }
+
+  if (!event.issue.pull_request) {
+    console.log(`⏭️  Skipping comment on #${event.issue.number}: not on a pull request`);
+    return skipResponse("Comment is not on a pull request", "not_a_pull_request");
+  }
+
+  if (event.comment.user.type === "Bot") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: author is a bot (${event.comment.user.login})`,
+    );
+    return skipResponse("Comment does not require processing", "author is a bot");
+  }
+
+  if (event.issue.state !== "open") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: PR is ${event.issue.state} (not open)`,
+    );
+    return skipResponse("Comment does not require processing", `pr_state=${event.issue.state}`);
+  }
+
+  console.log(`\n🔔 Received PR comment on #${event.issue.number}`);
+  console.log(`   Repository: ${event.repository.full_name}`);
+  console.log(`   Commenter: ${event.comment.user.login}`);
+
+  // Persist event to SQLite before processing (crash resilience)
+  let eventId: string | undefined;
+  if (webhookQueue) {
+    eventId = webhookQueue.enqueue("issue_comment", event);
+    if (deliveryId) {
+      webhookQueue.markProcessed("github", deliveryId);
+    }
+    debugLog(config, `Persisted event ${eventId} to queue`);
+  }
+
+  // Bot mention check happens inside processReviewAsync after fetching the PR.
+  reviewQueue
+    .add(() => processIssueCommentWithPersistence(eventId, event, config))
+    .catch((error) => {
+      console.error("❌ Error processing PR comment:", error);
+    });
+
+  return jsonResponse({
+    success: true,
+    message: "Comment processing started",
+    eventId,
+    prNumber: event.issue.number,
+    repository: event.repository.full_name,
+    processingTime: `${Date.now() - startTime}ms`,
+  });
 }
 
 interface QueuedGitLabWebhook {
@@ -670,7 +659,7 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
     const snapshot = await client.getCiSnapshot(target.projectPath, current.head.sha);
     if (snapshot.state !== "failure" || snapshot.failures.length === 0) return;
     const rawLogs = await client.getJobTraces(target.projectPath, snapshot.jobIds);
-    const { truncateCiLogs } = await import("./lib/ci-failure-watcher-acquirer");
+    const { truncateCiLogs } = await import("./lib/acquirers/ci-failure-watcher");
     const feedbackDir = mkdtempSync(join(tmpdir(), "devintern-gitlab-webhook-ci-"));
     const feedbackPath = join(feedbackDir, "ci-feedback.json");
     writeFileSync(
@@ -865,7 +854,7 @@ async function markCommentsAsAddressed(
   owner: string,
   repo: string,
   comments: ProcessedReviewComment[],
-  verbose = false,
+  _verbose = false,
 ): Promise<void> {
   if (comments.length === 0) {
     return;
@@ -946,18 +935,7 @@ async function processReviewAsync(
     // Get GitHub App author info if available (for commit attribution). In serve
     // mode we always prefer the bot identity when App credentials exist, even if
     // a GITHUB_TOKEN is also set.
-    let gitAuthor: { name: string; email: string } | undefined;
-    {
-      const githubAppAuth = GitHubAppAuth.fromEnvironment();
-      if (githubAppAuth) {
-        try {
-          gitAuthor = await githubAppAuth.getGitAuthor();
-          debugLog(config, `Commits will be authored by: ${gitAuthor.name}`);
-        } catch (error) {
-          debugLog(config, `Could not get GitHub App author info: ${(error as Error).message}`);
-        }
-      }
-    }
+    const gitAuthor = await resolveReviewGitAuthor(config);
 
     // Fetch ALL review comments for the PR (not just from this review)
     console.log("📥 Fetching review comments...");
@@ -967,16 +945,11 @@ async function processReviewAsync(
 
     // Local dedupe: filter out comments this worker already addressed. GitHub
     // reactions are visual feedback only and carry no gating meaning.
-    const workerState = new WorkerState();
-    const addressedCommentIds = new Set(
-      allRawComments
-        .filter((c) => workerState.isCommentAddressed(`${owner}/${repo}`, "review", c.id))
-        .map((c) => c.id),
+    const { rawComments, alreadyAddressed } = filterAddressedReviewComments(
+      owner,
+      repo,
+      allRawComments,
     );
-    workerState.close();
-
-    const rawComments = allRawComments.filter((c) => !addressedCommentIds.has(c.id));
-    const alreadyAddressed = allRawComments.length - rawComments.length;
 
     if (alreadyAddressed > 0) {
       console.log(`   ${alreadyAddressed} already addressed (skipping)`);
@@ -1039,15 +1012,7 @@ async function processReviewAsync(
 
     // Set git config for bot author if available (so Agent's commits are attributed to bot)
     if (gitAuthor) {
-      await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], {
-        verbose: config.debug,
-        cwd: worktreePath,
-      });
-      await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
-        verbose: config.debug,
-        cwd: worktreePath,
-      });
-      console.log(`🤖 Git author set to: ${gitAuthor.name}`);
+      await configureReviewGitAuthor(worktreePath, gitAuthor, config);
     }
 
     // Check if this is an auto-review trigger (e.g., "@bot enhance", "@bot improve")
@@ -1055,43 +1020,17 @@ async function processReviewAsync(
     const isAutoReviewRequest = isAutoReviewTrigger(reviewBody, botName || undefined);
 
     if (isAutoReviewRequest && config.autoReview) {
-      console.log(`\n🔄 Auto-review trigger detected: "${reviewBody?.trim()}"`);
-      console.log("   Skipping normal review flow, running auto-review loop directly...");
-
-      const autoReviewOutputDir = `/tmp/devintern-auto-review-${prNumber}`;
-      const baseBranch = event.pull_request.base.ref;
-      const { harness: reviewHarness, path: reviewPath } = resolveActiveHarness();
-      try {
-        const autoReviewResult = await runAutoReviewLoop({
-          repository: `${owner}/${repo}`,
-          prNumber,
-          prBranch: branch,
-          baseBranch,
-          harness: reviewHarness,
-          executablePath: reviewPath,
-          maxIterations: config.autoReviewMaxIterations,
-          minPriority: "medium",
-          workingDir: worktreePath,
-          outputDir: autoReviewOutputDir,
-        });
-
-        if (autoReviewResult.success) {
-          console.log(
-            `✅ Auto-review completed successfully after ${autoReviewResult.iterations} iteration(s)`,
-          );
-        } else {
-          console.warn(
-            `⚠️  Auto-review completed but some issues remain after ${autoReviewResult.iterations} iteration(s)`,
-          );
-        }
-
-        console.log(`\n✅ Successfully completed auto-review for PR #${prNumber}`);
-        return;
-      } catch (error) {
-        console.error(`❌ Auto-review loop failed: ${(error as Error).message}`);
-        // Don't fall through to normal flow - just return
-        return;
-      }
+      await runTriggeredAutoReview({
+        owner,
+        repo,
+        prNumber,
+        branch,
+        baseBranch: event.pull_request.base.ref,
+        worktreePath,
+        config,
+        reviewBody,
+      });
+      return;
     }
 
     // Format prompt for Agent
@@ -1131,56 +1070,35 @@ async function processReviewAsync(
       console.warn("⚠️  Agent hit max turns limit");
     }
 
-    // Get hook retries configuration
     const hookRetries = parseInt(process.env.HOOK_RETRIES || "10", 10);
     const { harness, path: executablePath } = resolveActiveHarness();
     const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
+    const ctx: ReviewGitContext = {
+      owner,
+      repo,
+      prNumber,
+      branch,
+      baseBranch: event.pull_request.base.ref,
+      worktreePath,
+      config,
+      gitAuthor,
+      harness,
+      executablePath,
+      maxTurns,
+      hookRetries,
+    };
+
     // Verify Agent didn't switch branches during execution (e.g., checking out main for comparison)
-    const currentBranch = await Utils.getCurrentBranch(worktreePath);
-    if (currentBranch && currentBranch !== branch) {
-      console.warn(
-        `⚠️  Agent switched from '${branch}' to '${currentBranch}' during execution, switching back...`,
-      );
-      const switchBack = await Utils.executeGitCommand(["checkout", branch], {
-        verbose: config.debug,
-        cwd: worktreePath,
-      });
-      if (!switchBack.success) {
-        // If simple checkout fails (dirty state conflicts), try stashing first
-        console.warn(`   Simple checkout failed, trying stash + checkout...`);
-        await Utils.executeGitCommand(["stash", "--include-untracked"], {
-          verbose: false,
-          cwd: worktreePath,
-        });
-        const switchAfterStash = await Utils.executeGitCommand(["checkout", branch], {
-          verbose: config.debug,
-          cwd: worktreePath,
-        });
-        if (switchAfterStash.success) {
-          await Utils.executeGitCommand(["stash", "pop"], {
-            verbose: false,
-            cwd: worktreePath,
-          });
-        } else {
-          console.error(
-            `❌ Failed to switch back to branch '${branch}': ${switchAfterStash.error}`,
-          );
-          return;
-        }
-      }
-      console.log(`✅ Switched back to '${branch}'`);
+    if (!(await restoreReviewBranch(ctx))) {
+      return;
     }
 
     // Check for uncommitted changes (indicates Agent didn't commit or hook failed)
     const hasUncommitted = await Utils.hasUncommittedChanges(worktreePath);
 
     // Check if there are commits to push
-    const aheadResult = await Utils.executeGitCommand(
-      ["rev-list", "--count", `origin/${branch}..HEAD`],
-      { verbose: false, cwd: worktreePath },
-    );
-    const commitsAhead = parseInt(aheadResult.output?.trim() || "0", 10);
+    const commitsAhead = await countCommitsAhead(worktreePath, branch);
 
     if (!hasUncommitted && commitsAhead === 0) {
       console.warn("⚠️  No changes were made by @devintern/code");
@@ -1188,258 +1106,19 @@ async function processReviewAsync(
     } else if (hasUncommitted) {
       // Agent left uncommitted changes - try to commit with hook retry logic
       console.log("\n📝 Agent left changes uncommitted, committing now...");
-
-      let commitAttempt = 0;
-      let commitSuccess = false;
-
-      while (commitAttempt <= hookRetries && !commitSuccess) {
-        commitAttempt++;
-        const commitResult = await Utils.commitChanges(
-          `PR-${prNumber}`,
-          `Address review feedback`,
-          { verbose: config.debug, author: gitAuthor, cwd: worktreePath },
-        );
-
-        if (commitResult.success) {
-          console.log("✅ Changes committed successfully");
-          commitSuccess = true;
-          break;
-        }
-
-        // Check if this is a git hook error that we can try to fix
-        if (commitResult.hookError && commitAttempt <= hookRetries) {
-          console.log(
-            `\n⚠️  Git pre-commit hook failed (attempt ${commitAttempt}/${hookRetries + 1})`,
-          );
-
-          // Try to fix the hook error with agent
-          const fixed = await runAgentHarnessToFixGitHook(
-            "commit",
-            harness,
-            executablePath,
-            maxTurns,
-            worktreePath,
-            branch,
-          );
-
-          if (fixed) {
-            if (await isCommitAlreadyComplete(worktreePath)) {
-              console.log("✅ Commit already completed during hook fix");
-              commitSuccess = true;
-              break;
-            }
-
-            console.log(`\n🔄 Retrying commit after ${harness.displayName} fixed the issues...`);
-            continue;
-          } else {
-            console.log("\n❌ Could not fix git hook errors automatically");
-            break;
-          }
-        } else {
-          // Not a hook error or out of retries
-          if (commitAttempt > hookRetries) {
-            console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
-          }
-          console.error(`\n❌ Failed to commit changes: ${commitResult.message}`);
-          return;
-        }
-      }
-
-      if (!commitSuccess) {
-        console.error("❌ Failed to commit changes after retries");
+      if (!(await commitUncommittedReviewChanges(ctx))) {
         return;
       }
     }
 
     // Re-check commits to push after potential commit
-    const finalAheadResult = await Utils.executeGitCommand(
-      ["rev-list", "--count", `origin/${branch}..HEAD`],
-      { verbose: false, cwd: worktreePath },
-    );
-    const finalCommitsAhead = parseInt(finalAheadResult.output?.trim() || "0", 10);
+    const finalCommitsAhead = await countCommitsAhead(worktreePath, branch);
 
     if (finalCommitsAhead === 0) {
       console.warn("⚠️  No new commits to push - Agent may not have made any changes");
       // Still continue to mark comments as addressed
-    } else {
-      // Helper function for local hook validation with retry
-      const validateLocalHook = async (phase: string): Promise<boolean> => {
-        let attempt = 0;
-
-        while (attempt <= hookRetries) {
-          attempt++;
-          const hookResult = await Utils.runPrePushHookLocally({
-            verbose: config.debug,
-            cwd: worktreePath,
-          });
-
-          if (hookResult.success) {
-            if (attempt === 1) {
-              console.log(`✅ ${hookResult.message}`);
-            } else {
-              console.log(`✅ Pre-push hook passed after ${attempt} attempt(s)`);
-            }
-            return true;
-          }
-
-          // Check if this is a hook error that we can try to fix
-          if (hookResult.hookError && attempt <= hookRetries) {
-            console.log(
-              `\n⚠️  Pre-push hook failed during ${phase} (attempt ${attempt}/${hookRetries + 1})`,
-            );
-
-            // Try to fix the hook error with agent
-            const fixed = await runAgentHarnessToFixGitHook(
-              "push",
-              harness,
-              executablePath,
-              maxTurns,
-              worktreePath,
-              branch,
-            );
-
-            if (fixed) {
-              console.log(
-                `\n🔄 Retrying local hook validation after ${harness.displayName} fixed the issues...`,
-              );
-              continue;
-            } else {
-              console.log("\n❌ Could not fix pre-push hook errors automatically");
-              return false;
-            }
-          } else {
-            // Not a hook error or out of retries
-            if (attempt > hookRetries) {
-              console.log(`\n❌ Max retries (${hookRetries}) exceeded for pre-push hook fixes`);
-            }
-            console.error(`\n❌ Pre-push hook validation failed: ${hookResult.message}`);
-            return false;
-          }
-        }
-
-        return false;
-      };
-
-      // Step 1: Validate pre-push hook locally BEFORE any push
-      console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
-      const initialHookValid = await validateLocalHook("initial validation");
-
-      if (!initialHookValid) {
-        console.error("❌ Cannot proceed without passing pre-push hook validation");
-        return;
-      }
-
-      // Step 2: Run auto-review loop with skipPush if enabled
-      // This allows all improvements to be made locally before pushing
-      let autoReviewRan = false;
-      if (config.autoReview) {
-        console.log("\n🔄 Running auto-review loop (without pushing)...");
-        const autoReviewOutputDir = `/tmp/devintern-auto-review-${prNumber}`;
-        const baseBranchForReview = event.pull_request.base.ref;
-        const { harness: reviewHarness2, path: reviewPath2 } = resolveActiveHarness();
-        try {
-          const autoReviewResult = await runAutoReviewLoop({
-            repository: `${owner}/${repo}`,
-            prNumber,
-            prBranch: branch,
-            baseBranch: baseBranchForReview,
-            harness: reviewHarness2,
-            executablePath: reviewPath2,
-            maxIterations: config.autoReviewMaxIterations,
-            minPriority: "medium",
-            workingDir: worktreePath,
-            outputDir: autoReviewOutputDir,
-            skipPush: true, // Don't push during auto-review iterations
-          });
-
-          if (autoReviewResult.success) {
-            console.log(
-              `✅ Auto-review completed successfully after ${autoReviewResult.iterations} iteration(s)`,
-            );
-          } else {
-            console.warn(
-              `⚠️  Auto-review completed but some issues remain after ${autoReviewResult.iterations} iteration(s)`,
-            );
-          }
-          autoReviewRan = true;
-
-          // Step 3: Re-validate local hook after auto-review (auto-review changes may have broken things)
-          console.log("\n🔍 Re-validating pre-push hook after auto-review improvements...");
-          const postAutoReviewHookValid = await validateLocalHook("post auto-review validation");
-
-          if (!postAutoReviewHookValid) {
-            console.error(
-              "❌ Cannot proceed - auto-review changes failed pre-push hook validation",
-            );
-            return;
-          }
-        } catch (error) {
-          console.error(`❌ Auto-review loop failed: ${(error as Error).message}`);
-          // Continue with push even if auto-review fails
-        }
-      }
-
-      // Step 4: Now do the actual push (hooks already validated, should succeed)
-      console.log(
-        `\n📤 Pushing ${finalCommitsAhead}${autoReviewRan ? "+ auto-review" : ""} commit(s)...`,
-      );
-
-      let pushAttempt = 0;
-      let pushSuccess = false;
-
-      while (pushAttempt <= hookRetries && !pushSuccess) {
-        pushAttempt++;
-        const pushResult = await Utils.pushCurrentBranch({
-          verbose: config.debug,
-          cwd: worktreePath,
-          expectedBranch: branch,
-        });
-
-        if (pushResult.success) {
-          console.log("✅ Changes pushed successfully");
-          pushSuccess = true;
-          break;
-        }
-
-        // Check if this is a git hook error that we can try to fix
-        if (pushResult.hookError && pushAttempt <= hookRetries) {
-          console.log(
-            `\n⚠️  Git pre-push hook failed during actual push (attempt ${pushAttempt}/${hookRetries + 1})`,
-          );
-
-          // Try to fix the hook error with agent
-          const fixed = await runAgentHarnessToFixGitHook(
-            "push",
-            harness,
-            executablePath,
-            maxTurns,
-            worktreePath,
-            branch,
-          );
-
-          if (fixed) {
-            console.log(
-              `\n🔄 Retrying push after ${harness.displayName} fixed and amended the commit...`,
-            );
-            continue;
-          } else {
-            console.log("\n❌ Could not fix git pre-push hook errors automatically");
-            break;
-          }
-        } else {
-          // Not a hook error or out of retries
-          if (pushAttempt > hookRetries) {
-            console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
-          }
-          console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
-          return;
-        }
-      }
-
-      if (!pushSuccess) {
-        console.error("❌ Failed to push changes after retries");
-        return;
-      }
+    } else if (!(await publishReviewChanges(ctx, finalCommitsAhead))) {
+      return;
     }
 
     // Mark comments as addressed with hooray reaction
@@ -1470,6 +1149,437 @@ async function processReviewAsync(
   // Note: We don't cleanup this branch's worktree here - it's reused across
   // reviews of the same PR for efficiency (deps stay cached). Worktrees from
   // other branches are pruned by prepareReviewWorktree on the next review.
+}
+
+/** Git / config context shared by the review publish helpers. */
+interface ReviewGitContext {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  branch: string;
+  baseBranch: string;
+  worktreePath: string;
+  config: WebhookServerConfig;
+  gitAuthor: { name: string; email: string } | undefined;
+  harness: ResolvedHarness["harness"];
+  executablePath: string;
+  maxTurns: number;
+  hookRetries: number;
+}
+
+/** Raw review comment shape accepted by {@link processReviewComment}. */
+type RawReviewComment = Parameters<typeof processReviewComment>[0];
+
+/** Resolve the App bot identity for commit attribution, if configured. */
+async function resolveReviewGitAuthor(
+  config: WebhookServerConfig,
+): Promise<{ name: string; email: string } | undefined> {
+  const githubAppAuth = GitHubAppAuth.fromEnvironment();
+  if (!githubAppAuth) return undefined;
+  try {
+    const gitAuthor = await githubAppAuth.getGitAuthor();
+    debugLog(config, `Commits will be authored by: ${gitAuthor.name}`);
+    return gitAuthor;
+  } catch (error) {
+    debugLog(config, `Could not get GitHub App author info: ${(error as Error).message}`);
+    return undefined;
+  }
+}
+
+/** Apply the bot identity to the worktree's git config. */
+async function configureReviewGitAuthor(
+  worktreePath: string,
+  gitAuthor: { name: string; email: string },
+  config: WebhookServerConfig,
+): Promise<void> {
+  await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], {
+    verbose: config.debug,
+    cwd: worktreePath,
+  });
+  await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
+    verbose: config.debug,
+    cwd: worktreePath,
+  });
+  console.log(`🤖 Git author set to: ${gitAuthor.name}`);
+}
+
+/** Drop comments this worker already addressed; returns the remaining set. */
+function filterAddressedReviewComments(
+  owner: string,
+  repo: string,
+  allRawComments: RawReviewComment[],
+): { rawComments: RawReviewComment[]; alreadyAddressed: number } {
+  const workerState = new WorkerState();
+  const addressedCommentIds = new Set(
+    allRawComments
+      .filter((c) => workerState.isCommentAddressed(`${owner}/${repo}`, "review", c.id))
+      .map((c) => c.id),
+  );
+  workerState.close();
+
+  const rawComments = allRawComments.filter((c) => !addressedCommentIds.has(c.id));
+  return { rawComments, alreadyAddressed: allRawComments.length - rawComments.length };
+}
+
+/** Count commits that exist locally ahead of `origin/<branch>`. */
+async function countCommitsAhead(worktreePath: string, branch: string): Promise<number> {
+  const result = await Utils.executeGitCommand(["rev-list", "--count", `origin/${branch}..HEAD`], {
+    verbose: false,
+    cwd: worktreePath,
+  });
+  return parseInt(result.output?.trim() || "0", 10);
+}
+
+/** Run the auto-review loop when the reviewer used an auto-review trigger. */
+async function runTriggeredAutoReview(params: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  branch: string;
+  baseBranch: string;
+  worktreePath: string;
+  config: WebhookServerConfig;
+  reviewBody: string | null;
+}): Promise<void> {
+  const { owner, repo, prNumber, branch, baseBranch, worktreePath, config, reviewBody } = params;
+  console.log(`\n🔄 Auto-review trigger detected: "${reviewBody?.trim()}"`);
+  console.log("   Skipping normal review flow, running auto-review loop directly...");
+
+  const autoReviewOutputDir = `/tmp/devintern-auto-review-${prNumber}`;
+  const { harness: reviewHarness, path: reviewPath } = resolveActiveHarness();
+  try {
+    const autoReviewResult = await runAutoReviewLoop({
+      repository: `${owner}/${repo}`,
+      prNumber,
+      prBranch: branch,
+      baseBranch,
+      harness: reviewHarness,
+      executablePath: reviewPath,
+      maxIterations: config.autoReviewMaxIterations,
+      minPriority: "medium",
+      workingDir: worktreePath,
+      outputDir: autoReviewOutputDir,
+    });
+
+    if (autoReviewResult.success) {
+      console.log(
+        `✅ Auto-review completed successfully after ${autoReviewResult.iterations} iteration(s)`,
+      );
+    } else {
+      console.warn(
+        `⚠️  Auto-review completed but some issues remain after ${autoReviewResult.iterations} iteration(s)`,
+      );
+    }
+
+    console.log(`\n✅ Successfully completed auto-review for PR #${prNumber}`);
+  } catch (error) {
+    console.error(`❌ Auto-review loop failed: ${(error as Error).message}`);
+    // Don't fall through to normal flow - just return
+  }
+}
+
+/** Restore the review branch if the agent checked out something else. */
+async function restoreReviewBranch(ctx: ReviewGitContext): Promise<boolean> {
+  const currentBranch = await Utils.getCurrentBranch(ctx.worktreePath);
+  if (!currentBranch || currentBranch === ctx.branch) {
+    return true;
+  }
+
+  console.warn(
+    `⚠️  Agent switched from '${ctx.branch}' to '${currentBranch}' during execution, switching back...`,
+  );
+  const switchBack = await Utils.executeGitCommand(["checkout", ctx.branch], {
+    verbose: ctx.config.debug,
+    cwd: ctx.worktreePath,
+  });
+  if (!switchBack.success) {
+    // If simple checkout fails (dirty state conflicts), try stashing first
+    console.warn(`   Simple checkout failed, trying stash + checkout...`);
+    await Utils.executeGitCommand(["stash", "--include-untracked"], {
+      verbose: false,
+      cwd: ctx.worktreePath,
+    });
+    const switchAfterStash = await Utils.executeGitCommand(["checkout", ctx.branch], {
+      verbose: ctx.config.debug,
+      cwd: ctx.worktreePath,
+    });
+    if (!switchAfterStash.success) {
+      console.error(
+        `❌ Failed to switch back to branch '${ctx.branch}': ${switchAfterStash.error}`,
+      );
+      return false;
+    }
+    await Utils.executeGitCommand(["stash", "pop"], {
+      verbose: false,
+      cwd: ctx.worktreePath,
+    });
+  }
+  console.log(`✅ Switched back to '${ctx.branch}'`);
+  return true;
+}
+
+/** Commit changes the agent left behind, retrying through hook failures. */
+async function commitUncommittedReviewChanges(ctx: ReviewGitContext): Promise<boolean> {
+  let commitAttempt = 0;
+  let commitSuccess = false;
+
+  while (commitAttempt <= ctx.hookRetries && !commitSuccess) {
+    commitAttempt++;
+    const commitResult = await Utils.commitChanges(
+      `PR-${ctx.prNumber}`,
+      `Address review feedback`,
+      { verbose: ctx.config.debug, author: ctx.gitAuthor, cwd: ctx.worktreePath },
+    );
+
+    if (commitResult.success) {
+      console.log("✅ Changes committed successfully");
+      commitSuccess = true;
+      break;
+    }
+
+    // Check if this is a git hook error that we can try to fix
+    if (commitResult.hookError && commitAttempt <= ctx.hookRetries) {
+      console.log(
+        `\n⚠️  Git pre-commit hook failed (attempt ${commitAttempt}/${ctx.hookRetries + 1})`,
+      );
+
+      // Try to fix the hook error with agent
+      const fixed = await runAgentHarnessToFixGitHook(
+        "commit",
+        ctx.harness,
+        ctx.executablePath,
+        ctx.maxTurns,
+        ctx.worktreePath,
+        ctx.branch,
+      );
+
+      if (fixed) {
+        if (await isCommitAlreadyComplete(ctx.worktreePath)) {
+          console.log("✅ Commit already completed during hook fix");
+          commitSuccess = true;
+          break;
+        }
+
+        console.log(`\n🔄 Retrying commit after ${ctx.harness.displayName} fixed the issues...`);
+        continue;
+      } else {
+        console.log("\n❌ Could not fix git hook errors automatically");
+        break;
+      }
+    } else {
+      // Not a hook error or out of retries
+      if (commitAttempt > ctx.hookRetries) {
+        console.log(`\n❌ Max retries (${ctx.hookRetries}) exceeded for git hook fixes`);
+      }
+      console.error(`\n❌ Failed to commit changes: ${commitResult.message}`);
+      return false;
+    }
+  }
+
+  if (!commitSuccess) {
+    console.error("❌ Failed to commit changes after retries");
+    return false;
+  }
+  return true;
+}
+
+/** Validate the pre-push hook locally, asking the agent to repair failures. */
+async function validateLocalPrePushHook(phase: string, ctx: ReviewGitContext): Promise<boolean> {
+  let attempt = 0;
+
+  while (attempt <= ctx.hookRetries) {
+    attempt++;
+    const hookResult = await Utils.runPrePushHookLocally({
+      verbose: ctx.config.debug,
+      cwd: ctx.worktreePath,
+    });
+
+    if (hookResult.success) {
+      if (attempt === 1) {
+        console.log(`✅ ${hookResult.message}`);
+      } else {
+        console.log(`✅ Pre-push hook passed after ${attempt} attempt(s)`);
+      }
+      return true;
+    }
+
+    // Check if this is a hook error that we can try to fix
+    if (hookResult.hookError && attempt <= ctx.hookRetries) {
+      console.log(
+        `\n⚠️  Pre-push hook failed during ${phase} (attempt ${attempt}/${ctx.hookRetries + 1})`,
+      );
+
+      // Try to fix the hook error with agent
+      const fixed = await runAgentHarnessToFixGitHook(
+        "push",
+        ctx.harness,
+        ctx.executablePath,
+        ctx.maxTurns,
+        ctx.worktreePath,
+        ctx.branch,
+      );
+
+      if (fixed) {
+        console.log(
+          `\n🔄 Retrying local hook validation after ${ctx.harness.displayName} fixed the issues...`,
+        );
+        continue;
+      } else {
+        console.log("\n❌ Could not fix pre-push hook errors automatically");
+        return false;
+      }
+    } else {
+      // Not a hook error or out of retries
+      if (attempt > ctx.hookRetries) {
+        console.log(`\n❌ Max retries (${ctx.hookRetries}) exceeded for pre-push hook fixes`);
+      }
+      console.error(`\n❌ Pre-push hook validation failed: ${hookResult.message}`);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/** Optionally run the auto-review loop (skipPush), then re-validate the hook. */
+async function runAutoReviewBeforePush(
+  ctx: ReviewGitContext,
+): Promise<{ autoReviewRan: boolean; ok: boolean }> {
+  if (!ctx.config.autoReview) {
+    return { autoReviewRan: false, ok: true };
+  }
+
+  console.log("\n🔄 Running auto-review loop (without pushing)...");
+  const autoReviewOutputDir = `/tmp/devintern-auto-review-${ctx.prNumber}`;
+  const { harness: reviewHarness, path: reviewPath } = resolveActiveHarness();
+  try {
+    const autoReviewResult = await runAutoReviewLoop({
+      repository: `${ctx.owner}/${ctx.repo}`,
+      prNumber: ctx.prNumber,
+      prBranch: ctx.branch,
+      baseBranch: ctx.baseBranch,
+      harness: reviewHarness,
+      executablePath: reviewPath,
+      maxIterations: ctx.config.autoReviewMaxIterations,
+      minPriority: "medium",
+      workingDir: ctx.worktreePath,
+      outputDir: autoReviewOutputDir,
+      skipPush: true, // Don't push during auto-review iterations
+    });
+
+    if (autoReviewResult.success) {
+      console.log(
+        `✅ Auto-review completed successfully after ${autoReviewResult.iterations} iteration(s)`,
+      );
+    } else {
+      console.warn(
+        `⚠️  Auto-review completed but some issues remain after ${autoReviewResult.iterations} iteration(s)`,
+      );
+    }
+
+    // Re-validate local hook after auto-review (auto-review changes may have broken things)
+    console.log("\n🔍 Re-validating pre-push hook after auto-review improvements...");
+    if (!(await validateLocalPrePushHook("post auto-review validation", ctx))) {
+      console.error("❌ Cannot proceed - auto-review changes failed pre-push hook validation");
+      return { autoReviewRan: true, ok: false };
+    }
+    return { autoReviewRan: true, ok: true };
+  } catch (error) {
+    console.error(`❌ Auto-review loop failed: ${(error as Error).message}`);
+    // Continue with push even if auto-review fails
+    return { autoReviewRan: false, ok: true };
+  }
+}
+
+/** Push the reviewed commits, retrying through pre-push hook failures. */
+async function pushReviewedChanges(
+  ctx: ReviewGitContext,
+  finalCommitsAhead: number,
+  autoReviewRan: boolean,
+): Promise<boolean> {
+  console.log(
+    `\n📤 Pushing ${finalCommitsAhead}${autoReviewRan ? "+ auto-review" : ""} commit(s)...`,
+  );
+
+  let pushAttempt = 0;
+  let pushSuccess = false;
+
+  while (pushAttempt <= ctx.hookRetries && !pushSuccess) {
+    pushAttempt++;
+    const pushResult = await Utils.pushCurrentBranch({
+      verbose: ctx.config.debug,
+      cwd: ctx.worktreePath,
+      expectedBranch: ctx.branch,
+    });
+
+    if (pushResult.success) {
+      console.log("✅ Changes pushed successfully");
+      pushSuccess = true;
+      break;
+    }
+
+    // Check if this is a git hook error that we can try to fix
+    if (pushResult.hookError && pushAttempt <= ctx.hookRetries) {
+      console.log(
+        `\n⚠️  Git pre-push hook failed during actual push (attempt ${pushAttempt}/${ctx.hookRetries + 1})`,
+      );
+
+      // Try to fix the hook error with agent
+      const fixed = await runAgentHarnessToFixGitHook(
+        "push",
+        ctx.harness,
+        ctx.executablePath,
+        ctx.maxTurns,
+        ctx.worktreePath,
+        ctx.branch,
+      );
+
+      if (fixed) {
+        console.log(
+          `\n🔄 Retrying push after ${ctx.harness.displayName} fixed and amended the commit...`,
+        );
+        continue;
+      } else {
+        console.log("\n❌ Could not fix git pre-push hook errors automatically");
+        break;
+      }
+    } else {
+      // Not a hook error or out of retries
+      if (pushAttempt > ctx.hookRetries) {
+        console.log(`\n❌ Max retries (${ctx.hookRetries}) exceeded for git hook fixes`);
+      }
+      console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
+      return false;
+    }
+  }
+
+  if (!pushSuccess) {
+    console.error("❌ Failed to push changes after retries");
+    return false;
+  }
+  return true;
+}
+
+/** Validate the hook, optionally auto-review, then push the reviewed commits. */
+async function publishReviewChanges(
+  ctx: ReviewGitContext,
+  finalCommitsAhead: number,
+): Promise<boolean> {
+  // Step 1: Validate pre-push hook locally BEFORE any push
+  console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
+  if (!(await validateLocalPrePushHook("initial validation", ctx))) {
+    console.error("❌ Cannot proceed without passing pre-push hook validation");
+    return false;
+  }
+
+  // Step 2: Optionally auto-review locally (with skipPush) and re-validate.
+  const { autoReviewRan, ok } = await runAutoReviewBeforePush(ctx);
+  if (!ok) {
+    return false;
+  }
+
+  // Step 3: Now do the actual push (hooks already validated, should succeed)
+  return pushReviewedChanges(ctx, finalCommitsAhead, autoReviewRan);
 }
 
 /**
@@ -1527,6 +1637,12 @@ async function runAgentHarnessForReview(
   });
 
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: Parameters<typeof resolve>[0]): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     (async () => {
       const maxTurns = parseInt(process.env.CLAUDE_MAX_TURNS || "500", 10);
 
@@ -1603,7 +1719,7 @@ async function runAgentHarnessForReview(
 
       agent.on("error", (error: NodeJS.ErrnoException) => {
         clearTimeout(timeout);
-        resolve({
+        settle({
           success: false,
           message: `Failed to run Agent: ${error.message}`,
         });
@@ -1621,7 +1737,7 @@ async function runAgentHarnessForReview(
         const output = stdoutOutput + stderrOutput;
 
         if (timedOut) {
-          resolve({
+          settle({
             success: false,
             message: `Agent timed out after ${timeoutMinutes} minutes`,
             output,
@@ -1633,7 +1749,7 @@ async function runAgentHarnessForReview(
           }
           // A usage/rate limit is account-global — surface it so the caller can
           // pause the queue until reset rather than treating it as a task failure.
-          resolve({
+          settle({
             success: false,
             message: `Agent hit a usage limit${usage.resetsAt ? ` (resets ${usage.resetsAt})` : ""}`,
             output,
@@ -1645,20 +1761,20 @@ async function runAgentHarnessForReview(
           if (matchedLine) {
             console.log(`   Matched output: ${matchedLine}`);
           }
-          resolve({
+          settle({
             success: false,
             message: "Agent reached max turns limit",
             output,
             maxTurnsReached: true,
           });
         } else if (code === 0) {
-          resolve({
+          settle({
             success: true,
             message: "Agent completed successfully",
             output,
           });
         } else {
-          resolve({
+          settle({
             success: false,
             message: `Agent exited with code ${code}`,
             output,
@@ -1667,7 +1783,7 @@ async function runAgentHarnessForReview(
         }
       });
     })().catch((error) => {
-      resolve({
+      settle({
         success: false,
         message: `Failed to run Agent: ${error instanceof Error ? error.message : String(error)}`,
       });

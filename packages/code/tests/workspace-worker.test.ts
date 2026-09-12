@@ -1,3 +1,4 @@
+import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
@@ -19,12 +20,12 @@ import {
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import type { ChangeDetector } from "../src/lib/change-detector";
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
+import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
-import { CiFailureWatcherAcquirer } from "../src/lib/ci-failure-watcher-acquirer";
-import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
-import { saveRelayState } from "../src/lib/relay-connect";
+import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
+import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
+import { saveRelayState } from "../src/lib/relay/connect";
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -472,6 +473,90 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
+  test.each(["review", "conflict"])(
+    "GitLab %s does not prepare checkout before supervisor admission",
+    async (kind) => {
+      const workspaceDir = join(tmpdir(), `ws-gitlab-supervision-${crypto.randomUUID()}`);
+      mkdirSync(workspaceDir, { recursive: true });
+      const state = openWorkspaceState(workspaceDir);
+      const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "auto"
+[defaults]
+tracker = "markdown"
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/widgets.git"
+[repos.env]
+DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true"
+GITLAB_CODE_HOST_TOKEN = "test-token"
+GITLAB_CODE_HOST_URL = "https://gitlab.com"
+GITLAB_CODE_HOST_CA_FILE = ""
+GITLAB_CODE_HOST_PROXY = ""
+`);
+      state.workerState.recordAgentChangeRequest({
+        provider: "gitlab",
+        instanceUrl: "https://gitlab.com",
+        projectPath: "acme/widgets",
+        projectId: "42",
+        number: 17,
+        webUrl: "https://gitlab.com/acme/widgets/-/merge_requests/17",
+      });
+      const snapshot = spyOn(GitLabReviewsClient.prototype, "getPollingSnapshot").mockResolvedValue(
+        {
+          state: "opened",
+          headSha: "head",
+          baseSha: "base",
+          sourceBranch: "feature",
+          targetBranch: "main",
+          webUrl: "https://gitlab.com/acme/widgets/-/merge_requests/17",
+          mergeability: kind === "conflict" ? "conflicts" : "mergeable",
+          assignedReviewerIds: [8],
+          feedback: [
+            {
+              discussionId: "d",
+              noteId: 1,
+              author: { id: 8, username: "reviewer" },
+              createdAt: new Date(Date.now() + 1000).toISOString(),
+            },
+          ],
+        },
+      );
+      const manager = new FakeRepoManager(workspaceDir);
+      const scheduled: string[] = [];
+      try {
+        const acquirers = await buildFleetEventAcquirers({
+          config,
+          workspaceDir,
+          state,
+          repoManager: manager,
+          searchTasks: async () => ({ tasks: [] }),
+          query: "",
+          intervalSeconds: 60,
+          supervisor: {
+            async schedule(request) {
+              scheduled.push(request.kind);
+              throw new JobNotStartedError();
+            },
+            updateLimits() {},
+            async drain() {},
+          },
+        });
+        await (
+          acquirers.find(
+            (a) => a instanceof GitLabReviewPollingAcquirer,
+          ) as GitLabReviewPollingAcquirer
+        ).tick();
+        expect(scheduled).toEqual([kind]);
+        expect(manager.calls).toEqual([]);
+      } finally {
+        snapshot.mockRestore();
+        state.close();
+        rmSync(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each(["closed", "repair"])(
     "GitLab CI keeps same-project MR identities separate: %s",
     async (scenario) => {

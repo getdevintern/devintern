@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { TaskFormatter } from "../src/lib/task-formatter";
+import { TaskFormatter } from "../src/lib/task/formatter";
 import { JiraTaskTrackerClient as JiraClient } from "../src/lib/trackers/jira/jira-task-tracker-client";
 import type { FormattedTaskDetails } from "../src/types/jira";
 import type { ProjectSettings } from "../src/types/settings";

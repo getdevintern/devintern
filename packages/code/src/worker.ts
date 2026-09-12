@@ -12,9 +12,9 @@
 
 import { flushErrorTracking } from "@devintern/utils";
 import { LockManager } from "./lib/lock-manager";
-import { initSentryOnce } from "./lib/sentry-init";
-import { startWorkerCapture } from "./lib/worker-capture";
-import type { WorkerCaptureHandle } from "./lib/worker-capture";
+import { initSentryOnce } from "./lib/observability/sentry-init";
+import { startWorkerCapture } from "./lib/observability/worker-capture";
+import type { WorkerCaptureHandle } from "./lib/observability/worker-capture";
 
 export interface WorkerOptions {
   /** Single-instance lock override (workspace mode locks the workspace home

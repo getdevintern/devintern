@@ -1,3 +1,4 @@
+import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 /**
  * Worker workspace (fleet) mode.
  *
@@ -12,23 +13,23 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { randomUUID } from "crypto";
 
-import { parseEnvInteger } from "../env-integer";
-import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../task-polling-acquirer";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
-import type { ChangeDetector } from "../change-detector";
-import { createPickupGate } from "../schedule";
-import type { PickupGate, ScheduleSnapshot } from "../schedule";
-import type { WebhookQueue } from "../webhook-queue";
-import type { WorkerState } from "../worker-state";
+import { parseEnvInteger } from "../config/env-integer";
+import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
+import type { ChangeDetector } from "../acquirers/change-detector";
+import { createPickupGate } from "../worker/schedule";
+import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
+import type { WebhookQueue } from "../state/webhook-queue";
+import type { WorkerState } from "../state/worker-state";
 import {
   loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
-} from "../orphan-recovery";
-import { RunStore } from "../run-recorder";
-import { RetryStateStore } from "../retry-state";
-import { ScheduledRetryStore } from "../run-retry";
-import type { TaskTrackerClient } from "../task-tracker-client";
+} from "../worker/orphan-recovery";
+import { RunStore } from "../state/run-recorder";
+import { RetryStateStore } from "../state/retry-state";
+import { ScheduledRetryStore } from "../state/run-retry";
+import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import {
@@ -52,16 +53,16 @@ import { WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
 import type { RoutingSkipStore } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
-import { probePushAccess } from "../github-push-probe";
-import { AutomationAcquirer } from "../automation-acquirer";
-import type { AutomationConfig } from "../automation-config";
-import { automationTaskArgs } from "../automation-config";
-import { EstimationAcquirer } from "../estimation-acquirer";
-import { createTaskSupervisor, JobNotStartedError } from "../task-supervisor";
-import type { TaskSupervisor } from "../task-supervisor";
-import type { AutomationRunContext } from "../automation-acquirer";
-import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../analytics";
-import { startWorkerFailover } from "../worker-failover";
+import { probePushAccess } from "../code-host/github/push-probe";
+import { AutomationAcquirer } from "../automation/acquirer";
+import type { AutomationConfig } from "../automation/config";
+import { automationTaskArgs } from "../automation/config";
+import { EstimationAcquirer } from "../automation/estimation-acquirer";
+import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
+import type { AutomationRunContext } from "../automation/acquirer";
+import { flushAnalytics, RUN_ORIGIN_ENV, trackWorkerStarted } from "../observability/analytics";
+import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
@@ -93,7 +94,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     let tracker: TaskTrackerClient | undefined;
     if (hasTaskOrphans && (config.teams?.length ?? 0) === 0) {
       try {
-        const { TaskTrackerManager } = await import("../task-tracker-manager");
+        const { TaskTrackerManager } = await import("../trackers/manager");
         tracker = new TaskTrackerManager().getClient();
       } catch (error) {
         console.warn(
@@ -725,18 +726,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     process.exit(1);
   }
 
-  // Shared workspace values serve GitHub/review consumers and the legacy
-  // single-defaults tracker. Team clients use explicit composed env maps.
-  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
-    process.env[key] = value;
-  }
-  const multiTeam = config.teams.length > 0;
-  if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
-  // In-process consumers (dashboard, run records) follow the fleet DB.
-  process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
-
-  const initialQuery = config.defaults.taskQuery;
-  const intervalSeconds = config.defaults.pollIntervalSeconds;
+  const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
@@ -746,24 +736,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  if (
-    !multiTeam &&
-    !initialQuery &&
-    config.automations.length === 0 &&
-    config.estimations.length === 0 &&
-    !config.errorMonitors.some((source) => source.enabled)
-  ) {
-    if (retryQueue.hasPending()) {
-      console.warn(
-        "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
-      );
-    } else {
-      console.error(
-        "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
-      );
-      process.exit(1);
-    }
-  }
+  assertWorkspaceHasWork(config, retryQueue, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   startWorkerFailover({
@@ -902,7 +875,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Error-monitor adapters share one provider-neutral acquirer. Each source
   // is pinned to a repo (and optionally a team), so projects with different
   // credentials cannot be dispatched into the wrong codebase.
-  const { ErrorMonitorAcquirer, createErrorMonitorProvider } = await import("../error-monitor");
+  const { ErrorMonitorAcquirer, createErrorMonitorProvider } =
+    await import("../acquirers/error-monitor");
   const errorTaskDir = join(workspaceDir, "error-fixes");
   for (const source of config.errorMonitors) {
     if (!source.enabled) continue;
@@ -952,8 +926,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Tracker identities and credentials are startup-only. Queries and fixed
   // team repo mappings stay live through lookups against the shared config.
   const { TaskTrackerManager, createTrackerClient, trackerRequiredEnv } =
-    await import("../task-tracker-manager");
-  const { createChangeDetector } = await import("../change-detector");
+    await import("../trackers/manager");
+  const { createChangeDetector } = await import("../acquirers/change-detector");
   const sources: FleetSourceRuntime[] = [];
 
   if (multiTeam) {
@@ -1176,6 +1150,59 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   );
 }
 
+/** Export shared workspace values into `process.env` and return derived defaults. */
+function applyWorkspaceEnv(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+): { multiTeam: boolean; initialQuery: string | undefined; intervalSeconds: number } {
+  // Shared workspace values serve GitHub/review consumers and the legacy
+  // single-defaults tracker. Team clients use explicit composed env maps.
+  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
+    process.env[key] = value;
+  }
+  const multiTeam = config.teams.length > 0;
+  if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
+  // In-process consumers (dashboard, run records) follow the fleet DB.
+  process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  return {
+    multiTeam,
+    initialQuery: config.defaults.taskQuery,
+    intervalSeconds: config.defaults.pollIntervalSeconds,
+  };
+}
+
+/**
+ * Exit when workspace mode has no work configured.
+ *
+ * Scheduled dashboard retries are the one exception: the worker can still run
+ * to drain them.
+ */
+function assertWorkspaceHasWork(
+  config: WorkspaceConfig,
+  retryQueue: ScheduledRetryStore,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): void {
+  const hasWork =
+    multiTeam ||
+    initialQuery ||
+    config.automations.length > 0 ||
+    config.estimations.length > 0 ||
+    config.errorMonitors.some((source) => source.enabled);
+  if (hasWork) return;
+
+  if (retryQueue.hasPending()) {
+    console.warn(
+      "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+    );
+    return;
+  }
+  console.error(
+    "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+  );
+  process.exit(1);
+}
+
 /**
  * Wire the fleet's event acquirers: review polling on the agent's own PRs,
  * a mention sweep per GitHub repo, and the relay when configured.
@@ -1235,7 +1262,7 @@ export async function buildFleetEventAcquirers(options: {
   } = await import("./fleet-events");
 
   const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
-    await import("../relay-connect");
+    await import("../relay/connect");
   const relayState = loadRelayState(workspaceDir);
   const relayToken = relayState?.relayToken;
   const relayUrl =
@@ -1256,7 +1283,7 @@ export async function buildFleetEventAcquirers(options: {
   // follow-up GitHub reads/writes stay local and authenticate with the user's
   // GITHUB_TOKEN. Without a relay, preserve the customer-owned App-first path
   // for air-gapped/direct installations (with PAT fallback).
-  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../github-reviews");
+  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../code-host/github/reviews");
   process.env[GITHUB_AUTH_MODE_ENV] = usesHostedApp ? "token-only" : "app-first";
 
   if (usesHostedApp) {
@@ -1278,7 +1305,7 @@ export async function buildFleetEventAcquirers(options: {
     ? Boolean(process.env.GITHUB_TOKEN)
     : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
-  let github: import("../github-reviews").GitHubReviewsClient | undefined;
+  let github: import("../code-host/github/reviews").GitHubReviewsClient | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
     | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
@@ -1309,8 +1336,8 @@ export async function buildFleetEventAcquirers(options: {
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
-    const { ReviewPollingAcquirer } = await import("../review-polling-acquirer");
-    const { isGitHubNotFound } = await import("../github-reviews");
+    const { ReviewPollingAcquirer } = await import("../acquirers/review-polling");
+    const { isGitHubNotFound } = await import("../code-host/github/reviews");
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,
@@ -1369,14 +1396,14 @@ export async function buildFleetEventAcquirers(options: {
 
     // CI failure repair uses the same durable agent-PR registry, repo
     // worktree, per-PR lock, and workspace supervisor as reviews.
-    const { CiFailureWatcherAcquirer } = await import("../ci-failure-watcher-acquirer");
+    const { CiFailureWatcherAcquirer } = await import("../acquirers/ci-failure-watcher");
     const fixPr = createFleetCiFix(eventDeps);
     const ciWatcher = new CiFailureWatcherAcquirer({
       intervalSeconds,
       enabled: () => config.workspace.ciFailureFix,
       workerState: state.workerState,
       queue: state.queue,
-      github: {
+      provider: createGitHubCiProvider({
         fetchPr: async (repo, n, etag) => {
           try {
             return await gh.conditionalGet(
@@ -1394,7 +1421,7 @@ export async function buildFleetEventAcquirers(options: {
         },
         fetchWorkflowRuns: async (repo, sha, etag) => {
           const result = await gh.conditionalGet<{
-            workflow_runs: import("../github-reviews").WorkflowRunSummary[];
+            workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
           }>(
             `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
             ownerOf(repo),
@@ -1430,7 +1457,7 @@ export async function buildFleetEventAcquirers(options: {
         },
         postComment: (repo, n, body) =>
           gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
-      },
+      }),
       fixPr,
       verbose,
     });
@@ -1441,8 +1468,8 @@ export async function buildFleetEventAcquirers(options: {
     // namespaced by slug). The permission gate runs in the fleet handler.
     // Sweeps are map-managed so live config reloads can attach sweeps for
     // newly added repos and stop them for removed ones.
-    const { MentionSweepAcquirer } = await import("../mention-sweep-acquirer");
-    type MentionSweep = import("../mention-sweep-acquirer").MentionSweepAcquirer;
+    const { MentionSweepAcquirer } = await import("../acquirers/mention-sweep");
+    type MentionSweep = import("../acquirers/mention-sweep").MentionSweepAcquirer;
     const mentionSweeps = new Map<string, MentionSweep>();
     const createMentionSweep = (slug: string): MentionSweep => {
       const [repoOwner, repoName] = slug.split("/") as [string, string];
@@ -1516,7 +1543,7 @@ export async function buildFleetEventAcquirers(options: {
       options.reloadHooksOut.hooks = {
         reconcileMentionSweeps: () => {
           const wanted = new Set(fleetGitHubSlugs(config));
-          for (const [slug, sweep] of [...mentionSweeps]) {
+          for (const [slug, sweep] of mentionSweeps) {
             if (!wanted.has(slug)) {
               // A stale updater calling updateInterval on a stopped sweep
               // only mutates options (no timer) and is harmless.
@@ -1553,338 +1580,19 @@ export async function buildFleetEventAcquirers(options: {
     );
   }
 
-  // GitLab polling is deliberately independent of GitHub credentials and
-  // watches only provider-aware rows registered after successful MR creation.
-  const { parseGitLabHostAliases, parseGitRemoteUrl } = await import("../code-host");
-  const { resolveGitLabCodeHostConfig } = await import("../pr-client");
-  const resolveGitLabRepo = (mr: import("../worker-state").AgentPr) =>
-    config.repos.find((repo) => {
-      const env = buildRepoEnv(repo, workspaceDir);
-      const remote = parseGitRemoteUrl(repo.remote, {
-        gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
-        gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
-      });
-      return (
-        remote?.provider === "gitlab" &&
-        remote.instanceUrl === mr.instanceUrl &&
-        remote.projectPath === mr.projectPath
-      );
-    });
-  const hasGitLabProfile = config.repos.some((repo) => {
-    const env = buildRepoEnv(repo, workspaceDir);
-    const remote = parseGitRemoteUrl(repo.remote, {
-      gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
-      gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
-    });
-    return remote?.provider === "gitlab" && resolveGitLabCodeHostConfig(remote.instanceUrl, env).ok;
+  const { buildGitLabFleetAcquirers } = await import("./gitlab-fleet-events");
+  const gitlabEvents = await buildGitLabFleetAcquirers({
+    config,
+    workspaceDir,
+    state,
+    repoManager,
+    intervalSeconds,
+    intervalUpdaters,
+    supervisor: options.supervisor,
+    verbose,
   });
-  let reconcileGitLabRelay:
-    | ((
-        envelope: import("../relay-acquirer").RelayEnvelope & {
-          codeHost: import("../relay-acquirer").RelayCodeHostIdentity;
-        },
-      ) => Promise<void>)
-    | undefined;
-  if (hasGitLabProfile) {
-    const { CiFailureWatcherAcquirer, runCiFixViaCli } =
-      await import("../ci-failure-watcher-acquirer");
-    const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
-    const { GitLabReviewsClient } = await import("../gitlab-reviews");
-    const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
-      await import("../review-polling-acquirer");
-    const clientForGitLabMr = (mr: import("../worker-state").AgentPr) => {
-      const repo = resolveGitLabRepo(mr);
-      if (!repo) return null;
-      const env = buildRepoEnv(repo, workspaceDir);
-      const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
-      if (!resolved.ok) return null;
-      try {
-        return new GitLabReviewsClient(resolved.token, resolved.instanceUrl, {
-          caFile: resolved.caFile,
-          proxy: resolved.proxy,
-        });
-      } catch (error) {
-        console.warn(
-          `⚠️  [fleet] GitLab client for ${mr.projectPath} could not be initialized: ${(error as Error).message}`,
-        );
-        return null;
-      }
-    };
-    const gitlabPoller = new GitLabReviewPollingAcquirer({
-      intervalSeconds,
-      workerState: state.workerState,
-      queue: state.queue,
-      allowed: (mr) => Boolean(resolveGitLabRepo(mr)),
-      clientFor: clientForGitLabMr,
-      addressMr: async (mr) => {
-        const repo = resolveGitLabRepo(mr);
-        if (!repo) return false;
-        await repoManager.ensureBareClone(repo);
-        await repoManager.fetch(repo.name);
-        const base = await repoManager.ensureBaseWorktree(repo);
-        const invoke = () =>
-          runAddressReviewUrlViaCli(
-            mr.webUrl,
-            `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
-            {
-              cwd: base,
-              env: buildRepoEnv(repo, workspaceDir),
-            },
-          );
-        if (!options.supervisor) return invoke();
-        try {
-          return await options.supervisor.schedule({
-            id: randomUUID(),
-            source: "gitlab:feedback",
-            repo: repo.name,
-            kind: "review",
-            label: `${mr.projectPath}!${mr.changeNumber}`,
-            checkoutClass: "shared_base",
-            run: invoke,
-          });
-        } catch (error) {
-          if (error instanceof JobNotStartedError) return "deferred";
-          throw error;
-        }
-      },
-      // Scheduled GitLab conflict windows need provider-neutral durable
-      // scheduling state; until that lands, never violate a scheduled policy.
-      shouldResolve: () => config.workspace.conflictResolution === "auto",
-      resolveMr: async (mr, expected) => {
-        const repo = resolveGitLabRepo(mr);
-        if (!repo) return { outcome: "skipped", message: "repository is not configured" };
-        await repoManager.ensureBareClone(repo);
-        await repoManager.fetch(repo.name);
-        const base = await repoManager.ensureBaseWorktree(repo);
-        const invoke = () =>
-          runResolveConflictsUrlViaCli(
-            mr.webUrl,
-            `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
-            {
-              cwd: base,
-              env: buildRepoEnv(repo, workspaceDir),
-              expectedHeadSha: expected.headSha,
-              expectedBaseSha: expected.baseSha,
-            },
-          );
-        if (!options.supervisor) return invoke();
-        try {
-          return await options.supervisor.schedule({
-            id: randomUUID(),
-            source: "gitlab:conflict",
-            repo: repo.name,
-            kind: "conflict",
-            label: `${mr.projectPath}!${mr.changeNumber}`,
-            checkoutClass: "shared_base",
-            run: invoke,
-          });
-        } catch (error) {
-          if (error instanceof JobNotStartedError) {
-            return { outcome: "deferred", message: error.message };
-          }
-          throw error;
-        }
-      },
-      reviewerAllowlist: (process.env.GITLAB_REVIEWER_ALLOWLIST ?? "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean),
-    });
-    acquirers.push(gitlabPoller);
-    intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
-
-    const gitlabCiRows = new Map<string, Map<number, import("../worker-state").AgentPr>>();
-    const gitlabCiSnapshots = new Map<
-      string,
-      { sha: string; snapshot: import("../gitlab-reviews").GitLabCiSnapshot }
-    >();
-    const ciKey = (mr: import("../worker-state").AgentPr) => `${mr.instanceUrl}:${mr.projectPath}`;
-    const ciRow = (key: string, number?: number) => {
-      const rows = gitlabCiRows.get(key);
-      // Project/SHA-scoped reads can use any row; MR operations require the exact IID.
-      return number === undefined ? rows?.values().next().value : rows?.get(number);
-    };
-    const resolveCi = (key: string, number?: number) => {
-      const mr = ciRow(key, number);
-      if (!mr) throw new Error("GitLab MR is no longer registered");
-      const client = clientForGitLabMr(mr);
-      if (!client) throw new Error("GitLab code-host profile is unavailable");
-      return { mr, client };
-    };
-    const gitlabCiWatcher = new CiFailureWatcherAcquirer({
-      intervalSeconds,
-      enabled: () => config.workspace.ciFailureFix,
-      workerState: state.workerState,
-      queue: state.queue,
-      namespace: "gitlab",
-      ciProviderLabel: "GitLab job trace",
-      feedbackRepository: (key) => ciRow(key)?.projectPath ?? key,
-      describeChange: (key, n) => `${ciRow(key)?.projectPath ?? key}!${n}`,
-      escalationRecoveryText: "Push a new commit and I will take another look.",
-      watchedChanges: () => {
-        gitlabCiRows.clear();
-        return state.workerState
-          .listOpenAgentChangeRequests()
-          .filter((mr) => mr.provider === "gitlab" && Boolean(resolveGitLabRepo(mr)))
-          .map((mr) => {
-            const key = ciKey(mr);
-            const rows = gitlabCiRows.get(key) ?? new Map();
-            rows.set(mr.changeNumber, mr);
-            gitlabCiRows.set(key, rows);
-            return { repo: key, prNumber: mr.changeNumber };
-          });
-      },
-      markClosed: (key, n) => {
-        const mr = ciRow(key, n);
-        if (mr) {
-          state.workerState.markAgentChangeRequestClosed({
-            provider: mr.provider,
-            instanceUrl: mr.instanceUrl,
-            projectId: mr.projectId,
-            projectPath: mr.projectPath,
-            number: mr.changeNumber,
-            webUrl: mr.webUrl,
-          });
-        }
-      },
-      github: {
-        fetchPr: async (key, n) => {
-          const { mr, client } = resolveCi(key, n);
-          try {
-            const current = await client.getChangeRequest(mr.projectPath, n);
-            return {
-              data: {
-                state: current.state === "opened" ? "open" : current.state,
-                head: { sha: current.head.sha, repo: { full_name: key } },
-              },
-              notModified: false,
-            };
-          } catch (error) {
-            if ((error as Error).message.includes("GitLab API error (404)")) {
-              return { data: null, notModified: false, gone: true };
-            }
-            throw error;
-          }
-        },
-        fetchWorkflowRuns: async (key, sha) => {
-          const { mr, client } = resolveCi(key);
-          const snapshot = await client.getCiSnapshot(mr.projectPath, sha);
-          gitlabCiSnapshots.set(key, { sha, snapshot });
-          const runs: import("../ci-failure-watcher-acquirer").WatchedWorkflowRun[] =
-            snapshot.failures.map((failure, index) => ({
-              id: index + 1,
-              externalId: `gitlab:${mr.instanceUrl}:${failure.externalId}`,
-              name: failure.name,
-              status: "completed",
-              conclusion: failure.conclusion,
-              html_url: failure.detailsUrl,
-            }));
-          if (runs.length === 0 && snapshot.state === "pending") {
-            runs.push({ id: 0, name: "GitLab pipeline", status: "running", conclusion: null });
-          } else if (runs.length === 0 && snapshot.state === "success") {
-            runs.push({
-              id: 0,
-              name: "GitLab pipeline",
-              status: "completed",
-              conclusion: "success",
-            });
-          }
-          return { data: runs, notModified: false };
-        },
-        fetchCommitStatus: async (key, sha) => {
-          const cached = gitlabCiSnapshots.get(key);
-          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
-          return {
-            data: {
-              state: snapshot?.state ?? "unknown",
-              total_count: snapshot?.state === "unknown" ? 0 : 1,
-              statuses: [],
-            },
-            notModified: false,
-          };
-        },
-        fetchFailingJobLogs: async (key, sha) => {
-          const { mr, client } = resolveCi(key);
-          const cached = gitlabCiSnapshots.get(key);
-          const snapshot = cached?.sha === sha ? cached.snapshot : undefined;
-          return client.getJobTraces(mr.projectPath, snapshot?.jobIds ?? []);
-        },
-        postComment: async (key, n, body) => {
-          const { mr, client } = resolveCi(key, n);
-          await client.postMergeRequestNote(mr.projectId ?? mr.projectPath, n, body);
-        },
-      },
-      fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
-        const { mr, client } = resolveCi(key, n);
-        const current = await client.getChangeRequest(mr.projectPath, mr.changeNumber);
-        if (current.state !== "opened" || current.head.sha !== expectedHeadSha) return false;
-        const repo = resolveGitLabRepo(mr);
-        if (!repo) return false;
-        const invoke = async (signal?: AbortSignal) => {
-          await repoManager.ensureBareClone(repo);
-          await repoManager.fetch(repo.name);
-          const base = await repoManager.ensureBaseWorktree(repo);
-          return runCiFixViaCli(mr.projectPath, mr.changeNumber, feedbackPath, {
-            cwd: base,
-            env: buildRepoEnv(repo, workspaceDir),
-            webUrl: mr.webUrl,
-            serializationKey: `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
-            expectedHeadSha,
-            signal,
-          });
-        };
-        if (!options.supervisor) return invoke();
-        try {
-          return await options.supervisor.schedule({
-            id: randomUUID(),
-            source: "gitlab:ci",
-            repo: repo.name,
-            kind: "ci_fix",
-            label: `${mr.projectPath}!${mr.changeNumber}`,
-            checkoutClass: "shared_base",
-            run: invoke,
-          });
-        } catch (error) {
-          if (error instanceof JobNotStartedError) return "deferred";
-          throw error;
-        }
-      },
-      verbose,
-    });
-    acquirers.push(gitlabCiWatcher);
-    intervalUpdaters.push((seconds) => gitlabCiWatcher.updateInterval(seconds));
-
-    reconcileGitLabRelay = async (envelope) => {
-      const { codeHost, ref } = envelope;
-      const matches = state.workerState
-        .listOpenAgentChangeRequests()
-        .filter(
-          (mr) =>
-            mr.provider === "gitlab" &&
-            mr.instanceUrl === codeHost.instanceUrl &&
-            mr.projectId === codeHost.projectId &&
-            mr.projectPath === codeHost.projectPath &&
-            (ref.change === undefined || mr.changeNumber === ref.change) &&
-            (ref.branch === undefined || mr.branch === ref.branch),
-        );
-      if (matches.length === 0) {
-        if (verbose) {
-          console.log(
-            `   [relay] no registered GitLab change matches ${codeHost.projectPath}` +
-              `${ref.change ? `!${ref.change}` : ref.branch ? `:${ref.branch}` : ""}`,
-          );
-        }
-        return;
-      }
-      for (const mr of matches) {
-        if (envelope.eventType === "ci.changed") {
-          await gitlabCiWatcher.reconcile(ciKey(mr), mr.changeNumber);
-        } else {
-          await gitlabPoller.reconcile(mr);
-        }
-      }
-    };
-  }
+  acquirers.push(...gitlabEvents.acquirers);
+  const reconcileGitLabRelay = gitlabEvents.reconcile;
 
   // Mode 2 relay is independent of GitHub polling credentials: tracker
   // envelopes only need the active tracker client. PR envelopes use the
@@ -1895,8 +1603,8 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
-      const { RelayAcquirer } = await import("../relay-acquirer");
-      const { botMentionCandidates, mentionsAnyBot } = await import("../mention-sweep-acquirer");
+      const { RelayAcquirer } = await import("../relay/acquirer");
+      const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
         const execute = createFleetTaskExecutor(
           {

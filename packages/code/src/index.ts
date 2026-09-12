@@ -39,8 +39,8 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/sandbox";
-import { initSentryOnce } from "./lib/sentry-init";
+import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/agent/sandbox";
+import { initSentryOnce } from "./lib/observability/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import {
   captureError,
@@ -61,24 +61,24 @@ import {
   trackSetupStarted,
   trackWorkerConnect,
   trackWorkerTaskRun,
-} from "./lib/analytics";
-import type { AnalyticsPropValue } from "./lib/analytics";
-import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
-import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
-import { parseAgentJsonObject } from "./lib/agent-json";
+} from "./lib/observability/analytics";
+import type { AnalyticsPropValue } from "./lib/observability/analytics";
+import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/agent/analysis-mode";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent/model";
+import { parseAgentJsonObject } from "./lib/agent/json";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterations,
-} from "./lib/auto-review-config";
-import { TaskFormatter } from "./lib/task-formatter";
-import type { RetryPromptContext } from "./lib/task-formatter";
-import { resolveOutputDir } from "./lib/output-dir";
-import { GitHubAppAuth } from "./lib/github-app-auth";
-import { scaffoldProject } from "./lib/init-scaffold";
-import { isInteractive, runInitWizard } from "./lib/init-wizard";
-import { ensureTrackerEnvConfigured } from "./lib/first-run";
-import { TaskTrackerManager } from "./lib/task-tracker-manager";
-import type { TaskTrackerClient } from "./lib/task-tracker-client";
+} from "./lib/review/auto-review-config";
+import { TaskFormatter } from "./lib/task/formatter";
+import type { RetryPromptContext } from "./lib/task/formatter";
+import { resolveOutputDir } from "./lib/config/output-dir";
+import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
+import { scaffoldProject } from "./lib/init/scaffold";
+import { isInteractive, runInitWizard } from "./lib/init/wizard";
+import { ensureTrackerEnvConfigured } from "./lib/init/first-run";
+import { TaskTrackerManager } from "./lib/trackers/manager";
+import type { TaskTrackerClient } from "./lib/trackers/client";
 import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-client";
 import { isMarkdownTaskTracker } from "./lib/trackers/markdown/markdown-task-tracker-client";
 import type { MarkdownTaskRaw } from "./lib/trackers/markdown/markdown-task-tracker-client";
@@ -89,10 +89,10 @@ import {
   supportsQuery,
   trackersSupportingEstimate,
   trackersSupportingQuery,
-} from "./lib/tracker-capabilities";
-import { normalizeTaskKeys } from "./lib/normalize-task-keys";
+} from "./lib/trackers/capabilities";
+import { normalizeTaskKeys } from "./lib/task/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
-import { PRManager } from "./lib/pr-client";
+import { PRManager } from "./lib/code-host";
 import {
   RunStore,
   beginRun,
@@ -101,25 +101,25 @@ import {
   recordRunPr,
   recordRunStage,
   recordRunTicket,
-} from "./lib/run-recorder";
-import type { RunStatus } from "./lib/run-recorder";
-import { buildTicketUrl } from "./lib/ticket-url";
-import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/retry-state";
-import { shouldSkipRetry } from "./lib/retry-gate";
+} from "./lib/state/run-recorder";
+import type { RunStatus } from "./lib/state/run-recorder";
+import { buildTicketUrl } from "./lib/task/ticket-url";
+import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/state/retry-state";
+import { shouldSkipRetry } from "./lib/state/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
-import { reportTaskFailure } from "./lib/failure-feedback";
+import { reportTaskFailure } from "./lib/task/failure-feedback";
 import {
   exitIfWorkerUsageLimit,
   isWorkerChild,
   USAGE_LIMIT_EXIT_CODE,
   writeUsageLimitHint,
-} from "./lib/usage-limit-protocol";
-import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/worker-state";
+} from "./lib/worker/usage-limit-protocol";
+import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/state/worker-state";
 import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
-import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
-import { runAutoReviewLoop } from "./lib/auto-review-loop";
-import { isAutomatedEnvironment } from "./lib/env-detector";
+import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
+import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
+import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
@@ -642,7 +642,7 @@ if (process.argv[2] === "init") {
   (async () => {
     if (isInteractive(process.argv, process.stdin)) {
       if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
-        const { runInitUpgrade } = await import("./lib/init-wizard");
+        const { runInitUpgrade } = await import("./lib/init/wizard");
         await runInitUpgrade();
       } else {
         await runInitWizard();
@@ -655,12 +655,13 @@ if (process.argv[2] === "init") {
   })();
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
+  // oxlint-disable-next-line complexity -- worker subcommand dispatcher spans connect/monitor/daemon branches; remedy: move each subcommand into its own `runWorker<Name>Command()` module.
   (async () => {
     // `devintern worker connect ...` — configure relay-backed integrations or
     // a directly polled Sentry error monitor.
     if (process.argv[3] === "connect") {
       const { runWorkerConnectCommand, parseConnectArgs, WORKER_CONNECT_TARGETS } =
-        await import("./lib/worker-connect");
+        await import("./lib/init/worker-connect");
       const connectArgs = process.argv.slice(4);
       // Parse once and hand the result to the command, so attribution and
       // execution cannot drift. Arg errors (`--team` with no value) and
@@ -754,8 +755,8 @@ if (process.argv[2] === "init") {
         process.exit(0);
       }
       loadedEnvPath = loadEnvironment();
-      const { runWorkerInit } = await import("./lib/worker-init");
-      const { isInteractive } = await import("./lib/init-wizard");
+      const { runWorkerInit } = await import("./lib/init/worker-init");
+      const { isInteractive } = await import("./lib/init/wizard");
       if (!isInteractive(args, process.stdin)) {
         console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
         console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
@@ -1045,7 +1046,7 @@ if (process.argv[2] === "init") {
     }
 
     // Import and run address-review
-    const { addressReview } = await import("./lib/address-review");
+    const { addressReview } = await import("./lib/review/address");
     try {
       await addressReview(prUrl, {
         noPush,
@@ -1118,7 +1119,7 @@ if (process.argv[2] === "init") {
       process.exit(1);
     }
 
-    const { resolveConflictsOnPr } = await import("./lib/conflict-resolver");
+    const { resolveConflictsOnPr } = await import("./lib/review/conflict-resolver");
     try {
       const result = await resolveConflictsOnPr(prUrl, {
         noPush,
@@ -1218,7 +1219,8 @@ if (process.argv[2] === "init") {
   // Readiness doctor: everything needed for a first successful run, with a
   // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
   (async () => {
-    const { collectReadinessChecks, renderReadinessReport } = await import("./lib/readiness");
+    const { collectReadinessChecks, renderReadinessReport } =
+      await import("./lib/observability/readiness");
     loadedEnvPath = loadEnvironment();
     let supabaseConfig;
     try {
@@ -1540,6 +1542,7 @@ async function reportProcessingFailure(taskKey: string, reason: string): Promise
  * @param taskIndex - Zero-based index in a batch run
  * @param totalTasks - Total tasks in the batch
  */
+// oxlint-disable-next-line complexity, max-statements -- end-to-end single-task pipeline (fetch → branch → agent → commit → PR → Jira transition) welded to module-level `activeTaskContext`/`options`; remedy: thread an explicit `TaskRunContext` and split fetch/execute/finalize phases.
 async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1): Promise<void> {
   try {
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
@@ -1956,9 +1959,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
             clarityInputFile,
             resolvedAgent.harness,
             resolvedAgent.path,
-            workflowKey,
-            tracker,
-            options.skipComments,
+            { key: workflowKey, tracker, skipComments: options.skipComments },
             runOptions,
           ),
         );
@@ -2072,28 +2073,27 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
     console.log(`\n🤖 Running ${resolvedAgent.harness.displayName} with task details...`);
     const implementationStartedAt = Date.now();
-    await runAgentHarness(
-      outputFile,
-      resolvedAgent.harness,
-      resolvedAgent.path,
-      Number.parseInt(options.maxTurns),
-      workflowKey,
-      taskDetails.summary,
-      options.git && options.autoCommit,
+    await runAgentHarness({
+      taskFile: outputFile,
+      harness: resolvedAgent.harness,
+      executablePath: resolvedAgent.path,
+      maxTurns: Number.parseInt(options.maxTurns),
+      taskKey: workflowKey,
+      taskSummary: taskDetails.summary,
+      enableGit: options.git && options.autoCommit,
       task,
-      options.createPr,
-      effectiveTargetBranch,
+      createPr: options.createPr,
+      prTargetBranch: effectiveTargetBranch,
       tracker,
-      options.skipComments,
-      Number.parseInt(options.hookRetries),
-      projectSettings,
+      skipComments: options.skipComments,
+      hookRetries: Number.parseInt(options.hookRetries),
       gitAuthor,
-      options.autoReview,
-      autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
-      false,
-      options.prTargetBranchExplicit,
-      options.requestedPrTargetBranch,
-    );
+      autoReview: options.autoReview,
+      autoReviewIterations: autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
+      isPlanRetry: false,
+      prTargetBranchExplicit: options.prTargetBranchExplicit,
+      requestedPrTargetBranch: options.requestedPrTargetBranch,
+    });
 
     // An incomplete-summary file written during this run means the agent
     // stopped short and handed back to a human (mtime check guards against
@@ -2244,6 +2244,7 @@ async function flushAnalyticsAndExit(exitCode: number): Promise<never> {
 }
 
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
+// oxlint-disable-next-line complexity, max-statements -- top-level CLI orchestrator: arg/JQL resolution, lock acquisition, batch loop, signal handling, and exit-code mapping; remedy: extract `resolveRunTargets`, `runTaskBatch`, and `installShutdownHandlers`.
 async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
@@ -2490,17 +2491,17 @@ async function main(): Promise<void> {
 
           // Run estimation
           const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
-            runEstimation(
+            runEstimation({
               estimationFile,
-              resolvedAgent.harness,
-              resolvedAgent.path,
+              harness: resolvedAgent.harness,
+              executablePath: resolvedAgent.path,
               taskKey,
               tracker,
-              projectSettings,
-              options.skipComments,
+              settings: projectSettings,
+              skipComments: options.skipComments,
               existingCommentId,
               runOptions,
-            ),
+            }),
           );
 
           // Clean up temp file
@@ -2530,9 +2531,7 @@ async function main(): Promise<void> {
             await finishTaskRun("deferred", error.message);
             if (isWorkerChild()) {
               console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
-              if (lockManager) {
-                lockManager.release();
-              }
+              lockManager?.release();
               writeUsageLimitHint(error);
               await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
             }
@@ -2707,9 +2706,8 @@ async function main(): Promise<void> {
  * @param clarityFile - Path to the clarity assessment prompt file
  * @param harness - Agent harness configuration
  * @param executablePath - Agent CLI executable path
- * @param taskKey - Task tracker issue key
- * @param tracker - Task tracker client
- * @param skipComments - When true, skip posting the assessment comment
+ * @param task - Tracker context: issue `key`, the `tracker` client, and
+ *   `skipComments` to skip posting the assessment comment
  * @param runOptions - Agent run options (mode/permissions); callers pass
  *   these via {@link runAnalysisWithFallback} so a failing read-only run is
  *   retried once in default mode
@@ -2718,11 +2716,10 @@ async function runClarityCheck(
   clarityFile: string,
   harness: AgentHarness,
   executablePath: string,
-  taskKey: string,
-  tracker: TaskTrackerClient | undefined,
-  skipComments: boolean,
+  task: { key: string; tracker: TaskTrackerClient | undefined; skipComments: boolean },
   runOptions: AgentRunOptions,
 ): Promise<ClarityAssessment | null> {
+  const { key: taskKey, tracker, skipComments } = task;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the clarity check.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -3110,27 +3107,35 @@ async function postClarityComment(
   }
 }
 
+interface RunEstimationOptions {
+  estimationFile: string;
+  harness: AgentHarness;
+  executablePath: string;
+  taskKey: string;
+  tracker: TaskTrackerClient;
+  settings: ProjectSettings | null;
+  skipComments: boolean;
+  existingCommentId: string | undefined;
+  runOptions: AgentRunOptions;
+}
+
 /**
  * Run the agent to estimate story points and update the task tracker (field + comment).
  *
- * @param estimationFile - Path to the estimation prompt file
- * @param harness - Agent harness configuration
- * @param executablePath - Agent CLI executable path
- * @param taskKey - Task tracker issue key
- * @param tracker - Task tracker client
- * @param projectSettings - Per-project custom field overrides
+ * @param options - Estimation inputs
  */
-async function runEstimation(
-  estimationFile: string,
-  harness: AgentHarness,
-  executablePath: string,
-  taskKey: string,
-  tracker: TaskTrackerClient,
-  settings: ProjectSettings | null,
-  skipComments: boolean,
-  existingCommentId: string | undefined,
-  runOptions: AgentRunOptions,
-): Promise<EstimationResult | null> {
+async function runEstimation(options: RunEstimationOptions): Promise<EstimationResult | null> {
+  const {
+    estimationFile,
+    harness,
+    executablePath,
+    taskKey,
+    tracker,
+    settings,
+    skipComments,
+    existingCommentId,
+    runOptions,
+  } = options;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the estimation.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -3521,53 +3526,55 @@ ${originalTaskContent}
 Now implement the solution. Write the actual code.`;
 }
 
+interface RunAgentHarnessOptions {
+  taskFile: string;
+  harness: AgentHarness;
+  executablePath: string;
+  maxTurns?: number;
+  taskKey?: string;
+  taskSummary?: string;
+  enableGit?: boolean;
+  task?: any;
+  createPr?: boolean;
+  prTargetBranch?: string;
+  tracker?: TaskTrackerClient;
+  skipComments?: boolean;
+  hookRetries?: number;
+  gitAuthor?: { name: string; email: string };
+  autoReview?: boolean;
+  autoReviewIterations?: number;
+  isPlanRetry?: boolean;
+  prTargetBranchExplicit?: boolean;
+  requestedPrTargetBranch?: string;
+}
+
 /**
  * Run the main agent harness implementation session for a formatted task.
  *
- * @param taskFile - Path to the formatted task markdown prompt
- * @param harness - Agent harness configuration
- * @param executablePath - Agent CLI executable path
- * @param maxTurns - Maximum agent turns
- * @param taskKey - Task tracker issue key
- * @param taskSummary - Issue summary for commits and comments
- * @param enableGit - When false, skip git branch/commit workflow
- * @param task - Generic task object (for PR creation and description extraction)
- * @param createPr - Create a pull request after implementation
- * @param prTargetBranch - Base branch for the PR
- * @param tracker - Task tracker client for status transitions and comments
- * @param skipComments - Skip posting tracker comments
- * @param hookRetries - Max retries for git hook auto-fix
- * @param projectSettings - Per-project workflow settings
- * @param gitAuthor - Optional bot author for commits
- * @param autoReview - Run post-PR auto-review loop
- * @param autoReviewIterations - Max auto-review iterations, resolved once at
- *   startup from the unified `--auto-review-iterations` arg / env var
- * @param isPlanRetry - Whether this run follows a plan-only retry
- * @param prTargetBranchExplicit - Whether the user explicitly selected the target branch
- * @param requestedPrTargetBranch - Original explicit target before Git fallback resolution
+ * @param input - Implementation run inputs
  */
-async function runAgentHarness(
-  taskFile: string,
-  harness: AgentHarness,
-  executablePath: string,
-  maxTurns = 500,
-  taskKey?: string,
-  taskSummary?: string,
-  enableGit = true,
-  task?: any,
-  createPr = false,
-  prTargetBranch = "main",
-  tracker?: TaskTrackerClient,
-  skipComments = false,
-  hookRetries = 10,
-  projectSettings: ProjectSettings | null = null,
-  gitAuthor?: { name: string; email: string },
-  autoReview = false,
-  autoReviewIterations: number = DEFAULT_AUTO_REVIEW_ITERATIONS,
-  isPlanRetry = false,
-  prTargetBranchExplicit = false,
-  requestedPrTargetBranch?: string,
-): Promise<void> {
+async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+  const {
+    taskFile,
+    harness,
+    executablePath,
+    maxTurns = 500,
+    taskKey,
+    taskSummary,
+    enableGit = true,
+    task,
+    createPr = false,
+    prTargetBranch = "main",
+    tracker,
+    skipComments = false,
+    hookRetries = 10,
+    gitAuthor,
+    autoReview = false,
+    autoReviewIterations = DEFAULT_AUTO_REVIEW_ITERATIONS,
+    isPlanRetry = false,
+    prTargetBranchExplicit = false,
+    requestedPrTargetBranch,
+  } = input;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the run.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -3681,6 +3688,7 @@ async function runAgentHarness(
       });
 
       // Handle process exit
+      // oxlint-disable-next-line complexity -- agent close handler fans out sandbox cleanup, output flushing, and failure reporting; remedy: extract `handleAgentClose(code)` on the run context.
       codeAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
@@ -4044,9 +4052,10 @@ async function runAgentHarness(
                 branchForPr,
                 effectivePrTargetBranch,
                 implementationOutput,
-                undefined,
-                prTargetBranchExplicit,
-                requestedPrTargetBranch,
+                {
+                  targetBranchExplicit: prTargetBranchExplicit,
+                  requestedTargetBranch: requestedPrTargetBranch,
+                },
               );
 
               if (prResult.success) {
@@ -4178,6 +4187,7 @@ async function runAgentHarness(
             };
 
             handleCommitWithRetry()
+              // oxlint-disable-next-line complexity -- commit-retry continuation branches on conflict resolution and plan-only detection; remedy: replace the `.then` with `await handleCommitWithRetry()` returning a typed result.
               .then(async ({ success, result }) => {
                 if (!success) {
                   // Check if this is a "plan only" scenario - Agent created a plan but didn't implement

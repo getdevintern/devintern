@@ -6,7 +6,7 @@
  */
 
 import { TrelloClient } from "@devintern/task-trackers";
-import type { TrelloAction, TrelloAttachment, TrelloCardDetail } from "@devintern/task-trackers";
+import type { TrelloAction, TrelloCardDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -16,7 +16,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../../task-tracker-client";
+import type { TaskTrackerClient } from "../client";
 import {
   formatAssessmentFailureMarkdown,
   formatClarityAssessmentMarkdown,

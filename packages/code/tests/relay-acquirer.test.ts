@@ -3,10 +3,10 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { RelayAcquirer } from "../src/lib/relay-acquirer";
-import type { RelayEnvelope } from "../src/lib/relay-acquirer";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+import { RelayAcquirer } from "../src/lib/relay/acquirer";
+import type { RelayEnvelope } from "../src/lib/relay/acquirer";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 const RELAY_URL = "http://relay.test";
 

@@ -28,7 +28,7 @@ import {
   trackWorkerInitStarted,
   trackWorkerStarted,
   trackWorkerTaskRun,
-} from "../src/lib/analytics";
+} from "../src/lib/observability/analytics";
 
 const tmpDirs: string[] = [];
 

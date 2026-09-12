@@ -22,6 +22,38 @@ This file provides guidance to Claude Code when working with this repository.
 
 1. Webhook receives review → 2. Check bot mention → 3. Queue review → 4. Switch worktree to PR branch → 5. Fetch comments → 6. Run Claude → 7. Commit fixes → 8. Push & reply
 
+### Module layout (`src/lib`)
+
+Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability *is*), and provider folders appear inside a context only where that provider genuinely multiplies.
+
+This repo has two independent provider axes — task trackers and code hosts — and two change vectors: capability work and provider work. A single-axis tree always fails one of them. The commit history is provider-divergent and GitLab-heavy, so provider code should be co-located at the leaf, while neutral contracts stay discoverable at the context root.
+
+Rules:
+
+- **Top level = context, not vendor.** Never `lib/github/` — `github` is both a task tracker (`trackers/github/`) and a code host (`code-host/github/`).
+- **Provider folder only at ≥3 files** in that context; below that, keep `github-*.ts` siblings next to the neutral contract.
+- **Neutral contracts + shared helpers live at the context root** (`code-host/provider.ts`, `code-host/shared.ts`), never inside a provider folder — this also avoids `import/no-cycle`.
+- **Provider-neutral capabilities stay concern-based** (`relay`, `worker`, `state`, `observability`, review orchestration) and earn provider folders only if they grow them.
+- **One primary export per file.** `pr-client.ts` was split one-class-per-file into `code-host/`; `worker/schedule.ts` (3 classes) and `state/run-retry.ts` (2 classes) are within the `max-classes-per-file` budget and can be split further if they grow.
+
+Current layout (context-first, provider-second; extends the `trackers/<provider>/` and `workspace/` precedent):
+
+```
+lib/
+  code-host/                 # context
+    provider.ts              # neutral contract: CodeHostProvider, CodeHostRepository, …
+    shared.ts                # PRInfo/PRResult, title/body builders, label parsing
+    base-client.ts  manager.ts  index.ts
+    ci-provider.ts  review-provider.ts  review-provider-factory.ts  change-origin.ts
+    github/                  # PR client, review adapter, CI provider, reviews, push probe, app auth, webhook
+    gitlab/                  # MR client, review adapter, CI provider, reviews, webhook(+admin)
+    bitbucket/               # PR client
+  trackers/                  # client.ts / manager.ts / capabilities.ts at the root + <provider>/ dirs
+  acquirers/  review/  relay/  worker/  state/  observability/
+  task/  agent/  config/  init/  automation/
+  utils.ts  lock-manager.ts  # cross-cutting low-level helpers kept at the lib root
+```
+
 ### Configuration
 
 **Environment Variables (.devintern-code/.env):**

@@ -6,12 +6,11 @@ import { join } from "path";
 
 import {
   buildConflictPrompt,
-  buildHookFixPrompt,
   resolveConflictsOnPr,
   sanitizeErrorForPublicComment,
-} from "../src/lib/conflict-resolver";
+} from "../src/lib/review/conflict-resolver";
 import { Utils } from "../src/lib/utils";
-import type { PullRequestInfo } from "../src/lib/github-reviews";
+import type { PullRequestInfo } from "../src/lib/code-host/github/reviews";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
 

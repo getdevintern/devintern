@@ -5,18 +5,18 @@ import { join } from "path";
 
 import { UsageLimitError } from "@devintern/agent-harness";
 
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
   resetWorkerFailover,
   runWithFailover,
   startWorkerFailover,
-} from "../src/lib/worker-failover";
+} from "../src/lib/worker/failover";
 import {
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   writeUsageLimitHint,
-} from "../src/lib/usage-limit-protocol";
+} from "../src/lib/worker/usage-limit-protocol";
 
 afterEach(() => {
   resetWorkerFailover();

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport } from "../src/lib/sandbox";
+import { buildSandboxDoctorReport } from "../src/lib/agent/sandbox";
 
 function detected(
   name: string,

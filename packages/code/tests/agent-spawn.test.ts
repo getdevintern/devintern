@@ -6,7 +6,7 @@ import {
   KimiHarness,
   OpencodeHarness,
 } from "@devintern/agent-harness";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../src/lib/agent-spawn";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../src/lib/agent/spawn";
 
 const runOptions = { skipPermissions: true, workingDir: "/tmp/repo" };
 

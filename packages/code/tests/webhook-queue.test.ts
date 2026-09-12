@@ -9,7 +9,7 @@ import {
   WebhookQueue,
   prepareQueueDbDirectory,
   resolveQueueDbPath,
-} from "../src/lib/webhook-queue";
+} from "../src/lib/state/webhook-queue";
 
 describe("WebhookQueue", () => {
   let dbPath: string;

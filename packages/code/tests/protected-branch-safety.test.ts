@@ -34,7 +34,7 @@ describe("Protected Branch Safety Checks", () => {
     // Rename to main if needed
     try {
       execSync("git branch -M main", { cwd: repoDir });
-    } catch (e) {
+    } catch {
       // Already on main
     }
   });
@@ -45,7 +45,7 @@ describe("Protected Branch Safety Checks", () => {
       if (existsSync(testDir)) {
         rmSync(testDir, { recursive: true, force: true });
       }
-    } catch (e) {
+    } catch {
       // Ignore cleanup errors
     }
   });

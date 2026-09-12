@@ -8,7 +8,7 @@ import {
   parseAutoReviewIterations,
   resolveAutoReviewIterations,
   resolveAutoReviewIterationsIfEnabled,
-} from "../src/lib/auto-review-config";
+} from "../src/lib/review/auto-review-config";
 
 const ENV_VARS = [AUTO_REVIEW_ITERATIONS_ENV, AUTO_REVIEW_ITERATIONS_DEPRECATED_ENV] as const;
 const originals = new Map(ENV_VARS.map((name) => [name, process.env[name]]));

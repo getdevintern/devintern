@@ -65,10 +65,25 @@ export interface HarnessResolutionOptions {
  */
 export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarness {
   const env = process.env;
+  const harness = resolveHarnessOrThrow(options, env);
+  const path = resolveHarnessPath(harness, options, env);
+  return { harness, path };
+}
 
+/**
+ * Resolve the requested harness name from options/env and look it up.
+ *
+ * @param options - Optional harness name and deprecation-warning control.
+ * @param env - Environment to read `AGENT_HARNESS` from.
+ * @returns The registered harness.
+ * @throws {Error} When the harness name is not registered.
+ */
+function resolveHarnessOrThrow(
+  options: HarnessResolutionOptions | undefined,
+  env: NodeJS.ProcessEnv,
+): AgentHarness {
   // 1. Determine harness name
-  const explicitHarnessName = options?.harnessName;
-  let harnessName = explicitHarnessName;
+  let harnessName = options?.harnessName;
   if (!harnessName) {
     // AGENT_HARNESS may name a comma-separated failover chain; env-driven
     // (non-explicit) resolution always uses the first (priority) entry, kept
@@ -98,34 +113,28 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
         `Set AGENT_HARNESS or pass harnessName explicitly.`,
     );
   }
+  return harness;
+}
 
+/**
+ * Resolve the executable path for a harness from options/env/defaults.
+ *
+ * @param harness - Registered harness being resolved.
+ * @param options - Optional CLI path, env prefix, and warning control.
+ * @param env - Environment to read path overrides from.
+ * @returns The resolved executable path or command.
+ */
+function resolveHarnessPath(
+  harness: AgentHarness,
+  options: HarnessResolutionOptions | undefined,
+  env: NodeJS.ProcessEnv,
+): string {
   // 2. Determine executable path
   let path = options?.cliPath;
   if (!path) {
-    if (explicitHarnessName) {
-      // Explicit selection (--harness / interactive picker): honour harness-specific
-      // paths only; AGENT_CLI_PATH is reserved for env/default-driven resolution.
-      if (options?.envPrefix) {
-        const prefix = options.envPrefix;
-        path = env[`${prefix}_CLI_PATH`];
-        if (!path && harness.name === "claude-code") {
-          path = env.CLAUDE_CLI_PATH;
-        }
-      } else {
-        path = getHarnessCliCommand(harness, { warnDeprecated: options?.warnDeprecated });
-      }
-    } else {
-      const prefix = options?.envPrefix ?? harness.name.toUpperCase().replace(/-/g, "_");
-      path =
-        env.AGENT_CLI_PATH ||
-        env[`${prefix}_CLI_PATH`] ||
-        // Antigravity: also accept AGY_CLI_PATH (binary name) and legacy GEMINI_CLI_PATH
-        (harness.name === "antigravity" ? env.AGY_CLI_PATH : undefined) ||
-        (harness.name === "antigravity" && env.GEMINI_CLI_PATH
-          ? warnAndMapLegacyGeminiCliPath(env.GEMINI_CLI_PATH, options?.warnDeprecated !== false)
-          : undefined) ||
-        env.CLAUDE_CLI_PATH; // backward compatibility
-    }
+    path = options?.harnessName
+      ? resolveExplicitHarnessPath(harness, options, env)
+      : resolveEnvHarnessPath(harness, options, env);
   }
   if (!path) {
     path = harness.defaultPath;
@@ -143,7 +152,59 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
     path = harness.defaultPath;
   }
 
-  return { harness, path };
+  return path;
+}
+
+/**
+ * Resolve a path for an explicitly selected harness (`--harness`/picker).
+ *
+ * @param harness - Explicitly selected harness.
+ * @param options - Optional env prefix and warning control.
+ * @param env - Environment to read path overrides from.
+ * @returns The resolved path, or `undefined` to fall back to the default.
+ */
+function resolveExplicitHarnessPath(
+  harness: AgentHarness,
+  options: HarnessResolutionOptions | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  // Explicit selection (--harness / interactive picker): honour harness-specific
+  // paths only; AGENT_CLI_PATH is reserved for env/default-driven resolution.
+  if (options?.envPrefix) {
+    const prefix = options.envPrefix;
+    const path = env[`${prefix}_CLI_PATH`];
+    if (!path && harness.name === "claude-code") {
+      return env.CLAUDE_CLI_PATH;
+    }
+    return path;
+  }
+  return getHarnessCliCommand(harness, { warnDeprecated: options?.warnDeprecated });
+}
+
+/**
+ * Resolve a path from env overrides for env/default-driven resolution.
+ *
+ * @param harness - Harness being resolved.
+ * @param options - Optional env prefix and warning control.
+ * @param env - Environment to read path overrides from.
+ * @returns The first matching path override, or `undefined`.
+ */
+function resolveEnvHarnessPath(
+  harness: AgentHarness,
+  options: HarnessResolutionOptions | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const prefix = options?.envPrefix ?? harness.name.toUpperCase().replace(/-/g, "_");
+  return (
+    env.AGENT_CLI_PATH ||
+    env[`${prefix}_CLI_PATH`] ||
+    // Antigravity: also accept AGY_CLI_PATH (binary name) and legacy GEMINI_CLI_PATH
+    (harness.name === "antigravity" ? env.AGY_CLI_PATH : undefined) ||
+    (harness.name === "antigravity" && env.GEMINI_CLI_PATH
+      ? warnAndMapLegacyGeminiCliPath(env.GEMINI_CLI_PATH, options?.warnDeprecated !== false)
+      : undefined) ||
+    env.CLAUDE_CLI_PATH // backward compatibility
+  );
 }
 
 /**

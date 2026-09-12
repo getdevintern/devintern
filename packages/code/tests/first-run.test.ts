@@ -2,13 +2,16 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ANALYTICS_CONFIG_DIR_ENV, setAnalyticsCaptureForTests } from "../src/lib/analytics";
-import { ensureTrackerEnvConfigured, missingTrackerEnv } from "../src/lib/first-run";
+import {
+  ANALYTICS_CONFIG_DIR_ENV,
+  setAnalyticsCaptureForTests,
+} from "../src/lib/observability/analytics";
+import { ensureTrackerEnvConfigured, missingTrackerEnv } from "../src/lib/init/first-run";
 
 // Snapshot the real wizard exports BEFORE any mock.module override so tests
-// that stub ../src/lib/init-wizard can restore it afterwards (the namespace
+// that stub ../src/lib/init/wizard can restore it afterwards (the namespace
 // object is live — spreading it after a mock would capture the mock).
-const realInitWizardExports = { ...(await import("../src/lib/init-wizard")) };
+const realInitWizardExports = { ...(await import("../src/lib/init/wizard")) };
 
 const jiraEnv = () => ({
   TASK_TRACKER: "jira",
@@ -121,7 +124,7 @@ describe("ensureTrackerEnvConfigured analytics", () => {
     if (telemetryDir) rmSync(telemetryDir, { recursive: true, force: true });
     // bun test shares one module registry across test files, so a stubbed
     // init-wizard must be restored here or later files would bind the mock.
-    mock.module("../src/lib/init-wizard", () => ({ ...realInitWizardExports }));
+    mock.module("../src/lib/init/wizard", () => ({ ...realInitWizardExports }));
   });
 
   /** Pin analytics to a throwaway config dir and record captured events. */
@@ -162,7 +165,7 @@ describe("ensureTrackerEnvConfigured analytics", () => {
   test("the default wizard path passes source: rescue to runInitWizard", async () => {
     const recorded = stubAnalytics();
     const wizardDeps: Array<Record<string, unknown> | undefined> = [];
-    mock.module("../src/lib/init-wizard", () => ({
+    mock.module("../src/lib/init/wizard", () => ({
       runInitWizard: async (deps?: Record<string, unknown>) => {
         wizardDeps.push(deps);
       },

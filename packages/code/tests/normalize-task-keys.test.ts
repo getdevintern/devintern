@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeTaskKeys } from "../src/lib/normalize-task-keys";
+import { normalizeTaskKeys } from "../src/lib/task/normalize-task-keys";
 
 describe("normalizeTaskKeys", () => {
   test("linear uppercases every identifier in a multi-task invocation", () => {
