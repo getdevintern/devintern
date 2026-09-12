@@ -315,157 +315,19 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
 
   // Handle pull_request_review event
   if (eventType === "pull_request_review") {
-    const event = payload as PullRequestReviewEvent;
-
-    // Quick payload-only checks (no API calls — respond 200 fast)
-    // Accept "changes_requested" and plain "comment" reviews; the bot-mention
-    // gate (applied later in processReviewAsync) keeps commented reviews from
-    // firing unless @bot is mentioned.
-    if (event.review.state !== "changes_requested" && event.review.state !== "commented") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: state is "${event.review.state}" (only changes_requested/commented are processed)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: `state=${event.review.state}`,
-      });
-    }
-
-    if (event.review.user.type === "Bot") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: reviewer is a bot (${event.review.user.login})`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: "reviewer is a bot",
-      });
-    }
-
-    if (event.pull_request.state !== "open") {
-      console.log(
-        `⏭️  Skipping review on PR #${event.pull_request.number}: PR is ${event.pull_request.state} (not open)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Review does not require processing",
-        reason: `pr_state=${event.pull_request.state}`,
-      });
-    }
-
-    console.log(`\n🔔 Received ${event.review.state} review for PR #${event.pull_request.number}`);
-    console.log(`   Repository: ${event.repository.full_name}`);
-    console.log(`   Reviewer: ${event.review.user.login}`);
-
-    // Persist event to SQLite before processing (crash resilience)
-    let eventId: string | undefined;
-    if (webhookQueue) {
-      eventId = webhookQueue.enqueue("pull_request_review", event);
-      if (deliveryId) {
-        webhookQueue.markProcessed("github", deliveryId);
-      }
-      debugLog(config, `Persisted event ${eventId} to queue`);
-    }
-
-    // Add to queue for sequential processing (prevents race conditions)
-    // Bot mention check happens inside processReviewAsync after fetching comments
-    reviewQueue
-      .add(() => processReviewWithPersistence(eventId, event, config))
-      .catch((error) => {
-        console.error("❌ Error processing review:", error);
-      });
-
-    const duration = Date.now() - startTime;
-    return jsonResponse({
-      success: true,
-      message: "Review processing started",
-      eventId,
-      prNumber: event.pull_request.number,
-      repository: event.repository.full_name,
-      processingTime: `${duration}ms`,
-    });
+    return handlePullRequestReview(
+      payload as PullRequestReviewEvent,
+      config,
+      startTime,
+      deliveryId,
+    );
   }
 
   // Handle issue_comment event — top-level (conversation) comments on a PR.
   // Lets a user kick off devintern by commenting "@bot finish this" on their
   // own PR, without leaving a formal review.
   if (eventType === "issue_comment") {
-    const event = payload as IssueCommentEvent;
-
-    // Quick payload-only checks (no API calls — respond 200 fast)
-    if (event.action !== "created") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: action is "${event.action}" (only "created" is processed)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: `action=${event.action}`,
-      });
-    }
-
-    if (!event.issue.pull_request) {
-      console.log(`⏭️  Skipping comment on #${event.issue.number}: not on a pull request`);
-      return jsonResponse({
-        success: true,
-        message: "Comment is not on a pull request",
-        reason: "not_a_pull_request",
-      });
-    }
-
-    if (event.comment.user.type === "Bot") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: author is a bot (${event.comment.user.login})`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: "author is a bot",
-      });
-    }
-
-    if (event.issue.state !== "open") {
-      console.log(
-        `⏭️  Skipping comment on #${event.issue.number}: PR is ${event.issue.state} (not open)`,
-      );
-      return jsonResponse({
-        success: true,
-        message: "Comment does not require processing",
-        reason: `pr_state=${event.issue.state}`,
-      });
-    }
-
-    console.log(`\n🔔 Received PR comment on #${event.issue.number}`);
-    console.log(`   Repository: ${event.repository.full_name}`);
-    console.log(`   Commenter: ${event.comment.user.login}`);
-
-    // Persist event to SQLite before processing (crash resilience)
-    let eventId: string | undefined;
-    if (webhookQueue) {
-      eventId = webhookQueue.enqueue("issue_comment", event);
-      if (deliveryId) {
-        webhookQueue.markProcessed("github", deliveryId);
-      }
-      debugLog(config, `Persisted event ${eventId} to queue`);
-    }
-
-    // Bot mention check happens inside processReviewAsync after fetching the PR.
-    reviewQueue
-      .add(() => processIssueCommentWithPersistence(eventId, event, config))
-      .catch((error) => {
-        console.error("❌ Error processing PR comment:", error);
-      });
-
-    const duration = Date.now() - startTime;
-    return jsonResponse({
-      success: true,
-      message: "Comment processing started",
-      eventId,
-      prNumber: event.issue.number,
-      repository: event.repository.full_name,
-      processingTime: `${duration}ms`,
-    });
+    return handleIssueComment(payload as IssueCommentEvent, config, startTime, deliveryId);
   }
 
   // Handle pull_request_review_comment event (individual inline diff comments).
@@ -480,6 +342,143 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
   }
 
   return jsonResponse({ error: "Unhandled event type" }, 400);
+}
+
+/** Build a 200 response for an event that was delivered but needs no work. */
+function skipResponse(message: string, reason: string): Response {
+  return jsonResponse({ success: true, message, reason });
+}
+
+/** Validate and enqueue a `pull_request_review` event. */
+async function handlePullRequestReview(
+  event: PullRequestReviewEvent,
+  config: WebhookServerConfig,
+  startTime: number,
+  deliveryId: string | null,
+): Promise<Response> {
+  // Quick payload-only checks (no API calls — respond 200 fast)
+  // Accept "changes_requested" and plain "comment" reviews; the bot-mention
+  // gate (applied later in processReviewAsync) keeps commented reviews from
+  // firing unless @bot is mentioned.
+  if (event.review.state !== "changes_requested" && event.review.state !== "commented") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: state is "${event.review.state}" (only changes_requested/commented are processed)`,
+    );
+    return skipResponse("Review does not require processing", `state=${event.review.state}`);
+  }
+
+  if (event.review.user.type === "Bot") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: reviewer is a bot (${event.review.user.login})`,
+    );
+    return skipResponse("Review does not require processing", "reviewer is a bot");
+  }
+
+  if (event.pull_request.state !== "open") {
+    console.log(
+      `⏭️  Skipping review on PR #${event.pull_request.number}: PR is ${event.pull_request.state} (not open)`,
+    );
+    return skipResponse(
+      "Review does not require processing",
+      `pr_state=${event.pull_request.state}`,
+    );
+  }
+
+  console.log(`\n🔔 Received ${event.review.state} review for PR #${event.pull_request.number}`);
+  console.log(`   Repository: ${event.repository.full_name}`);
+  console.log(`   Reviewer: ${event.review.user.login}`);
+
+  // Persist event to SQLite before processing (crash resilience)
+  let eventId: string | undefined;
+  if (webhookQueue) {
+    eventId = webhookQueue.enqueue("pull_request_review", event);
+    if (deliveryId) {
+      webhookQueue.markProcessed("github", deliveryId);
+    }
+    debugLog(config, `Persisted event ${eventId} to queue`);
+  }
+
+  // Add to queue for sequential processing (prevents race conditions)
+  // Bot mention check happens inside processReviewAsync after fetching comments
+  reviewQueue
+    .add(() => processReviewWithPersistence(eventId, event, config))
+    .catch((error) => {
+      console.error("❌ Error processing review:", error);
+    });
+
+  return jsonResponse({
+    success: true,
+    message: "Review processing started",
+    eventId,
+    prNumber: event.pull_request.number,
+    repository: event.repository.full_name,
+    processingTime: `${Date.now() - startTime}ms`,
+  });
+}
+
+/** Validate and enqueue an `issue_comment` event on a pull request. */
+async function handleIssueComment(
+  event: IssueCommentEvent,
+  config: WebhookServerConfig,
+  startTime: number,
+  deliveryId: string | null,
+): Promise<Response> {
+  // Quick payload-only checks (no API calls — respond 200 fast)
+  if (event.action !== "created") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: action is "${event.action}" (only "created" is processed)`,
+    );
+    return skipResponse("Comment does not require processing", `action=${event.action}`);
+  }
+
+  if (!event.issue.pull_request) {
+    console.log(`⏭️  Skipping comment on #${event.issue.number}: not on a pull request`);
+    return skipResponse("Comment is not on a pull request", "not_a_pull_request");
+  }
+
+  if (event.comment.user.type === "Bot") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: author is a bot (${event.comment.user.login})`,
+    );
+    return skipResponse("Comment does not require processing", "author is a bot");
+  }
+
+  if (event.issue.state !== "open") {
+    console.log(
+      `⏭️  Skipping comment on #${event.issue.number}: PR is ${event.issue.state} (not open)`,
+    );
+    return skipResponse("Comment does not require processing", `pr_state=${event.issue.state}`);
+  }
+
+  console.log(`\n🔔 Received PR comment on #${event.issue.number}`);
+  console.log(`   Repository: ${event.repository.full_name}`);
+  console.log(`   Commenter: ${event.comment.user.login}`);
+
+  // Persist event to SQLite before processing (crash resilience)
+  let eventId: string | undefined;
+  if (webhookQueue) {
+    eventId = webhookQueue.enqueue("issue_comment", event);
+    if (deliveryId) {
+      webhookQueue.markProcessed("github", deliveryId);
+    }
+    debugLog(config, `Persisted event ${eventId} to queue`);
+  }
+
+  // Bot mention check happens inside processReviewAsync after fetching the PR.
+  reviewQueue
+    .add(() => processIssueCommentWithPersistence(eventId, event, config))
+    .catch((error) => {
+      console.error("❌ Error processing PR comment:", error);
+    });
+
+  return jsonResponse({
+    success: true,
+    message: "Comment processing started",
+    eventId,
+    prNumber: event.issue.number,
+    repository: event.repository.full_name,
+    processingTime: `${Date.now() - startTime}ms`,
+  });
 }
 
 interface QueuedGitLabWebhook {

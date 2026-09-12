@@ -1100,6 +1100,47 @@ export class Utils {
   }
 
   /**
+   * Resolve the directory containing git hooks, respecting `core.hooksPath`
+   * (falling back to `.git/hooks`, shared across worktrees).
+   *
+   * @param cwd - Repository working directory
+   * @returns The hook directory, or `error` when the git dir cannot be found
+   */
+  private static async resolveHookDir(cwd: string): Promise<{ hookDir?: string; error?: string }> {
+    const hooksPathResult = await Utils.executeGitCommand(["config", "--get", "core.hooksPath"], {
+      verbose: false,
+      cwd,
+    });
+
+    if (hooksPathResult.success && hooksPathResult.output?.trim()) {
+      const configured = hooksPathResult.output.trim();
+      if (configured.startsWith("/")) {
+        return { hookDir: configured };
+      }
+      // Relative core.hooksPath is resolved from the repo root.
+      const repoRootResult = await Utils.executeGitCommand(["rev-parse", "--show-toplevel"], {
+        verbose: false,
+        cwd,
+      });
+      return repoRootResult.success && repoRootResult.output?.trim()
+        ? { hookDir: join(repoRootResult.output.trim(), configured) }
+        : { hookDir: configured };
+    }
+
+    // Use --git-common-dir to find hooks in worktrees (hooks are shared).
+    const gitDirResult = await Utils.executeGitCommand(["rev-parse", "--git-common-dir"], {
+      verbose: false,
+      cwd,
+    });
+    if (!gitDirResult.success || !gitDirResult.output?.trim()) {
+      return { error: "Could not determine .git directory" };
+    }
+    const gitDir = gitDirResult.output.trim();
+    // Handle both absolute and relative git dir paths.
+    return { hookDir: gitDir.startsWith("/") ? join(gitDir, "hooks") : join(cwd, gitDir, "hooks") };
+  }
+
+  /**
    * Run the local `pre-push` hook without pushing (dry validation).
    *
    * @param options - Verbose logging and working directory
@@ -1123,49 +1164,16 @@ export class Utils {
       }
 
       // Find the hook path (respects core.hooksPath configuration)
-      const hooksPathResult = await Utils.executeGitCommand(["config", "--get", "core.hooksPath"], {
-        verbose: false,
-        cwd,
-      });
-
-      let hookDir: string;
-      if (hooksPathResult.success && hooksPathResult.output?.trim()) {
-        hookDir = hooksPathResult.output.trim();
-        // If it's a relative path, resolve it from the repo root
-        if (!hookDir.startsWith("/")) {
-          const repoRootResult = await Utils.executeGitCommand(["rev-parse", "--show-toplevel"], {
-            verbose: false,
-            cwd,
-          });
-          if (repoRootResult.success && repoRootResult.output?.trim()) {
-            const { join } = require("path");
-            hookDir = join(repoRootResult.output.trim(), hookDir);
-          }
-        }
-      } else {
-        // Default to .git/hooks
-        // Use --git-common-dir to find hooks in worktrees (hooks are shared)
-        const gitDirResult = await Utils.executeGitCommand(["rev-parse", "--git-common-dir"], {
-          verbose: false,
-          cwd,
-        });
-        if (!gitDirResult.success || !gitDirResult.output?.trim()) {
-          return {
-            success: false,
-            message: "Could not determine .git directory",
-          };
-        }
-        const { join } = require("path");
-        const gitDir = gitDirResult.output.trim();
-        // Handle both absolute and relative git dir paths
-        hookDir = gitDir.startsWith("/") ? join(gitDir, "hooks") : join(cwd, gitDir, "hooks");
+      const hookResolution = await Utils.resolveHookDir(cwd);
+      if (hookResolution.error) {
+        return {
+          success: false,
+          message: hookResolution.error,
+        };
       }
-
-      const { join } = require("path");
-      const hookPath = join(hookDir, "pre-push");
+      const hookPath = join(hookResolution.hookDir ?? "", "pre-push");
 
       // Check if hook exists
-      const { existsSync, statSync } = require("fs");
       if (!existsSync(hookPath)) {
         if (verbose) {
           console.log("   No pre-push hook found, skipping local validation");

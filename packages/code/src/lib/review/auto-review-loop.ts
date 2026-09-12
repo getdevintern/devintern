@@ -600,6 +600,45 @@ function saveIterationArtifacts(
   writeFileSync(join(iterationDir, "review-prompt.txt"), prompt);
 }
 
+/** Log an iteration's review summary, issue breakdown, and delta from the previous run. */
+function reportIterationFeedback(
+  iteration: number,
+  feedback: ReviewFeedback,
+  history: AutoReviewLoopResult["history"],
+): void {
+  console.log(`\n📊 Review Summary: ${feedback.summary}`);
+  console.log(`   Total issues: ${feedback.items.length}`);
+
+  const priorityCounts = feedback.items.reduce<Record<string, number>>((acc, item) => {
+    acc[item.priority] = (acc[item.priority] || 0) + 1;
+    return acc;
+  }, {});
+  console.log("   Breakdown:", priorityCounts);
+
+  if (feedback.items.length > 0) {
+    console.log("   Issues:");
+    for (const item of feedback.items) {
+      const location = item.file ? ` (${item.file}${item.line ? `:${item.line}` : ""})` : "";
+      console.log(`     [${item.priority}]${location}: ${item.issue}`);
+    }
+  }
+
+  if (iteration > 1 && history.length > 0) {
+    const previousTotal = history[history.length - 1].feedback.items.length;
+    const delta = feedback.items.length - previousTotal;
+
+    if (delta < 0) {
+      console.log(`   ✅ ${Math.abs(delta)} fewer issue(s) than iteration ${iteration - 1}`);
+    } else if (delta > 0) {
+      console.log(
+        `   ⚠️  ${delta} more issue(s) than iteration ${iteration - 1} (fixes may have introduced new issues)`,
+      );
+    } else {
+      console.log(`   ℹ️  Same number of issues as iteration ${iteration - 1}`);
+    }
+  }
+}
+
 /**
  * Run the iterative PR self-review loop: review, fix, commit, and optionally push.
  *
@@ -669,46 +708,7 @@ export async function runAutoReviewLoop(
     // Save iteration artifacts
     saveIterationArtifacts(outputDir, iteration, currentFeedback, reviewPrompt);
 
-    console.log(`\n📊 Review Summary: ${currentFeedback.summary}`);
-    console.log(`   Total issues: ${currentFeedback.items.length}`);
-
-    // Count by priority
-    const priorityCounts = currentFeedback.items.reduce(
-      (acc, item) => {
-        acc[item.priority] = (acc[item.priority] || 0) + 1;
-        return acc;
-      },
-      {} as Record<string, number>,
-    );
-
-    console.log("   Breakdown:", priorityCounts);
-
-    // Log each issue with priority
-    if (currentFeedback.items.length > 0) {
-      console.log("   Issues:");
-      for (const item of currentFeedback.items) {
-        const location = item.file ? ` (${item.file}${item.line ? `:${item.line}` : ""})` : "";
-        console.log(`     [${item.priority}]${location}: ${item.issue}`);
-      }
-    }
-
-    // Show comparison to previous iteration
-    if (iteration > 1 && history.length > 0) {
-      const previousFeedback = history[history.length - 1].feedback;
-      const previousTotal = previousFeedback.items.length;
-      const currentTotal = currentFeedback.items.length;
-      const delta = currentTotal - previousTotal;
-
-      if (delta < 0) {
-        console.log(`   ✅ ${Math.abs(delta)} fewer issue(s) than iteration ${iteration - 1}`);
-      } else if (delta > 0) {
-        console.log(
-          `   ⚠️  ${delta} more issue(s) than iteration ${iteration - 1} (fixes may have introduced new issues)`,
-        );
-      } else {
-        console.log(`   ℹ️  Same number of issues as iteration ${iteration - 1}`);
-      }
-    }
+    reportIterationFeedback(iteration, currentFeedback, history);
 
     // Step 4: Filter issues to address
     const toAddress = filterByPriority(currentFeedback.items, minPriority);
