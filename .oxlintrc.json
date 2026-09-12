@@ -146,11 +146,7 @@
       // Grandfathered complexity/size offenders. These files predate the
       // `complexity`/`max-statements` error ratchet; they stay warnings so new
       // violations elsewhere fail CI. Remove a file here once it is split.
-      "files": [
-        "packages/code/src/index.ts",
-        "packages/code/src/lib/utils.ts",
-        "packages/code/src/webhook-server.ts"
-      ],
+      "files": ["packages/code/src/index.ts"],
       "rules": {
         "complexity": ["warn", 30],
         "max-statements": ["warn", 200]
