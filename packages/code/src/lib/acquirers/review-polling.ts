@@ -882,8 +882,138 @@ export class ReviewPollingAcquirer implements Acquirer {
     return actionable;
   }
 
+  /**
+   * Re-fetch the PR immediately before executing a base sync. Returns a "go"
+   * with the fresh refs, or "stop" after recording/deferring or when the PR
+   * changed, resolved itself, or GitHub is still recomputing mergeability.
+   */
+  private async refetchForBaseSync(
+    repo: string,
+    prNumber: number,
+    expectedHeadSha: string,
+    expectedBaseSha: string,
+    externalId: string,
+    now: number,
+  ): Promise<
+    { kind: "go"; headSha: string; baseSha: string; branch: string | undefined } | { kind: "stop" }
+  > {
+    const { github, queue } = this.options;
+    const freshResult = await github.fetchPr(repo, prNumber);
+    const fresh = freshResult.data;
+    if (
+      !fresh ||
+      fresh.state !== "open" ||
+      fresh.head?.sha !== expectedHeadSha ||
+      fresh.base?.sha !== expectedBaseSha
+    ) {
+      if (fresh?.state === "open" && fresh.head?.sha && fresh.base?.sha) {
+        queue.observeBaseSyncEvent({
+          externalId: this.baseSyncExternalId(repo, prNumber, fresh.base.sha, fresh.head.sha),
+          repo,
+          prNumber,
+          baseSha: fresh.base.sha,
+          headSha: fresh.head.sha,
+          now,
+        });
+      }
+      return { kind: "stop" };
+    }
+    // Mergeability resolved itself while we waited (someone else synced the
+    // branch): nothing left to do.
+    if (fresh.mergeable_state === "unknown" || !fresh.mergeable_state) {
+      return { kind: "stop" };
+    }
+    if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
+      this.deferCounts.delete(externalId);
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      return { kind: "stop" };
+    }
+    return { kind: "go", headSha: fresh.head.sha, baseSha: fresh.base.sha, branch: fresh.head.ref };
+  }
+
+  /** Run conflict resolution for a queued base-sync event and advance its state. */
+  private async executeBaseSync(params: {
+    repo: string;
+    prNumber: number;
+    externalId: string;
+    now: number;
+    headSha: string;
+    baseSha: string;
+    branch: string | undefined;
+  }): Promise<void> {
+    const { queue, resolveConflicts, runStore } = this.options;
+    if (!resolveConflicts) return;
+    const { repo, prNumber, externalId, now, headSha, baseSha, branch } = params;
+
+    const attempt = queue.beginBaseSyncAttempt(externalId, now);
+    let runId: number | null = null;
+    try {
+      runId =
+        runStore?.createRun({
+          origin: "conflict_resolution",
+          repo,
+          prNumber,
+          prUrl: `https://github.com/${repo}/pull/${prNumber}`,
+          branch,
+          harness: this.options.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
+          attempt,
+        }) ?? null;
+    } catch (error) {
+      console.warn(`⚠️  Run recording (base sync begin) failed: ${(error as Error).message}`);
+    }
+
+    console.log(`\n🔀 [${this.name}] syncing ${repo}#${prNumber} with its advanced base`);
+    let result: AutomaticResolveResult;
+    try {
+      result = await resolveConflicts(repo, prNumber, { headSha, baseSha });
+    } catch (error) {
+      result = { outcome: "failed", message: (error as Error).message };
+    }
+    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
+    if (terminal) {
+      this.deferCounts.delete(externalId);
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+    } else if (result.outcome === "deferred") {
+      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
+      this.deferCounts.set(externalId, defers);
+      console.warn(
+        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
+          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
+      );
+      if (defers >= MAX_CONSECUTIVE_DEFERS) {
+        console.warn(
+          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
+            `the head or base moves again`,
+        );
+        this.deferCounts.delete(externalId);
+        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+      } else {
+        queue.deferBaseSyncAttempt(externalId);
+      }
+    } else {
+      console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
+      const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
+      if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+    }
+    if (runId !== null) {
+      try {
+        runStore?.finishRun(
+          runId,
+          result.outcome === "failed"
+            ? "failed"
+            : result.outcome === "deferred"
+              ? "deferred"
+              : "succeeded",
+          result.message,
+        );
+      } catch (error) {
+        console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
+      }
+    }
+  }
+
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
-    const { github, queue, resolveConflicts, runStore } = this.options;
+    const { queue, resolveConflicts } = this.options;
     if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
 
@@ -944,103 +1074,24 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.
-    const freshResult = await github.fetchPr(repo, prNumber);
-    const fresh = freshResult.data;
-    if (
-      !fresh ||
-      fresh.state !== "open" ||
-      fresh.head?.sha !== pr.head.sha ||
-      fresh.base?.sha !== pr.base.sha
-    ) {
-      if (fresh?.state === "open" && fresh.head?.sha && fresh.base?.sha) {
-        queue.observeBaseSyncEvent({
-          externalId: this.baseSyncExternalId(repo, prNumber, fresh.base.sha, fresh.head.sha),
-          repo,
-          prNumber,
-          baseSha: fresh.base.sha,
-          headSha: fresh.head.sha,
-          now,
-        });
-      }
-      return;
-    }
-    // Mergeability resolved itself while we waited (someone else synced the
-    // branch): nothing left to do.
-    if (fresh.mergeable_state === "unknown" || !fresh.mergeable_state) return;
-    if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
-      this.deferCounts.delete(externalId);
-      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
-      return;
-    }
-
-    const attempt = queue.beginBaseSyncAttempt(externalId, now);
-    let runId: number | null = null;
-    try {
-      runId =
-        runStore?.createRun({
-          origin: "conflict_resolution",
-          repo,
-          prNumber,
-          prUrl: `https://github.com/${repo}/pull/${prNumber}`,
-          branch: fresh.head.ref,
-          harness: this.options.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
-          attempt,
-        }) ?? null;
-    } catch (error) {
-      console.warn(`⚠️  Run recording (base sync begin) failed: ${(error as Error).message}`);
-    }
-
-    console.log(`\n🔀 [${this.name}] syncing ${repo}#${prNumber} with its advanced base`);
-    let result: AutomaticResolveResult;
-    try {
-      result = await resolveConflicts(repo, prNumber, {
-        headSha: fresh.head.sha,
-        baseSha: fresh.base.sha,
-      });
-    } catch (error) {
-      result = { outcome: "failed", message: (error as Error).message };
-    }
-    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
-    if (terminal) {
-      this.deferCounts.delete(externalId);
-      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
-    } else if (result.outcome === "deferred") {
-      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
-      this.deferCounts.set(externalId, defers);
-      console.warn(
-        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
-          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
-      );
-      if (defers >= MAX_CONSECUTIVE_DEFERS) {
-        console.warn(
-          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
-            `the head or base moves again`,
-        );
-        this.deferCounts.delete(externalId);
-        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-      } else {
-        queue.deferBaseSyncAttempt(externalId);
-      }
-    } else {
-      console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
-      const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
-      if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-    }
-    if (runId !== null) {
-      try {
-        runStore?.finishRun(
-          runId,
-          result.outcome === "failed"
-            ? "failed"
-            : result.outcome === "deferred"
-              ? "deferred"
-              : "succeeded",
-          result.message,
-        );
-      } catch (error) {
-        console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
-      }
-    }
+    const freshState = await this.refetchForBaseSync(
+      repo,
+      prNumber,
+      pr.head.sha,
+      pr.base.sha,
+      externalId,
+      now,
+    );
+    if (freshState.kind === "stop") return;
+    await this.executeBaseSync({
+      repo,
+      prNumber,
+      externalId,
+      now,
+      headSha: freshState.headSha,
+      baseSha: freshState.baseSha,
+      branch: freshState.branch,
+    });
   }
 
   /**

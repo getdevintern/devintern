@@ -182,62 +182,23 @@ export async function runAgent(
   });
 }
 
+type ReviewAdapter = Awaited<ReturnType<typeof createReviewAdapter>>;
+type ChangeRequest = ReviewAdapter["change"];
+type GitAuthor = ReviewAdapter["gitAuthor"];
+type AgentHarness = ReturnType<typeof resolveHarness>["harness"];
+
 /**
- * Record in-scope comments as addressed (local dedupe) and leave 🎉 reactions
- * as visual feedback for humans. Reaction failures are logged and ignored:
- * they carry no gating meaning.
- *
- * @param client - GitHub reviews API client
- * @param owner - Repository owner
- * @param repo - Repository name
- * @param comments - Top-level and reply review comments to mark
- * @param conversationComments - Issue/conversation tab comments to mark
+ * Build the agent prompt and record the run's start. Returns null when there is
+ * no feedback to address (the caller stops without failing).
  */
-/**
- * Fetch PR review feedback and run an agent to address unaddressed comments.
- *
- * @param prUrl - Full GitHub pull request or GitLab merge-request URL
- * @param options - Control push, comment marking, and verbosity
- * @throws When the PR is not open, worktree setup fails, or agent/commit/push fails
- */
-export async function addressReview(
+async function prepareReviewPrompt(
+  adapter: ReviewAdapter,
+  pr: ChangeRequest,
+  repoSlug: string,
   prUrl: string,
-  options: AddressReviewOptions = {},
-): Promise<void> {
-  const { noPush = false, noReply = false, verbose = false } = options;
-
-  console.log("🔍 Parsing PR URL...");
-  const identity = parseChangeRequestUrl(prUrl, {
-    gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
-  });
-  if (!identity || identity.provider === "bitbucket") {
-    throw new Error(
-      `Invalid PR URL: ${prUrl}\n` +
-        "Expected a GitHub pull request or configured GitLab merge-request URL.",
-    );
-  }
-  const prNumber = identity.number;
-  const repoSlug = identity.projectPath;
-  console.log(`   Repository: ${repoSlug}`);
-  console.log(`   ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`);
-
-  const adapter = await createReviewAdapter(identity, verbose);
-  const { change: pr, gitAuthor } = adapter;
-  console.log(`   Title: ${pr.title}`);
-  console.log(`   Branch: ${pr.head.ref}`);
-  console.log(`   State: ${pr.state}`);
-  if (options.expectedHeadSha && pr.head.sha !== options.expectedHeadSha) {
-    throw new Error(
-      `${identity.provider === "gitlab" ? "MR" : "PR"} head changed before CI repair started; refusing stale feedback.`,
-    );
-  }
-
-  const ciFeedback = options.ciFeedbackPath
-    ? readCiFeedbackFile(options.ciFeedbackPath)
-    : undefined;
-  let prompt: string;
-  let commitSummary: string;
-
+  prNumber: number,
+  ciFeedback: CiFailureFeedback | undefined,
+): Promise<{ prompt: string; commitSummary: string } | null> {
   if (ciFeedback) {
     if (ciFeedback.failures.length === 0) {
       throw new Error("CI feedback contains no failing checks.");
@@ -259,32 +220,425 @@ export async function addressReview(
       summary: `fixing ${ciFeedback.failures.length} failing check(s) on ${pr.head.ref}`,
       detail: { failures: ciFeedback.failures, hasLogs: Boolean(ciFeedback.logs) },
     });
-    prompt = formatCiFixPrompt({
-      ...ciFeedback,
-      repository: ciFeedback.repository || repoSlug,
-      prTitle: pr.title,
-      branch: pr.head.ref,
-    });
-    commitSummary = "Fix CI failures";
-  } else {
-    const selection = await adapter.loadFeedback();
-    if (!selection) return;
-    beginRun({
-      origin: "pr_mention",
-      repo: repoSlug,
-      prNumber,
-      prUrl,
-      branch: pr.head.ref,
-      harness: resolveHarness({ warnDeprecated: false }).harness.name,
-    });
-    recordRunStage("change_request", {
-      status: "succeeded",
-      summary: selection.stageSummary,
-      detail: selection.stageDetail,
-    });
-    prompt = formatReviewPrompt(selection.feedback);
-    commitSummary = `Address review feedback from ${selection.feedback.reviewer}`;
+    return {
+      prompt: formatCiFixPrompt({
+        ...ciFeedback,
+        repository: ciFeedback.repository || repoSlug,
+        prTitle: pr.title,
+        branch: pr.head.ref,
+      }),
+      commitSummary: "Fix CI failures",
+    };
   }
+
+  const selection = await adapter.loadFeedback();
+  if (!selection) return null;
+  beginRun({
+    origin: "pr_mention",
+    repo: repoSlug,
+    prNumber,
+    prUrl,
+    branch: pr.head.ref,
+    harness: resolveHarness({ warnDeprecated: false }).harness.name,
+  });
+  recordRunStage("change_request", {
+    status: "succeeded",
+    summary: selection.stageSummary,
+    detail: selection.stageDetail,
+  });
+  return {
+    prompt: formatReviewPrompt(selection.feedback),
+    commitSummary: `Address review feedback from ${selection.feedback.reviewer}`,
+  };
+}
+
+/** Point the worktree's git identity at the bot author, returning the prior values. */
+async function configureBotGitAuthor(
+  workDir: string,
+  gitAuthor: GitAuthor | undefined,
+  verbose: boolean,
+): Promise<{ originalGitName: string | null; originalGitEmail: string | null }> {
+  let originalGitName: string | null = null;
+  let originalGitEmail: string | null = null;
+  if (!gitAuthor) {
+    return { originalGitName, originalGitEmail };
+  }
+
+  const nameResult = await Utils.executeGitCommand(["config", "user.name"], {
+    verbose: false,
+    cwd: workDir,
+  });
+  if (nameResult.success && nameResult.output.trim()) {
+    originalGitName = nameResult.output.trim();
+  }
+  const emailResult = await Utils.executeGitCommand(["config", "user.email"], {
+    verbose: false,
+    cwd: workDir,
+  });
+  if (emailResult.success && emailResult.output.trim()) {
+    originalGitEmail = emailResult.output.trim();
+  }
+
+  await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], { verbose, cwd: workDir });
+  await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
+    verbose,
+    cwd: workDir,
+  });
+  if (verbose) {
+    console.log(`   Set git config to bot author: ${gitAuthor.name} <${gitAuthor.email}>`);
+  }
+  return { originalGitName, originalGitEmail };
+}
+
+/** Switch back to the PR branch if the agent drifted off it, stashing if needed. */
+async function ensureOnPrBranch(
+  workDir: string,
+  prBranch: string,
+  verbose: boolean,
+): Promise<void> {
+  const currentBranch = await Utils.getCurrentBranch(workDir);
+  if (!currentBranch || currentBranch === prBranch) {
+    return;
+  }
+  console.warn(
+    `⚠️  Agent switched from '${prBranch}' to '${currentBranch}' during execution, switching back...`,
+  );
+  const switchBack = await Utils.executeGitCommand(["checkout", prBranch], {
+    verbose,
+    cwd: workDir,
+  });
+  if (!switchBack.success) {
+    console.warn(`   Simple checkout failed, trying stash + checkout...`);
+    await Utils.executeGitCommand(["stash", "--include-untracked"], {
+      verbose: false,
+      cwd: workDir,
+    });
+    const switchAfterStash = await Utils.executeGitCommand(["checkout", prBranch], {
+      verbose,
+      cwd: workDir,
+    });
+    if (!switchAfterStash.success) {
+      console.error(`❌ Failed to switch back to branch '${prBranch}': ${switchAfterStash.error}`);
+      throw new Error(`Failed to switch back to branch '${prBranch}'`);
+    }
+    await Utils.executeGitCommand(["stash", "pop"], { verbose: false, cwd: workDir });
+  }
+  console.log(`✅ Switched back to '${prBranch}'`);
+}
+
+/** Commit uncommitted agent changes, retrying through fixable git-hook failures. */
+async function commitWithHookRetry(params: {
+  workDir: string;
+  prNumber: number;
+  commitSummary: string;
+  verbose: boolean;
+  gitAuthor: GitAuthor | undefined;
+  hookRetries: number;
+  harness: AgentHarness;
+  executablePath: string;
+  maxTurns: number;
+  prBranch: string;
+}): Promise<void> {
+  let commitAttempt = 0;
+  let commitSuccess = false;
+
+  while (commitAttempt <= params.hookRetries && !commitSuccess) {
+    commitAttempt++;
+    const commitResult = await Utils.commitChanges(`PR-${params.prNumber}`, params.commitSummary, {
+      verbose: params.verbose,
+      author: params.gitAuthor,
+      cwd: params.workDir,
+    });
+
+    if (commitResult.success) {
+      console.log("✅ Changes committed successfully");
+      commitSuccess = true;
+      break;
+    }
+
+    if (commitResult.hookError && commitAttempt <= params.hookRetries) {
+      console.log(`\n⚠️  Git hook failed (attempt ${commitAttempt}/${params.hookRetries + 1})`);
+      const fixed = await runAgentHarnessToFixGitHook(
+        "commit",
+        params.harness,
+        params.executablePath,
+        params.maxTurns,
+        params.workDir,
+        params.prBranch,
+      );
+      if (fixed) {
+        if (await isCommitAlreadyComplete(params.workDir)) {
+          console.log("✅ Commit already completed during hook fix");
+          commitSuccess = true;
+          break;
+        }
+        console.log(`\n🔄 Retrying commit after ${params.harness.displayName} fixed the issues...`);
+        continue;
+      }
+      console.log("\n❌ Could not fix git hook errors automatically");
+      break;
+    }
+
+    if (commitAttempt > params.hookRetries) {
+      console.log(`\n❌ Max retries (${params.hookRetries}) exceeded for git hook fixes`);
+    }
+    console.error(`\n❌ Failed to commit changes: ${commitResult.message}`);
+    throw new Error(`Commit failed: ${commitResult.message}`);
+  }
+
+  if (!commitSuccess) {
+    throw new Error("Failed to commit changes after retries");
+  }
+}
+
+/** Push the branch, retrying through fixable pre-push hook failures. */
+async function pushWithHookRetry(params: {
+  workDir: string;
+  verbose: boolean;
+  hookRetries: number;
+  harness: AgentHarness;
+  executablePath: string;
+  maxTurns: number;
+  prBranch: string;
+}): Promise<void> {
+  let pushAttempt = 0;
+  let pushSuccess = false;
+
+  while (pushAttempt <= params.hookRetries && !pushSuccess) {
+    pushAttempt++;
+    const pushResult = await Utils.pushCurrentBranch({
+      verbose: params.verbose,
+      cwd: params.workDir,
+      expectedBranch: params.prBranch,
+    });
+
+    if (pushResult.success) {
+      console.log("✅ Changes pushed successfully");
+      pushSuccess = true;
+      break;
+    }
+
+    if (pushResult.hookError && pushAttempt <= params.hookRetries) {
+      console.log(
+        `\n⚠️  Git pre-push hook failed (attempt ${pushAttempt}/${params.hookRetries + 1})`,
+      );
+      const fixed = await runAgentHarnessToFixGitHook(
+        "push",
+        params.harness,
+        params.executablePath,
+        params.maxTurns,
+        params.workDir,
+        params.prBranch,
+      );
+      if (fixed) {
+        console.log(
+          `\n🔄 Retrying push after ${params.harness.displayName} fixed and amended the commit...`,
+        );
+        continue;
+      }
+      console.log("\n❌ Could not fix git pre-push hook errors automatically");
+      break;
+    }
+
+    if (pushAttempt > params.hookRetries) {
+      console.log(`\n❌ Max retries (${params.hookRetries}) exceeded for git hook fixes`);
+    }
+    console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
+    throw new Error(`Push failed: ${pushResult.message}`);
+  }
+
+  if (!pushSuccess) {
+    throw new Error("Failed to push changes after retries");
+  }
+}
+
+/** Remove untracked files left behind by linters/tools/agent. */
+async function cleanupUntrackedFiles(workDir: string, verbose: boolean): Promise<void> {
+  const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], {
+    verbose: false,
+    cwd: workDir,
+  });
+  if (!statusResult.success || !statusResult.output.trim()) {
+    return;
+  }
+  const untrackedLines = statusResult.output.split("\n").filter((line) => line.startsWith("??"));
+  if (untrackedLines.length === 0) {
+    return;
+  }
+  if (verbose) {
+    console.log("\n🧹 Cleaning up untracked files...");
+    untrackedLines.forEach((line) => {
+      const file = line.substring(3).trim();
+      console.log(`   Removing: ${file}`);
+    });
+  }
+  await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: workDir });
+}
+
+/** Restore the git identity saved by {@link configureBotGitAuthor}. */
+async function restoreBotGitAuthor(
+  workDir: string,
+  gitAuthor: GitAuthor | undefined,
+  originalGitName: string | null,
+  originalGitEmail: string | null,
+  verbose: boolean,
+): Promise<void> {
+  if (!gitAuthor) {
+    return;
+  }
+  if (originalGitName) {
+    await Utils.executeGitCommand(["config", "user.name", originalGitName], {
+      verbose: false,
+      cwd: workDir,
+    });
+  } else {
+    await Utils.executeGitCommand(["config", "--unset", "user.name"], {
+      verbose: false,
+      cwd: workDir,
+    });
+  }
+
+  if (originalGitEmail) {
+    await Utils.executeGitCommand(["config", "user.email", originalGitEmail], {
+      verbose: false,
+      cwd: workDir,
+    });
+  } else {
+    await Utils.executeGitCommand(["config", "--unset", "user.email"], {
+      verbose: false,
+      cwd: workDir,
+    });
+  }
+
+  if (verbose) {
+    console.log("   Restored original git config");
+  }
+}
+
+type ReviewIdentity = NonNullable<ReturnType<typeof parseChangeRequestUrl>>;
+
+/** Parse and validate the PR/MR URL, rejecting unsupported hosts. */
+function parseReviewIdentity(prUrl: string): ReviewIdentity {
+  const identity = parseChangeRequestUrl(prUrl, {
+    gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+  });
+  if (!identity || identity.provider === "bitbucket") {
+    throw new Error(
+      `Invalid PR URL: ${prUrl}\n` +
+        "Expected a GitHub pull request or configured GitLab merge-request URL.",
+    );
+  }
+  return identity;
+}
+
+/** Refuse stale CI feedback when the head moved since the job was queued. */
+function assertExpectedHead(actualSha: string, expected: string | undefined, label: string): void {
+  if (expected && actualSha !== expected) {
+    throw new Error(`${label} head changed before CI repair started; refusing stale feedback.`);
+  }
+}
+
+/** Stop without failing when the agent produced no commits or working changes. */
+function stopIfNoChanges(
+  hasUncommitted: boolean,
+  hasUnpushed: boolean,
+  ciFeedback: CiFailureFeedback | undefined,
+  prUrl: string,
+): boolean {
+  if (hasUncommitted || hasUnpushed) return false;
+  console.log("\n⚠️  No changes were made by @devintern/code");
+  console.log(`   View PR: ${prUrl}`);
+  if (ciFeedback) {
+    throw new Error("CI fix agent made no changes");
+  }
+  endRun("succeeded", "agent made no changes");
+  return true;
+}
+
+/** Validate the agent run outcome, throwing on max-turns or failure. */
+function assertAgentSucceeded(agentResult: Awaited<ReturnType<typeof runAgent>>): void {
+  if (agentResult.maxTurnsReached) {
+    console.error("\n❌ Agent reached max turns limit without completing the task");
+    throw new Error(
+      "Agent reached max turns limit. Increase CLAUDE_MAX_TURNS environment variable.",
+    );
+  }
+  if (!agentResult.success) {
+    console.error("\n❌ Agent failed to complete successfully");
+    throw new Error("Agent failed to complete successfully");
+  }
+  console.log("\n✅ Agent completed successfully");
+}
+
+/** Mark review comments addressed unless suppressed by CI-fix / no-reply / no-push. */
+async function acknowledgeIfRequested(
+  adapter: ReviewAdapter,
+  ciFeedback: CiFailureFeedback | undefined,
+  noReply: boolean,
+  noPush: boolean,
+  agentOutput: string,
+): Promise<void> {
+  if (ciFeedback) return;
+  if (noReply) {
+    console.log("\n⏭️  Skipping marking comments (--no-reply flag)");
+    return;
+  }
+  if (!noPush) {
+    await adapter.acknowledge(agentOutput);
+  }
+}
+
+/** Log the final success line for a review or CI-fix run. */
+function logReviewSuccess(
+  identity: ReviewIdentity,
+  prNumber: number,
+  prUrl: string,
+  ciFeedback: CiFailureFeedback | undefined,
+): void {
+  const kind = identity.provider === "gitlab" ? "MR" : "PR";
+  console.log(
+    ciFeedback
+      ? `\n✅ Successfully pushed a CI fix for ${kind} #${prNumber}`
+      : `\n✅ Successfully addressed review for ${kind} #${prNumber}`,
+  );
+  console.log(`   View ${kind}: ${prUrl}`);
+}
+
+/**
+ * Fetch PR review feedback and run an agent to address unaddressed comments.
+ *
+ * @param prUrl - Full GitHub pull request or GitLab merge-request URL
+ * @param options - Control push, comment marking, and verbosity
+ * @throws When the PR is not open, worktree setup fails, or agent/commit/push fails
+ */
+export async function addressReview(
+  prUrl: string,
+  options: AddressReviewOptions = {},
+): Promise<void> {
+  const { noPush = false, noReply = false, verbose = false } = options;
+
+  console.log("🔍 Parsing PR URL...");
+  const identity = parseReviewIdentity(prUrl);
+  const prNumber = identity.number;
+  const repoSlug = identity.projectPath;
+  const changeKind = identity.provider === "gitlab" ? "MR" : "PR";
+  console.log(`   Repository: ${repoSlug}`);
+  console.log(`   ${changeKind} #${prNumber}`);
+
+  const adapter = await createReviewAdapter(identity, verbose);
+  const { change: pr, gitAuthor } = adapter;
+  console.log(`   Title: ${pr.title}`);
+  console.log(`   Branch: ${pr.head.ref}`);
+  console.log(`   State: ${pr.state}`);
+  assertExpectedHead(pr.head.sha, options.expectedHeadSha, changeKind);
+
+  const ciFeedback = options.ciFeedbackPath
+    ? readCiFeedbackFile(options.ciFeedbackPath)
+    : undefined;
+
+  const prepared = await prepareReviewPrompt(adapter, pr, repoSlug, prUrl, prNumber, ciFeedback);
+  if (!prepared) return;
+  const { prompt, commitSummary } = prepared;
 
   // Prepare the review worktree
   console.log(`\n🌿 Preparing review worktree for branch: ${pr.head.ref}`);
@@ -311,60 +665,17 @@ export async function addressReview(
   console.log(`✅ Worktree ready at: ${workDir}`);
 
   // Set git config for bot author if available (so Agent's commits are attributed to bot)
-  let originalGitName: string | null = null;
-  let originalGitEmail: string | null = null;
-
-  if (gitAuthor) {
-    // Save original git config
-    const nameResult = await Utils.executeGitCommand(["config", "user.name"], {
-      verbose: false,
-      cwd: workDir,
-    });
-    if (nameResult.success && nameResult.output.trim()) {
-      originalGitName = nameResult.output.trim();
-    }
-
-    const emailResult = await Utils.executeGitCommand(["config", "user.email"], {
-      verbose: false,
-      cwd: workDir,
-    });
-    if (emailResult.success && emailResult.output.trim()) {
-      originalGitEmail = emailResult.output.trim();
-    }
-
-    // Set bot author in git config
-    await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], {
-      verbose,
-      cwd: workDir,
-    });
-    await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
-      verbose,
-      cwd: workDir,
-    });
-
-    if (verbose) {
-      console.log(`   Set git config to bot author: ${gitAuthor.name} <${gitAuthor.email}>`);
-    }
-  }
+  const { originalGitName, originalGitEmail } = await configureBotGitAuthor(
+    workDir,
+    gitAuthor,
+    verbose,
+  );
 
   try {
     // Run Agent (prompt is passed via stdin, no file created)
     console.log("\n🤖 Running Agent to address review feedback...");
     const agentResult = await runAgent(prompt, workDir, verbose);
-
-    if (agentResult.maxTurnsReached) {
-      console.error("\n❌ Agent reached max turns limit without completing the task");
-      throw new Error(
-        "Agent reached max turns limit. Increase CLAUDE_MAX_TURNS environment variable.",
-      );
-    }
-
-    if (!agentResult.success) {
-      console.error("\n❌ Agent failed to complete successfully");
-      throw new Error("Agent failed to complete successfully");
-    }
-
-    console.log("\n✅ Agent completed successfully");
+    assertAgentSucceeded(agentResult);
 
     // Check if there are unpushed commits (Agent should have committed)
     const unpushedResult = await Utils.executeGitCommand(
@@ -376,13 +687,7 @@ export async function addressReview(
     // Check if there are uncommitted changes (fallback if Agent didn't commit)
     const hasUncommitted = await Utils.hasUncommittedChanges(workDir);
 
-    if (!hasUncommitted && !hasUnpushed) {
-      console.log("\n⚠️  No changes were made by @devintern/code");
-      console.log(`   View PR: ${prUrl}`);
-      if (ciFeedback) {
-        throw new Error("CI fix agent made no changes");
-      }
-      endRun("succeeded", "agent made no changes");
+    if (stopIfNoChanges(hasUncommitted, hasUnpushed, ciFeedback, prUrl)) {
       return;
     }
 
@@ -393,183 +698,48 @@ export async function addressReview(
     const prBranch = pr.head.ref;
 
     // Verify Agent didn't switch branches during execution (e.g., checking out main for comparison)
-    const currentBranch = await Utils.getCurrentBranch(workDir);
-    if (currentBranch && currentBranch !== prBranch) {
-      console.warn(
-        `⚠️  Agent switched from '${prBranch}' to '${currentBranch}' during execution, switching back...`,
-      );
-      const switchBack = await Utils.executeGitCommand(["checkout", prBranch], {
-        verbose,
-        cwd: workDir,
-      });
-      if (!switchBack.success) {
-        console.warn(`   Simple checkout failed, trying stash + checkout...`);
-        await Utils.executeGitCommand(["stash", "--include-untracked"], {
-          verbose: false,
-          cwd: workDir,
-        });
-        const switchAfterStash = await Utils.executeGitCommand(["checkout", prBranch], {
-          verbose,
-          cwd: workDir,
-        });
-        if (switchAfterStash.success) {
-          await Utils.executeGitCommand(["stash", "pop"], {
-            verbose: false,
-            cwd: workDir,
-          });
-        } else {
-          console.error(
-            `❌ Failed to switch back to branch '${prBranch}': ${switchAfterStash.error}`,
-          );
-          throw new Error(`Failed to switch back to branch '${prBranch}'`);
-        }
-      }
-      console.log(`✅ Switched back to '${prBranch}'`);
-    }
+    await ensureOnPrBranch(workDir, prBranch, verbose);
 
     // Prefer Agent's commits, but handle uncommitted changes as fallback
     if (hasUnpushed) {
       console.log("\n✅ Changes committed by @devintern/code");
     } else if (hasUncommitted) {
       console.log("\n📝 Agent left changes uncommitted, committing now...");
-
-      // Try committing with retry logic for git hook failures
-      let commitAttempt = 0;
-      let commitSuccess = false;
-
-      while (commitAttempt <= hookRetries && !commitSuccess) {
-        commitAttempt++;
-        const commitResult = await Utils.commitChanges(`PR-${prNumber}`, commitSummary, {
-          verbose,
-          author: gitAuthor,
-          cwd: workDir,
-        });
-
-        if (commitResult.success) {
-          console.log("✅ Changes committed successfully");
-          commitSuccess = true;
-          break;
-        }
-
-        // Check if this is a git hook error that we can try to fix
-        if (commitResult.hookError && commitAttempt <= hookRetries) {
-          console.log(`\n⚠️  Git hook failed (attempt ${commitAttempt}/${hookRetries + 1})`);
-
-          // Try to fix the hook error with agent
-          const fixed = await runAgentHarnessToFixGitHook(
-            "commit",
-            harness,
-            executablePath,
-            maxTurns,
-            workDir,
-            pr.head.ref,
-          );
-
-          if (fixed) {
-            if (await isCommitAlreadyComplete(workDir)) {
-              console.log("✅ Commit already completed during hook fix");
-              commitSuccess = true;
-              break;
-            }
-
-            console.log(`\n🔄 Retrying commit after ${harness.displayName} fixed the issues...`);
-            continue;
-          } else {
-            console.log("\n❌ Could not fix git hook errors automatically");
-            break;
-          }
-        } else {
-          // Not a hook error or out of retries
-          if (commitAttempt > hookRetries) {
-            console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
-          }
-          console.error(`\n❌ Failed to commit changes: ${commitResult.message}`);
-          throw new Error(`Commit failed: ${commitResult.message}`);
-        }
-      }
-
-      if (!commitSuccess) {
-        throw new Error("Failed to commit changes after retries");
-      }
+      await commitWithHookRetry({
+        workDir,
+        prNumber,
+        commitSummary,
+        verbose,
+        gitAuthor,
+        hookRetries,
+        harness,
+        executablePath,
+        maxTurns,
+        prBranch,
+      });
     }
 
     // Push changes if requested
     if (!noPush) {
       await adapter.beforePush();
       console.log("\n📤 Pushing changes...");
-
-      // Try pushing with retry logic for git hook failures
-      let pushAttempt = 0;
-      let pushSuccess = false;
-
-      while (pushAttempt <= hookRetries && !pushSuccess) {
-        pushAttempt++;
-        const pushResult = await Utils.pushCurrentBranch({
-          verbose,
-          cwd: workDir,
-          expectedBranch: pr.head.ref,
-        });
-
-        if (pushResult.success) {
-          console.log("✅ Changes pushed successfully");
-          pushSuccess = true;
-          break;
-        }
-
-        // Check if this is a git hook error that we can try to fix
-        if (pushResult.hookError && pushAttempt <= hookRetries) {
-          console.log(`\n⚠️  Git pre-push hook failed (attempt ${pushAttempt}/${hookRetries + 1})`);
-
-          // Try to fix the hook error with agent
-          const fixed = await runAgentHarnessToFixGitHook(
-            "push",
-            harness,
-            executablePath,
-            maxTurns,
-            workDir,
-            pr.head.ref,
-          );
-
-          if (fixed) {
-            console.log(
-              `\n🔄 Retrying push after ${harness.displayName} fixed and amended the commit...`,
-            );
-            // Agent was instructed to amend the commit, so just retry the push
-            continue;
-          } else {
-            console.log("\n❌ Could not fix git pre-push hook errors automatically");
-            break;
-          }
-        } else {
-          // Not a hook error or out of retries
-          if (pushAttempt > hookRetries) {
-            console.log(`\n❌ Max retries (${hookRetries}) exceeded for git hook fixes`);
-          }
-          console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
-          throw new Error(`Push failed: ${pushResult.message}`);
-        }
-      }
-
-      if (!pushSuccess) {
-        throw new Error("Failed to push changes after retries");
-      }
+      await pushWithHookRetry({
+        workDir,
+        verbose,
+        hookRetries,
+        harness,
+        executablePath,
+        maxTurns,
+        prBranch,
+      });
     } else {
       console.log("\n⏭️  Skipping push (--no-push flag)");
     }
 
     // Mark comments as addressed if requested (only if push succeeded)
-    if (!ciFeedback && !noReply && !noPush) {
-      await adapter.acknowledge(agentResult.output);
-    } else if (!ciFeedback && noReply) {
-      console.log("\n⏭️  Skipping marking comments (--no-reply flag)");
-    }
+    await acknowledgeIfRequested(adapter, ciFeedback, noReply, noPush, agentResult.output);
 
-    console.log(
-      ciFeedback
-        ? `\n✅ Successfully pushed a CI fix for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`
-        : `\n✅ Successfully addressed review for ${identity.provider === "gitlab" ? "MR" : "PR"} #${prNumber}`,
-    );
-    console.log(`   View ${identity.provider === "gitlab" ? "MR" : "PR"}: ${prUrl}`);
+    logReviewSuccess(identity, prNumber, prUrl, ciFeedback);
     endRun("succeeded");
     return;
   } catch (error) {
@@ -581,64 +751,9 @@ export async function addressReview(
     throw error;
   } finally {
     // Clean up any untracked files left by linters/tools/agent
-    const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], {
-      verbose: false,
-      cwd: workDir,
-    });
-
-    if (statusResult.success && statusResult.output.trim()) {
-      // Check for untracked files (lines starting with "??")
-      const untrackedLines = statusResult.output
-        .split("\n")
-        .filter((line) => line.startsWith("??"));
-
-      if (untrackedLines.length > 0) {
-        if (verbose) {
-          console.log("\n🧹 Cleaning up untracked files...");
-          untrackedLines.forEach((line) => {
-            const file = line.substring(3).trim();
-            console.log(`   Removing: ${file}`);
-          });
-        }
-
-        // Use git clean to remove all untracked files and directories
-        // -f: force, -d: directories
-        await Utils.executeGitCommand(GIT_CLEAN_ARGS, {
-          verbose: false,
-          cwd: workDir,
-        });
-      }
-    }
+    await cleanupUntrackedFiles(workDir, verbose);
 
     // Restore original git config if we changed it
-    if (gitAuthor) {
-      if (originalGitName) {
-        await Utils.executeGitCommand(["config", "user.name", originalGitName], {
-          verbose: false,
-          cwd: workDir,
-        });
-      } else {
-        await Utils.executeGitCommand(["config", "--unset", "user.name"], {
-          verbose: false,
-          cwd: workDir,
-        });
-      }
-
-      if (originalGitEmail) {
-        await Utils.executeGitCommand(["config", "user.email", originalGitEmail], {
-          verbose: false,
-          cwd: workDir,
-        });
-      } else {
-        await Utils.executeGitCommand(["config", "--unset", "user.email"], {
-          verbose: false,
-          cwd: workDir,
-        });
-      }
-
-      if (verbose) {
-        console.log("   Restored original git config");
-      }
-    }
+    await restoreBotGitAuthor(workDir, gitAuthor, originalGitName, originalGitEmail, verbose);
   }
 }
