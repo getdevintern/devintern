@@ -87,7 +87,7 @@ async function runCLI(
     // Clean up temp directory
     try {
       rmSync(testDir, { recursive: true, force: true });
-    } catch (e) {
+    } catch {
       // Ignore cleanup errors
     }
   }
@@ -619,7 +619,7 @@ describe.concurrent("CLI Init Command", () => {
       // Clean up temp directory
       try {
         rmSync(testDir, { recursive: true, force: true });
-      } catch (e) {
+      } catch {
         // Ignore cleanup errors
       }
     }

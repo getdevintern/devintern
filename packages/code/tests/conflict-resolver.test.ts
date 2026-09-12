@@ -6,7 +6,6 @@ import { join } from "path";
 
 import {
   buildConflictPrompt,
-  buildHookFixPrompt,
   resolveConflictsOnPr,
   sanitizeErrorForPublicComment,
 } from "../src/lib/conflict-resolver";

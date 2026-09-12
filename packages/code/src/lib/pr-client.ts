@@ -852,7 +852,7 @@ export class PRManager {
           resolve({ platform: "unknown", repository: "" });
         });
       });
-    } catch (error) {
+    } catch {
       return { platform: "unknown", repository: "" };
     }
   }

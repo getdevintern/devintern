@@ -36,7 +36,7 @@ export class Utils {
     try {
       const date = new Date(dateString);
       return date.toLocaleString();
-    } catch (error) {
+    } catch {
       return dateString;
     }
   }
@@ -59,7 +59,7 @@ export class Utils {
     try {
       const urlObj = new URL(url);
       return urlObj.hostname;
-    } catch (error) {
+    } catch {
       return url;
     }
   }
@@ -86,7 +86,7 @@ export class Utils {
     try {
       new URL(string);
       return true;
-    } catch (_) {
+    } catch {
       return false;
     }
   }
@@ -1332,7 +1332,7 @@ export class Utils {
         "production",
       ];
       return protectedBranches.includes(currentBranch.toLowerCase());
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -1518,7 +1518,7 @@ export class Utils {
             // Try to forcibly delete the worktree directory and prune
             try {
               rmSync(worktreeToRemove, { recursive: true, force: true });
-            } catch (e) {
+            } catch {
               // Ignore deletion errors
             }
             await Utils.executeGitCommand(["worktree", "prune"], gitOpts);
@@ -1566,7 +1566,7 @@ export class Utils {
           // Also try to delete directory if still exists
           try {
             rmSync(worktreePath, { recursive: true, force: true });
-          } catch (e) {
+          } catch {
             // Ignore
           }
 
@@ -1822,7 +1822,7 @@ export class Utils {
         // Remove directory itself (ignore errors)
         try {
           rmSync(worktreePath, { recursive: true, force: true });
-        } catch (e) {
+        } catch {
           // Ignore
         }
 

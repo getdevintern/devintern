@@ -10,7 +10,7 @@
  */
 
 import { AsanaClient, parseAsanaTaskFilters } from "@devintern/task-trackers";
-import type { AsanaStory, AsanaTaskDetail } from "@devintern/task-trackers";
+import type { AsanaTaskDetail } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,

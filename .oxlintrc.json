@@ -11,6 +11,7 @@
     }
   },
   "rules": {
+    "no-unused-vars": "error",
     "react/rules-of-hooks": "error",
     "react/exhaustive-deps": "error",
     "react/no-array-index-key": "error",

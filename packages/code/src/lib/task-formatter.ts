@@ -552,7 +552,6 @@ If you need clarification on any requirements or if the task description is uncl
       linkedResources,
       relatedIssues,
       comments,
-      attachments,
     } = taskDetails;
 
     let prompt = `# Task Clarity Assessment

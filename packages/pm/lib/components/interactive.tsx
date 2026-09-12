@@ -278,7 +278,7 @@ export async function runInteractiveMode(
       const [inputVersion, setInputVersion] = useState(0);
       const [issueTypes, setIssueTypes] = useState<string[]>(defaultIssueTypes);
       const orderedIssueTypes = orderIssueTypes(issueTypes);
-      const [isLoadingIssueTypes, setIsLoadingIssueTypes] = useState(false);
+      const [, setIsLoadingIssueTypes] = useState(false);
       const scrollViewRef = useRef<ScrollViewRef>(null);
       const sym = uiSymbols();
       const bufferedPreviewData = useRef<{ summary: string; description: string } | null>(null);
