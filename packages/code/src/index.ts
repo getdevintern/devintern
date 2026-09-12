@@ -29,7 +29,6 @@ import {
   RUN_ORIGIN_ENV,
   track,
   trackInteractiveTaskRun,
-  trackWorkerTaskRun,
 } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
 import { runAnalysisWithFallback } from "./lib/agent/analysis-mode";
@@ -54,19 +53,16 @@ import {
   trackersSupportingEstimate,
   trackersSupportingQuery,
 } from "./lib/trackers/capabilities";
-import { normalizeTaskKeys } from "./lib/task/normalize-task-keys";
 import { LockManager } from "./lib/lock-manager";
 import { PRManager } from "./lib/code-host";
 import {
   RunStore,
   beginRun,
-  endRun,
   recordRunBranch,
   recordRunPr,
   recordRunStage,
   recordRunTicket,
 } from "./lib/state/run-recorder";
-import type { RunStatus } from "./lib/state/run-recorder";
 import { buildTicketUrl } from "./lib/task/ticket-url";
 import { clearRetryState, getRetryState, recordIncompleteAttempt } from "./lib/state/retry-state";
 import { shouldSkipRetry } from "./lib/state/retry-gate";
@@ -105,13 +101,15 @@ import {
   resolveProjectKey,
 } from "./lib/config/project-settings";
 import { validateEnvironment } from "./lib/config/validate-environment";
+import { isWorkerTaskProcess, runContext } from "./lib/cli/context";
+import { runEstimationBatch, resolveRunTargets, runTaskBatch } from "./lib/cli/run";
+import { finishTaskRun } from "./lib/state/task-run";
 import { runClarityCheck } from "./lib/agent/clarity";
 import {
   createPlanImplementationPrompt,
   detectPlanOnlyBehavior,
   logHookErrorToFile,
 } from "./lib/agent/plan";
-import { runEstimation } from "./lib/automation/estimation";
 import { postImplementationComment } from "./lib/task/implementation-comment";
 import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
@@ -152,32 +150,6 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
     estimate: options.estimate === true,
     sandbox: KNOWN_SANDBOX_PROVIDERS.has(sandboxProvider ?? "") ? sandboxProvider : undefined,
   };
-}
-
-function isWorkerTaskProcess(): boolean {
-  const origin = process.env[RUN_ORIGIN_ENV];
-  return (
-    origin === "worker" ||
-    origin === "error_monitor" ||
-    origin === "scheduled" ||
-    origin === "estimate" ||
-    origin === "manual"
-  );
-}
-
-/** Finish the local run record and emit exactly one outcome event for worker tasks. */
-async function finishTaskRun(
-  status: Exclude<RunStatus, "in_progress">,
-  reason?: string,
-): Promise<void> {
-  endRun(status, reason);
-  const tracked = trackWorkerTaskRun(status, {
-    cliVersion: VERSION,
-    tracker: process.env.TASK_TRACKER || "jira",
-  });
-  if (tracked) {
-    await flushAnalytics();
-  }
 }
 
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
@@ -249,6 +221,8 @@ if (!isSubcommand) {
 const options = isSubcommand ? ({} as ProgramOptions) : program.opts<ProgramOptions>();
 const taskKeys = isSubcommand ? [] : program.args;
 
+runContext.options = options;
+
 if (options.sandbox) {
   setSandboxOverride(options.sandbox);
 }
@@ -294,19 +268,10 @@ const autoReviewIterationCap: number | undefined = (() => {
 
 // Resolve the final agent harness
 const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
+runContext.resolvedAgent = resolvedAgent;
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);
 }
-
-// Context for the task currently being processed, so signal handlers and
-// error paths can leave feedback on the ticket instead of failing silently
-// with the task stranded in "In Progress".
-let activeTaskContext: {
-  taskKey: string;
-  tracker: TaskTrackerClient;
-  projectKey: string;
-  movedToInProgress: boolean;
-} | null = null;
 
 /**
  * Best-effort failure feedback: post a comment explaining why no pull request
@@ -319,7 +284,7 @@ let activeTaskContext: {
  * an immediate re-pickup loop.
  */
 async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
-  const context = activeTaskContext;
+  const context = runContext.activeTaskContext;
   if (!context || options.skipComments || isMarkdownFilePath(taskKey)) return;
 
   await reportTaskFailure({
@@ -342,7 +307,7 @@ async function reportProcessingFailure(taskKey: string, reason: string): Promise
  * @param taskIndex - Zero-based index in a batch run
  * @param totalTasks - Total tasks in the batch
  */
-// oxlint-disable-next-line complexity, max-statements -- end-to-end single-task pipeline (fetch → branch → agent → commit → PR → Jira transition) welded to module-level `activeTaskContext`/`options`; remedy: thread an explicit `TaskRunContext` and split fetch/execute/finalize phases.
+// oxlint-disable-next-line complexity, max-statements -- end-to-end single-task pipeline (fetch → branch → agent → commit → PR → Jira transition) welded to module-level `runContext.activeTaskContext`/`options`; remedy: thread an explicit `TaskRunContext` and split fetch/execute/finalize phases.
 async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1): Promise<void> {
   try {
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
@@ -373,7 +338,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     // Load project settings to get status transitions
     const projectSettings = loadProjectSettings();
     const projectKey = resolveProjectKey(workflowKey, task);
-    activeTaskContext = {
+    runContext.activeTaskContext = {
       taskKey: workflowKey,
       tracker,
       projectKey,
@@ -416,8 +381,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           return;
         }
         // Release lock before exiting
-        if (lockManager) {
-          lockManager.release();
+        if (runContext.lockManager) {
+          runContext.lockManager.release();
         }
         process.exit(0);
       }
@@ -714,8 +679,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
         await finishTaskRun("abandoned", "feature branch creation failed");
         // Release lock before exiting
-        if (lockManager) {
-          lockManager.release();
+        if (runContext.lockManager) {
+          runContext.lockManager.release();
         }
         process.exit(1);
       }
@@ -777,8 +742,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
             );
           } else {
             await finishTaskRun("abandoned", "failed feasibility assessment");
-            if (lockManager) {
-              lockManager.release();
+            if (runContext.lockManager) {
+              runContext.lockManager.release();
             }
             process.exit(1);
           }
@@ -829,8 +794,11 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
           console.log(`\n🔄 Transitioning ${workflowKey} to '${inProgressStatus}'...`);
           await tracker.transitionStatus(workflowKey, inProgressStatus.trim());
           console.log(`✅ Task moved to '${inProgressStatus}'`);
-          if (activeTaskContext && activeTaskContext.taskKey === workflowKey) {
-            activeTaskContext.movedToInProgress = true;
+          if (
+            runContext.activeTaskContext &&
+            runContext.activeTaskContext.taskKey === workflowKey
+          ) {
+            runContext.activeTaskContext.movedToInProgress = true;
           }
         } catch (statusError) {
           console.warn(
@@ -941,7 +909,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       // A later reopen of the ticket starts with a clean retry slate.
       clearRetryState(workflowKey);
     }
-    activeTaskContext = null;
+    runContext.activeTaskContext = null;
   } catch (error) {
     // Usage limit: don't treat as a task failure. Propagate in batch so the
     // loop aborts the remaining tasks; for a single task, exit 0 (no-op).
@@ -952,21 +920,24 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
         // Hand the ticket back to To Do without a failure comment so the
         // incomplete-attempt gate cannot strand it, and the parent can retry
         // on the next harness (or pick it up again once a window elapses).
-        if (activeTaskContext?.movedToInProgress) {
+        if (runContext.activeTaskContext?.movedToInProgress) {
           try {
             const todoStatus = getTodoStatusForProject(
-              activeTaskContext.projectKey,
+              runContext.activeTaskContext.projectKey,
               loadProjectSettings(),
             );
             if (todoStatus?.trim()) {
-              await activeTaskContext.tracker.transitionStatus(taskKey, todoStatus.trim());
+              await runContext.activeTaskContext.tracker.transitionStatus(
+                taskKey,
+                todoStatus.trim(),
+              );
             }
           } catch {
             /* best-effort */
           }
         }
-        if (lockManager) {
-          lockManager.release();
+        if (runContext.lockManager) {
+          runContext.lockManager.release();
         }
         writeUsageLimitHint(error);
         await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
@@ -982,8 +953,8 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
       if (totalTasks > 1) {
         throw error;
       }
-      if (lockManager) {
-        lockManager.release();
+      if (runContext.lockManager) {
+        runContext.lockManager.release();
       }
       await flushAnalyticsAndExit(0);
     }
@@ -1010,7 +981,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
     } catch {
       /* best-effort */
     }
-    activeTaskContext = null;
+    runContext.activeTaskContext = null;
 
     // For batch processing, throw the error to be handled by the main function
     // For single task processing, exit immediately
@@ -1031,18 +1002,14 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
   }
 }
 
-// Global lock manager instance
-let lockManager: LockManager | null = null;
-
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
-// oxlint-disable-next-line complexity, max-statements -- top-level CLI orchestrator: arg/JQL resolution, lock acquisition, batch loop, signal handling, and exit-code mapping; remedy: extract `resolveRunTargets`, `runTaskBatch`, and `installShutdownHandlers`.
 async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
 
     // Acquire lock to prevent multiple instances
-    lockManager = new LockManager();
-    const lockResult = lockManager.acquire();
+    runContext.lockManager = new LockManager();
+    const lockResult = runContext.lockManager.acquire();
 
     if (!lockResult.success) {
       console.error(`❌ ${lockResult.message}`);
@@ -1147,331 +1114,21 @@ async function main(): Promise<void> {
       }
     }
 
-    let tasksToProcess: string[] = [];
-
-    // Determine which tasks to process
-    if (options.query) {
-      console.log(`🔍 Searching task tracker with query: ${options.query}`);
-
-      const tracker = new TaskTrackerManager().getClient();
-
-      const searchResult = await tracker.searchTasks(options.query);
-
-      if (searchResult.tasks.length === 0) {
-        console.log("⚠️  No tasks found matching the query");
-        return;
-      }
-
-      tasksToProcess = searchResult.tasks.map((task) => task.key);
-      console.log(
-        `📋 Found ${tasksToProcess.length} tasks to process: ${tasksToProcess.join(", ")}`,
-      );
-    } else if (taskKeys.length > 0) {
-      // Individual task keys / file paths mode.
-      // File-path arguments are kept as-is; PM task keys are normalised (e.g. Trello ref parsing).
-      const pmArgs = taskKeys.filter((k) => !isMarkdownFilePath(k));
-      const fileArgs = taskKeys.filter(isMarkdownFilePath);
-      tasksToProcess = [...normalizeTaskKeys(pmArgs, getActiveTrackerType()), ...fileArgs];
-      console.log(`📋 Processing ${tasksToProcess.length} task(s): ${tasksToProcess.join(", ")}`);
-    } else {
-      // No tasks specified
-      console.error(
-        "❌ Error: No tasks specified. Provide task keys as arguments or use --query option.",
-      );
-      console.error("   Examples:");
-      console.error("     devintern PROJ-123");
-      console.error("     devintern PROJ-123 PROJ-124 PROJ-125");
-      console.error("     devintern --query \"project = PROJ AND status = 'To Do'\"");
-      console.error("     devintern ./tasks/feature-spec.md --no-git");
-      console.error("     devintern ./epic.md ./subtask-a.md --no-git");
-      await flushAnalyticsAndExit(1);
-    }
+    const tasksToProcess = await resolveRunTargets(taskKeys, activeTrackerType);
+    if (!tasksToProcess) return;
 
     // Estimation mode: separate code path
     if (options.estimate) {
-      console.log("\n📊 Running in estimation mode...");
-
-      const tracker = new TaskTrackerManager().getClient();
-
-      const projectSettings = loadProjectSettings();
-      const estimationResults = {
-        total: 0,
-        estimated: 0,
-        skipped: 0,
-        failed: 0,
-        errors: [] as Array<{ taskKey: string; error: string }>,
-      };
-
-      for (const taskKey of tasksToProcess) {
-        try {
-          console.log(`\n${"=".repeat(60)}`);
-          console.log(`📊 Estimating: ${taskKey}`);
-
-          // Fetch task to check creation date
-          const task = await tracker.getTask(taskKey);
-
-          // Skip tasks created less than 24 hours ago
-          const createdDate = new Date(task.created);
-          const now = new Date();
-          const hoursAgo = (now.getTime() - createdDate.getTime()) / (1000 * 60 * 60);
-
-          if (hoursAgo < 24) {
-            console.log(`⏭️  Skipping ${taskKey} — created ${hoursAgo.toFixed(1)}h ago (< 24h)`);
-            estimationResults.skipped++;
-            continue;
-          }
-
-          // Check if task already has an estimation comment
-          const existingEstimation = await tracker.findEstimationComment(taskKey);
-          let existingCommentId: string | undefined;
-
-          if (existingEstimation) {
-            // Compare estimation comment date with task updated date
-            const estimationDate = new Date(existingEstimation.created);
-            const taskUpdated = new Date(task.updated);
-
-            if (taskUpdated <= estimationDate) {
-              console.log(`⏭️  Skipping ${taskKey} — already estimated and not updated since`);
-              estimationResults.skipped++;
-              continue;
-            }
-
-            console.log(`🔄 Re-estimating ${taskKey} — task updated since last estimate`);
-            existingCommentId = existingEstimation.commentId;
-          }
-
-          estimationResults.total++;
-
-          // Structured run record for this attempt (skips above are not
-          // attempts). Estimation is its own dashboard origin — never an
-          // implement run — and scheduled sweeps carry the schedule id.
-          const estimationScheduleId = process.env.DEVINTERN_AUTOMATION_ID;
-          beginRun({
-            origin: "estimate",
-            taskKey,
-            tracker: activeTrackerType,
-            // Every origin records the harness that executed it.
-            harness: resolvedAgent.harness.name,
-            ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
-          });
-
-          // Fetch comments and linked resources
-          const comments = await tracker.getComments(taskKey);
-          const linkedResources = tracker.extractLinkedResources(task);
-          const relatedIssues = await tracker.getRelatedWorkItems(task);
-
-          // Format task details
-          const taskDetails = tracker.formatTaskDetails(
-            task,
-            comments,
-            linkedResources,
-            relatedIssues,
-          );
-
-          // Create estimation prompt file
-          const { tmpdir } = require("os");
-          const estimationFile = join(
-            tmpdir(),
-            `estimation-${taskKey.toLowerCase()}-${Date.now()}.md`,
-          );
-          TaskFormatter.saveEstimationPrompt(
-            taskDetails,
-            estimationFile,
-            process.env.JIRA_BASE_URL!,
-          );
-
-          // Run estimation
-          const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
-            runEstimation({
-              estimationFile,
-              harness: resolvedAgent.harness,
-              executablePath: resolvedAgent.path,
-              taskKey,
-              tracker,
-              settings: projectSettings,
-              skipComments: options.skipComments,
-              existingCommentId,
-              runOptions,
-            }),
-          );
-
-          // Clean up temp file
-          try {
-            require("fs").unlinkSync(estimationFile);
-          } catch {
-            // Ignore cleanup errors
-          }
-
-          if (result) {
-            estimationResults.estimated++;
-          } else {
-            estimationResults.failed++;
-            estimationResults.errors.push({
-              taskKey,
-              error: "Failed to parse estimation response",
-            });
-          }
-          await finishTaskRun(
-            result ? "succeeded" : "failed",
-            result ? undefined : "Failed to parse estimation response",
-          );
-        } catch (error) {
-          // Usage limit is account-global — abort the rest of the estimation
-          // batch and exit 0 so the scheduler retries next window.
-          if (error instanceof UsageLimitError) {
-            await finishTaskRun("deferred", error.message);
-            if (isWorkerChild()) {
-              console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
-              lockManager?.release();
-              writeUsageLimitHint(error);
-              await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
-            }
-            console.warn(`\n⏳ ${error.message}. Aborting estimation batch; will retry next run.`);
-            if (lockManager) {
-              lockManager.release();
-            }
-            await flushAnalyticsAndExit(0);
-          }
-
-          estimationResults.failed++;
-          estimationResults.errors.push({
-            taskKey,
-            error: (error as Error).message,
-          });
-          console.error(`❌ Failed to estimate ${taskKey}: ${(error as Error).message}`);
-          // A failed estimation is a user action that did not complete.
-          captureError(error, {
-            taskKey,
-            tracker: process.env.TASK_TRACKER || "jira",
-            stage: "estimate",
-          });
-          await finishTaskRun("failed", (error as Error).message);
-        }
-      }
-
-      // Print summary
-      console.log(`\n${"=".repeat(60)}`);
-      console.log("📊 Estimation Summary:");
-      console.log(`   Estimated: ${estimationResults.estimated}`);
-      console.log(`   Skipped (< 24h old): ${estimationResults.skipped}`);
-      console.log(`   Failed: ${estimationResults.failed}`);
-
-      if (estimationResults.errors.length > 0) {
-        console.log("\n❌ Failed estimations:");
-        estimationResults.errors.forEach(({ taskKey, error }) => {
-          console.log(`   - ${taskKey}: ${error}`);
-        });
-      }
-
-      // Release lock and exit
-      if (lockManager) {
-        lockManager.release();
-      }
-      await flushAnalytics();
-      if (estimationResults.failed > 0) {
-        await flushErrorTracking();
-        process.exit(1);
-      }
+      await runEstimationBatch({ activeTrackerType, tasksToProcess });
       return;
     }
 
     // Process tasks sequentially
-    const results = {
-      total: tasksToProcess.length,
-      successful: 0,
-      failed: 0,
-      errors: [] as Array<{ taskKey: string; error: string }>,
-    };
-
-    for (let i = 0; i < tasksToProcess.length; i++) {
-      const taskKey = tasksToProcess[i];
-
-      try {
-        await processSingleTask(taskKey, i, tasksToProcess.length);
-        results.successful++;
-
-        if (i < tasksToProcess.length - 1) {
-          console.log("\n" + "=".repeat(80));
-          console.log("⏭️  Moving to next task...\n");
-        }
-      } catch (error) {
-        // Usage limit is account-global: abort the remaining batch instead of
-        // hammering tasks that would all fail. Exit 0 so the scheduler retries
-        // next window without marking the run failed.
-        if (error instanceof UsageLimitError) {
-          if (isWorkerChild()) {
-            if (lockManager) {
-              lockManager.release();
-            }
-            writeUsageLimitHint(error);
-            await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
-          }
-          const remaining = tasksToProcess.length - i - 1;
-          console.warn(
-            `\n⏳ ${error.message}. Aborting batch — ${remaining} task(s) left, ` +
-              `will resume on the next scheduled run.`,
-          );
-          if (lockManager) {
-            lockManager.release();
-          }
-          await flushAnalyticsAndExit(0);
-        }
-
-        results.failed++;
-        results.errors.push({
-          taskKey,
-          error: (error as Error).message,
-        });
-
-        console.log("⚠️  Continuing with remaining tasks...\n");
-      }
-    }
-
-    // One outcome event per interactive run marks the activation funnel's
-    // "first successful task" step; worker subprocesses instead report
-    // `worker_task_run` so the two paths stay comparable.
-    if (!isWorkerTaskProcess() && tasksToProcess.length > 0) {
-      await trackInteractiveTaskRun({
-        tracker: activeTrackerType,
-        outcome: results.failed === 0 ? "succeeded" : results.successful > 0 ? "partial" : "failed",
-        taskCount: tasksToProcess.length,
-        runMode: options.query ? "query" : "tasks",
-      });
-    }
-
-    // Print summary for batch operations
-    if (tasksToProcess.length > 1) {
-      console.log("\n" + "=".repeat(80));
-      console.log("📊 Batch Processing Summary:");
-      console.log(`   Total tasks: ${results.total}`);
-      console.log(`   ✅ Successful: ${results.successful}`);
-      console.log(`   ❌ Failed: ${results.failed}`);
-
-      if (results.errors.length > 0) {
-        console.log("\n❌ Failed tasks:");
-        results.errors.forEach(({ taskKey, error }) => {
-          console.log(`   - ${taskKey}: ${error}`);
-        });
-      }
-
-      if (results.failed > 0) {
-        // Release lock before exiting
-        if (lockManager) {
-          lockManager.release();
-        }
-        await flushAnalytics();
-        // Task failures were already captured in processSingleTask; make sure
-        // those events are sent before this exit.
-        await flushErrorTracking();
-        process.exit(1);
-      }
-    }
-
-    // Release lock on successful completion
-    if (lockManager) {
-      lockManager.release();
-    }
-    await flushAnalytics();
+    await runTaskBatch({
+      activeTrackerType,
+      tasksToProcess,
+      runTask: processSingleTask,
+    });
   } catch (error) {
     const err = error as Error;
     console.error(`❌ Error: ${err.message}`);
@@ -1482,8 +1139,8 @@ async function main(): Promise<void> {
     // handlers (lock, tracker query, license, ...).
     captureError(error, { stage: "main" });
     // Release lock before exiting on error
-    if (lockManager) {
-      lockManager.release();
+    if (runContext.lockManager) {
+      runContext.lockManager.release();
     }
     await flushAnalytics();
     await flushErrorTracking();
@@ -2481,8 +2138,8 @@ process.on("unhandledRejection", (error: Error) => {
   }
   captureError(error);
   // Release lock before exiting
-  if (lockManager) {
-    lockManager.release();
+  if (runContext.lockManager) {
+    runContext.lockManager.release();
   }
   void Promise.all([flushErrorTracking(), flushAnalytics()]).finally(() => process.exit(1));
 });
@@ -2496,7 +2153,7 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
   // If a task is mid-flight, tell the tracker it was interrupted instead of
   // leaving it silently in "In Progress" with no PR and no feedback.
-  const context = activeTaskContext;
+  const context = runContext.activeTaskContext;
   if (context) {
     // Bound the feedback attempt so tracker I/O can never stall shutdown.
     const shutdownTimer = setTimeout(() => process.exit(exitCode), 15_000);
@@ -2510,8 +2167,8 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
     }
     clearTimeout(shutdownTimer);
   }
-  if (lockManager) {
-    lockManager.release();
+  if (runContext.lockManager) {
+    runContext.lockManager.release();
   }
   // Bounded; pending crash/handled-error and queued analytics events get a
   // chance to send before the process is torn down.
@@ -2536,8 +2193,8 @@ process.on("uncaughtException", (error: Error) => {
   }
   captureError(error);
   // Release lock before exiting
-  if (lockManager) {
-    lockManager.release();
+  if (runContext.lockManager) {
+    runContext.lockManager.release();
   }
   void Promise.all([flushErrorTracking(), flushAnalytics()]).finally(() => process.exit(1));
 });
