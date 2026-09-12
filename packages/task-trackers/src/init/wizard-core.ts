@@ -26,6 +26,13 @@ export type PromptFn = (question: string) => Promise<string>;
 export type ProbeFn = (trackerId: string, env: Record<string, string>) => Promise<void>;
 export type LogFn = (message: string) => void;
 
+/** Prompt/probe/log dependencies for {@link validateConnection}. */
+export interface ConnectionValidationIo {
+  prompt: PromptFn;
+  probe: ProbeFn;
+  log: LogFn;
+}
+
 /** One credential/config prompt in an init wizard. */
 export interface EnvPromptStep {
   /** Environment variable name. */
@@ -270,11 +277,10 @@ export async function validateConnection(
   trackerId: string,
   values: Record<string, string>,
   steps: EnvPromptStep[],
-  prompt: PromptFn,
-  probe: ProbeFn,
-  log: LogFn,
+  io: ConnectionValidationIo,
   envPath: string,
 ): Promise<boolean> {
+  const { prompt, probe, log } = io;
   let edits = 0;
   for (;;) {
     log("\n🔌 Checking the connection...");

@@ -53,18 +53,19 @@
     "react/display-name": "error",
     "react/hook-use-state": "error",
 
-    // Complexity / size metrics. `max-depth`, `max-params`, and
-    // `max-classes-per-file` are enforced as errors (all clean); `complexity`
-    // stays a warning until the remaining long functions are split. The size
-    // rules stay off for now.
+    // Complexity / size metrics. `max-depth`, `max-params`,
+    // `max-nested-callbacks`, and `max-classes-per-file` are enforced as errors
+    // (all clean); `complexity` and `max-statements` stay warnings until the
+    // remaining long functions are split. `max-lines` and
+    // `max-lines-per-function` stay off for now.
     "complexity": ["warn", 30],
     "max-depth": ["error", 6],
-    "max-params": ["error", 7],
-    "max-nested-callbacks": ["warn", 10],
+    "max-params": ["error", 6],
+    "max-nested-callbacks": ["error", 5],
     "max-classes-per-file": ["error", 3],
     "max-lines": "off",
     "max-lines-per-function": "off",
-    "max-statements": "off",
+    "max-statements": ["warn", 200],
 
     // Import hygiene rules: error so bad imports fail pre-commit/CI (DEV-65).
     "import/no-cycle": "error",

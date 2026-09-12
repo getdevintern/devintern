@@ -312,7 +312,13 @@ export async function runTrackerSetup(
   if (trackerId === "markdown") {
     log("\nℹ️  No credentials needed for the markdown tracker.");
   } else {
-    await validateConnection(trackerId, values, steps, prompt, probe, log, ".devintern-code/.env");
+    await validateConnection(
+      trackerId,
+      values,
+      steps,
+      { prompt, probe, log },
+      ".devintern-code/.env",
+    );
   }
 
   // Optional PR-integration token when the tracker itself is not GitHub.
@@ -420,9 +426,7 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
           currentTracker,
           { ...existing, ...values },
           steps,
-          prompt,
-          probe,
-          log,
+          { prompt, probe, log },
           ".devintern-code/.env",
         );
       }
@@ -465,9 +469,7 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
         trackerId,
         values,
         steps,
-        prompt,
-        probe,
-        log,
+        { prompt, probe, log },
         ".devintern-code/.env",
       );
     }

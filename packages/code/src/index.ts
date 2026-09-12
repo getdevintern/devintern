@@ -1957,9 +1957,7 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
             clarityInputFile,
             resolvedAgent.harness,
             resolvedAgent.path,
-            workflowKey,
-            tracker,
-            options.skipComments,
+            { key: workflowKey, tracker, skipComments: options.skipComments },
             runOptions,
           ),
         );
@@ -2705,9 +2703,8 @@ async function main(): Promise<void> {
  * @param clarityFile - Path to the clarity assessment prompt file
  * @param harness - Agent harness configuration
  * @param executablePath - Agent CLI executable path
- * @param taskKey - Task tracker issue key
- * @param tracker - Task tracker client
- * @param skipComments - When true, skip posting the assessment comment
+ * @param task - Tracker context: issue `key`, the `tracker` client, and
+ *   `skipComments` to skip posting the assessment comment
  * @param runOptions - Agent run options (mode/permissions); callers pass
  *   these via {@link runAnalysisWithFallback} so a failing read-only run is
  *   retried once in default mode
@@ -2716,11 +2713,10 @@ async function runClarityCheck(
   clarityFile: string,
   harness: AgentHarness,
   executablePath: string,
-  taskKey: string,
-  tracker: TaskTrackerClient | undefined,
-  skipComments: boolean,
+  task: { key: string; tracker: TaskTrackerClient | undefined; skipComments: boolean },
   runOptions: AgentRunOptions,
 ): Promise<ClarityAssessment | null> {
+  const { key: taskKey, tracker, skipComments } = task;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the clarity check.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -4052,9 +4048,10 @@ async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
                 branchForPr,
                 effectivePrTargetBranch,
                 implementationOutput,
-                undefined,
-                prTargetBranchExplicit,
-                requestedPrTargetBranch,
+                {
+                  targetBranchExplicit: prTargetBranchExplicit,
+                  requestedTargetBranch: requestedPrTargetBranch,
+                },
               );
 
               if (prResult.success) {
