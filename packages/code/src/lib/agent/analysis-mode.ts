@@ -14,7 +14,7 @@
 import { isConstrainedMode, isModeSupported } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 
-import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./model";
 
 /**
  * When true, analysis spawns prefer harness `readonly`/`plan` modes (with

@@ -23,9 +23,9 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { ResolvedHarness } from "@devintern/agent-harness";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent-spawn";
+import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./lib/agent/spawn";
 import { parseEnvInteger } from "./lib/env-integer";
-import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent/model";
 import { getSandbox } from "./lib/sandbox";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { captureError, flushErrorTracking } from "@devintern/utils";
@@ -53,7 +53,7 @@ import {
 } from "./lib/acquirers/review-polling";
 import { formatReviewPrompt } from "./lib/review/formatter";
 import { Utils } from "./lib/utils";
-import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
+import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,

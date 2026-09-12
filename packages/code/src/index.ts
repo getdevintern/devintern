@@ -63,9 +63,9 @@ import {
   trackWorkerTaskRun,
 } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
-import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/analysis-mode";
-import { resolveAgentEffort, resolveAgentModel } from "./lib/agent-model";
-import { parseAgentJsonObject } from "./lib/agent-json";
+import { ReadonlyAnalysisError, runAnalysisWithFallback } from "./lib/agent/analysis-mode";
+import { resolveAgentEffort, resolveAgentModel } from "./lib/agent/model";
+import { parseAgentJsonObject } from "./lib/agent/json";
 import {
   DEFAULT_AUTO_REVIEW_ITERATIONS,
   resolveAutoReviewIterations,
@@ -117,7 +117,7 @@ import {
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "./lib/state/worker-state";
 import { Utils } from "./lib/utils";
 import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
-import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
+import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";

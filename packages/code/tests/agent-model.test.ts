@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { InvalidAgentEffortError } from "@devintern/agent-harness";
 
-import { resolveAgentEffort, resolveAgentModel } from "../src/lib/agent-model";
+import { resolveAgentEffort, resolveAgentModel } from "../src/lib/agent/model";
 
 afterEach(() => {
   delete process.env.AGENT_MODEL;
