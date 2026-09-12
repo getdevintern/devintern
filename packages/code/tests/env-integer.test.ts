@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { parseEnvInteger } from "../src/lib/env-integer";
+import { parseEnvInteger } from "../src/lib/config/env-integer";
 
 const ENV_NAME = "DEVINTERN_TEST_INTEGER";
 const originalValue = process.env[ENV_NAME];

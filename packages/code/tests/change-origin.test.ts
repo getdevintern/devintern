@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertGitLabOrigin } from "../src/lib/change-origin";
+import { assertGitLabOrigin } from "../src/lib/code-host/change-origin";
 import type { ChangeRequestIdentity } from "../src/lib/code-host";
 
 const identity: ChangeRequestIdentity = {

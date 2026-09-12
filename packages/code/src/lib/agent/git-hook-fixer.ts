@@ -15,9 +15,9 @@ import {
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
-import { getSandbox } from "../sandbox";
+import { getSandbox } from "./sandbox";
 import { Utils } from "../utils";
-import { resolveOutputDir } from "../output-dir";
+import { resolveOutputDir } from "../config/output-dir";
 
 /** Default message when the agent fixed hooks but left the commit unfinished. */
 export const MANUAL_HOOK_FIX_COMMIT_MESSAGE = "fix: resolve pre-commit hook failures";

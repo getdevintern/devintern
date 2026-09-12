@@ -1,4 +1,4 @@
-import { assertCurrentGitLabOrigin } from "../change-origin";
+import { assertCurrentGitLabOrigin } from "../code-host/change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**

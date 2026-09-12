@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { randomUUID } from "crypto";
 
-import { parseEnvInteger } from "../env-integer";
+import { parseEnvInteger } from "../config/env-integer";
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
