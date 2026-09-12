@@ -1,3 +1,4 @@
+import { transitionIssueStatus } from "../shared/issue-status-policy";
 /**
  * GitHub Issues implementation of the platform-agnostic {@link TaskTrackerClient}.
  *
@@ -39,9 +40,6 @@ import type {
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
-
-/** Status names treated as "close the issue" rather than a label swap. */
-const CLOSE_STATUS_NAMES = new Set(["closed", "done", "complete", "completed"]);
 
 /** URL patterns for GitHub-hosted attachments embedded in issue markdown. */
 const GITHUB_ATTACHMENT_URL_REGEX =
@@ -112,48 +110,31 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
   }
 
   async transitionStatus(taskKey: string, statusName: string): Promise<void> {
-    const issueNumber = this.toIssueNumber(taskKey);
-
-    if (CLOSE_STATUS_NAMES.has(statusName.toLowerCase())) {
-      await this.githubClient.updateIssue(issueNumber, { state: "closed" });
-      return;
-    }
-
-    // Status transitions need an authoritative catalog — the picker soft-cap
-    // (default 500) can omit a configured status label that exists further on.
-    let { labels: repoLabels, truncated } = await this.githubClient.getLabels();
-    let target = repoLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
-    if (!target && truncated) {
-      ({ labels: repoLabels } = await this.githubClient.getLabels(Number.POSITIVE_INFINITY));
-      target = repoLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
-    }
-
-    if (!target) {
-      const available = repoLabels.map((l) => l.name).join(", ");
-      throw new TaskTrackerError(
-        `Label "${statusName}" not found in the repository. Available labels: ${available}. ` +
-          "Create the label or update the status names in .devintern-code/settings.json.",
-      );
-    }
-
-    // Swap out other configured status labels so only one status is active.
-    const issue = await this.githubClient.getIssue(issueNumber);
-    const currentLabels = (issue.labels ?? []).map((l) => l.name);
-    const otherStatusLabels = currentLabels.filter(
-      (name) =>
-        name.toLowerCase() !== target.name.toLowerCase() &&
-        this.statusLabels.some((s) => s.toLowerCase() === name.toLowerCase()),
-    );
-
-    await this.githubClient.addLabels(issueNumber, [target.name]);
-    for (const label of otherStatusLabels) {
-      await this.githubClient.removeLabel(issueNumber, label);
-    }
-
-    // Moving back to an open status reopens a closed issue.
-    if (issue.state === "closed") {
-      await this.githubClient.updateIssue(issueNumber, { state: "open" });
-    }
+    const number = this.toIssueNumber(taskKey);
+    const client = this.githubClient;
+    await transitionIssueStatus(statusName, this.statusLabels, {
+      scope: "repository",
+      getLabels: (limit) => client.getLabels(limit),
+      getIssue: async () => {
+        const issue = await client.getIssue(number);
+        return {
+          labels: (issue.labels ?? []).map((label) => label.name),
+          closed: issue.state === "closed",
+        };
+      },
+      close: async () => {
+        await client.updateIssue(number, { state: "closed" });
+      },
+      reopen: async () => {
+        await client.updateIssue(number, { state: "open" });
+      },
+      addLabel: async (name) => {
+        await client.addLabels(number, [name]);
+      },
+      removeLabel: async (name) => {
+        await client.removeLabel(number, name);
+      },
+    });
   }
 
   extractDescriptionText(task: Task): string {
