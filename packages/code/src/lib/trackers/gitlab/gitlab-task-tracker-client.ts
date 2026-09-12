@@ -1,3 +1,4 @@
+import { transitionIssueStatus } from "../shared/issue-status-policy";
 /**
  * GitLab implementation of the platform-agnostic {@link TaskTrackerClient}.
  *
@@ -39,9 +40,6 @@ import type {
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
-
-/** Status names treated as "close the issue" rather than a label swap. */
-const CLOSE_STATUS_NAMES = new Set(["closed", "done", "complete", "completed"]);
 
 /**
  * URL patterns for GitLab-hosted attachments embedded in issue markdown.
@@ -128,48 +126,28 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   }
 
   async transitionStatus(taskKey: string, statusName: string): Promise<void> {
-    const issueIid = this.toIssueIid(taskKey);
-
-    if (CLOSE_STATUS_NAMES.has(statusName.toLowerCase())) {
-      await this.gitlabClient.updateIssue(issueIid, { state: "closed" });
-      return;
-    }
-
-    // Status transitions need an authoritative catalog — the picker soft-cap
-    // (default 500) can omit a configured status label that exists further on.
-    let { labels: projectLabels, truncated } = await this.gitlabClient.getLabels();
-    let target = projectLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
-    if (!target && truncated) {
-      ({ labels: projectLabels } = await this.gitlabClient.getLabels(Number.POSITIVE_INFINITY));
-      target = projectLabels.find((l) => l.name.toLowerCase() === statusName.toLowerCase());
-    }
-
-    if (!target) {
-      const available = projectLabels.map((l) => l.name).join(", ");
-      throw new TaskTrackerError(
-        `Label "${statusName}" not found in the project. Available labels: ${available}. ` +
-          "Create the label or update the status names in .devintern-code/settings.json.",
-      );
-    }
-
-    // Swap out other configured status labels so only one status is active.
-    const issue = await this.gitlabClient.getIssue(issueIid);
-    const currentLabels = issue.labels ?? [];
-    const otherStatusLabels = currentLabels.filter(
-      (name) =>
-        name.toLowerCase() !== target.name.toLowerCase() &&
-        this.statusLabels.some((s) => s.toLowerCase() === name.toLowerCase()),
-    );
-
-    await this.gitlabClient.addLabels(issueIid, [target.name]);
-    for (const label of otherStatusLabels) {
-      await this.gitlabClient.removeLabel(issueIid, label);
-    }
-
-    // Moving back to an open status reopens a closed issue.
-    if (issue.state === "closed") {
-      await this.gitlabClient.updateIssue(issueIid, { state: "opened" });
-    }
+    const number = this.toIssueIid(taskKey);
+    const client = this.gitlabClient;
+    await transitionIssueStatus(statusName, this.statusLabels, {
+      scope: "project",
+      getLabels: (limit) => client.getLabels(limit),
+      getIssue: async () => {
+        const issue = await client.getIssue(number);
+        return { labels: issue.labels ?? [], closed: issue.state === "closed" };
+      },
+      close: async () => {
+        await client.updateIssue(number, { state: "closed" });
+      },
+      reopen: async () => {
+        await client.updateIssue(number, { state: "opened" });
+      },
+      addLabel: async (name) => {
+        await client.addLabels(number, [name]);
+      },
+      removeLabel: async (name) => {
+        await client.removeLabel(number, name);
+      },
+    });
   }
 
   extractDescriptionText(task: Task): string {
