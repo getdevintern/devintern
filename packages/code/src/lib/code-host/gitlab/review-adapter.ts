@@ -1,14 +1,14 @@
-import type { ChangeRequestIdentity } from "./code-host";
-import type { ReviewAdapter } from "./review-provider";
-import { WorkerState } from "./worker-state";
+import type { ChangeRequestIdentity } from "../index";
+import type { ReviewAdapter } from "../review-provider";
+import { WorkerState } from "../../worker-state";
 import type {
   ProcessedReviewComment,
   ProcessedReviewFeedback,
   ProcessedConversationComment,
-} from "../types/github-webhooks";
-import { GitLabReviewsClient } from "./gitlab-reviews";
-import { resolveGitLabCodeHostConfig } from "./code-host";
-import { extractAgentSummary } from "./review-formatter";
+} from "../../../types/github-webhooks";
+import { GitLabReviewsClient } from "./reviews";
+import { resolveGitLabCodeHostConfig } from "../index";
+import { extractAgentSummary } from "../../review-formatter";
 
 export async function createGitLabReviewAdapter(
   identity: ChangeRequestIdentity,

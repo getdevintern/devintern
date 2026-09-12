@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { GitLabReviewsClient } from "../src/lib/gitlab-reviews";
+import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 
 function json(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {

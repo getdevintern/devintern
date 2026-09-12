@@ -6,7 +6,7 @@ import type { TaskExecutionResult } from "./task-polling-acquirer";
 import type { AutomaticResolveResult } from "./review-polling-acquirer";
 import type { AgentPr, WorkerState } from "./worker-state";
 import type { WebhookQueue } from "./webhook-queue";
-import type { GitLabPollingSnapshot } from "./gitlab-reviews";
+import type { GitLabPollingSnapshot } from "./code-host/gitlab/reviews";
 
 export interface GitLabPollingClient {
   getPollingSnapshot(project: string | number, iid: number): Promise<GitLabPollingSnapshot>;

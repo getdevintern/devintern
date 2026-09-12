@@ -8,7 +8,7 @@ import {
   normalizeGitLabWebhook,
   verifyGitLabWebhookSignature,
   verifyGitLabWebhookToken,
-} from "../src/lib/gitlab-webhook";
+} from "../src/lib/code-host/gitlab/webhook";
 
 const project = { id: 42, path_with_namespace: "acme/widgets" };
 

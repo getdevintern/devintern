@@ -14,9 +14,9 @@ import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devi
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
-import { saveGitHubAppRecord } from "./github-app-setup";
-import { GitLabWebhookAdminClient } from "./gitlab-webhook-admin";
-import type { GitLabProjectHook, GitLabWebhookProject } from "./gitlab-webhook-admin";
+import { saveGitHubAppRecord } from "./code-host/github/app-setup";
+import { GitLabWebhookAdminClient } from "./code-host/gitlab/webhook-admin";
+import type { GitLabProjectHook, GitLabWebhookProject } from "./code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "./code-host";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";

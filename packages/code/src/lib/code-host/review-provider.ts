@@ -1,4 +1,4 @@
-import type { ProcessedReviewFeedback } from "../types/github-webhooks";
+import type { ProcessedReviewFeedback } from "../../types/github-webhooks";
 
 export interface ReviewAdapter {
   change: { title: string; state: string; head: { ref: string; sha: string } };

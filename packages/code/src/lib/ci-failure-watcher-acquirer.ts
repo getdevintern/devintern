@@ -39,7 +39,11 @@ import type { Acquirer } from "../worker";
 import type { CiFailureFeedback } from "./review-formatter";
 import { serializePrRun } from "./review-polling-acquirer";
 
-import type { CiProvider, CiAggregateState, CiFailure as PendingFailure } from "./ci-provider";
+import type {
+  CiProvider,
+  CiAggregateState,
+  CiFailure as PendingFailure,
+} from "./code-host/ci-provider";
 
 /** Outcome of requesting one CI repair from the workspace executor. */
 export type CiFixResult = boolean | "deferred";

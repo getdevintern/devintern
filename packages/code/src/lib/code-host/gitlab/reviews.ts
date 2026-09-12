@@ -5,9 +5,9 @@ import type {
   ProcessedConversationComment,
   ProcessedReviewComment,
   ProcessedReviewFeedback,
-} from "../types/github-webhooks";
-import { normalizeCodeHostUrl } from "./code-host";
-import { Utils } from "./utils";
+} from "../../../types/github-webhooks";
+import { normalizeCodeHostUrl } from "../index";
+import { Utils } from "../../utils";
 
 interface GitLabUser {
   id: number;
