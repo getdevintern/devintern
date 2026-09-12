@@ -149,8 +149,7 @@
       "files": [
         "packages/code/src/index.ts",
         "packages/code/src/lib/utils.ts",
-        "packages/code/src/webhook-server.ts",
-        "packages/pm/index.ts"
+        "packages/code/src/webhook-server.ts"
       ],
       "rules": {
         "complexity": ["warn", 30],
