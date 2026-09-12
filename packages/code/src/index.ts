@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-import { Option, program } from "commander";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { checkLicense } from "@devintern/license-check";
 import {
@@ -52,8 +51,6 @@ import { JiraTaskTrackerClient } from "./lib/trackers/jira/jira-task-tracker-cli
 import { isMarkdownTaskTracker } from "./lib/trackers/markdown/markdown-task-tracker-client";
 import type { MarkdownTaskRaw } from "./lib/trackers/markdown/markdown-task-tracker-client";
 import {
-  TRACKER_CAPABILITIES,
-  supportedTrackers,
   supportsEstimate,
   supportsQuery,
   trackersSupportingEstimate,
@@ -88,7 +85,7 @@ import { WORKSPACE_REPO_ENV } from "./lib/workspace/env";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agent/git-hook-fixer";
 import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
-import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
+import type { ProjectSettings } from "./types/settings";
 import {
   VERSION,
   checkForCliUpdate,
@@ -100,6 +97,18 @@ import {
   migrateLegacyConfigDir,
   setEnvironmentEntryDir,
 } from "./lib/cli/bootstrap";
+import { isSubcommandCommand, createProgram } from "./lib/cli/program";
+import type { ProgramOptions } from "./lib/cli/program";
+import {
+  getActiveTrackerType,
+  getInProgressStatusForProject,
+  getPrStatusForProject,
+  getStoryPointsFieldForProject,
+  getTodoStatusForProject,
+  loadProjectSettings,
+  resolveProjectKey,
+} from "./lib/config/project-settings";
+import { validateEnvironment } from "./lib/config/validate-environment";
 import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
 import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
@@ -167,31 +176,6 @@ async function finishTaskRun(
   }
 }
 
-interface ProgramOptions {
-  claudePath: string;
-  agentPath: string;
-  envFile?: string;
-  git: boolean;
-  verbose: boolean;
-  maxTurns: string;
-  autoCommit: boolean;
-  skipClarityCheck: boolean; // New option to skip clarity check
-  createPr: boolean; // New option to create pull request
-  prTargetBranch: string; // Target branch for PR
-  prTargetBranchExplicit?: boolean; // Whether --pr-target-branch was supplied
-  requestedPrTargetBranch?: string; // Unresolved explicit target for provider validation
-  autoReview: boolean; // New option to run automatic PR review loop
-  autoReviewIterations?: string; // Max iterations for auto-review loop (unset → AUTO_REVIEW_ITERATIONS env or shared default)
-  query?: string; // Generic query for batch processing
-  jql?: string; // Deprecated alias for --query
-  skipComments: boolean; // Skip posting comments to task tracker
-  force: boolean; // Bypass the retry gate (re-run an unchanged incomplete task)
-  skipJiraComments: boolean; // Deprecated alias for --skip-comments
-  hookRetries: string; // Number of retries for git hook failures
-  estimate: boolean; // Run in estimation mode to add story points
-  sandbox?: string; // Sandbox provider for the agent process
-}
-
 interface ClarityAssessment {
   isImplementable: boolean;
   clarityScore: number;
@@ -212,165 +196,6 @@ interface EstimationResult {
   risks: string[];
   unclearAreas: string[];
   summary: string;
-}
-
-/**
- * Load per-project workflow settings from `.devintern-code/settings.json`.
- *
- * @returns Parsed settings, or `null` when missing or invalid
- */
-function loadProjectSettings(): ProjectSettings | null {
-  const settingsPath = resolve(process.cwd(), ".devintern-code", "settings.json");
-
-  if (!existsSync(settingsPath)) {
-    return null;
-  }
-
-  try {
-    const settingsContent = readFileSync(settingsPath, "utf8");
-    const settings = JSON.parse(settingsContent) as ProjectSettings;
-    return settings;
-  } catch (error) {
-    console.warn(`⚠️  Failed to parse settings.json: ${error}`);
-    return null;
-  }
-}
-
-/**
- * Resolve the active tracker type from environment.
- */
-function getActiveTrackerType(): string {
-  return (process.env.TASK_TRACKER || "jira").toLowerCase();
-}
-
-function resolveProjectKey(taskKey: string, task?: { raw: unknown }): string {
-  const trackerType = getActiveTrackerType();
-  if (trackerType === "trello") {
-    const raw = task?.raw as
-      | { idBoard?: string; board?: { id?: string; shortLink?: string } }
-      | undefined;
-    const boardKey = raw?.board?.shortLink ?? raw?.idBoard ?? process.env.TRELLO_DEFAULT_BOARD_ID;
-    if (boardKey) {
-      return boardKey;
-    }
-  }
-  if (trackerType === "github" && process.env.GITHUB_REPO) {
-    return process.env.GITHUB_REPO;
-  }
-  if (trackerType === "gitlab" && process.env.GITLAB_PROJECT) {
-    return process.env.GITLAB_PROJECT;
-  }
-  if (trackerType === "azure-devops" && process.env.AZURE_DEVOPS_PROJECT) {
-    return process.env.AZURE_DEVOPS_PROJECT;
-  }
-  if (trackerType === "asana") {
-    const raw = task?.raw as { memberships?: Array<{ project?: { gid?: string } }> } | undefined;
-    const projectGid =
-      raw?.memberships?.find((m) => m.project?.gid)?.project?.gid ??
-      process.env.ASANA_DEFAULT_PROJECT_GID;
-    if (projectGid) {
-      return projectGid;
-    }
-  }
-  return taskKey.split("-")[0] ?? taskKey;
-}
-
-function printMissingEnvHelp(): void {
-  console.error("\nPlease ensure you have a .env file in one of these locations:");
-  console.error(
-    `   - Project-specific: ${resolve(process.cwd(), ".devintern-code", ".env")} (or in any parent directory)`,
-  );
-  console.error(
-    `   - Current directory: ${resolve(process.cwd(), ".env")} (or in any parent directory)`,
-  );
-  console.error(`   - Home directory: ${resolve(process.env.HOME || "~", ".env")}`);
-  console.error("\nOr specify a custom .env file with --env-file <path>");
-  console.error("Or set these environment variables in your shell.");
-  console.error("\n💡 Quick start: Run 'devintern init' to create project-specific configuration");
-}
-
-/**
- * Resolve tracker-specific project configuration from settings.
- *
- * Checks the tracker-specific section first (e.g., `settings.jira.projects`),
- * then falls back to the legacy top-level `projects` map for backward
- * compatibility when the active tracker is Jira.
- */
-function resolveProjectConfig(
-  projectKey: string,
-  settings: ProjectSettings | null,
-  trackerType?: string,
-): BaseProjectConfig | undefined {
-  if (!settings) {
-    return undefined;
-  }
-
-  const tracker = trackerType ? trackerType.toLowerCase() : getActiveTrackerType();
-
-  // 1. Check tracker-specific section first
-  const trackerSection = settings[tracker as keyof ProjectSettings];
-  if (trackerSection && typeof trackerSection === "object" && "projects" in trackerSection) {
-    const projects = (trackerSection as TrackerSection).projects;
-    if (projects) {
-      const config = projects[projectKey];
-      if (config) {
-        return config;
-      }
-
-      // Trello cards expose a 24-char idBoard; settings often use the board short link.
-      if (tracker === "trello") {
-        const defaultBoardId = process.env.TRELLO_DEFAULT_BOARD_ID;
-        if (defaultBoardId && defaultBoardId !== projectKey && projects[defaultBoardId]) {
-          return projects[defaultBoardId];
-        }
-
-        const projectKeys = Object.keys(projects);
-        if (projectKeys.length === 1 && projectKeys[0]) {
-          return projects[projectKeys[0]];
-        }
-      }
-    }
-  }
-
-  // 2. Fall back to legacy top-level `projects` for Jira backward compatibility.
-  //    The legacy map was originally Jira-only, so we only fall back for Jira.
-  if (tracker === "jira" && settings.projects) {
-    return settings.projects[projectKey];
-  }
-
-  return undefined;
-}
-
-/** Resolve the status name to use after PR creation for a project. */
-function getPrStatusForProject(
-  projectKey: string,
-  settings: ProjectSettings | null,
-): string | undefined {
-  return resolveProjectConfig(projectKey, settings)?.prStatus;
-}
-
-/** Resolve the "In Progress" status name for a project. */
-function getInProgressStatusForProject(
-  projectKey: string,
-  settings: ProjectSettings | null,
-): string | undefined {
-  return resolveProjectConfig(projectKey, settings)?.inProgressStatus;
-}
-
-/** Resolve the "To Do" status name for a project. */
-function getTodoStatusForProject(
-  projectKey: string,
-  settings: ProjectSettings | null,
-): string | undefined {
-  return resolveProjectConfig(projectKey, settings)?.todoStatus;
-}
-
-/** Return an optional story-points custom field override from project settings. */
-function getStoryPointsFieldForProject(
-  projectKey: string,
-  settings: ProjectSettings | null,
-): string | undefined {
-  return resolveProjectConfig(projectKey, settings)?.storyPointsField;
 }
 
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
@@ -431,143 +256,10 @@ function resolveAgentHarness(providedPath?: string): ResolvedHarness {
 }
 
 // Configure CLI
-program
-  .name("devintern")
-  .description(
-    "Your AI intern for automatically implementing tasks using Agent Harness. Supports single tasks, multiple tasks, or query-based batch processing.",
-  )
-  .version(VERSION)
-  .argument(
-    "[task-keys...]",
-    "One or more task keys (Jira: PROJ-123; Linear: ENG-42 or issue URL; GitHub: 123, #123, or issue URL; Trello: card short link, full card URL, or 24-char ID), local markdown file paths (./task.md), or use --query for batch selection",
-  )
-  .option(
-    "--query <query>",
-    'Query to fetch multiple tasks (syntax depends on tracker; Jira: JQL, e.g., "project = PROJ AND status = \'To Do\'"; Linear: JSON IssueFilter or plain text; GitHub: search qualifiers, e.g., "is:open label:bug")',
-  )
-  .addOption(new Option("--jql <query>", "JQL query to fetch multiple Jira issues").hideHelp())
-  .option("--agent-path <path>", "Path to the AI agent CLI executable")
-  .addOption(new Option("--claude-path <path>", "Path to Claude CLI executable").hideHelp())
-  .option("--env-file <path>", "Path to .env file")
-  .option("--no-git", "Skip git branch creation")
-  .option("-v, --verbose", "Verbose output")
-  .option("--max-turns <number>", "Maximum number of turns for Agent", "500")
-  .option("--no-auto-commit", "Skip automatic git commit after Agent completes")
-  .option("--skip-clarity-check", "Skip running Agent for clarity assessment")
-  .option("--create-pr", "Create pull request after implementation")
-  .option(
-    "--pr-target-branch <branch>",
-    "Target branch for pull request (omitting this uses the repository default branch)",
-    "main",
-  )
-  .option("--auto-review", "Run automatic PR review loop after creating PR (requires --create-pr)")
-  .option(
-    "--auto-review-iterations <number>",
-    "Maximum review-fix cycles for auto-review (default: 2; env: AUTO_REVIEW_ITERATIONS)",
-  )
-  .option("--skip-comments", "Skip posting comments to the task tracker (for testing)")
-  .option(
-    "--force",
-    "Re-run a task even if a previous attempt was reported incomplete and the ticket is unchanged",
-  )
-  .addOption(new Option("--skip-jira-comments", "Skip posting comments to JIRA").hideHelp())
-  .option("--hook-retries <number>", "Number of retry attempts for git hook failures", "10")
-  .option(
-    "--estimate",
-    "Run in estimation mode to add story points estimates to tasks (Jira, Linear, Azure DevOps, Asana via custom field; GitHub and GitLab post comment-only estimates)",
-  )
-  .option(
-    "--sandbox <provider>",
-    "Run the agent inside a sandbox: none | auto | native | nono | srt | docker | smolvm (overrides AGENT_SANDBOX; run 'devintern sandbox' to see what is available)",
-  )
-  .addOption(new Option("--no-update", "Skip the npm update check for this run"));
-
-program.addHelpText(
-  "after",
-  `
-Examples (Jira):
-  devintern PROJ-123 --create-pr
-  devintern PROJ-123 PROJ-456 PROJ-789 --create-pr
-  devintern --query "project = PROJ AND status = 'To Do'" --create-pr
-
-Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
-  devintern ENG-42 --create-pr
-  devintern ENG-42 ENG-43 ENG-44 --create-pr
-  devintern https://linear.app/acme/issue/ENG-42/issue-slug --create-pr
-  devintern --query '{"state":{"name":{"eq":"Todo"}}}' --create-pr
-  devintern --query "login bug" --create-pr
-
-Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
-  devintern 123 --create-pr
-  devintern https://github.com/acme/webapp/issues/123 --create-pr
-  devintern --query "is:open label:bug" --create-pr
-
-Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
-  devintern 123 --create-pr
-  devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
-  devintern --query "is:open label:bug" --create-pr
-
-Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
-  devintern 4211 --create-pr
-  devintern https://dev.azure.com/my-org/MyProject/_workitems/edit/4211 --create-pr
-  devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'" --create-pr
-
-Examples (Asana; set TASK_TRACKER=asana in .devintern-code/.env):
-  devintern 1200000000000001 --create-pr
-  devintern https://app.asana.com/0/1200000000000000/1200000000000001 --create-pr
-  devintern --query 'section:"To Do" completed:false' --create-pr
-
-Examples (Trello; set TASK_TRACKER=trello in .devintern-code/.env):
-  devintern 4uWKPOTv --create-pr
-  devintern https://trello.com/c/4uWKPOTv/card-slug --create-pr
-  devintern --query 'list:"To Do" is:open' --create-pr
-
-Examples (Markdown; no PM credentials required for file paths):
-  devintern ./tasks/feature-spec.md --no-git
-  devintern /path/to/my-task.md --create-pr
-  devintern ./epic.md ./subtask-a.md ./subtask-b.md --no-git
-
-Examples (Markdown tracker; set TASK_TRACKER=markdown and MARKDOWN_TASKS_DIR in .devintern-code/.env):
-  devintern 2025-01-01T12-00-00-abcd-my-feature --create-pr
-  devintern --query "status=todo" --create-pr
-
-Subcommands:
-  init                 Initialize .devintern-code configuration in current directory
-                       Interactive wizard in a terminal; pass --yes (or --no-interactive)
-                       to write the config templates without prompts
-  worker               Run the workspace worker daemon;
-                        'worker init' writes a workspace, ready-tasks query,
-                        relay pairing, and the GitHub App (@mentions)
-  dashboard            Serve the local observability dashboard (run history and stats)
-  webhook serve        Start the advanced repo-local direct-webhook server
-  address-review       Address review feedback on an existing pull request
-  resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
-  login [method]       Sign in (github | google | x | email; prompts if omitted)
-  logout               Clear local auth session
-  whoami               Show current authenticated user
-   sandbox              Sandbox doctor: providers, remaining setup steps, and what
-                        the next run will do (exit 1 if it would fail)
-  doctor               Readiness check: runtime, git, agent CLI, tracker
-                        credentials, sign-in, license (exit 1 if anything fails)
-
-Run 'devintern <subcommand> --help' for subcommand-specific options.`,
-);
+const program = createProgram();
 
 // Only parse with Commander if we're not running a subcommand
-const isSubcommand = [
-  "init",
-  "worker",
-  "dashboard",
-  "workspace",
-  "webhook",
-  "address-review",
-  "resolve-conflicts",
-  "login",
-  "logout",
-  "whoami",
-  "sandbox",
-  "doctor",
-].includes(process.argv[2]);
+const isSubcommand = isSubcommandCommand(process.argv[2]);
 if (!isSubcommand) {
   program.parse();
 }
@@ -622,37 +314,6 @@ const autoReviewIterationCap: number | undefined = (() => {
 const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);
-}
-
-/**
- * Ensure required environment variables for the configured task tracker are present.
- *
- * Supports `TASK_TRACKER=jira` (default), `trello`, or `markdown`.
- *
- * Exit paths flush pending analytics first so events captured earlier in the
- * run (`cli_run`, `setup_declined`/`setup_failed` from the first-run rescue)
- * are delivered instead of dying with the process.
- *
- * @throws Exits the process when variables are missing
- */
-async function validateEnvironment(): Promise<void> {
-  const trackerType = (process.env.TASK_TRACKER || "jira").toLowerCase();
-  const capabilities = TRACKER_CAPABILITIES[trackerType];
-
-  if (!capabilities) {
-    console.error(`❌ Unsupported task tracker: "${trackerType}"`);
-    console.error(`   Supported values: ${supportedTrackers().join(", ")}`);
-    await flushAnalyticsAndExit(1);
-    return;
-  }
-
-  const missing = capabilities.requiredEnv.filter((key) => !process.env[key]);
-  if (missing.length > 0) {
-    console.error(`❌ Missing required ${capabilities.displayName} environment variables:`);
-    missing.forEach((key) => console.error(`   - ${key}`));
-    printMissingEnvHelp();
-    await flushAnalyticsAndExit(1);
-  }
 }
 
 // Context for the task currently being processed, so signal handlers and
