@@ -1,3 +1,4 @@
+import { assertCurrentGitLabOrigin } from "./change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**
@@ -22,7 +23,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
  */
 
 import { runAgent } from "./address-review";
-import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
+import { parseChangeRequestUrl } from "./code-host";
 import type { PullRequestInfo } from "./github-reviews";
 import { Utils } from "./utils";
 
@@ -341,24 +342,7 @@ export async function resolveConflictsOnPr(
   let baseRef = "";
 
   if (provider === "gitlab" && !options.fetchPr) {
-    const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
-      cwd,
-    });
-    const remote = remoteResult.success
-      ? parseGitRemoteUrl(remoteResult.output.trim(), {
-          gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
-          gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
-        })
-      : null;
-    if (
-      remote?.provider !== "gitlab" ||
-      remote.instanceUrl !== identity.instanceUrl ||
-      remote.projectPath !== identity.projectPath
-    ) {
-      throw new Error(
-        `The current origin does not match GitLab project ${identity.projectPath} on ${identity.instanceUrl}.`,
-      );
-    }
+    await assertCurrentGitLabOrigin(identity, { cwd });
   }
 
   async function failWith(kind: FailureKind, message: string): Promise<ResolveConflictsResult> {

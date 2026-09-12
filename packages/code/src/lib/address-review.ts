@@ -1,3 +1,4 @@
+import { assertCurrentGitLabOrigin } from "./change-origin";
 /**
  * Address Review Command
  *
@@ -16,7 +17,7 @@ import {
 import { readFileSync } from "fs";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./agent-spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./agent-model";
-import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "./code-host";
+import { parseChangeRequestUrl } from "./code-host";
 import { getSandbox } from "./sandbox";
 import { GitHubReviewsClient, resolveGitHubAuthMode } from "./github-reviews";
 import { GitHubAppAuth } from "./github-app-auth";
@@ -757,24 +758,7 @@ export async function addressReview(
     throw new Error("Not in a git repository. Please run this command from within the repository.");
   }
   if (identity.provider === "gitlab") {
-    const remoteResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
-      verbose: false,
-    });
-    const remote = remoteResult.success
-      ? parseGitRemoteUrl(remoteResult.output.trim(), {
-          gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
-          gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
-        })
-      : null;
-    if (
-      remote?.provider !== "gitlab" ||
-      remote.instanceUrl !== identity.instanceUrl ||
-      remote.projectPath !== identity.projectPath
-    ) {
-      throw new Error(
-        `The current origin does not match GitLab project ${identity.projectPath} on ${identity.instanceUrl}.`,
-      );
-    }
+    await assertCurrentGitLabOrigin(identity, { verbose: false });
   }
 
   // Prepare the single reusable worktree for this review
