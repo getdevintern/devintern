@@ -201,8 +201,19 @@ export function runCiFixViaCli(
     prNumber,
     () =>
       new Promise((resolve) => {
+        let settled = false;
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        let abort: (() => void) | undefined;
+        const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
+          if (abort) opts.signal?.removeEventListener("abort", abort);
+          if (killTimer) clearTimeout(killTimer);
+          // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
+          resolve(ok);
+        };
         if (opts.signal?.aborted) {
-          resolve(false);
+          finish(false);
           return;
         }
         const detached = process.platform !== "win32";
@@ -223,9 +234,7 @@ export function runCiFixViaCli(
             detached,
           },
         );
-        let killTimer: ReturnType<typeof setTimeout> | undefined;
-        let settled = false;
-        const abort = () => {
+        abort = () => {
           if (child.pid === undefined) return;
           try {
             if (detached) process.kill(-child.pid, "SIGTERM");
@@ -242,13 +251,6 @@ export function runCiFixViaCli(
             }
           }, 5_000);
           killTimer.unref?.();
-        };
-        const finish = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          opts.signal?.removeEventListener("abort", abort);
-          if (killTimer) clearTimeout(killTimer);
-          resolve(ok);
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {

@@ -283,14 +283,17 @@ export class RelayAcquirer implements Acquirer {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
         this.wakeSleep = null;
         resolve();
-      }, ms);
+      };
+      const timer = setTimeout(finish, ms);
       this.wakeSleep = () => {
         clearTimeout(timer);
-        this.wakeSleep = null;
-        resolve();
+        finish();
       };
     });
   }

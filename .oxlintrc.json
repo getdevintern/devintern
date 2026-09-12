@@ -76,7 +76,7 @@
     "promise/no-new-statics": "warn",
     "promise/no-return-wrap": "warn",
     "promise/no-callback-in-promise": "warn",
-    "promise/no-multiple-resolved": "warn",
+    "promise/no-multiple-resolved": "error",
     "promise/no-promise-in-callback": "warn",
     "promise/no-nesting": "warn",
     "promise/prefer-await-to-callbacks": "warn",

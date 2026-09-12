@@ -407,8 +407,19 @@ function spawnResolveOnce(
 ): Promise<{ code: number; result: AutomaticResolveResult }> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
   return new Promise((resolve) => {
+    let settled = false;
+    let abort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (value: { code: number; result: AutomaticResolveResult }): void => {
+      if (settled) return;
+      settled = true;
+      if (abort) opts.signal?.removeEventListener("abort", abort);
+      if (timer) clearTimeout(timer);
+      // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
+      resolve(value);
+    };
     if (opts.signal?.aborted) {
-      resolve({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+      finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
       return;
     }
     let result: AutomaticResolveResult | null = null;
@@ -429,13 +440,13 @@ function spawnResolveOnce(
       },
     );
     let aborted = false;
-    const abort = () => {
+    abort = () => {
       aborted = true;
       killProcessTree(child);
     };
     opts.signal?.addEventListener("abort", abort, { once: true });
     const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
-    const timer =
+    timer =
       timeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
@@ -455,14 +466,12 @@ function spawnResolveOnce(
       resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
-      opts.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
       if (aborted) {
-        resolve({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+        finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
         return;
       }
       if (timedOut) {
-        resolve({
+        finish({
           code: 1,
           result: { outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` },
         });
@@ -485,7 +494,7 @@ function spawnResolveOnce(
           }
         }
       }
-      resolve({
+      finish({
         code: code ?? 1,
         result: result ?? {
           outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
@@ -499,9 +508,7 @@ function spawnResolveOnce(
       });
     });
     child.on("error", (error) => {
-      opts.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
-      resolve({
+      finish({
         code: 1,
         result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },
       });
