@@ -30,7 +30,7 @@ import type {
   SpawnedAutomationRun,
 } from "./automation-acquirer";
 import { RUN_ORIGIN_ENV } from "./analytics";
-import { workerTaskArgs } from "./task-polling-acquirer";
+import { workerTaskArgs } from "./acquirers/task-polling";
 
 /** Test-only spawn override so manual-run tests never launch a real CLI. */
 export interface StandaloneAutomationOptions {

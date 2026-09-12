@@ -84,11 +84,11 @@ export async function buildGitLabFleetAcquirers(options: {
     | undefined;
   if (hasGitLabProfile) {
     const { CiFailureWatcherAcquirer, runCiFixViaCli } =
-      await import("../ci-failure-watcher-acquirer");
-    const { GitLabReviewPollingAcquirer } = await import("../gitlab-review-polling-acquirer");
+      await import("../acquirers/ci-failure-watcher");
+    const { GitLabReviewPollingAcquirer } = await import("../acquirers/gitlab-review-polling");
     const { GitLabReviewsClient } = await import("../code-host/gitlab/reviews");
     const { runAddressReviewUrlViaCli, runResolveConflictsUrlViaCli } =
-      await import("../review-polling-acquirer");
+      await import("../acquirers/review-polling");
     const clientForGitLabMr = (mr: import("../worker-state").AgentPr) => {
       const repo = resolveGitLabRepo(mr);
       if (!repo) return null;

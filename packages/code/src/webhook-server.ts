@@ -46,11 +46,11 @@ import {
 import type { GitLabWebhookEvent } from "./lib/code-host/gitlab/webhook";
 import { normalizeCodeHostUrl, resolveGitLabCodeHostConfig } from "./lib/code-host";
 import { GitLabReviewsClient } from "./lib/code-host/gitlab/reviews";
-import { runCiFixViaCli } from "./lib/ci-failure-watcher-acquirer";
+import { runCiFixViaCli } from "./lib/acquirers/ci-failure-watcher";
 import {
   runAddressReviewUrlViaCli,
   runResolveConflictsUrlViaCli,
-} from "./lib/review-polling-acquirer";
+} from "./lib/acquirers/review-polling";
 import { formatReviewPrompt } from "./lib/review-formatter";
 import { Utils } from "./lib/utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/git-hook-fixer";
@@ -660,7 +660,7 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
     const snapshot = await client.getCiSnapshot(target.projectPath, current.head.sha);
     if (snapshot.state !== "failure" || snapshot.failures.length === 0) return;
     const rawLogs = await client.getJobTraces(target.projectPath, snapshot.jobIds);
-    const { truncateCiLogs } = await import("./lib/ci-failure-watcher-acquirer");
+    const { truncateCiLogs } = await import("./lib/acquirers/ci-failure-watcher");
     const feedbackDir = mkdtempSync(join(tmpdir(), "devintern-gitlab-webhook-ci-"));
     const feedbackPath = join(feedbackDir, "ci-feedback.json");
     writeFileSync(

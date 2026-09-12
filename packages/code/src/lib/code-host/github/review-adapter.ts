@@ -8,7 +8,7 @@ import type {
 } from "../../../types/github-webhooks";
 import { GitHubReviewsClient, resolveGitHubAuthMode } from "./reviews";
 import { GitHubAppAuth } from "./app-auth";
-import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "../../mention-sweep-acquirer";
+import { botMentionCandidates, mentionsAnyBot, mentionsBot } from "../../acquirers/mention-sweep";
 /**
  * Metadata of the review a run will act on.
  */
