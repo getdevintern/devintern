@@ -1669,6 +1669,27 @@ export class Utils {
   }
 
   /**
+   * Pull the latest changes for `branch` in `worktreePath`, logging when verbose.
+   *
+   * @param worktreePath - Worktree to pull inside
+   * @param branch - Branch to pull
+   * @param verbose - Whether to log progress
+   */
+  private static async pullReviewWorktreeBranch(
+    worktreePath: string,
+    branch: string,
+    verbose: boolean,
+  ): Promise<void> {
+    if (verbose) {
+      console.log(`   Pulling latest changes...`);
+    }
+    await Utils.executeGitCommand(["pull", "origin", branch, "--ff-only"], {
+      verbose,
+      cwd: worktreePath,
+    });
+  }
+
+  /**
    * Prepare or reuse a branch-scoped review worktree under
    * `/tmp/devintern-review-worktree-<branch>/`.
    *
@@ -1782,13 +1803,7 @@ export class Utils {
             if (switchResult.success) {
               // Pull latest changes if origin exists
               if (hasOrigin) {
-                if (verbose) {
-                  console.log(`   Pulling latest changes...`);
-                }
-                await Utils.executeGitCommand(["pull", "origin", branch, "--ff-only"], {
-                  verbose,
-                  cwd: worktreePath,
-                });
+                await Utils.pullReviewWorktreeBranch(worktreePath, branch, verbose);
               }
 
               // Clean again after checkout to remove any untracked files from the new branch state

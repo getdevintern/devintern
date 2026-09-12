@@ -2072,28 +2072,27 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 
     console.log(`\n🤖 Running ${resolvedAgent.harness.displayName} with task details...`);
     const implementationStartedAt = Date.now();
-    await runAgentHarness(
-      outputFile,
-      resolvedAgent.harness,
-      resolvedAgent.path,
-      Number.parseInt(options.maxTurns),
-      workflowKey,
-      taskDetails.summary,
-      options.git && options.autoCommit,
+    await runAgentHarness({
+      taskFile: outputFile,
+      harness: resolvedAgent.harness,
+      executablePath: resolvedAgent.path,
+      maxTurns: Number.parseInt(options.maxTurns),
+      taskKey: workflowKey,
+      taskSummary: taskDetails.summary,
+      enableGit: options.git && options.autoCommit,
       task,
-      options.createPr,
-      effectiveTargetBranch,
+      createPr: options.createPr,
+      prTargetBranch: effectiveTargetBranch,
       tracker,
-      options.skipComments,
-      Number.parseInt(options.hookRetries),
-      projectSettings,
+      skipComments: options.skipComments,
+      hookRetries: Number.parseInt(options.hookRetries),
       gitAuthor,
-      options.autoReview,
-      autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
-      false,
-      options.prTargetBranchExplicit,
-      options.requestedPrTargetBranch,
-    );
+      autoReview: options.autoReview,
+      autoReviewIterations: autoReviewIterationCap ?? DEFAULT_AUTO_REVIEW_ITERATIONS,
+      isPlanRetry: false,
+      prTargetBranchExplicit: options.prTargetBranchExplicit,
+      requestedPrTargetBranch: options.requestedPrTargetBranch,
+    });
 
     // An incomplete-summary file written during this run means the agent
     // stopped short and handed back to a human (mtime check guards against
@@ -2490,17 +2489,17 @@ async function main(): Promise<void> {
 
           // Run estimation
           const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
-            runEstimation(
+            runEstimation({
               estimationFile,
-              resolvedAgent.harness,
-              resolvedAgent.path,
+              harness: resolvedAgent.harness,
+              executablePath: resolvedAgent.path,
               taskKey,
               tracker,
-              projectSettings,
-              options.skipComments,
+              settings: projectSettings,
+              skipComments: options.skipComments,
               existingCommentId,
               runOptions,
-            ),
+            }),
           );
 
           // Clean up temp file
@@ -2530,9 +2529,7 @@ async function main(): Promise<void> {
             await finishTaskRun("deferred", error.message);
             if (isWorkerChild()) {
               console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
-              if (lockManager) {
-                lockManager.release();
-              }
+              lockManager?.release();
               writeUsageLimitHint(error);
               await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
             }
@@ -3110,27 +3107,35 @@ async function postClarityComment(
   }
 }
 
+interface RunEstimationOptions {
+  estimationFile: string;
+  harness: AgentHarness;
+  executablePath: string;
+  taskKey: string;
+  tracker: TaskTrackerClient;
+  settings: ProjectSettings | null;
+  skipComments: boolean;
+  existingCommentId: string | undefined;
+  runOptions: AgentRunOptions;
+}
+
 /**
  * Run the agent to estimate story points and update the task tracker (field + comment).
  *
- * @param estimationFile - Path to the estimation prompt file
- * @param harness - Agent harness configuration
- * @param executablePath - Agent CLI executable path
- * @param taskKey - Task tracker issue key
- * @param tracker - Task tracker client
- * @param projectSettings - Per-project custom field overrides
+ * @param options - Estimation inputs
  */
-async function runEstimation(
-  estimationFile: string,
-  harness: AgentHarness,
-  executablePath: string,
-  taskKey: string,
-  tracker: TaskTrackerClient,
-  settings: ProjectSettings | null,
-  skipComments: boolean,
-  existingCommentId: string | undefined,
-  runOptions: AgentRunOptions,
-): Promise<EstimationResult | null> {
+async function runEstimation(options: RunEstimationOptions): Promise<EstimationResult | null> {
+  const {
+    estimationFile,
+    harness,
+    executablePath,
+    taskKey,
+    tracker,
+    settings,
+    skipComments,
+    existingCommentId,
+    runOptions,
+  } = options;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the estimation.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
@@ -3521,53 +3526,55 @@ ${originalTaskContent}
 Now implement the solution. Write the actual code.`;
 }
 
+interface RunAgentHarnessOptions {
+  taskFile: string;
+  harness: AgentHarness;
+  executablePath: string;
+  maxTurns?: number;
+  taskKey?: string;
+  taskSummary?: string;
+  enableGit?: boolean;
+  task?: any;
+  createPr?: boolean;
+  prTargetBranch?: string;
+  tracker?: TaskTrackerClient;
+  skipComments?: boolean;
+  hookRetries?: number;
+  gitAuthor?: { name: string; email: string };
+  autoReview?: boolean;
+  autoReviewIterations?: number;
+  isPlanRetry?: boolean;
+  prTargetBranchExplicit?: boolean;
+  requestedPrTargetBranch?: string;
+}
+
 /**
  * Run the main agent harness implementation session for a formatted task.
  *
- * @param taskFile - Path to the formatted task markdown prompt
- * @param harness - Agent harness configuration
- * @param executablePath - Agent CLI executable path
- * @param maxTurns - Maximum agent turns
- * @param taskKey - Task tracker issue key
- * @param taskSummary - Issue summary for commits and comments
- * @param enableGit - When false, skip git branch/commit workflow
- * @param task - Generic task object (for PR creation and description extraction)
- * @param createPr - Create a pull request after implementation
- * @param prTargetBranch - Base branch for the PR
- * @param tracker - Task tracker client for status transitions and comments
- * @param skipComments - Skip posting tracker comments
- * @param hookRetries - Max retries for git hook auto-fix
- * @param projectSettings - Per-project workflow settings
- * @param gitAuthor - Optional bot author for commits
- * @param autoReview - Run post-PR auto-review loop
- * @param autoReviewIterations - Max auto-review iterations, resolved once at
- *   startup from the unified `--auto-review-iterations` arg / env var
- * @param isPlanRetry - Whether this run follows a plan-only retry
- * @param prTargetBranchExplicit - Whether the user explicitly selected the target branch
- * @param requestedPrTargetBranch - Original explicit target before Git fallback resolution
+ * @param input - Implementation run inputs
  */
-async function runAgentHarness(
-  taskFile: string,
-  harness: AgentHarness,
-  executablePath: string,
-  maxTurns = 500,
-  taskKey?: string,
-  taskSummary?: string,
-  enableGit = true,
-  task?: any,
-  createPr = false,
-  prTargetBranch = "main",
-  tracker?: TaskTrackerClient,
-  skipComments = false,
-  hookRetries = 10,
-  projectSettings: ProjectSettings | null = null,
-  gitAuthor?: { name: string; email: string },
-  autoReview = false,
-  autoReviewIterations: number = DEFAULT_AUTO_REVIEW_ITERATIONS,
-  isPlanRetry = false,
-  prTargetBranchExplicit = false,
-  requestedPrTargetBranch?: string,
-): Promise<void> {
+async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+  const {
+    taskFile,
+    harness,
+    executablePath,
+    maxTurns = 500,
+    taskKey,
+    taskSummary,
+    enableGit = true,
+    task,
+    createPr = false,
+    prTargetBranch = "main",
+    tracker,
+    skipComments = false,
+    hookRetries = 10,
+    gitAuthor,
+    autoReview = false,
+    autoReviewIterations = DEFAULT_AUTO_REVIEW_ITERATIONS,
+    isPlanRetry = false,
+    prTargetBranchExplicit = false,
+    requestedPrTargetBranch,
+  } = input;
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the run.
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
