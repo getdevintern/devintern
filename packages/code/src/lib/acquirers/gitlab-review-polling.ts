@@ -4,8 +4,8 @@ import { captureError } from "@devintern/utils";
 import type { Acquirer } from "../../worker";
 import type { TaskExecutionResult } from "./task-polling";
 import type { AutomaticResolveResult } from "./review-polling";
-import type { AgentPr, WorkerState } from "../worker-state";
-import type { WebhookQueue } from "../webhook-queue";
+import type { AgentPr, WorkerState } from "../state/worker-state";
+import type { WebhookQueue } from "../state/webhook-queue";
 import type { GitLabPollingSnapshot } from "../code-host/gitlab/reviews";
 
 export interface GitLabPollingClient {

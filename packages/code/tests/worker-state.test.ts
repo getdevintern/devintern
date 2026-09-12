@@ -3,8 +3,8 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState, parseGitHubPrUrl, recordAgentPrFromUrl } from "../src/lib/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState, parseGitHubPrUrl, recordAgentPrFromUrl } from "../src/lib/state/worker-state";
 
 describe("WorkerState", () => {
   let dbPath: string;

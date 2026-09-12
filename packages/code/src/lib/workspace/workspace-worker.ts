@@ -19,16 +19,16 @@ import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import { createPickupGate } from "../schedule";
 import type { PickupGate, ScheduleSnapshot } from "../schedule";
-import type { WebhookQueue } from "../webhook-queue";
-import type { WorkerState } from "../worker-state";
+import type { WebhookQueue } from "../state/webhook-queue";
+import type { WorkerState } from "../state/worker-state";
 import {
   loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
 } from "../orphan-recovery";
-import { RunStore } from "../run-recorder";
-import { RetryStateStore } from "../retry-state";
-import { ScheduledRetryStore } from "../run-retry";
+import { RunStore } from "../state/run-recorder";
+import { RetryStateStore } from "../state/retry-state";
+import { ScheduledRetryStore } from "../state/run-retry";
 import type { TaskTrackerClient } from "../task-tracker-client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";

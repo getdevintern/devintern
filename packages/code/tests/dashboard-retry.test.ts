@@ -5,10 +5,10 @@ import { tmpdir } from "os";
 
 import { DashboardData, handleRetryRun, handleRunDetail } from "../src/lib/dashboard-api";
 import type { RetryHandlerDeps } from "../src/lib/dashboard-api";
-import { isRunRetriable, ScheduledRetryStore } from "../src/lib/run-retry";
-import type { SpawnedRetryProcess } from "../src/lib/run-retry";
-import { RunStore } from "../src/lib/run-recorder";
-import type { RunStatus } from "../src/lib/run-recorder";
+import { isRunRetriable, ScheduledRetryStore } from "../src/lib/state/run-retry";
+import type { SpawnedRetryProcess } from "../src/lib/state/run-retry";
+import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunStatus } from "../src/lib/state/run-recorder";
 
 const ACTOR: NonNullable<RetryHandlerDeps["resolveActor"]> = async () => ({
   email: "sup@example.com",

@@ -20,7 +20,7 @@ import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent-spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent-model";
 import { parseChangeRequestUrl } from "../code-host/index";
 import { getSandbox } from "../sandbox";
-import { beginRun, endRun, recordRunStage } from "../run-recorder";
+import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";

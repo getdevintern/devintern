@@ -18,8 +18,8 @@ import { existsSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, join, resolve } from "path";
 
-import { resolveQueueDbPath, WebhookQueue } from "../src/lib/webhook-queue";
-import { RunStore } from "../src/lib/run-recorder";
+import { resolveQueueDbPath, WebhookQueue } from "../src/lib/state/webhook-queue";
+import { RunStore } from "../src/lib/state/run-recorder";
 
 const PINNED = process.env.WEBHOOK_QUEUE_DB;
 const PACKAGE_ROOT = resolve(__dirname, "..");

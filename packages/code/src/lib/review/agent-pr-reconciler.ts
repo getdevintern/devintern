@@ -15,7 +15,7 @@
  * shares its fetch results with the caller's per-PR poll loop via `fresh`.
  */
 
-import type { AgentPr, WorkerState } from "../worker-state";
+import type { AgentPr, WorkerState } from "../state/worker-state";
 
 /** The subset of a GitHub PR payload the poller and reconciler rely on. */
 export interface PolledPr {

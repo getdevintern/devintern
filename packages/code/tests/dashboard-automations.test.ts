@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { DashboardData, handleAutomations, handleRunAutomation } from "../src/lib/dashboard-api";
 import type { AutomationRunDeps, DashboardAutomationView } from "../src/lib/dashboard-api";
 import { startDashboardServer } from "../src/dashboard-server";
-import { RunStore } from "../src/lib/run-recorder";
+import { RunStore } from "../src/lib/state/run-recorder";
 import type { AutomationScheduleStatus } from "../src/lib/automation-acquirer";
 
 const ACTOR: NonNullable<AutomationRunDeps["resolveActor"]> = async () => ({

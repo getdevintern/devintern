@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 
 import type { AutomationConfig } from "./automation-config";
-import { configureSqliteConnection } from "./sqlite";
-import { prepareQueueDbDirectory } from "./webhook-queue";
+import { configureSqliteConnection } from "./state/sqlite";
+import { prepareQueueDbDirectory } from "./state/webhook-queue";
 
 export interface AutomationScheduleState {
   automationId: string;

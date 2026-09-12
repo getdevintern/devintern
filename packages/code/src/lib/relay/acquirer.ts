@@ -17,8 +17,8 @@
 
 import { captureError } from "@devintern/utils";
 
-import type { WebhookQueue } from "../webhook-queue";
-import type { WorkerState } from "../worker-state";
+import type { WebhookQueue } from "../state/webhook-queue";
+import type { WorkerState } from "../state/worker-state";
 import type { Acquirer } from "../../worker";
 
 export type RelayEventType =

@@ -6,7 +6,7 @@ import { createReviewAdapter } from "../src/lib/code-host/review-provider-factor
 import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import type { GitLabReviewContext } from "../src/lib/code-host/gitlab/reviews";
-import { WorkerState } from "../src/lib/worker-state";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 let dir: string;
 let saved: Record<string, string | undefined>;
