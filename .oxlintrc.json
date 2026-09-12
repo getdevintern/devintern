@@ -151,8 +151,6 @@
         "packages/code/src/lib/init/worker-connect.ts",
         "packages/code/src/lib/init/worker-init.ts",
         "packages/code/src/lib/relay/connect.ts",
-        "packages/code/src/lib/utils.ts",
-        "packages/code/src/webhook-server.ts",
         "packages/pm/index.ts",
         "packages/pm/lib/components/interactive.tsx",
         "packages/pm/lib/parse-args.ts"
