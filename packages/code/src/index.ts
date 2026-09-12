@@ -655,6 +655,7 @@ if (process.argv[2] === "init") {
   })();
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
+  // oxlint-disable-next-line complexity -- worker subcommand dispatcher spans connect/monitor/daemon branches; remedy: move each subcommand into its own `runWorker<Name>Command()` module.
   (async () => {
     // `devintern worker connect ...` — configure relay-backed integrations or
     // a directly polled Sentry error monitor.
@@ -1541,6 +1542,7 @@ async function reportProcessingFailure(taskKey: string, reason: string): Promise
  * @param taskIndex - Zero-based index in a batch run
  * @param totalTasks - Total tasks in the batch
  */
+// oxlint-disable-next-line complexity, max-statements -- end-to-end single-task pipeline (fetch → branch → agent → commit → PR → Jira transition) welded to module-level `activeTaskContext`/`options`; remedy: thread an explicit `TaskRunContext` and split fetch/execute/finalize phases.
 async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1): Promise<void> {
   try {
     const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
@@ -2242,6 +2244,7 @@ async function flushAnalyticsAndExit(exitCode: number): Promise<never> {
 }
 
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
+// oxlint-disable-next-line complexity, max-statements -- top-level CLI orchestrator: arg/JQL resolution, lock acquisition, batch loop, signal handling, and exit-code mapping; remedy: extract `resolveRunTargets`, `runTaskBatch`, and `installShutdownHandlers`.
 async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
@@ -3685,6 +3688,7 @@ async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
       });
 
       // Handle process exit
+      // oxlint-disable-next-line complexity -- agent close handler fans out sandbox cleanup, output flushing, and failure reporting; remedy: extract `handleAgentClose(code)` on the run context.
       codeAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
@@ -4183,6 +4187,7 @@ async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
             };
 
             handleCommitWithRetry()
+              // oxlint-disable-next-line complexity -- commit-retry continuation branches on conflict resolution and plan-only detection; remedy: replace the `.then` with `await handleCommitWithRetry()` returning a typed result.
               .then(async ({ success, result }) => {
                 if (!success) {
                   // Check if this is a "plan only" scenario - Agent created a plan but didn't implement
