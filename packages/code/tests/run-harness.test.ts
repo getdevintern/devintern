@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { AgentHarness } from "@devintern/agent-harness";
+import type { ReviewFeedback } from "../src/types/auto-review";
 import { runContext } from "../src/lib/cli/context";
 
 // --- snapshot real modules before any mock.module override ---
@@ -67,6 +68,9 @@ let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
 let autoReviewCalls: number;
 let planPath: string | null;
+let verifyVerdicts: ReviewFeedback[];
+let verifyCalls: number;
+let deliveryEvents: string[];
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let postImplementationCommentMock: ReturnType<typeof mock>;
 
@@ -111,9 +115,13 @@ mock.module("../src/lib/utils", () => ({
       hookCalls++;
       return hookResult;
     },
-    pushCurrentBranch: async () => pushResult,
+    pushCurrentBranch: async () => {
+      deliveryEvents.push("push");
+      return pushResult;
+    },
     commitChanges: async () => {
       commitCalls++;
+      deliveryEvents.push("commit");
       return commitResults.shift() ?? commitResult;
     },
     getCurrentBranch: async () => "feature/task-1",
@@ -140,10 +148,20 @@ mock.module("../src/lib/config/project-settings", () => ({
   resolveProjectKey: () => "PROJ",
 }));
 mock.module("../src/lib/review/auto-review-loop", () => ({
+  ...realAutoReview,
   runAutoReviewLoop: async () => {
     autoReviewCalls++;
     return { success: true, iterations: 1, finalFeedback: [] };
   },
+  getPRDiff: () => "diff --git a/file b/file",
+  runAgentPrompt: async () => {
+    verifyCalls++;
+    deliveryEvents.push("verify");
+    return "verdict";
+  },
+  parseReviewFeedback: () =>
+    verifyVerdicts.shift() ?? { summary: "approved", items: [], approved: true },
+  filterByPriority: realAutoReview.filterByPriority,
 }));
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
@@ -206,6 +224,9 @@ beforeEach(() => {
   hookCalls = 0;
   autoReviewCalls = 0;
   planPath = null;
+  verifyVerdicts = [];
+  verifyCalls = 0;
+  deliveryEvents = [];
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   postImplementationCommentMock = mock(async () => {});
   outDir = mkdtempSync(join(tmpdir(), "run-harness-"));
@@ -354,6 +375,50 @@ describe("runAgentHarness git delivery", () => {
 
     expect(autoReviewCalls).toBe(1);
     expect(hookCalls).toBe(2);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("verifies the committed diff before pushing", async () => {
+    scenario.stdout = "done";
+
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
+
+    expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("halts a failed verdict and returns the ticket to To Do", async () => {
+    scenario.stdout = "done";
+    verifyVerdicts = [
+      {
+        summary: "Required behavior missing",
+        approved: false,
+        items: [{ priority: "high", category: "bug", issue: "Missing case", suggestion: "Fix it" }],
+      },
+    ];
+
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: { onFail: "halt" } });
+
+    expect(deliveryEvents).toEqual(["commit", "verify"]);
+    expect(tracker.postIncompleteImplementationComment).toHaveBeenCalledTimes(1);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "To Do");
+  });
+
+  test("repairs a failed verdict, recommits, and verifies before publishing", async () => {
+    scenario.stdout = "done";
+    verifyVerdicts = [
+      {
+        summary: "Required behavior missing",
+        approved: false,
+        items: [{ priority: "high", category: "bug", issue: "Missing case", suggestion: "Fix it" }],
+      },
+      { summary: "Approved", approved: true, items: [] },
+    ];
+
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: { maxIterations: 2 } });
+
+    expect(verifyCalls).toBe(2);
+    expect(deliveryEvents).toEqual(["commit", "verify", "commit", "verify", "push"]);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 });

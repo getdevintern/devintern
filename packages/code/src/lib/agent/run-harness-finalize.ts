@@ -9,7 +9,9 @@ import {
 import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
 import { resolveOutputDir } from "../config/output-dir";
+import { getTodoStatusForProject, resolveProjectKey } from "../config/project-settings";
 import { runAutoReviewLoop } from "../review/auto-review-loop";
+import { recordIncompleteAttempt } from "../state/retry-state";
 import { recordRunStage } from "../state/run-recorder";
 import { postImplementationComment } from "../task/implementation-comment";
 import { Utils } from "../utils";
@@ -21,6 +23,8 @@ import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
 import { runTaskSteps } from "../task/step-runner";
 import type { TaskStep } from "../task/step-runner";
+import type { ReviewFeedback } from "../../types/auto-review";
+import { buildRepairPrompt, verifyImplementation } from "./verify";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
@@ -31,6 +35,7 @@ export interface DeliveryState {
   committed: boolean;
   planRetry: boolean;
   autoReviewRan: boolean;
+  pendingFeedback?: ReviewFeedback;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -295,23 +300,87 @@ export async function publishImplementation(state: DeliveryState): Promise<void>
   }
 }
 
-const deliverySteps: readonly TaskStep<DeliveryState>[] = [
-  {
-    name: "commit",
-    run: async (state) =>
-      (await commitImplementation(state))
-        ? undefined
-        : { kind: "halt", reason: "Implementation was not committed" },
-  },
-  {
-    name: "auto-review",
-    run: async (state) =>
-      (await reviewImplementation(state))
-        ? undefined
-        : { kind: "halt", reason: "Pre-push validation failed" },
-  },
-  { name: "publish", run: publishImplementation },
-];
+async function repairImplementation(state: DeliveryState) {
+  const feedback = state.pendingFeedback;
+  if (!feedback) return;
+  state.pendingFeedback = undefined;
+  if (!state.context.runRepair) {
+    return { kind: "halt" as const, reason: "Implementation repair is unavailable" };
+  }
+  const result = await state.context.runRepair(
+    buildRepairPrompt(state.context.taskContent, feedback),
+  );
+  if (result.kind === "halted") {
+    return { kind: "halt" as const, reason: "Agent could not complete verification repairs" };
+  }
+  state.output = result.stdout;
+  if (!(await commitImplementation(state))) {
+    return { kind: "halt" as const, reason: "Verification repairs were not committed" };
+  }
+  return;
+}
+
+async function reportVerificationHalt(state: DeliveryState, reason: string): Promise<void> {
+  const ctx = state.context;
+  const { taskKey, tracker, task } = ctx;
+  const report = `Verification stopped: ${reason}\n\n${state.output}`;
+  if (taskKey) {
+    try {
+      const taskDir = join(resolveOutputDir(), taskKey.toLowerCase());
+      writeFileSync(join(taskDir, "implementation-summary-incomplete.md"), report, "utf8");
+    } catch (error) {
+      console.warn(`⚠️  Failed to save incomplete verification summary: ${error}`);
+    }
+  }
+  if (!(taskKey && tracker && task && !ctx.skipComments)) return;
+  try {
+    await tracker.postIncompleteImplementationComment(taskKey, report, ctx.taskSummary);
+    recordIncompleteAttempt(
+      taskKey,
+      process.env.TASK_TRACKER || "jira",
+      tracker.extractDescriptionText(task),
+    );
+  } catch (error) {
+    console.warn(`⚠️  Failed to post verification failure: ${error}`);
+  }
+  const todoStatus = getTodoStatusForProject(resolveProjectKey(taskKey, task), ctx.projectSettings);
+  if (todoStatus?.trim()) {
+    try {
+      await tracker.transitionStatus(taskKey, todoStatus.trim());
+    } catch (error) {
+      console.warn(`⚠️  Failed to move ${taskKey} back to '${todoStatus}': ${error}`);
+    }
+  }
+}
+
+const commitStep: TaskStep<DeliveryState> = {
+  name: "commit",
+  run: async (state) =>
+    (await commitImplementation(state))
+      ? undefined
+      : { kind: "halt", reason: "Implementation was not committed" },
+};
+
+const reviewStep: TaskStep<DeliveryState> = {
+  name: "auto-review",
+  run: async (state) =>
+    (await reviewImplementation(state))
+      ? undefined
+      : { kind: "halt", reason: "Pre-push validation failed" },
+};
+
+const publishStep: TaskStep<DeliveryState> = { name: "publish", run: publishImplementation };
+
+function deliverySteps(verify: boolean): readonly TaskStep<DeliveryState>[] {
+  if (!verify) return [commitStep, reviewStep, publishStep];
+  return [
+    commitStep,
+    { name: "repair", run: repairImplementation },
+    { name: "verify", run: verifyImplementation },
+    reviewStep,
+    publishStep,
+  ];
+}
 
 /** Run the existing commit, review, and publish flow as separate steps. */
 export function finalizeAgentRun(ctx: FinalizeContext): void {
@@ -323,8 +392,13 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     planRetry: false,
     autoReviewRan: false,
   };
-  runTaskSteps(deliverySteps, state)
-    .then(() => ctx.resolve())
+  runTaskSteps(deliverySteps(Boolean(ctx.verify)), state)
+    .then(async (result) => {
+      if (result.kind === "halted" && ["repair", "verify"].includes(result.step)) {
+        await reportVerificationHalt(state, result.reason);
+      }
+      ctx.resolve();
+    })
     .catch((error: unknown) => {
       if (error instanceof UsageLimitError) {
         ctx.reject(error);

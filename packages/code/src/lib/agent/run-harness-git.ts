@@ -13,6 +13,7 @@ import type { TaskTrackerClient } from "../trackers/client";
 import { Utils } from "../utils";
 import { runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { logHookErrorToFile } from "./plan";
+import type { VerifyConfig } from "./verify";
 
 export interface FinalizeContext {
   taskFile: string;
@@ -36,6 +37,10 @@ export interface FinalizeContext {
   isPlanRetry: boolean;
   prTargetBranchExplicit: boolean;
   requestedPrTargetBranch?: string;
+  verify?: VerifyConfig;
+  runRepair?: (
+    prompt: string,
+  ) => Promise<{ kind: "complete"; stdout: string } | { kind: "halted" }>;
   projectSettings: ReturnType<typeof loadProjectSettings>;
   resolve: () => void;
   reject: (error: Error) => void;
