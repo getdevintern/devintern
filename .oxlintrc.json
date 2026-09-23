@@ -145,8 +145,7 @@
       "files": [
         "packages/code/src/lib/utils.ts",
         "packages/code/src/webhook-server.ts",
-        "packages/code/src/lib/workspace/workspace-worker.ts",
-        "packages/pm/lib/components/interactive.tsx"
+        "packages/code/src/lib/workspace/workspace-worker.ts"
       ],
       "rules": {
         "max-lines": "off"
@@ -158,8 +157,7 @@
       "files": [
         "packages/code/src/lib/agent/run-harness.ts",
         "packages/pm-desktop/src/main/ipc.ts",
-        "packages/pm-desktop/src/renderer/src/App.tsx",
-        "packages/pm/lib/components/interactive.tsx"
+        "packages/pm-desktop/src/renderer/src/App.tsx"
       ],
       "rules": {
         "max-lines-per-function": "off"
