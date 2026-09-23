@@ -153,6 +153,19 @@ describe("pipeline configuration", () => {
         projectRoot,
       ),
     ).rejects.toThrow("positive integer");
+    await expect(
+      resolvePipelineSteps(
+        {
+          steps: [
+            { use: "implement" },
+            { use: "commit" },
+            { use: "auto-review", maxIterations: 0 },
+            { use: "finalize" },
+          ],
+        },
+        projectRoot,
+      ),
+    ).rejects.toThrow("auto-review.maxIterations");
     writeFileSync(join(projectRoot, "invalid.ts"), "export default {};\n");
     await expect(resolvePipelineSteps({ plugins: ["./invalid.ts"] }, projectRoot)).rejects.toThrow(
       "name and create",

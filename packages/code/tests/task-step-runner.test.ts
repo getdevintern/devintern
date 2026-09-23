@@ -196,4 +196,56 @@ describe("runTaskSteps", () => {
     expect(result).toEqual({ kind: "halted", step: "check", reason: "still broken" });
     expect(attempts).toBe(2);
   });
+
+  test("records step data and warnings for later plugins", async () => {
+    const context = {
+      results: [] as Array<{ step: string; result: unknown }>,
+      warnings: [] as string[],
+    };
+    const result = await runTaskSteps(
+      [
+        { name: "prepare", run: async () => ({ kind: "continue" as const, data: { count: 2 } }) },
+        { name: "check", run: async () => ({ kind: "warn" as const, reason: "advisory" }) },
+      ],
+      context,
+    );
+    expect(result).toEqual({ kind: "completed" });
+    expect(context.results).toEqual([
+      { step: "prepare", result: { kind: "continue", data: { count: 2 } } },
+      { step: "check", result: { kind: "warn", reason: "advisory" } },
+    ]);
+    expect(context.warnings).toEqual(["check: advisory"]);
+  });
+
+  test("passes structured feedback to a repeated step and supports a quiet stop", async () => {
+    const feedback = { summary: "Missing case", approved: false, items: [] };
+    const context = { loopbackFeedback: undefined as typeof feedback | undefined, seen: false };
+    let attempts = 0;
+    const result = await runTaskSteps(
+      [
+        {
+          name: "implement",
+          run: async (current) => {
+            attempts++;
+            current.seen = current.loopbackFeedback === feedback;
+          },
+        },
+        {
+          name: "check",
+          run: async () =>
+            attempts === 1
+              ? { kind: "repeat" as const, from: "implement", maxRepeats: 1, feedback }
+              : { kind: "halt" as const, haltKind: "stop" as const, reason: "needs manual action" },
+        },
+      ],
+      context,
+    );
+    expect(context.seen).toBe(true);
+    expect(result).toEqual({
+      kind: "halted",
+      step: "check",
+      reason: "needs manual action",
+      haltKind: "stop",
+    });
+  });
 });
