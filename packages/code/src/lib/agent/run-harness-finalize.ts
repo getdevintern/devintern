@@ -208,7 +208,7 @@ export async function reviewImplementation(
   config: { maxIterations?: number; minSeverity?: ReviewPriority } = {},
 ): Promise<boolean> {
   const ctx = state.context;
-  if (!(ctx.createPr && ctx.task)) return true;
+  if (!(ctx.enableGit && ctx.createPr && ctx.task)) return true;
   console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
   const initial = await state.helpers.validatePrePushHook(
     state.planRetry ? "plan implementation validation" : "initial validation",
@@ -278,6 +278,7 @@ export async function reviewImplementation(
 export async function publishImplementation(state: DeliveryState): Promise<TaskStepResult | void> {
   const ctx = state.context;
   const { taskKey, taskSummary, tracker, skipComments } = ctx;
+  if (!(ctx.enableGit && taskKey && taskSummary)) return;
   if (ctx.createPr && ctx.task) {
     if (!state.hookValidated) {
       console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
@@ -378,10 +379,14 @@ async function reportPipelineHalt(state: DeliveryState, reason: string): Promise
 
 const commitStep: TaskStep<DeliveryState> = {
   name: "commit",
-  run: async (state) =>
-    (await commitImplementation(state))
+  run: async (state) => {
+    if (!(state.enableGit && state.taskKey && state.taskSummary)) {
+      return { kind: "continue", data: { skipped: true } };
+    }
+    return (await commitImplementation(state))
       ? undefined
-      : { kind: "halt", reason: "Implementation was not committed" },
+      : { kind: "halt", reason: "Implementation was not committed" };
+  },
 };
 
 const implementStep: TaskStep<DeliveryState> = {

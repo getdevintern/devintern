@@ -106,6 +106,15 @@ describe("verifyImplementation", () => {
     });
   });
 
+  test("warns when Git delivery is disabled", async () => {
+    const run = state({});
+    run.enableGit = false;
+    expect(await verifyImplementation(run, deps())).toEqual({
+      kind: "warn",
+      reason: "verify skipped: git workflow disabled",
+    });
+  });
+
   test("retries a transient verifier error once", async () => {
     const run = state({});
     let attempts = 0;

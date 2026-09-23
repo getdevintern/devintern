@@ -636,4 +636,35 @@ describe("runAgentHarness git delivery", () => {
       blocking: 0,
     });
   });
+
+  test("runs custom checks while Git delivery is disabled", async () => {
+    scenario.stdout = "done";
+    const name = `no-git-plugin-${randomUUID()}`;
+    let observedWarnings: string[] = [];
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async (context) => {
+          observedWarnings = [...context.warnings];
+        },
+      }),
+    });
+    pipelineConfig = {
+      steps: [
+        { use: "implement" },
+        { use: "commit" },
+        { use: "verify" },
+        { use: name },
+        { use: "finalize" },
+      ],
+    };
+
+    await runAgentHarness({ ...baseInput(), enableGit: false });
+
+    expect(commitCalls).toBe(0);
+    expect(verifyCalls).toBe(0);
+    expect(observedWarnings).toEqual(["__verify-1: verify skipped: git workflow disabled"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+  });
 });

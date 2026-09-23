@@ -284,6 +284,7 @@ Task delivery runs `implement`, `commit`, optional `auto-review` (when `--auto-r
 ```
 
 `verify` asks the configured agent whether the committed diff meets the task requirements. It is opt-in; you may add several `verify` entries with different prompts. `prompt` accepts inline instructions or a path to a prompt file relative to the project directory. `minSeverity` defaults to `high`. On a failed verdict, `onFail` can `loopback` (default: ask the agent to repair, commit, and verify again), `halt` (mark the task incomplete and return it to To Do), or `warn` (continue). `maxIterations` limits repair cycles and defaults to `3`. If verification cannot get a valid verdict after two attempts, the task is marked incomplete before any push.
+When Git delivery is disabled, `commit` and `finalize` skip their Git work, `verify` records a warning because there is no committed diff, and custom steps still run.
 
 `auto-review` accepts `maxIterations` and `minSeverity` (default `medium`). Local pre-push hook validation still runs before publishing if you omit `auto-review` from the sequence.
 
