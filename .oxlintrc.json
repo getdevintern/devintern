@@ -142,7 +142,7 @@
     {
       // Ratchet baseline: files larger than the 1500-line cap. Split a file and
       // remove its entry to lock in the tighter limit.
-      "files": ["packages/code/src/lib/utils.ts", "packages/code/src/webhook-server.ts"],
+      "files": ["packages/code/src/lib/utils.ts"],
       "rules": {
         "max-lines": "off"
       }
