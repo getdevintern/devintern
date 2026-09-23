@@ -140,14 +140,6 @@
   },
   "overrides": [
     {
-      // Ratchet baseline: files containing a function longer than the 500-line
-      // cap. Split the function and remove its entry to lock in the tighter limit.
-      "files": ["packages/code/src/lib/agent/run-harness.ts"],
-      "rules": {
-        "max-lines-per-function": "off"
-      }
-    },
-    {
       "files": ["**/*.{test,spec}.{ts,tsx,js,jsx}", "**/test/**", "**/tests/**"],
       "rules": {
         "react/no-array-index-key": "off",
