@@ -7,8 +7,28 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
+import { CONFIG_DIR_ENV } from "../config/config-dir";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { TaskTrackerManager } from "../trackers/manager";
+import { workspaceConfigDir } from "../workspace/paths";
+
+/**
+ * Pin the daemon's durable project config dir to the workspace home.
+ *
+ * The daemon can be launched from anywhere. A native service runs with the
+ * workspace home as its working directory, but a terminal launch from inside
+ * an imported repository resolves that checkout's `.devintern-code`. The auth
+ * session, license cache, and run lock live under `DEVINTERN_CONFIG_DIR`, so
+ * pin it once the workspace is known and both launch paths read the same
+ * store. The daemon's own worker lock is unaffected: it uses an explicit
+ * workspace path, and `shouldSkipRunLock` also requires the worker subprocess
+ * marker.
+ *
+ * @param workspaceDir - Workspace home selected for this daemon run.
+ */
+export function pinWorkspaceConfigDir(workspaceDir: string): void {
+  process.env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
+}
 
 /** True when `args` contains a `--help`/`-h` flag. */
 function hasHelpArg(args: string[]): boolean {
@@ -237,6 +257,11 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)))) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
+
+  // Pin auth/license resolution to the workspace home before the gate, so the
+  // native-service and terminal launch paths resolve the same session and
+  // license cache (see pinWorkspaceConfigDir).
+  pinWorkspaceConfigDir(selectedWorkspaceDir);
 
   // License check — the worker is unattended automation, so it always
   // requires an automation entitlement.

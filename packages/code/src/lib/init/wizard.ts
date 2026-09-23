@@ -31,7 +31,8 @@ import {
   promptSteps,
   validateConnection,
 } from "@devintern/task-trackers";
-import { findProjectRoot, resolveConfigDir, upsertEnvVars } from "@devintern/utils";
+import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { resolveProjectConfigDir } from "../config/config-dir";
 import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
   trackSetupCompleted,
@@ -87,11 +88,7 @@ export interface InitWizardDeps {
 
 /** Supabase auth config matching what the CLI uses at runtime. */
 function wizardSupabaseConfig(cwd: string): SupabaseAuthConfig {
-  const configDir = resolveConfigDir({
-    configDirName: ".devintern-code",
-    startDir: cwd,
-  });
-  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
+  return createDefaultSupabaseAuthConfig(join(resolveProjectConfigDir(cwd), ".auth-session.json"));
 }
 
 /**

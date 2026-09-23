@@ -281,7 +281,7 @@ export class RepoManager {
     await Utils.isolateWorktreeHooks(path);
     // Worktrees are throwaway checkouts; a stale `.devintern-code/` from an
     // interrupted or older run must never be staged into a task PR.
-    ensureGitInfoExcluded(path, join(path, ".devintern-code"), ".devintern-code/");
+    ensureGitInfoExcluded(path, ".devintern-code/");
   }
 
   /** Serialize compound Git administration without nesting public locks. */

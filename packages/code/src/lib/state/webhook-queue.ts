@@ -105,7 +105,7 @@ const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
  * failure (not a repo, read-only .git) is ignored.
  */
 function ensureDbIgnored(dbPath: string): void {
-  ensureGitInfoExcluded(dirname(dbPath), dbPath, QUEUE_DB_IGNORE_PATTERN);
+  ensureGitInfoExcluded(dirname(dbPath), QUEUE_DB_IGNORE_PATTERN, dbPath);
 }
 
 /**

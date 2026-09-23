@@ -56,7 +56,8 @@ import {
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { gitHubSlugFromRemote } from "../workspace/env";
-import { workspaceConfigPath } from "../workspace/paths";
+import { workspaceConfigDir, workspaceConfigPath } from "../workspace/paths";
+import { configDirOverride, CONFIG_DIR_ENV } from "../config/config-dir";
 import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
@@ -152,9 +153,9 @@ export interface WorkerInitDeps {
     log: LogFn;
   }) => Promise<{ workspaceDir: string; created?: boolean; repoName?: string } | { error: string }>;
   /** Signed-in user lookup for relay onboarding. */
-  getUser?: (projectRoot: string) => Promise<InitUserLike | null>;
+  getUser?: (projectRoot: string, workspaceDir?: string) => Promise<InitUserLike | null>;
   /** Interactive login for relay onboarding. */
-  signIn?: (projectRoot: string) => Promise<InitUserLike | null>;
+  signIn?: (projectRoot: string, workspaceDir?: string) => Promise<InitUserLike | null>;
   /** Register relay sources while persisting state under the workspace home. */
   connectRelay?: (ctx: {
     projectRoot: string;
@@ -428,19 +429,42 @@ async function defaultEnsureTracker(
   return result.trackerId;
 }
 
-function projectAuthConfig(projectRoot: string) {
-  return createDefaultSupabaseAuthConfig(
-    join(projectRoot, ".devintern-code", ".auth-session.json"),
-  );
+/**
+ * Resolve the auth-session path `worker init` reads and writes.
+ *
+ * Once the workspace is known the session must live in the workspace config
+ * dir — the same `DEVINTERN_CONFIG_DIR` that `buildRepoEnv` pins for the
+ * daemon and every task/review/automation subprocess. Otherwise signing in
+ * during `worker init` would write the session beside the imported checkout,
+ * where the unattended worker never looks, and its license check would fail.
+ *
+ * @param projectRoot - Imported repository root, used only before the workspace exists
+ * @param workspaceDir - Workspace home once it has been written
+ */
+export function workerAuthSessionPath(projectRoot: string, workspaceDir?: string): string {
+  const configDir = workspaceDir
+    ? workspaceConfigDir(workspaceDir)
+    : (configDirOverride() ?? join(projectRoot, ".devintern-code"));
+  return join(configDir, ".auth-session.json");
 }
 
-async function defaultGetUser(projectRoot: string): Promise<InitUserLike | null> {
-  return getAuthenticatedUser(projectAuthConfig(projectRoot));
+function projectAuthConfig(projectRoot: string, workspaceDir?: string) {
+  return createDefaultSupabaseAuthConfig(workerAuthSessionPath(projectRoot, workspaceDir));
 }
 
-async function defaultSignIn(projectRoot: string): Promise<InitUserLike | null> {
+async function defaultGetUser(
+  projectRoot: string,
+  workspaceDir?: string,
+): Promise<InitUserLike | null> {
+  return getAuthenticatedUser(projectAuthConfig(projectRoot, workspaceDir));
+}
+
+async function defaultSignIn(
+  projectRoot: string,
+  workspaceDir?: string,
+): Promise<InitUserLike | null> {
   const resolved = await resolveLogin(process.argv);
-  return login(projectAuthConfig(projectRoot), resolved);
+  return login(projectAuthConfig(projectRoot, workspaceDir), resolved);
 }
 
 async function detectGitHubRepo(): Promise<string | null> {
@@ -474,7 +498,7 @@ async function defaultConnectRelay(
 ): Promise<boolean> {
   const getAccessToken = async () => {
     const user = await requireAuthenticatedUser(
-      projectAuthConfig(options.projectRoot),
+      projectAuthConfig(options.projectRoot, options.workspaceDir),
       "devintern login",
     );
     return user.accessToken;
@@ -690,12 +714,15 @@ async function runLicenseStep(ctx: InitContext): Promise<void> {
  *
  * @returns The user, or null when the user declines or login fails.
  */
-async function resolveRelayUser(ctx: InitContext): Promise<InitUserLike | null> {
+async function resolveRelayUser(
+  ctx: InitContext,
+  workspaceDir: string,
+): Promise<InitUserLike | null> {
   const getUser = ctx.deps.getUser ?? defaultGetUser;
   const signIn = ctx.deps.signIn ?? defaultSignIn;
   let user: InitUserLike | null = null;
   try {
-    user = await getUser(ctx.projectRoot);
+    user = await getUser(ctx.projectRoot, workspaceDir);
   } catch {
     user = null;
   }
@@ -712,7 +739,7 @@ async function resolveRelayUser(ctx: InitContext): Promise<InitUserLike | null> 
     return null;
   }
   try {
-    user = await signIn(ctx.projectRoot);
+    user = await signIn(ctx.projectRoot, workspaceDir);
     if (user) {
       ctx.log(`✅ Signed in as ${user.email || user.id}.`);
     }
@@ -746,7 +773,7 @@ async function runRelayStep(
     return { relayConnected, relayConnect };
   }
 
-  const user = await resolveRelayUser(ctx);
+  const user = await resolveRelayUser(ctx, workspaceDir);
   if (!user) {
     ctx.log("   Relay skipped. Run `devintern login`, then re-run `devintern worker init` later.");
     return { relayConnected, relayConnect };
@@ -1090,6 +1117,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const workspace = await bootstrapWorkerWorkspace(ctx, tracker.trackerType);
     if (!workspace) return abort;
     const { workspaceDir, repoName } = workspace;
+
+    // Pin the remainder of init (license check, sign-in, relay) to the
+    // workspace config dir, so it agrees with the daemon's auth/license
+    // resolution instead of reading the imported repo's config dir.
+    process.env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
 
     // 3. Ready-tasks query, validated with a live dry run, then task_query.
     const query = await promptReadyQuery(ctx, tracker.trackerName, tracker.queryExample);

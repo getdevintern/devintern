@@ -8,8 +8,15 @@ import { dirname, join, resolve } from "path";
  *
  * `--git-common-dir` is used so every linked worktree of a repository shares
  * one exclude file (the bare clone's in fleet mode), and the pattern applies
- * relative to each worktree root. Already-ignored targets and non-git
- * directories are no-ops.
+ * relative to each worktree root. Non-git directories are no-ops, and a
+ * second call with the same pattern adds nothing: the written line is the
+ * idempotency check.
+ *
+ * When `target` is given, a `git check-ignore` probe short-circuits the write
+ * for a path the project's own ignore rules already cover. The probe is only
+ * reliable for file paths: a directory-only pattern is not recognized for a
+ * path that does not exist yet, so directory callers omit `target` and rely on
+ * the written-line check.
  *
  * Best-effort by design: any failure (not a repo, read-only `.git`) is
  * swallowed. This is a safety net against tool state leaking into commits
@@ -17,15 +24,17 @@ import { dirname, join, resolve } from "path";
  * primary relocation takes effect), never a hard requirement.
  *
  * @param cwd - Directory inside the target working tree
- * @param target - Path that must end up ignored (checked with `git check-ignore`)
- * @param pattern - Exclude pattern appended when `target` is not yet ignored
+ * @param pattern - Exclude pattern appended when not already present
+ * @param target - Optional path probed with `git check-ignore` before writing
  */
-export function ensureGitInfoExcluded(cwd: string, target: string, pattern: string): void {
+export function ensureGitInfoExcluded(cwd: string, pattern: string, target?: string): void {
   try {
-    // 0 = already ignored, 128 = not a repository. Only 1 (visible) proceeds.
-    const check = spawnSync("git", ["check-ignore", "-q", target], { cwd });
-    if (check.status !== 1) {
-      return;
+    if (target !== undefined) {
+      // 0 = already ignored, 128 = not a repository. Only 1 (visible) proceeds.
+      const check = spawnSync("git", ["check-ignore", "-q", target], { cwd });
+      if (check.status !== 1) {
+        return;
+      }
     }
 
     const gitDir = spawnSync("git", ["rev-parse", "--git-common-dir"], {

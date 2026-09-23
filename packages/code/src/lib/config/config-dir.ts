@@ -25,6 +25,20 @@ export const CONFIG_DIR_ENV = "DEVINTERN_CONFIG_DIR";
 export const CONFIG_DIR_NAME = ".devintern-code";
 
 /**
+ * Marks a subprocess spawned by the workspace worker/scheduler.
+ *
+ * `buildRepoEnv` sets it for every task, review, and automation subprocess, so
+ * process-level guards can distinguish a supervised fleet run from an operator
+ * who merely exported `DEVINTERN_CONFIG_DIR` in their shell.
+ */
+export const WORKER_SUBPROCESS_ENV = "DEVINTERN_WORKER_SUBPROCESS";
+
+/** Whether this process is a supervised worker/scheduler subprocess. */
+export function isWorkerSubprocess(): boolean {
+  return process.env[WORKER_SUBPROCESS_ENV] === "1";
+}
+
+/**
  * The `DEVINTERN_CONFIG_DIR` override, resolved to an absolute path, or
  * `undefined` when unset/blank.
  */

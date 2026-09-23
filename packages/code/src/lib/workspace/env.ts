@@ -21,7 +21,7 @@ import {
   workspaceEnvPath,
 } from "./paths";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
-import { CONFIG_DIR_ENV } from "../config/config-dir";
+import { CONFIG_DIR_ENV, WORKER_SUBPROCESS_ENV } from "../config/config-dir";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
@@ -104,6 +104,10 @@ export function buildRepoEnv(
   // throwaway worktree, so the default resolution would drop `.pid.lock` and
   // the license cache into the checkout and `git add -A` would commit them.
   env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
+  // Distinguish a supervised subprocess from an operator who only exported
+  // DEVINTERN_CONFIG_DIR, so process-level guards (e.g. the CLI run lock) can
+  // scope themselves to fleet runs.
+  env[WORKER_SUBPROCESS_ENV] = "1";
   env[WORKSPACE_REPO_ENV] = repo.name;
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {

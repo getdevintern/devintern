@@ -16,7 +16,9 @@ import {
   configDirOverride,
   resolveProjectConfigDir,
 } from "../src/lib/config/config-dir";
+import { loadSupabaseConfig } from "../src/lib/cli/bootstrap";
 import { ensureGitInfoExcluded } from "../src/lib/utils/git-exclude";
+import { pinWorkspaceConfigDir } from "../src/lib/worker/cli";
 import { buildRepoEnv } from "../src/lib/workspace/env";
 
 function git(cwd: string, args: string[]): string {
@@ -81,6 +83,43 @@ describe("fleet config-dir isolation (DEV-126)", () => {
   });
 });
 
+describe("worker daemon auth/license config-dir pin (DEV-126)", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "runtime-daemon-config-"));
+    delete process.env[CONFIG_DIR_ENV];
+  });
+
+  afterEach(() => {
+    delete process.env[CONFIG_DIR_ENV];
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("daemon license gate sees the workspace session from a non-workspace cwd", () => {
+    const checkoutConfigDir = join(root, "checkout", ".devintern-code");
+    const workspaceDir = join(root, "workspace");
+    const workspaceConfigDirPath = join(workspaceDir, ".devintern-code");
+    mkdirSync(checkoutConfigDir, { recursive: true });
+    mkdirSync(workspaceConfigDirPath, { recursive: true });
+    const sessionFile = join(workspaceConfigDirPath, ".auth-session.json");
+    writeFileSync(sessionFile, JSON.stringify({ accessToken: "a", refreshToken: "r" }));
+
+    // Simulate a terminal launch inside an imported checkout: project config
+    // resolution points at the repo, not the workspace home.
+    process.env[CONFIG_DIR_ENV] = checkoutConfigDir;
+    expect(loadSupabaseConfig().sessionFilePath).toBe(
+      join(checkoutConfigDir, ".auth-session.json"),
+    );
+
+    // The daemon pins the selected workspace dir before the license gate.
+    pinWorkspaceConfigDir(workspaceDir);
+
+    expect(loadSupabaseConfig().sessionFilePath).toBe(sessionFile);
+    expect(existsSync(sessionFile)).toBe(true);
+  });
+});
+
 describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
   let repo: string;
 
@@ -105,9 +144,9 @@ describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
     git(repo, ["add", "-A"]);
     git(repo, ["commit", "-qm", "add settings"]);
 
-    ensureGitInfoExcluded(repo, join(repo, ".devintern-code"), ".devintern-code/");
+    ensureGitInfoExcluded(repo, ".devintern-code/");
     // Idempotent: a second call adds nothing.
-    ensureGitInfoExcluded(repo, join(repo, ".devintern-code"), ".devintern-code/");
+    ensureGitInfoExcluded(repo, ".devintern-code/");
 
     // Runtime artifacts appearing in the checkout stay out of the index...
     writeFileSync(join(repo, ".devintern-code", ".pid.lock"), "{}");

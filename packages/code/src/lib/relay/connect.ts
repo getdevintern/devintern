@@ -18,6 +18,7 @@ import { saveGitHubAppRecord } from "../code-host/github/app-setup";
 import { GitLabWebhookAdminClient } from "../code-host/gitlab/webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "../code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
+import { configDirOverride } from "../config/config-dir";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -183,11 +184,11 @@ export function resolveRelayUrl(): string {
 }
 
 function relayStatePath(workingDir: string): string {
-  return join(resolve(workingDir, ".devintern-code"), "relay.json");
+  return join(configDirOverride() ?? resolve(workingDir, ".devintern-code"), "relay.json");
 }
 
 function authSessionPath(workingDir: string): string {
-  return join(resolve(workingDir, ".devintern-code"), ".auth-session.json");
+  return join(configDirOverride() ?? resolve(workingDir, ".devintern-code"), ".auth-session.json");
 }
 
 /**
