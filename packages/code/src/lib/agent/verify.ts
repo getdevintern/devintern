@@ -94,6 +94,9 @@ export async function verifyImplementation(
   repairStep = "repair",
 ): Promise<TaskStepResult | void> {
   if (!config) return;
+  if (!state.enableGit) {
+    return { kind: "warn", reason: "verify skipped: git workflow disabled" };
+  }
   if (!state.committed) return { kind: "halt", reason: "No committed implementation to verify" };
   const maxIterations = config.maxIterations ?? 3;
   if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
@@ -141,7 +144,7 @@ export async function verifyImplementation(
 
   if (config.onFail === "warn") {
     console.warn(`⚠️  Verification found ${blocking.length} blocking issue(s); continuing`);
-    return;
+    return { kind: "warn", reason: feedback.summary };
   }
   if (config.onFail === "halt") {
     return { kind: "halt", reason: feedback.summary };

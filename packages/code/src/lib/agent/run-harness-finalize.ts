@@ -10,7 +10,13 @@ import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
 import { resolveOutputDir } from "../config/output-dir";
 import { getTodoStatusForProject, resolveProjectKey } from "../config/project-settings";
-import { runAutoReviewLoop } from "../review/auto-review-loop";
+import {
+  filterByPriority,
+  getPRDiff,
+  parseReviewFeedback,
+  runAgentPrompt,
+  runAutoReviewLoop,
+} from "../review/auto-review-loop";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import { recordRunStage } from "../state/run-recorder";
 import { postImplementationComment } from "../task/implementation-comment";
@@ -23,7 +29,7 @@ import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
 import { runTaskSteps } from "../task/step-runner";
 import type { TaskStep, TaskStepResult } from "../task/step-runner";
-import type { ReviewFeedback } from "../../types/auto-review";
+import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
 import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
 
@@ -34,8 +40,10 @@ export interface DeliveryState extends PipelineContext {
   helpers: GitHelpers;
   planRetry: boolean;
   autoReviewRan: boolean;
+  hookValidated: boolean;
   pendingFeedback?: ReviewFeedback;
   failedPlugin?: boolean;
+  implementationStepSeen: boolean;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -195,9 +203,12 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
 }
 
 /** Validate hooks and run optional local auto-review before the push. */
-export async function reviewImplementation(state: DeliveryState): Promise<boolean> {
+export async function reviewImplementation(
+  state: DeliveryState,
+  config: { maxIterations?: number; minSeverity?: ReviewPriority } = {},
+): Promise<boolean> {
   const ctx = state.context;
-  if (!(ctx.createPr && ctx.task)) return true;
+  if (!(ctx.enableGit && ctx.createPr && ctx.task)) return true;
   console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
   const initial = await state.helpers.validatePrePushHook(
     state.planRetry ? "plan implementation validation" : "initial validation",
@@ -206,6 +217,7 @@ export async function reviewImplementation(state: DeliveryState): Promise<boolea
     console.log("   Cannot proceed without passing pre-push hook validation");
     return false;
   }
+  state.hookValidated = true;
   if (state.planRetry) return true;
 
   const branch = await Utils.getCurrentBranch();
@@ -223,8 +235,8 @@ export async function reviewImplementation(state: DeliveryState): Promise<boolea
       baseBranch: ctx.prTargetBranch,
       harness: ctx.harness,
       executablePath: ctx.executablePath,
-      maxIterations: ctx.autoReviewIterations,
-      minPriority: "medium",
+      maxIterations: config.maxIterations ?? ctx.autoReviewIterations,
+      minPriority: config.minSeverity ?? "medium",
       workingDir: process.cwd(),
       outputDir: taskDir,
       skipPush: true,
@@ -248,8 +260,10 @@ export async function reviewImplementation(state: DeliveryState): Promise<boolea
       console.log("   Cannot proceed - auto-review changes failed pre-push hook validation");
       return false;
     }
+    state.hookValidated = true;
   } catch (error) {
     if (error instanceof UsageLimitError) throw error;
+    state.hookValidated = false;
     recordRunStage("auto_review", {
       status: "failed",
       summary: `loop errored: ${(error as Error).message}`,
@@ -261,14 +275,24 @@ export async function reviewImplementation(state: DeliveryState): Promise<boolea
 }
 
 /** Push, comment, and create a PR after the commit/review phases. */
-export async function publishImplementation(state: DeliveryState): Promise<void> {
+export async function publishImplementation(state: DeliveryState): Promise<TaskStepResult | void> {
   const ctx = state.context;
   const { taskKey, taskSummary, tracker, skipComments } = ctx;
+  if (!(ctx.enableGit && taskKey && taskSummary)) return;
   if (ctx.createPr && ctx.task) {
+    if (!state.hookValidated) {
+      console.log("\n🔍 Validating pre-push hook locally (before pushing)...");
+      const validation = await state.helpers.validatePrePushHook("pre-publish validation");
+      if (!validation.success) {
+        console.log("   Cannot proceed without passing pre-push hook validation");
+        return { kind: "halt", haltKind: "stop", reason: "Pre-push validation failed" };
+      }
+      state.hookValidated = true;
+    }
     const pushed = await state.helpers.pushWithHookRetry();
     if (!pushed.success) {
       console.log("   Cannot create PR without pushing branch to remote");
-      return;
+      return { kind: "halt", haltKind: "stop", reason: "Push failed" };
     }
   }
 
@@ -355,10 +379,40 @@ async function reportPipelineHalt(state: DeliveryState, reason: string): Promise
 
 const commitStep: TaskStep<DeliveryState> = {
   name: "commit",
-  run: async (state) =>
-    (await commitImplementation(state))
+  run: async (state) => {
+    if (!(state.enableGit && state.taskKey && state.taskSummary)) {
+      return { kind: "continue", data: { skipped: true } };
+    }
+    return (await commitImplementation(state))
       ? undefined
-      : { kind: "halt", reason: "Implementation was not committed" },
+      : { kind: "halt", reason: "Implementation was not committed" };
+  },
+};
+
+const implementStep: TaskStep<DeliveryState> = {
+  name: "implement",
+  run: async (state) => {
+    if (!state.implementationStepSeen) {
+      state.implementationStepSeen = true;
+      return;
+    }
+    if (!state.context.runRepair) {
+      return { kind: "halt", reason: "Implementation retry is unavailable" };
+    }
+    const prompt = state.loopbackFeedback
+      ? buildRepairPrompt(state.taskContent, state.loopbackFeedback)
+      : `Continue implementing this task and address the following finding: ${state.loopbackReason ?? "The previous check requested changes."}\n\nOriginal task:\n${state.taskContent}\n\nDo not commit or push; the task runner handles delivery.`;
+    state.loopbackFeedback = undefined;
+    state.loopbackReason = undefined;
+    const result = await state.context.runRepair(prompt);
+    if (result.kind === "halted") {
+      return { kind: "halt", reason: "Agent could not complete implementation retry" };
+    }
+    state.output = result.stdout;
+    state.committed = false;
+    state.hookValidated = false;
+    return;
+  },
 };
 
 const reviewStep: TaskStep<DeliveryState> = {
@@ -376,53 +430,64 @@ function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[]
   if (!configured) {
     return state.context.verify
       ? [
+          implementStep,
           commitStep,
           { name: "repair", run: repairImplementation },
           { name: "verify", run: verifyImplementation },
           reviewStep,
           publishStep,
         ]
-      : [commitStep, reviewStep, publishStep];
+      : [implementStep, commitStep, reviewStep, publishStep];
   }
-  return configured.flatMap((entry, index): TaskStep<DeliveryState>[] => {
-    switch (entry.use) {
-      case "commit":
-        return [commitStep];
-      case "auto-review":
-        return [reviewStep];
-      case "finalize":
-        return [publishStep];
-      case "verify": {
-        const repairName = `__repair-${index}`;
-        return [
-          { name: repairName, run: repairImplementation },
-          {
-            name: `__verify-${index}`,
-            run: (current) => verifyImplementation(current, undefined, entry.config, repairName),
-          },
-        ];
-      }
-      case "plugin":
-        return [
-          {
-            name: entry.step.name,
-            run: async (current) => {
-              let result: TaskStepResult | void;
-              try {
-                result = await entry.step.run(current);
-              } catch (error) {
-                if (!(error instanceof Error && error.name === "StepExecutionError")) {
-                  current.failedPlugin = true;
-                }
-                throw error;
-              }
-              if (result?.kind === "warn") current.warnings.push(result.reason);
-              return result;
+  return [
+    implementStep,
+    ...configured.flatMap((entry, index): TaskStep<DeliveryState>[] => {
+      switch (entry.use) {
+        case "commit":
+          return [commitStep];
+        case "auto-review":
+          return [
+            {
+              name: "auto-review",
+              run: (current) =>
+                reviewImplementation(current, entry.config).then((ok) =>
+                  ok ? undefined : { kind: "halt" as const, reason: "Pre-push validation failed" },
+                ),
             },
-          },
-        ];
-    }
-  });
+          ];
+        case "finalize":
+          return [publishStep];
+        case "verify": {
+          const repairName = `__repair-${index}`;
+          return [
+            { name: repairName, run: repairImplementation },
+            {
+              name: `__verify-${index}`,
+              run: (current) => verifyImplementation(current, undefined, entry.config, repairName),
+            },
+          ];
+        }
+        case "plugin":
+          return [
+            {
+              name: entry.step.name,
+              run: async (current) => {
+                let result: TaskStepResult | void;
+                try {
+                  result = await entry.step.run(current);
+                } catch (error) {
+                  if (!(error instanceof Error && error.name === "StepExecutionError")) {
+                    current.failedPlugin = true;
+                  }
+                  throw error;
+                }
+                return result;
+              },
+            },
+          ];
+      }
+    }),
+  ];
 }
 
 /** Run the existing commit, review, and publish flow as separate steps. */
@@ -432,21 +497,43 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     helpers: createGitHelpers(ctx),
     taskKey: ctx.taskKey,
     taskSummary: ctx.taskSummary,
+    task: ctx.task,
+    tracker: ctx.tracker,
+    projectSettings: ctx.projectSettings,
     taskContent: ctx.taskContent,
+    taskFile: ctx.taskFile,
     workingDir: process.cwd(),
     outputDir: ctx.taskKey
       ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
       : dirname(ctx.taskFile),
     prTargetBranch: ctx.prTargetBranch,
+    enableGit: ctx.enableGit,
+    createPr: ctx.createPr,
+    skipComments: ctx.skipComments,
+    autoReview: ctx.autoReview,
+    autoReviewIterations: ctx.autoReviewIterations,
+    maxTurns: ctx.maxTurns,
     warnings: [],
+    results: [],
+    runAgentPrompt: (prompt) =>
+      runAgentPrompt(prompt, process.cwd(), ctx.harness, ctx.executablePath),
+    getDiff: () => getPRDiff(ctx.prTargetBranch, process.cwd()),
+    parseReviewFeedback,
+    filterByPriority,
     output: ctx.stdoutOutput,
     committed: false,
     planRetry: false,
     autoReviewRan: false,
+    hookValidated: false,
+    implementationStepSeen: false,
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
-      if (result.kind === "halted" && !["commit", "auto-review", "publish"].includes(result.step)) {
+      if (
+        result.kind === "halted" &&
+        result.haltKind !== "stop" &&
+        !["commit", "auto-review", "publish"].includes(result.step)
+      ) {
         await reportPipelineHalt(state, result.reason);
       }
       ctx.resolve();
