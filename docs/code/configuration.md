@@ -265,6 +265,66 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
 }
 ```
 
+## Pipeline Customization
+
+Task delivery runs `implement`, `commit`, optional `auto-review` (when `--auto-review` is set), and `finalize` (push, comment, and PR creation). Add a `pipeline` section to `.devintern-code/settings.json` to insert verification or project-defined steps. The usual branch preparation, feasibility check, and In Progress transition still happen before implementation.
+
+```json
+{
+  "pipeline": {
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "loopback", "minSeverity": "high", "maxIterations": 3 },
+      { "use": "auto-review" },
+      { "use": "finalize" }
+    ]
+  }
+}
+```
+
+`verify` asks the configured agent whether the committed diff meets the task requirements. It is opt-in; you may add several `verify` entries with different prompts. `prompt` accepts inline instructions or a path to a prompt file relative to the project directory. `minSeverity` defaults to `high`. On a failed verdict, `onFail` can `loopback` (default: ask the agent to repair, commit, and verify again), `halt` (mark the task incomplete and return it to To Do), or `warn` (continue). `maxIterations` limits repair cycles and defaults to `3`. If verification cannot get a valid verdict after two attempts, the task is marked incomplete before any push.
+
+The order must start with `implement` (optionally preceded by a `clarity` marker), include `commit` once, and end with `finalize`. `verify` and `auto-review` must follow `commit`. The `clarity` marker refers to the existing feasibility preamble; `--skip-clarity-check` still controls whether it runs. Custom steps can run after `implement` and before `finalize`.
+
+For a custom step, list a project-relative module or an installed package under `pipeline.plugins`. The module default-exports a definition. The plugin runs in the local DevIntern process with the project's Bun runtime.
+
+```json
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/check-policy.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "check-policy", "threshold": 0.9 },
+      { "use": "finalize" }
+    ]
+  }
+}
+```
+
+```ts
+import type { StepDefinition } from "@getdevintern/code/pipeline";
+
+const definition: StepDefinition = {
+  name: "check-policy",
+  create: (config) => ({
+    name: "check-policy",
+    async run(context) {
+      // Inspect context.workingDir and context.output.
+      if (Number(config.threshold) > 1) {
+        return { kind: "halt", reason: "Policy threshold is invalid" };
+      }
+      return { kind: "continue" };
+    },
+  }),
+};
+
+export default definition;
+```
+
+Steps return `continue`, `warn`, or `halt` results. A step may return `{ kind: "repeat", from: "earlier-step", maxRepeats: 2 }` for a bounded repeat. Throw `StepExecutionError` from `@getdevintern/code/pipeline` to retry a transient step failure once. Other thrown errors use the existing task failure handler.
+
 ## Verbose API Logging
 
 To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` environment variable:

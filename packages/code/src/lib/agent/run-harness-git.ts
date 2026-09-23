@@ -14,6 +14,7 @@ import { Utils } from "../utils";
 import { runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { logHookErrorToFile } from "./plan";
 import type { VerifyConfig } from "./verify";
+import type { ResolvedPipelineStep } from "../task/pipeline-config";
 
 export interface FinalizeContext {
   taskFile: string;
@@ -38,6 +39,7 @@ export interface FinalizeContext {
   prTargetBranchExplicit: boolean;
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
+  pipelineSteps?: ResolvedPipelineStep[];
   runRepair?: (
     prompt: string,
   ) => Promise<{ kind: "complete"; stdout: string } | { kind: "halted" }>;

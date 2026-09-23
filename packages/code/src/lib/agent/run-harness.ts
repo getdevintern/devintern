@@ -20,6 +20,7 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
+import { resolvePipelineSteps } from "../task/pipeline-config";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
@@ -449,11 +450,28 @@ export async function runAgentSession(
 
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+  const configuredPipeline = loadProjectSettings()?.pipeline;
+  const pipelineSteps = await resolvePipelineSteps(
+    configuredPipeline ??
+      (input.verify
+        ? {
+            steps: [
+              { use: "implement" },
+              { use: "commit" },
+              { use: "verify", ...input.verify },
+              { use: "auto-review" },
+              { use: "finalize" },
+            ],
+          }
+        : undefined),
+    process.cwd(),
+  );
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
   await new Promise<void>((resolve, reject) => {
     finalizeAgentRun({
       ...session.context,
+      pipelineSteps,
       runRepair: async (prompt) => {
         const repair = await runAgentSession(input, prompt);
         return repair.kind === "complete"
