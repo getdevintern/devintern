@@ -27,6 +27,16 @@ import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watche
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay/connect";
 
+/** Deterministic synchronization gate for tests (preferred over sleeps). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  // oxlint-disable-next-line promise/avoid-new -- test synchronization gate.
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -269,6 +279,8 @@ describe("createWorkspaceTaskAcquirer", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const firstStarted = deferred();
+    const allStarted = deferred();
     tasks = [{ key: "T-10", updated: "u1", labels: ["backend"] }];
     const acquirer = createWorkspaceTaskAcquirer({
       config: CONFIG,
@@ -284,6 +296,8 @@ describe("createWorkspaceTaskAcquirer", () => {
       supervisor,
       runTask: async (taskKey) => {
         startedKeys.push(taskKey);
+        if (startedKeys.length === 1) firstStarted.resolve();
+        if (startedKeys.length === 4) allStarted.resolve();
         active += 1;
         peak = Math.max(peak, active);
         await gate;
@@ -293,7 +307,7 @@ describe("createWorkspaceTaskAcquirer", () => {
     });
 
     const firstTick = acquirer.tick();
-    await Bun.sleep(10);
+    await firstStarted.promise;
     expect(startedKeys).toEqual(["T-10"]);
 
     // Three tasks appear while T-10 is still running; nine slots are free.
@@ -304,7 +318,7 @@ describe("createWorkspaceTaskAcquirer", () => {
       { key: "T-13", updated: "u1", labels: ["backend"] },
     ];
     const secondTick = acquirer.tick();
-    await Bun.sleep(10);
+    await allStarted.promise;
 
     expect(new Set(startedKeys)).toEqual(new Set(["T-10", "T-11", "T-12", "T-13"]));
     expect(peak).toBe(4);

@@ -16,7 +16,12 @@
  *    slots without waiting for the current batch to finish.
  *
  * The cursor advances once a tick's executions settle; a crash mid-tick
- * re-detects on restart and the dedupe prevents double execution.
+ * re-detects on restart and the dedupe prevents double execution. An edit to a
+ * task whose run is still in flight advances the cursor too, but its unclaimed
+ * stamp is persisted durably and re-admitted once that run settles — or on the
+ * next start after a crash — so the cursor is not held (and the tracker
+ * re-queried) for the whole run. A deferred task is tracked the same way, so it
+ * is re-evaluated even when an overlapping tick already advanced the cursor.
  */
 
 import { spawn } from "child_process";
@@ -44,6 +49,27 @@ export function processedTaskId(task: ReadyTask): string {
 
 function hasUpdateStamp(task: ReadyTask): boolean {
   return Boolean(task.updated?.trim());
+}
+
+/** Parse a persisted `[key, externalId]` list, ignoring anything malformed. */
+function parsePendingRescans(raw: string | null): Array<[string, string]> {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const result: Array<[string, string]> = [];
+  for (const entry of parsed as unknown[]) {
+    if (!Array.isArray(entry)) continue;
+    const [key, externalId] = entry as unknown[];
+    if (typeof key === "string" && typeof externalId === "string") {
+      result.push([key, externalId]);
+    }
+  }
+  return result;
 }
 
 export interface TaskPollingAcquirerOptions {
@@ -167,6 +193,15 @@ export class TaskPollingAcquirer implements Acquirer {
   private busy = false;
   /** Task keys with an execution in flight, to avoid running one key twice at once. */
   private readonly inFlightKeys = new Set<string>();
+  /**
+   * Tasks that must be re-admitted once their run settles, keyed to the newest
+   * unclaimed `(key, stamp)` id. Covers both a task edited mid-run and a
+   * deferred task whose claim was released. The cursor advances past the change
+   * so ticks do not re-query the tracker while the in-flight run is still
+   * going; the map is persisted to `worker_meta` so a crash before the run
+   * settles still replays the re-admission on restart.
+   */
+  private readonly pendingRescans = new Map<string, string>();
   private readonly gateErrors = new Set<string>();
 
   constructor(options: TaskPollingAcquirerOptions) {
@@ -183,6 +218,10 @@ export class TaskPollingAcquirer implements Acquirer {
         `(query: ${query ?? "disabled until task_query is configured"})`,
     );
     const lastDrainAt = this.readLastDrainAt();
+    // Arm the interval before the first batch settles: the startup/catch-up
+    // drain must also keep polling while its executions run, and a slow first
+    // batch must not delay the cadence.
+    this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
     if (this.options.gate?.shouldCatchUpOnStart(lastDrainAt)) {
       // The laptop slept through the entire previous window; drain once now
       // instead of waiting for the next one.
@@ -191,7 +230,6 @@ export class TaskPollingAcquirer implements Acquirer {
     } else {
       await this.tick();
     }
-    this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
   }
 
   private readLastDrainAt(): number | null {
@@ -257,16 +295,25 @@ export class TaskPollingAcquirer implements Acquirer {
     const { detector, workerState, queue, searchTasks, executeTask, verbose } = this.options;
     const executions: Promise<void>[] = [];
     let tickDeferred = false;
-    let holdCursor = false;
+    let evaluateFailed = false;
     let cursorBefore: string | null = null;
     let nextCursor: string | null = null;
 
     try {
+      // Replay any pending re-admissions persisted before a restart before
+      // deciding whether this tick has work to evaluate.
+      this.loadPendingRescans(detector.source);
       cursorBefore = workerState.getCursor(detector.source)?.cursorValue ?? null;
       const detection = await detector.changesSince(cursorBefore);
       nextCursor = detection.nextCursor;
+      // A task edited mid-run or deferred keeps a pending stamp. Re-evaluate
+      // once its run has settled — not on every tick — so the cursor can
+      // advance while the potentially many-minute agent run is still in flight.
+      const hasReadyPending = [...this.pendingRescans.keys()].some(
+        (key) => !this.inFlightKeys.has(key),
+      );
 
-      if (detection.changed) {
+      if (detection.changed || hasReadyPending) {
         const { tasks } = await searchTasks(query);
         const skipped: string[] = [];
         const missingStamp: string[] = [];
@@ -282,13 +329,15 @@ export class TaskPollingAcquirer implements Acquirer {
             continue;
           }
           if (this.inFlightKeys.has(task.key)) {
-            // The same task is still running (it was edited mid-run). Leave the
-            // new stamp unclaimed and hold the cursor so it is evaluated again
-            // once the in-flight run finishes, rather than running one task
-            // twice concurrently.
-            holdCursor = true;
+            // The same task is still running (it was edited mid-run). Advance
+            // the cursor past the edit instead of holding it, and persist the
+            // unclaimed stamp so the settled run (or a restart) re-admits it
+            // exactly once, rather than running one task twice concurrently.
+            this.rememberPendingRescan(detector.source, task.key, externalId);
             continue;
           }
+          // This stamp is being admitted now: drop any pending marker for it.
+          this.forgetPendingRescan(detector.source, task.key);
           // Mark before executing: a persistently failing task must not loop
           // every tick. It re-enters when the ticket is updated again (new
           // stamp), and the pipeline's own incomplete-attempt check guards
@@ -304,10 +353,14 @@ export class TaskPollingAcquirer implements Acquirer {
               try {
                 const result = await executeTask(task.key);
                 if (result === "deferred") {
-                  // The task never started. Release the provisional claim so the
-                  // same tracker change is evaluated on the next tick. Other
-                  // tasks completed in this tick stay deduped.
+                  // The task never started. Release the provisional claim and
+                  // track the key explicitly so the same tracker change is
+                  // re-evaluated on the next tick even when an overlapping tick
+                  // already advanced the cursor past it (the best-effort
+                  // rollback below is not always possible). Other tasks
+                  // completed in this tick stay deduped.
                   queue.unmarkProcessed(detector.source, externalId);
+                  this.rememberPendingRescan(detector.source, task.key, externalId);
                   tickDeferred = true;
                   console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
                 } else {
@@ -332,8 +385,25 @@ export class TaskPollingAcquirer implements Acquirer {
           undefined,
         );
         this.logCapacity(pickedUp, verbose);
+        // A pending stamp that is neither still in flight nor returned by
+        // search is no longer eligible; drop it so it cannot force future
+        // re-evaluations forever.
+        let droppedPending = false;
+        for (const key of Array.from(this.pendingRescans.keys())) {
+          if (!this.inFlightKeys.has(key)) {
+            this.pendingRescans.delete(key);
+            droppedPending = true;
+          }
+        }
+        if (droppedPending) {
+          this.persistPendingRescans(detector.source);
+        }
       }
     } catch (error) {
+      // Detection, evaluation, or claim failed partway: do not advance the
+      // cursor, or the detected change would be silently consumed and its
+      // tasks skipped until the ticket is edited again.
+      evaluateFailed = true;
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
       // Release the polling gate before awaiting the batch: polling must keep
@@ -347,21 +417,49 @@ export class TaskPollingAcquirer implements Acquirer {
     );
     if (rejected) {
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(rejected.reason as Error).message}`);
+    }
+
+    if (evaluateFailed) {
+      // Leave the cursor untouched so the next tick re-detects the same change
+      // instead of skipping its tasks.
       return;
     }
 
     if (tickDeferred) {
-      // A deferred task never started. Drop the cursor so its change is
-      // re-detected next tick; dedupe keeps completed siblings from re-running.
-      this.scheduleGuard(() => workerState.clearCursor(detector.source), undefined);
+      // A deferred task never started. Roll the cursor back to where this tick
+      // began so the change is re-detected next tick; dedupe keeps completed
+      // siblings from re-running. Deleting the row is only correct when there
+      // was no prior cursor — otherwise a sync-token tracker would be forced
+      // into a full resync, and an overlapping tick's progress would be lost.
+      if (cursorBefore === null) {
+        this.scheduleGuard(() => workerState.clearCursor(detector.source), undefined);
+      } else {
+        const current = this.scheduleGuard(
+          () => workerState.getCursor(detector.source)?.cursorValue ?? null,
+          null,
+        );
+        if (current === nextCursor) {
+          this.scheduleGuard(() => workerState.setCursor(detector.source, cursorBefore), undefined);
+        }
+      }
       return;
     }
 
-    if (!holdCursor && nextCursor !== null && nextCursor !== cursorBefore) {
+    if (rejected) {
+      return;
+    }
+
+    const finalCursor = nextCursor;
+    if (finalCursor !== null && finalCursor !== cursorBefore) {
       // Compare-and-set: overlapping ticks must not regress a newer cursor.
-      const current = workerState.getCursor(detector.source)?.cursorValue ?? null;
+      // Both the read and the write go through the guard: a bookkeeping failure
+      // must degrade to a warning, never crash the fire-and-forget tick.
+      const current = this.scheduleGuard(
+        () => workerState.getCursor(detector.source)?.cursorValue ?? null,
+        null,
+      );
       if (current === cursorBefore) {
-        workerState.setCursor(detector.source, nextCursor);
+        this.scheduleGuard(() => workerState.setCursor(detector.source, finalCursor), undefined);
       }
     }
   }
@@ -369,6 +467,50 @@ export class TaskPollingAcquirer implements Acquirer {
   private resolveQuery(): string | undefined {
     const raw = this.options.query;
     return typeof raw === "function" ? raw() : raw;
+  }
+
+  /** `worker_meta` key holding one source's durable pending re-admissions. */
+  private pendingRescansKey(source: string): string {
+    return `task-poll:pending-rescans:${source}`;
+  }
+
+  /**
+   * Merge persisted pending re-admissions into the in-memory map. Runs at the
+   * start of every tick: a restart loses the map but not the advanced cursor,
+   * so without this an edit that landed while a run was in flight would be
+   * silently dropped.
+   */
+  private loadPendingRescans(source: string): void {
+    const raw = this.scheduleGuard(
+      () => this.options.workerState.getMeta(this.pendingRescansKey(source)),
+      null,
+    );
+    for (const [key, externalId] of parsePendingRescans(raw)) {
+      if (!this.pendingRescans.has(key)) {
+        this.pendingRescans.set(key, externalId);
+      }
+    }
+  }
+
+  /** Remember one unclaimed stamp and persist it for replay after a restart. */
+  private rememberPendingRescan(source: string, key: string, externalId: string): void {
+    this.pendingRescans.set(key, externalId);
+    this.persistPendingRescans(source);
+  }
+
+  /** Drop a pending re-admission and persist the removal. */
+  private forgetPendingRescan(source: string, key: string): void {
+    if (!this.pendingRescans.delete(key)) return;
+    this.persistPendingRescans(source);
+  }
+
+  /** Write the whole map through to `worker_meta`; failures degrade to a warning. */
+  private persistPendingRescans(source: string): void {
+    const serialized = JSON.stringify([...this.pendingRescans.entries()]);
+    this.scheduleGuard(
+      () => this.options.workerState.setMeta(this.pendingRescansKey(source), serialized),
+      undefined,
+    );
   }
 
   /**
