@@ -19,10 +19,23 @@ const feedback: ReviewFeedback = {
 function state(verify: FinalizeContext["verify"]): DeliveryState {
   return {
     taskContent: "Implement the feature",
+    taskFile: join(outputDir, "task.md"),
     workingDir: process.cwd(),
     outputDir,
     prTargetBranch: "main",
+    projectSettings: null,
+    enableGit: true,
+    createPr: false,
+    skipComments: false,
+    autoReview: false,
+    autoReviewIterations: 5,
+    maxTurns: 500,
     warnings: [],
+    results: [],
+    runAgentPrompt: async () => "",
+    getDiff: () => "",
+    parseReviewFeedback: () => feedback,
+    filterByPriority: (items) => items,
     context: {
       verify,
       taskFile: join(outputDir, "task.md"),
@@ -36,6 +49,8 @@ function state(verify: FinalizeContext["verify"]): DeliveryState {
     committed: true,
     planRetry: false,
     autoReviewRan: false,
+    hookValidated: false,
+    implementationStepSeen: false,
   };
 }
 
@@ -85,7 +100,10 @@ describe("verifyImplementation", () => {
       kind: "halt",
       reason: feedback.summary,
     });
-    expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toBeUndefined();
+    expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toEqual({
+      kind: "warn",
+      reason: feedback.summary,
+    });
   });
 
   test("retries a transient verifier error once", async () => {

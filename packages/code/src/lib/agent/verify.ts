@@ -141,7 +141,7 @@ export async function verifyImplementation(
 
   if (config.onFail === "warn") {
     console.warn(`⚠️  Verification found ${blocking.length} blocking issue(s); continuing`);
-    return;
+    return { kind: "warn", reason: feedback.summary };
   }
   if (config.onFail === "halt") {
     return { kind: "halt", reason: feedback.summary };

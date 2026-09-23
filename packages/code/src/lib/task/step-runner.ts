@@ -1,18 +1,26 @@
+import type { ReviewFeedback } from "../../types/auto-review";
+
 /** A phase of a task run. Steps share the same prepared task context. */
 export interface TaskStep<Context> {
   name: string;
   run(context: Context): Promise<TaskStepResult | void>;
 }
 
-export type TaskStepResult =
+export type TaskStepResult = (
   | { kind: "continue" }
   | { kind: "warn"; reason: string }
-  | { kind: "halt"; reason: string }
-  | { kind: "repeat"; from: string; maxRepeats: number };
+  | { kind: "halt"; reason: string; haltKind?: "incomplete" | "stop" }
+  | { kind: "repeat"; from: string; maxRepeats: number; reason?: string; feedback?: ReviewFeedback }
+) & { data?: Record<string, unknown> };
+
+export interface TaskStepRecord {
+  step: string;
+  result: TaskStepResult;
+}
 
 export type TaskStepsResult =
   | { kind: "completed" }
-  | { kind: "halted"; step: string; reason: string };
+  | { kind: "halted"; step: string; reason: string; haltKind?: "incomplete" | "stop" };
 
 /**
  * Execute task steps in order. A step may halt or repeat an earlier phase;
@@ -34,6 +42,12 @@ export async function runTaskSteps<Context>(
 
   const repeatCounts = new Map<number, number>();
   const retryCounts = new Map<number, number>();
+  const shared = context as {
+    results?: TaskStepRecord[];
+    warnings?: string[];
+    loopbackFeedback?: ReviewFeedback;
+    loopbackReason?: string;
+  };
   let index = 0;
   while (index < steps.length) {
     const step = steps[index]!;
@@ -47,10 +61,13 @@ export async function runTaskSteps<Context>(
         const retries = (retryCounts.get(index) ?? 0) + 1;
         retryCounts.set(index, retries);
         if (retries <= 1) continue;
+        const halt: TaskStepResult = { kind: "halt", reason: error.message };
+        shared.results?.push({ step: step.name, result: halt });
         return { kind: "halted", step: step.name, reason: error.message };
       }
       throw error;
     }
+    shared.results?.push({ step: step.name, result: result ?? { kind: "continue" } });
     if (!result || result.kind === "continue") {
       index++;
       continue;
@@ -58,12 +75,18 @@ export async function runTaskSteps<Context>(
 
     if (result.kind === "warn") {
       console.warn(`⚠️  ${step.name}: ${result.reason}`);
+      shared.warnings?.push(`${step.name}: ${result.reason}`);
       index++;
       continue;
     }
 
     if (result.kind === "halt") {
-      return { kind: "halted", step: step.name, reason: result.reason };
+      return {
+        kind: "halted",
+        step: step.name,
+        reason: result.reason,
+        ...(result.haltKind === "stop" ? { haltKind: "stop" as const } : {}),
+      };
     }
 
     const targetIndex = indexByName.get(result.from);
@@ -85,6 +108,8 @@ export async function runTaskSteps<Context>(
       };
     }
     repeatCounts.set(index, repeats);
+    shared.loopbackFeedback = result.feedback;
+    shared.loopbackReason = result.reason;
     index = targetIndex;
   }
 

@@ -285,6 +285,8 @@ Task delivery runs `implement`, `commit`, optional `auto-review` (when `--auto-r
 
 `verify` asks the configured agent whether the committed diff meets the task requirements. It is opt-in; you may add several `verify` entries with different prompts. `prompt` accepts inline instructions or a path to a prompt file relative to the project directory. `minSeverity` defaults to `high`. On a failed verdict, `onFail` can `loopback` (default: ask the agent to repair, commit, and verify again), `halt` (mark the task incomplete and return it to To Do), or `warn` (continue). `maxIterations` limits repair cycles and defaults to `3`. If verification cannot get a valid verdict after two attempts, the task is marked incomplete before any push.
 
+`auto-review` accepts `maxIterations` and `minSeverity` (default `medium`). Local pre-push hook validation still runs before publishing if you omit `auto-review` from the sequence.
+
 The order must start with `implement` (optionally preceded by a `clarity` marker), include `commit` once, and end with `finalize`. `verify` and `auto-review` must follow `commit`. The `clarity` marker refers to the existing feasibility preamble; `--skip-clarity-check` still controls whether it runs. Custom steps can run after `implement` and before `finalize`.
 
 For a custom step, list a project-relative module or an installed package under `pipeline.plugins`. The module default-exports a definition. The plugin runs in the local DevIntern process with the project's Bun runtime.
@@ -323,7 +325,7 @@ const definition: StepDefinition = {
 export default definition;
 ```
 
-Steps return `continue`, `warn`, or `halt` results. A step may return `{ kind: "repeat", from: "earlier-step", maxRepeats: 2 }` for a bounded repeat. Throw `StepExecutionError` from `@getdevintern/code/pipeline` to retry a transient step failure once. Other thrown errors use the existing task failure handler.
+Steps return `continue`, `warn`, or `halt` results. A result may include `data`, which later steps can read through `context.results`; warnings accumulate in `context.warnings`. A halt marks the task incomplete unless it includes `haltKind: "stop"`, which stops delivery without changing the task's status. A step may return `{ kind: "repeat", from: "implement", maxRepeats: 2, feedback }` to ask the agent to revise the implementation with structured findings before recommitting. Repeats can also target an earlier custom step. Throw `StepExecutionError` from `@getdevintern/code/pipeline` to retry a transient step failure once. Other thrown errors use the existing task failure handler. Custom agent-backed steps can use `context.runAgentPrompt(prompt)`, `context.getDiff()`, `context.parseReviewFeedback(output)`, and `context.filterByPriority(items, minPriority)`.
 
 ## Verbose API Logging
 

@@ -74,6 +74,8 @@ let planPath: string | null;
 let verifyVerdicts: ReviewFeedback[];
 let verifyCalls: number;
 let deliveryEvents: string[];
+let agentPrompts: string[];
+let autoReviewOptions: Array<{ maxIterations?: number; minPriority?: string }>;
 let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let postImplementationCommentMock: ReturnType<typeof mock>;
@@ -87,7 +89,10 @@ class FakeChild extends EventEmitter {
 mock.module("@devintern/agent-harness", () => ({
   ...realHarness,
   resolveExecutablePathWithRetry: async (path: string) => path,
-  buildPromptArgs: () => [],
+  buildPromptArgs: (_harness: unknown, prompt: string) => {
+    agentPrompts.push(prompt);
+    return [];
+  },
   reapTree: () => {},
   spawnAgent: async () => {
     const child = new FakeChild();
@@ -153,8 +158,9 @@ mock.module("../src/lib/config/project-settings", () => ({
 }));
 mock.module("../src/lib/review/auto-review-loop", () => ({
   ...realAutoReview,
-  runAutoReviewLoop: async () => {
+  runAutoReviewLoop: async (options: { maxIterations?: number; minPriority?: string }) => {
     autoReviewCalls++;
+    autoReviewOptions.push(options);
     return { success: true, iterations: 1, finalFeedback: [] };
   },
   getPRDiff: () => "diff --git a/file b/file",
@@ -231,6 +237,8 @@ beforeEach(() => {
   verifyVerdicts = [];
   verifyCalls = 0;
   deliveryEvents = [];
+  agentPrompts = [];
+  autoReviewOptions = [];
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   postImplementationCommentMock = mock(async () => {});
@@ -481,5 +489,151 @@ describe("runAgentHarness git delivery", () => {
 
     await expect(runAgentHarness(baseInput())).rejects.toThrow("Plugin failed unexpectedly");
     expect(commitCalls).toBe(0);
+  });
+
+  test("validates hooks before publishing when auto-review is omitted", async () => {
+    scenario.stdout = "done";
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(hookCalls).toBe(1);
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+  });
+
+  test("stops before push if a pipeline without auto-review fails hook validation", async () => {
+    scenario.stdout = "done";
+    hookResult = { success: false, message: "hook failed" };
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(hookCalls).toBe(1);
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("uses configured auto-review options", async () => {
+    scenario.stdout = "done";
+    pipelineConfig = {
+      steps: [
+        { use: "implement" },
+        { use: "commit" },
+        { use: "auto-review", maxIterations: 2, minSeverity: "high" },
+        { use: "finalize" },
+      ],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true, autoReview: true });
+
+    expect(autoReviewOptions[0]).toMatchObject({ maxIterations: 2, minPriority: "high" });
+    expect(hookCalls).toBe(2);
+  });
+
+  test("lets a plugin repeat implementation with structured feedback", async () => {
+    scenario.stdout = "done";
+    const name = `loopback-plugin-${randomUUID()}`;
+    let runs = 0;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async (context) => {
+          runs++;
+          expect(context.results.some((record) => record.step === "commit")).toBe(true);
+          if (runs === 1) {
+            return {
+              kind: "repeat",
+              from: "implement",
+              maxRepeats: 1,
+              feedback: {
+                summary: "Missing case",
+                approved: false,
+                items: [
+                  {
+                    priority: "high",
+                    category: "bug",
+                    issue: "Missing case",
+                    suggestion: "Fix it",
+                  },
+                ],
+              },
+            } as const;
+          }
+          return { kind: "continue" } as const;
+        },
+      }),
+    });
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(runs).toBe(2);
+    expect(commitCalls).toBe(2);
+    expect(agentPrompts[1]).toContain("Missing case");
+    expect(deliveryEvents).toEqual(["commit", "commit", "push"]);
+  });
+
+  test("lets a plugin stop without marking the task incomplete", async () => {
+    scenario.stdout = "done";
+    const name = `stop-plugin-${randomUUID()}`;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async () => ({ kind: "halt", haltKind: "stop", reason: "Manual approval needed" }),
+      }),
+    });
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(tracker.postIncompleteImplementationComment).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("offers the configured agent and diff to a custom verification step", async () => {
+    scenario.stdout = "done";
+    const name = `agent-plugin-${randomUUID()}`;
+    let observed:
+      | { diff: string; verdict: string; approved: boolean; blocking: number }
+      | undefined;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async (context) => {
+          const verdict = await context.runAgentPrompt("Check the task");
+          const feedback = context.parseReviewFeedback(verdict);
+          observed = {
+            diff: context.getDiff(),
+            verdict,
+            approved: feedback.approved,
+            blocking: context.filterByPriority(feedback.items, "high").length,
+          };
+        },
+      }),
+    });
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
+    };
+
+    await runAgentHarness(baseInput());
+
+    expect(observed).toEqual({
+      diff: "diff --git a/file b/file",
+      verdict: "verdict",
+      approved: true,
+      blocking: 0,
+    });
   });
 });

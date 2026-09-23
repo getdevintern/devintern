@@ -2,11 +2,13 @@ import { isAbsolute, resolve } from "path";
 import { pathToFileURL } from "url";
 import type { PipelineConfig, PipelineStepConfig } from "../../types/settings";
 import type { VerifyConfig } from "../agent/verify";
+import type { ReviewPriority } from "../../types/auto-review";
 import { getStep, listSteps, registerStep } from "./pipeline-registry";
 import type { PipelineStep, StepDefinition } from "./pipeline-registry";
 
 export type ResolvedPipelineStep =
-  | { use: "commit" | "auto-review" | "finalize" }
+  | { use: "commit" | "finalize" }
+  | { use: "auto-review"; config: { maxIterations?: number; minSeverity?: ReviewPriority } }
   | { use: "verify"; config: VerifyConfig }
   | { use: "plugin"; step: PipelineStep };
 
@@ -77,7 +79,30 @@ function resolveDeliveryEntry(entry: PipelineStepConfig, committed: boolean): Re
   const name = entry.use;
   if (name === "verify" || name === "auto-review" || name === "finalize") {
     if (!committed) throw new Error(`${name} must follow commit`);
-    return name === "verify" ? { use: "verify", config: verifyOptions(entry) } : { use: name };
+    if (name === "verify") return { use: "verify", config: verifyOptions(entry) };
+    if (name === "auto-review") {
+      const { maxIterations, minSeverity } = entry;
+      if (
+        maxIterations !== undefined &&
+        (!Number.isSafeInteger(maxIterations) || (maxIterations as number) < 1)
+      ) {
+        throw new Error("auto-review.maxIterations must be a positive integer");
+      }
+      if (
+        minSeverity !== undefined &&
+        !["critical", "high", "medium", "low", "info"].includes(minSeverity as string)
+      ) {
+        throw new Error("auto-review.minSeverity must be a review priority");
+      }
+      return {
+        use: "auto-review",
+        config: {
+          maxIterations: maxIterations as number | undefined,
+          minSeverity: minSeverity as ReviewPriority | undefined,
+        },
+      };
+    }
+    return { use: "finalize" };
   }
   const definition = getStep(name);
   if (!definition) {
