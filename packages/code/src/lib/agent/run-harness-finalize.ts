@@ -22,20 +22,20 @@ import { createGitHelpers } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
 import { runTaskSteps } from "../task/step-runner";
-import type { TaskStep } from "../task/step-runner";
+import type { TaskStep, TaskStepResult } from "../task/step-runner";
 import type { ReviewFeedback } from "../../types/auto-review";
+import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
-export interface DeliveryState {
+export interface DeliveryState extends PipelineContext {
   context: FinalizeContext;
   helpers: GitHelpers;
-  output: string;
-  committed: boolean;
   planRetry: boolean;
   autoReviewRan: boolean;
   pendingFeedback?: ReviewFeedback;
+  failedPlugin?: boolean;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -320,10 +320,10 @@ async function repairImplementation(state: DeliveryState) {
   return;
 }
 
-async function reportVerificationHalt(state: DeliveryState, reason: string): Promise<void> {
+async function reportPipelineHalt(state: DeliveryState, reason: string): Promise<void> {
   const ctx = state.context;
   const { taskKey, tracker, task } = ctx;
-  const report = `Verification stopped: ${reason}\n\n${state.output}`;
+  const report = `Pipeline stopped: ${reason}\n\n${state.output}`;
   if (taskKey) {
     try {
       const taskDir = join(resolveOutputDir(), taskKey.toLowerCase());
@@ -371,15 +371,58 @@ const reviewStep: TaskStep<DeliveryState> = {
 
 const publishStep: TaskStep<DeliveryState> = { name: "publish", run: publishImplementation };
 
-function deliverySteps(verify: boolean): readonly TaskStep<DeliveryState>[] {
-  if (!verify) return [commitStep, reviewStep, publishStep];
-  return [
-    commitStep,
-    { name: "repair", run: repairImplementation },
-    { name: "verify", run: verifyImplementation },
-    reviewStep,
-    publishStep,
-  ];
+function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
+  const configured = state.context.pipelineSteps;
+  if (!configured) {
+    return state.context.verify
+      ? [
+          commitStep,
+          { name: "repair", run: repairImplementation },
+          { name: "verify", run: verifyImplementation },
+          reviewStep,
+          publishStep,
+        ]
+      : [commitStep, reviewStep, publishStep];
+  }
+  return configured.flatMap((entry, index): TaskStep<DeliveryState>[] => {
+    switch (entry.use) {
+      case "commit":
+        return [commitStep];
+      case "auto-review":
+        return [reviewStep];
+      case "finalize":
+        return [publishStep];
+      case "verify": {
+        const repairName = `__repair-${index}`;
+        return [
+          { name: repairName, run: repairImplementation },
+          {
+            name: `__verify-${index}`,
+            run: (current) => verifyImplementation(current, undefined, entry.config, repairName),
+          },
+        ];
+      }
+      case "plugin":
+        return [
+          {
+            name: entry.step.name,
+            run: async (current) => {
+              let result: TaskStepResult | void;
+              try {
+                result = await entry.step.run(current);
+              } catch (error) {
+                if (!(error instanceof Error && error.name === "StepExecutionError")) {
+                  current.failedPlugin = true;
+                }
+                throw error;
+              }
+              if (result?.kind === "warn") current.warnings.push(result.reason);
+              return result;
+            },
+          },
+        ];
+    }
+  });
 }
 
 /** Run the existing commit, review, and publish flow as separate steps. */
@@ -387,21 +430,30 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   const state: DeliveryState = {
     context: ctx,
     helpers: createGitHelpers(ctx),
+    taskKey: ctx.taskKey,
+    taskSummary: ctx.taskSummary,
+    taskContent: ctx.taskContent,
+    workingDir: process.cwd(),
+    outputDir: ctx.taskKey
+      ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
+      : dirname(ctx.taskFile),
+    prTargetBranch: ctx.prTargetBranch,
+    warnings: [],
     output: ctx.stdoutOutput,
     committed: false,
     planRetry: false,
     autoReviewRan: false,
   };
-  runTaskSteps(deliverySteps(Boolean(ctx.verify)), state)
+  runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
-      if (result.kind === "halted" && ["repair", "verify"].includes(result.step)) {
-        await reportVerificationHalt(state, result.reason);
+      if (result.kind === "halted" && !["commit", "auto-review", "publish"].includes(result.step)) {
+        await reportPipelineHalt(state, result.reason);
       }
       ctx.resolve();
     })
     .catch((error: unknown) => {
-      if (error instanceof UsageLimitError) {
-        ctx.reject(error);
+      if (error instanceof UsageLimitError || state.failedPlugin || state.committed) {
+        ctx.reject(error instanceof Error ? error : new Error(String(error)));
         return;
       }
       console.log(`⚠️  Failed to commit changes: ${(error as Error).message}`);

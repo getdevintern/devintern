@@ -16,9 +16,12 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
 import type { AgentHarness } from "@devintern/agent-harness";
 import type { ReviewFeedback } from "../src/types/auto-review";
+import type { PipelineConfig } from "../src/types/settings";
+import { registerStep } from "../src/lib/task/pipeline-registry";
 import { runContext } from "../src/lib/cli/context";
 
 // --- snapshot real modules before any mock.module override ---
@@ -71,6 +74,7 @@ let planPath: string | null;
 let verifyVerdicts: ReviewFeedback[];
 let verifyCalls: number;
 let deliveryEvents: string[];
+let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let postImplementationCommentMock: ReturnType<typeof mock>;
 
@@ -142,7 +146,7 @@ mock.module("../src/lib/code-host", () => ({
 
 mock.module("../src/lib/config/output-dir", () => ({ resolveOutputDir: () => outDir }));
 mock.module("../src/lib/config/project-settings", () => ({
-  loadProjectSettings: () => ({}),
+  loadProjectSettings: () => ({ pipeline: pipelineConfig }),
   getTodoStatusForProject: () => "To Do",
   getPrStatusForProject: () => "In Review",
   resolveProjectKey: () => "PROJ",
@@ -227,6 +231,7 @@ beforeEach(() => {
   verifyVerdicts = [];
   verifyCalls = 0;
   deliveryEvents = [];
+  pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   postImplementationCommentMock = mock(async () => {});
   outDir = mkdtempSync(join(tmpdir(), "run-harness-"));
@@ -420,5 +425,61 @@ describe("runAgentHarness git delivery", () => {
     expect(verifyCalls).toBe(2);
     expect(deliveryEvents).toEqual(["commit", "verify", "commit", "verify", "push"]);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("runs configured plugin and multiple verifiers before publishing", async () => {
+    scenario.stdout = "done";
+    const name = `review-plugin-${randomUUID()}`;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async () => {
+          deliveryEvents.push("plugin");
+        },
+      }),
+    });
+    pipelineConfig = {
+      steps: [
+        { use: "implement" },
+        { use: "commit" },
+        { use: "verify", onFail: "halt" },
+        { use: name },
+        { use: "verify", onFail: "halt" },
+        { use: "finalize" },
+      ],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(deliveryEvents).toEqual(["commit", "verify", "plugin", "verify", "push"]);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("rejects invalid pipeline settings before launching the agent", async () => {
+    pipelineConfig = { steps: [{ use: "implement" }, { use: "verify" }] };
+
+    await expect(runAgentHarness(baseInput())).rejects.toThrow("follow commit");
+    expect(commitCalls).toBe(0);
+  });
+
+  test("propagates an unexpected plugin failure before commit", async () => {
+    scenario.stdout = "done";
+    const name = `failing-plugin-${randomUUID()}`;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async () => {
+          throw new Error("Plugin failed unexpectedly");
+        },
+      }),
+    });
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: name }, { use: "commit" }, { use: "finalize" }],
+    };
+
+    await expect(runAgentHarness(baseInput())).rejects.toThrow("Plugin failed unexpectedly");
+    expect(commitCalls).toBe(0);
   });
 });
