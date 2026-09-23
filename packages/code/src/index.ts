@@ -1,34 +1,16 @@
 #!/usr/bin/env node
 
 import { Option, program } from "commander";
-import { config } from "dotenv";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import {
-  createDefaultSupabaseAuthConfig,
-  getAuthenticatedUser,
-  login,
-  logout,
-  resolveLogin,
-} from "@devintern/auth";
-import { checkLicense, LicenseCheckError, requireLicense } from "@devintern/license-check";
-import type { LicenseCheckResult } from "@devintern/license-check";
+import { checkLicense } from "@devintern/license-check";
 import {
   buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
   findMaxTurnsReachedLine,
   detectOpenQuestions,
-  detectSandboxProviders,
   detectUsageLimit,
   isConstrainedMode,
   resolveHarness,
@@ -39,27 +21,16 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, ResolvedHarness } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport, getSandbox, setSandboxOverride } from "./lib/agent/sandbox";
+import { getSandbox, setSandboxOverride } from "./lib/agent/sandbox";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import {
-  captureError,
-  findEnvFile,
-  flushErrorTracking,
-  maybeOfferCliUpdate,
-  resolveConfigDir,
-} from "@devintern/utils";
+import { captureError, flushErrorTracking } from "@devintern/utils";
 import {
   flushAnalytics,
   isAnonymousIdNewlyCreated,
   RUN_ORIGIN_ENV,
   track,
-  trackDoctorRun,
   trackInteractiveTaskRun,
-  trackLoginResult,
-  trackSetupCompleted,
-  trackSetupStarted,
-  trackWorkerConnect,
   trackWorkerTaskRun,
 } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
@@ -74,8 +45,6 @@ import { TaskFormatter } from "./lib/task/formatter";
 import type { RetryPromptContext } from "./lib/task/formatter";
 import { resolveOutputDir } from "./lib/config/output-dir";
 import { GitHubAppAuth } from "./lib/code-host/github/app-auth";
-import { scaffoldProject } from "./lib/init/scaffold";
-import { isInteractive, runInitWizard } from "./lib/init/wizard";
 import { ensureTrackerEnvConfigured } from "./lib/init/first-run";
 import { TaskTrackerManager } from "./lib/trackers/manager";
 import type { TaskTrackerClient } from "./lib/trackers/client";
@@ -109,7 +78,6 @@ import { shouldSkipRetry } from "./lib/state/retry-gate";
 import { formatAgentInputNeededMarkdown } from "./lib/trackers/shared/markdown-comment-formatter";
 import { reportTaskFailure } from "./lib/task/failure-feedback";
 import {
-  exitIfWorkerUsageLimit,
   isWorkerChild,
   USAGE_LIMIT_EXIT_CODE,
   writeUsageLimitHint,
@@ -121,29 +89,29 @@ import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./lib/agen
 import { runAutoReviewLoop } from "./lib/review/auto-review-loop";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "./types/settings";
-
-// Version is injected at build time via --define flag, or read from package.json in dev
-declare const __VERSION__: string;
-const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
-
-/**
- * Check npm for a newer global `@getdevintern/code` and offer/apply an update.
- * Non-interactive sessions skip install by default (see `@devintern/utils`).
- */
-async function checkForCliUpdate(): Promise<void> {
-  await maybeOfferCliUpdate({
-    packageName: "@getdevintern/code",
-    binName: "devintern",
-    currentVersion: VERSION,
-    isInteractive: isInteractive(process.argv, process.stdin) && !isAutomatedEnvironment(),
-    noUpdateEnv: "DEVINTERN_NO_UPDATE",
-    autoUpdateEnv: "DEVINTERN_AUTO_UPDATE",
-  });
-}
+import {
+  VERSION,
+  checkForCliUpdate,
+  enforceLicenseOrExit,
+  flushAnalyticsAndExit,
+  getLoadedEnvPath,
+  loadEnvironment,
+  loadSupabaseConfig,
+  migrateLegacyConfigDir,
+  setEnvironmentEntryDir,
+} from "./lib/cli/bootstrap";
+import { runInitCommand } from "./lib/init/cli";
+import { runWorkerCli } from "./lib/worker/cli";
+import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
+import { runWebhookCommand } from "./lib/code-host/cli";
+import { runAddressReviewCommand, runResolveConflictsCommand } from "./lib/review/cli";
+import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
+import { runSandboxCommand } from "./lib/agent/cli";
 
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
 const __filename_resolved = fileURLToPath(import.meta.url);
 const __dirname_resolved = dirname(__filename_resolved);
+setEnvironmentEntryDir(__dirname_resolved);
 
 const KNOWN_SANDBOX_PROVIDERS = new Set([
   "none",
@@ -199,27 +167,6 @@ async function finishTaskRun(
   }
 }
 
-/**
- * Rename legacy `.claude-intern` project config to `.devintern-code` once.
- */
-function migrateLegacyConfigDir(): void {
-  const cwd = process.cwd();
-  const newDir = resolve(cwd, ".devintern-code");
-  const oldDir = resolve(cwd, ".claude-intern");
-
-  if (existsSync(newDir)) return;
-  if (existsSync(oldDir)) {
-    try {
-      renameSync(oldDir, newDir);
-      console.log(`ℹ️  Migrated legacy config directory: .claude-intern → .devintern-code`);
-    } catch (error) {
-      console.warn(
-        `⚠️  Failed to migrate legacy config directory .claude-intern: ${error instanceof Error ? error.message : error}`,
-      );
-    }
-  }
-}
-
 interface ProgramOptions {
   claudePath: string;
   agentPath: string;
@@ -265,56 +212,6 @@ interface EstimationResult {
   risks: string[];
   unclearAreas: string[];
   summary: string;
-}
-
-/**
- * Scaffold `.devintern-code/` with env template, settings, and gitignore
- * entries (non-interactive fallback for `init --yes` / piped stdin).
- */
-async function initializeProject(): Promise<void> {
-  const configDir = resolve(process.cwd(), ".devintern-code");
-  const envFile = join(configDir, ".env");
-  const settingsFile = join(configDir, "settings.json");
-
-  console.log("🚀 Initializing @devintern/code for this project...");
-
-  if (!scaffoldProject()) {
-    return;
-  }
-  // Non-interactive setup still counts toward the activation funnel; the
-  // wizard records its own started/completed pair when prompts are available.
-  trackSetupStarted("init");
-
-  // Surface installed sandbox providers so users know isolation is available.
-  try {
-    const detections = await detectSandboxProviders();
-    const available = detections.filter((d) => d.detection.available);
-    if (available.length > 0) {
-      const names = available
-        .map((d) => `${d.provider.name}${d.detection.version ? ` (${d.detection.version})` : ""}`)
-        .join(", ");
-      console.log(`\n🔒 Sandbox providers detected: ${names}`);
-      console.log("   Set AGENT_SANDBOX=auto in .devintern-code/.env to run agents isolated.");
-    } else {
-      console.log("\n🔓 No sandbox provider detected — agents will run unsandboxed.");
-      console.log("   Run 'devintern sandbox' for install options.");
-    }
-  } catch {
-    // Detection is best-effort; init must not fail because of it.
-  }
-
-  console.log("\n🎉 Project initialized successfully!");
-  console.log("\n📝 Next steps:");
-  console.log(`   1. Edit ${envFile}`);
-  console.log("      - Add your task tracker credentials (Jira, Linear, etc.)");
-  console.log(`   2. Edit ${settingsFile} (optional)`);
-  console.log("      - Configure per-project status transitions for your tracker");
-  console.log(
-    "      - The file includes examples for Jira, Linear, Trello, GitHub, Azure DevOps, and Asana",
-  );
-  console.log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
-
-  trackSetupCompleted({ signedIn: "skipped" });
 }
 
 /**
@@ -476,155 +373,6 @@ function getStoryPointsFieldForProject(
   return resolveProjectConfig(projectKey, settings)?.storyPointsField;
 }
 
-let loadedEnvPath: string | null = null;
-
-/**
- * Load environment variables from standard locations or a custom file.
- *
- * Searches upward from the current working directory for the nearest
- * `.devintern-code/.env`, then plain `.env`. Falls back to home directory
- * and package directory if no project config is found.
- *
- * @param envFile - Optional explicit `.env` path (exits on missing file)
- * @returns Path to the loaded .env file, or `null` if none was found
- */
-function loadEnvironment(envFile?: string): string | null {
-  const loaded = loadEnvironmentInner(envFile);
-  // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
-  // loading has had its chance to populate it.
-  initSentryOnce(`code@${VERSION}`);
-  return loaded;
-}
-
-function loadEnvironmentInner(envFile?: string): string | null {
-  // If user specified a custom env file, use that first
-  if (envFile) {
-    const customEnvPath = resolve(envFile);
-    if (existsSync(customEnvPath)) {
-      config({ path: customEnvPath });
-      console.log(`📁 Loaded environment from custom file: ${customEnvPath}`);
-      return customEnvPath;
-    }
-    console.error(`❌ Specified .env file not found: ${customEnvPath}`);
-    process.exit(1);
-  }
-
-  // Otherwise, search upward from cwd for the nearest .env file
-  const envPath = findEnvFile({ configDirName: ".devintern-code" });
-
-  if (envPath) {
-    config({ path: envPath });
-    return envPath;
-  }
-
-  // Final fallback: home directory and package directory
-  const fallbackPaths = [
-    resolve(process.env.HOME || "~", ".env"),
-    resolve(__dirname_resolved, "..", ".env"),
-  ];
-
-  for (const fallbackPath of fallbackPaths) {
-    if (existsSync(fallbackPath)) {
-      config({ path: fallbackPath });
-      return fallbackPath;
-    }
-  }
-
-  return null;
-}
-
-/** Build Supabase auth config pointing at the project session file. */
-function loadSupabaseConfig() {
-  const configDir = resolveConfigDir({ configDirName: ".devintern-code" });
-  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
-}
-
-/**
- * Enforce a license result inside the CLI. `requireLicense` throws a
- * `LicenseCheckError` on failure (library code must never kill the host
- * process); the CLI converts that into its standard failed-check exit code 1
- * after the failure details were already printed to stderr. The exit flushes
- * pending analytics so events captured earlier in the run (e.g. `cli_run`)
- * are not dropped.
- */
-async function enforceLicenseOrExit(result: LicenseCheckResult): Promise<void> {
-  try {
-    requireLicense(result);
-  } catch (error) {
-    if (error instanceof LicenseCheckError) await flushAnalyticsAndExit(1);
-    throw error;
-  }
-}
-
-function printWebhookHelp(): void {
-  console.log("Usage: devintern webhook <command>");
-  console.log("");
-  console.log("Run advanced direct-webhook services. Relay is recommended for normal workers.");
-  console.log("");
-  console.log("Commands:");
-  console.log("  serve               Start the repo-local GitHub/GitLab webhook server");
-  console.log("");
-  console.log("Run 'devintern webhook serve --help' for command-specific options.");
-}
-
-function printWebhookServeHelp(): void {
-  console.log("Usage: devintern webhook serve [options]");
-  console.log("");
-  console.log("Start the repo-local webhook server for GitHub PR and GitLab MR events.");
-  console.log("");
-  console.log("Options:");
-  console.log("  --port <port>  Port to listen on (default: 3000, or WEBHOOK_PORT env var)");
-  console.log("  --host <host>  Host to bind to (default: 0.0.0.0, or WEBHOOK_HOST env var)");
-  console.log("  -h, --help     Display this help message");
-  console.log("");
-  console.log("Environment variables:");
-  console.log("  WEBHOOK_SECRET      (required) Secret for verifying GitHub webhook signatures");
-  console.log("  GITLAB_WEBHOOK_SECRET  Secret token for GitLab project webhooks");
-  console.log("  GITLAB_WEBHOOK_SIGNING_TOKEN  Standard Webhooks signing token (GitLab 19+)");
-  console.log("  At least one provider webhook secret is required.");
-  console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
-  console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
-  console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");
-  console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
-  console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
-}
-
-async function runWebhookServeCommand(args: string[]): Promise<void> {
-  let portOverride: number | undefined;
-  let hostOverride: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--port" && args[i + 1]) {
-      portOverride = parseInt(args[i + 1], 10);
-      i++;
-    } else if (args[i] === "--host" && args[i + 1]) {
-      hostOverride = args[i + 1];
-      i++;
-    } else if (args[i] === "--help" || args[i] === "-h") {
-      printWebhookServeHelp();
-      return;
-    } else {
-      console.error(`❌ Unknown webhook serve option: ${args[i]}`);
-      console.error("   Run 'devintern webhook serve --help' for usage.");
-      process.exitCode = 1;
-      return;
-    }
-  }
-
-  loadedEnvPath = loadEnvironment();
-  const port = portOverride ?? parseInt(process.env.WEBHOOK_PORT || "3000", 10);
-  const host = hostOverride ?? (process.env.WEBHOOK_HOST || "0.0.0.0");
-  const licenseResult = await checkLicense({
-    productKey: "devintern/code",
-    supabaseConfig: loadSupabaseConfig(),
-    requireAutomation: true,
-  });
-  await enforceLicenseOrExit(licenseResult);
-
-  const { startWebhookServer } = await import("./webhook-server");
-  await startWebhookServer({ port, host });
-}
-
 // Sentry error tracking — uses the baked-in DevIntern DSN unless SENTRY_DISABLED=1.
 // Shared entry-point init (worker/webhook standalone reuse this too); call sites
 // pass the release so standalone entries stay attributed to the CLI version.
@@ -639,628 +387,36 @@ await checkForCliUpdate();
 // Check if running subcommands before parsing
 // This needs to happen early to avoid Commander treating them as task keys
 if (process.argv[2] === "init") {
-  (async () => {
-    if (isInteractive(process.argv, process.stdin)) {
-      if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
-        const { runInitUpgrade } = await import("./lib/init/wizard");
-        await runInitUpgrade();
-      } else {
-        await runInitWizard();
-      }
-    } else {
-      await initializeProject();
-    }
-    await flushAnalytics();
-    process.exit(0);
-  })();
+  await runInitCommand();
 } else if (process.argv[2] === "worker") {
   // Handle worker command - long-running workspace daemon.
-  // oxlint-disable-next-line complexity -- worker subcommand dispatcher spans connect/monitor/daemon branches; remedy: move each subcommand into its own `runWorker<Name>Command()` module.
-  (async () => {
-    // `devintern worker connect ...` — configure relay-backed integrations or
-    // a directly polled Sentry error monitor.
-    if (process.argv[3] === "connect") {
-      const { runWorkerConnectCommand, parseConnectArgs, WORKER_CONNECT_TARGETS } =
-        await import("./lib/init/worker-connect");
-      const connectArgs = process.argv.slice(4);
-      // Parse once and hand the result to the command, so attribution and
-      // execution cannot drift. Arg errors (`--team` with no value) and
-      // unknown targets stay out of analytics: the command reports them, and
-      // tracking only allowlisted targets keeps the funnel low-cardinality.
-      const parsed = parseConnectArgs(connectArgs);
-      const shouldTrack =
-        !parsed.error &&
-        !parsed.help &&
-        parsed.target !== "status" &&
-        WORKER_CONNECT_TARGETS.has(parsed.target);
-      const exitCode = await runWorkerConnectCommand(connectArgs, { parsed });
-      if (shouldTrack) {
-        await trackWorkerConnect({
-          target: parsed.target,
-          outcome: exitCode === 0 ? "succeeded" : "failed",
-        });
-      }
-      await flushAnalytics();
-      process.exit(exitCode);
-    }
-
-    if (process.argv[3] === "scaffold") {
-      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
-        console.log("Usage: devintern worker scaffold");
-        console.log("");
-        console.log("Create ~/.devintern/workspace.toml and the shared .env without the wizard.");
-        process.exit(0);
-      }
-      const { runWorkerScaffold } = await import("./lib/workspace/init");
-      process.exit(runWorkerScaffold());
-    }
-
-    if (process.argv[3] === "add-repo") {
-      if (process.argv.slice(4).some((arg) => arg === "--help" || arg === "-h")) {
-        console.log("Usage: devintern worker add-repo");
-        console.log("");
-        console.log("Add the current Git repository to the worker workspace.");
-        process.exit(0);
-      }
-      const { runWorkerAddRepo } = await import("./lib/workspace/init");
-      process.exit(await runWorkerAddRepo(process.cwd()));
-    }
-
-    // `devintern worker run-now` — ask a running workspace worker for one
-    // immediate drain, bypassing working windows without editing them.
-    if (process.argv[3] === "run-now") {
-      const args = process.argv.slice(4);
-      let workspacePath: string | undefined;
-      for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        if (arg === "--workspace" && args[i + 1] && !args[i + 1]?.startsWith("-")) {
-          workspacePath = args[i + 1];
-          i++;
-        } else if (arg === "--help" || arg === "-h") {
-          console.log("Usage: devintern worker run-now [--workspace <path>]");
-          console.log("");
-          console.log("Ask the running workspace worker to drain ready tasks now,");
-          console.log("ignoring working windows (quiet hours) for this one pass.");
-          console.log("The worker picks up the request on its next poll interval");
-          console.log("(default 60s) and deletes the marker once served.");
-          process.exit(0);
-        }
-      }
-      const { resolveWorkspaceDir, workspaceConfigPath, workspaceRunNowPath } =
-        await import("./lib/workspace/paths");
-      const selectedDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
-      if (!existsSync(workspaceConfigPath(selectedDir))) {
-        console.error(`❌ No workspace.toml at ${workspaceConfigPath(selectedDir)}.`);
-        process.exit(1);
-      }
-      writeFileSync(workspaceRunNowPath(selectedDir), "");
-      console.log(`✅ Run-now requested for ${workspaceConfigPath(selectedDir)}`);
-      console.log(`   Marker: ${workspaceRunNowPath(selectedDir)}`);
-      console.log("   The worker drains within one poll interval and removes the marker.");
-      process.exit(0);
-    }
-
-    const args = process.argv.slice(3);
-
-    if (args[0] === "init") {
-      if (args.some((arg) => arg === "--help" || arg === "-h")) {
-        console.log("Usage: devintern worker init [--no-service]");
-        console.log("");
-        console.log("Interactively configure unattended automation and a native user service.");
-        console.log("");
-        console.log("Options:");
-        console.log(
-          "  --no-service  Skip the install-and-launch offer for the systemd/launchd service",
-        );
-        process.exit(0);
-      }
-      loadedEnvPath = loadEnvironment();
-      const { runWorkerInit } = await import("./lib/init/worker-init");
-      const { isInteractive } = await import("./lib/init/wizard");
-      if (!isInteractive(args, process.stdin)) {
-        console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-        console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
-        console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
-        process.exit(1);
-      }
-      const trackerManager = new TaskTrackerManager();
-      const result = await runWorkerInit({
-        noService: args.some((arg) => arg === "--no-service"),
-        dryRunQuery: async (query) => {
-          const result = await trackerManager.getClient().searchTasks(query);
-          return result.tasks.length;
-        },
-        checkAutomationLicense: async () => {
-          const license = await checkLicense({
-            productKey: "devintern/code",
-            supabaseConfig: loadSupabaseConfig(),
-            requireAutomation: true,
-          });
-          return license.valid ? null : license.message;
-        },
-      });
-      await flushAnalytics();
-      process.exit(result.ok ? 0 : 1);
-    }
-
-    let verbose = false;
-    let workspacePath: string | undefined;
-
-    const removedWorkerFlags: Record<string, string> = {
-      "--listen": "Use the workspace worker or `devintern webhook serve`.",
-      "--no-workspace": "Use the workspace worker or `devintern webhook serve`.",
-      "--port": "Use the workspace worker or `devintern webhook serve`.",
-      "--host": "Use the workspace worker or `devintern webhook serve`.",
-      "--query": "Set [defaults].task_query in workspace.toml.",
-      "--interval": "Set [defaults].poll_interval in workspace.toml.",
-      "--ui": "The dashboard is on by default. Set [workspace].dashboard = false to disable it.",
-      "--no-ui": "Set [workspace].dashboard = false in workspace.toml.",
-      "--ui-port": "Set [workspace].dashboard_port in workspace.toml.",
-      "--sandbox": "Set AGENT_SANDBOX in the workspace .env.",
-    };
-
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === undefined) {
-        continue;
-      }
-      const removed = removedWorkerFlags[arg];
-      if (removed) {
-        console.error(`❌ ${arg} has been removed from devintern worker.`);
-        console.error(`   ${removed}`);
-        process.exit(1);
-      }
-      if (arg === "--workspace") {
-        if (!args[i + 1] || args[i + 1].startsWith("-")) {
-          console.error("❌ --workspace requires a path to workspace.toml.");
-          process.exit(1);
-        }
-        workspacePath = args[i + 1];
-        i++;
-      } else if (arg === "-v" || arg === "--verbose") {
-        verbose = true;
-      } else if (arg === "--help" || arg === "-h") {
-        console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
-        console.log("       devintern worker connect [target] [--workspace <path>]");
-        console.log("");
-        console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
-        console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
-        console.log("`worker connect` configures relay integrations and Sentry auto-fixes;");
-        console.log("see `devintern worker connect --help` for targets and options.");
-        console.log("");
-        console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
-        console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
-        console.log("");
-        console.log("Subcommands:");
-        console.log(
-          "  init                Guided unattended setup: tracker, workspace, ready-tasks",
-        );
-        console.log(
-          "                      query, operating policy, optional Sentry, and license check",
-        );
-        console.log("  scaffold            Create workspace.toml and the shared .env only");
-        console.log("  add-repo            Add the current repository to the worker workspace");
-        console.log("  connect             Configure relay integrations or Sentry auto-fixes");
-        console.log("  run-now             One immediate drain, ignoring working windows");
-        console.log("");
-        console.log("Options:");
-        console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
-        console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
-        console.log("  -v, --verbose       Verbose logging");
-        console.log("  -h, --help          Display this help message");
-        process.exit(0);
-      } else if (!arg.startsWith("-")) {
-        console.error(`❌ Unknown worker command: ${arg}`);
-        console.error("   Run `devintern worker --help` for available commands.");
-        process.exit(1);
-      }
-    }
-
-    loadedEnvPath = loadEnvironment();
-
-    const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
-      await import("./lib/workspace/paths");
-    const workspaceMode = Boolean(workspacePath) || hasWorkspace();
-    if (!workspaceMode) {
-      console.error("❌ No workspace configured. Run `devintern worker init` first.");
-      process.exit(1);
-    }
-
-    // Workspace credentials must be available before the license gate. This
-    // matters for native services, whose working directory is the workspace
-    // home rather than a source checkout.
-    const { parseEnvFile } = await import("./lib/workspace/env");
-    const selectedWorkspaceDir = workspacePath
-      ? dirname(resolve(workspacePath))
-      : resolveWorkspaceDir();
-    for (const [key, value] of Object.entries(
-      parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)),
-    )) {
-      if (process.env[key] === undefined) process.env[key] = value;
-    }
-
-    // License check — the worker is unattended automation, so it always
-    // requires an automation entitlement.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    await enforceLicenseOrExit(licenseResult);
-
-    const { runWorkspaceWorker } = await import("./lib/workspace/workspace-worker");
-    await runWorkspaceWorker({
-      workspacePath,
-      verbose,
-      cliVersion: VERSION,
-    });
-    return;
-  })();
+  await runWorkerCli(process.argv.slice(3));
 } else if (process.argv[2] === "workspace") {
   console.error("❌ Unknown command: workspace");
   console.error("   Workspace setup and management live under `devintern worker`.");
   console.error("   Run `devintern worker --help` for available commands.");
   process.exit(1);
 } else if (process.argv[2] === "dashboard") {
-  // Local observability dashboard, standalone: reads the worker's SQLite
-  // read-only, so it works whether or not the worker is running.
-  (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    const args = process.argv.slice(3);
-    let port: number | undefined;
-    let host: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--port" && args[i + 1]) {
-        port = parseInt(args[i + 1], 10);
-        i++;
-      } else if (args[i] === "--host" && args[i + 1]) {
-        host = args[i + 1];
-        i++;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern dashboard [options]");
-        console.log("");
-        console.log("Serve the local observability dashboard: run history, per-run stage");
-        console.log("timelines, and aggregate stats, read from the worker's local database.");
-        console.log("Works with the worker running or stopped; data never leaves this machine.");
-        console.log("");
-        console.log("Options:");
-        console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
-        console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
-        console.log("                 accepted: 127.0.0.1, localhost, ::1)");
-        console.log("  -h, --help     Display this help message");
-        process.exit(0);
-      }
-    }
-
-    // Same entitlement as the worker: the dashboard is part of the
-    // automation tier.
-    const supabaseConfig = loadSupabaseConfig();
-    const licenseResult = await checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig,
-      requireAutomation: true,
-    });
-    await enforceLicenseOrExit(licenseResult);
-
-    const { startDashboardServer } = await import("./dashboard-server");
-    const server = startDashboardServer({ port, host });
-
-    const shutdown = (): void => {
-      console.log("\n👋 Dashboard stopped");
-      server.stop();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-  })();
+  await runDashboardCommand(process.argv.slice(3));
 } else if (process.argv[2] === "webhook") {
-  (async () => {
-    const command = process.argv[3];
-    if (!command || command === "--help" || command === "-h") {
-      printWebhookHelp();
-      return;
-    }
-    if (command !== "serve") {
-      console.error(`❌ Unknown webhook command: ${command}`);
-      console.error("   Run 'devintern webhook --help' for usage.");
-      process.exitCode = 1;
-      return;
-    }
-    await runWebhookServeCommand(process.argv.slice(4));
-  })();
+  await runWebhookCommand(process.argv.slice(3));
 } else if (process.argv[2] === "address-review") {
-  // Handle address-review command - manually address PR review feedback
-  (async () => {
-    // Load environment
-    loadedEnvPath = loadEnvironment();
-
-    // Parse address-review options
-    const args = process.argv.slice(3);
-    let prUrl: string | undefined;
-    let noPush = false;
-    let noReply = false;
-    let verbose = false;
-    let ciFeedbackPath: string | undefined;
-    let expectedHeadSha: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--no-push") {
-        noPush = true;
-      } else if (args[i] === "--no-reply") {
-        noReply = true;
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
-        verbose = true;
-      } else if (args[i] === "--ci-feedback") {
-        const feedbackPath = args[i + 1];
-        if (!feedbackPath || feedbackPath.startsWith("-")) {
-          console.error("Error: --ci-feedback requires a file path");
-          process.exitCode = 1;
-          return;
-        }
-        ciFeedbackPath = feedbackPath;
-        i++;
-      } else if (args[i] === "--expected-head") {
-        const sha = args[i + 1];
-        if (!sha || sha.startsWith("-")) {
-          console.error("Error: --expected-head requires a commit SHA");
-          process.exitCode = 1;
-          return;
-        }
-        expectedHeadSha = sha;
-        i++;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern address-review <pr-url> [options]");
-        console.log("");
-        console.log("Manually address pull-request or merge-request feedback using Agent");
-        console.log("");
-        console.log("Arguments:");
-        console.log("  pr-url         GitHub PR or GitLab MR URL");
-        console.log("");
-        console.log("Options:");
-        console.log("  --no-push      Don't push changes after fixing");
-        console.log("  --no-reply     Don't post a reply comment on the PR");
-        console.log("  -v, --verbose  Enable verbose logging");
-        console.log("  -h, --help     Display this help message");
-        console.log("");
-        console.log("Examples:");
-        console.log("  devintern address-review https://github.com/owner/repo/pull/123");
-        console.log(
-          "  devintern address-review https://gitlab.com/group/project/-/merge_requests/123",
-        );
-        console.log("  devintern address-review https://github.com/owner/repo/pull/123 --no-push");
-        process.exit(0);
-      } else if (!args[i].startsWith("-")) {
-        prUrl = args[i];
-      }
-    }
-
-    if (!prUrl) {
-      console.error("❌ Error: PR URL is required");
-      console.error("");
-      console.error("Usage: devintern address-review <pr-url>");
-      console.error("Run 'devintern address-review --help' for more information.");
-      process.exit(1);
-    }
-
-    // Import and run address-review
-    const { addressReview } = await import("./lib/review/address");
-    try {
-      await addressReview(prUrl, {
-        noPush,
-        noReply,
-        verbose,
-        ciFeedbackPath,
-        expectedHeadSha,
-      });
-    } catch (error) {
-      if (exitIfWorkerUsageLimit(error)) {
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      // Close any run record addressReview opened before it failed (no-op
-      // when none is active — addressReview also ends runs it completes).
-      endRun("failed", message);
-      captureError(error, { command: "address-review", prUrl });
-      console.error(`❌ Error: ${message}`);
-      // This is a handled exception, so the process-level fatal handlers do
-      // not run. Flush explicitly before the subprocess reports failure.
-      await flushErrorTracking();
-      process.exit(1);
-    }
-  })();
+  await runAddressReviewCommand(process.argv.slice(3));
 } else if (process.argv[2] === "resolve-conflicts") {
-  // Catch a PR branch up with its base, resolving merge conflicts with the
-  // agent when needed. Also invoked by the worker for its own PRs.
-  (async () => {
-    loadedEnvPath = loadEnvironment();
-
-    const args = process.argv.slice(3);
-    let prUrl: string | undefined;
-    let noPush = false;
-    let verbose = false;
-    let expectedHeadSha: string | undefined;
-    let expectedBaseSha: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--no-push") {
-        noPush = true;
-      } else if (args[i] === "--expected-head") {
-        expectedHeadSha = args[++i];
-      } else if (args[i] === "--expected-base") {
-        expectedBaseSha = args[++i];
-      } else if (args[i] === "-v" || args[i] === "--verbose") {
-        verbose = true;
-      } else if (args[i] === "--help" || args[i] === "-h") {
-        console.log("Usage: devintern resolve-conflicts <pr-url> [options]");
-        console.log("");
-        console.log("Merge the PR's base branch into its branch, resolving merge");
-        console.log("conflicts with the agent when needed, then push (never forced).");
-        console.log("");
-        console.log("Arguments:");
-        console.log("  pr-url         GitHub PR or GitLab MR URL");
-        console.log("");
-        console.log("Options:");
-        console.log("  --no-push      Resolve and commit locally but don't push");
-        console.log("  -v, --verbose  Enable verbose logging");
-        console.log("  -h, --help     Display this help message");
-        process.exit(0);
-      } else if (!args[i].startsWith("-")) {
-        prUrl = args[i];
-      }
-    }
-
-    if (!prUrl) {
-      console.error("❌ Error: PR URL is required");
-      console.error("");
-      console.error("Usage: devintern resolve-conflicts <pr-url>");
-      process.exit(1);
-    }
-
-    const { resolveConflictsOnPr } = await import("./lib/review/conflict-resolver");
-    try {
-      const result = await resolveConflictsOnPr(prUrl, {
-        noPush,
-        verbose,
-        expectedHeadSha,
-        expectedBaseSha,
-      });
-      const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
-      if (Number.isInteger(resultFd) && resultFd >= 3) {
-        const { writeSync } = await import("fs");
-        writeSync(resultFd, `${JSON.stringify(result)}\n`);
-      }
-      if (result.outcome === "skipped") {
-        console.log(`⏭️  Skipped: ${result.message}`);
-      } else if (result.outcome === "failed") {
-        // A landed-but-unconfirmed failure means the merge commit IS on the
-        // PR branch even though verification failed; only the other failure
-        // kinds leave the PR untouched.
-        const untouchedHint =
-          result.failureKind === "landed-but-unconfirmed"
-            ? "The merge commit is on the branch; see the PR for details."
-            : "No changes landed on the PR; see the PR comment for details.";
-        console.error(`❌ Failed: ${result.message}. ${untouchedHint}`);
-      } else if (result.outcome === "deferred") {
-        console.log(`⏳ Deferred: ${result.message}`);
-      }
-      process.exitCode = result.outcome === "failed" ? 1 : result.outcome === "deferred" ? 2 : 0;
-    } catch (error) {
-      if (exitIfWorkerUsageLimit(error)) {
-        return;
-      }
-      console.error(`❌ Error: ${(error as Error).message}`);
-      // Thrown (unexpected) resolution errors are user actions that failed —
-      // reported like address-review; `failed`/`deferred` outcomes above are
-      // expected results and stay unreported.
-      captureError(error, { command: "resolve-conflicts", prUrl });
-      await flushErrorTracking();
-      process.exitCode = 1;
-    }
-  })();
+  await runResolveConflictsCommand(process.argv.slice(3));
 } else if (process.argv[2] === "login") {
-  (async () => {
-    try {
-      const supabaseConfig = loadSupabaseConfig();
-      const resolved = await resolveLogin(process.argv);
-      const user = await login(supabaseConfig, resolved);
-      console.log(`✅ Signed in as ${user.email || user.id}`);
-      await trackLoginResult({ outcome: "succeeded", method: resolved.method });
-      await flushAnalytics();
-      process.exit(0);
-    } catch (error) {
-      console.error(`❌ ${(error as Error).message}`);
-      await trackLoginResult({ outcome: "failed" });
-      await flushAnalytics();
-      process.exit(1);
-    }
-  })();
+  await runLoginCommand(process.argv);
 } else if (process.argv[2] === "logout") {
-  (async () => {
-    const supabaseConfig = loadSupabaseConfig();
-    await logout(supabaseConfig);
-    console.log("✅ Signed out");
-    process.exit(0);
-  })();
+  await runLogoutCommand();
 } else if (process.argv[2] === "sandbox") {
-  // Doctor command: providers on this machine, remaining setup steps, and
-  // what the next run will do with the current configuration.
-  (async () => {
-    loadedEnvPath = loadEnvironment();
-    const detections = await detectSandboxProviders();
-    const configured = process.env.AGENT_SANDBOX || "none";
-    // Attribute the value to the .env file only when that file actually sets
-    // it; dotenv merges into process.env, so the two are indistinguishable
-    // after loading.
-    const envFileSetsIt = (() => {
-      try {
-        return loadedEnvPath
-          ? /^\s*AGENT_SANDBOX\s*=/m.test(readFileSync(loadedEnvPath, "utf-8"))
-          : false;
-      } catch {
-        return false;
-      }
-    })();
-    const configuredSource = process.env.AGENT_SANDBOX
-      ? envFileSetsIt
-        ? (loadedEnvPath as string)
-        : "environment"
-      : "default";
-    const harnessName = resolveHarness().harness.name;
-    const report = buildSandboxDoctorReport(detections, configured, configuredSource, harnessName);
-    console.log(report.lines.join("\n"));
-    // Non-zero exit when the configured provider guarantees a failed run, so
-    // scripts and CI can gate on 'devintern sandbox'.
-    process.exit(report.nextRunFails ? 1 : 0);
-  })();
+  await runSandboxCommand();
 } else if (process.argv[2] === "doctor") {
-  // Readiness doctor: everything needed for a first successful run, with a
-  // fix hint per failing row. Exit 1 when any check fails so scripts can gate.
-  (async () => {
-    const { collectReadinessChecks, renderReadinessReport } =
-      await import("./lib/observability/readiness");
-    loadedEnvPath = loadEnvironment();
-    let supabaseConfig;
-    try {
-      supabaseConfig = loadSupabaseConfig();
-    } catch {
-      supabaseConfig = undefined;
-    }
-    const checks = await collectReadinessChecks({ envPath: loadedEnvPath, supabaseConfig });
-    console.log("🩺 devintern readiness:\n");
-    const report = renderReadinessReport(checks);
-    console.log(report.lines.join("\n"));
-    if (report.hasFailures) {
-      console.log("\n❌ Not ready — fix the failed checks above.");
-    } else if (report.hasWarnings) {
-      console.log("\n✅ Ready to run (with the warnings above).");
-    } else {
-      console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
-    }
-    await trackDoctorRun({
-      checks,
-      hasFailures: report.hasFailures,
-      hasWarnings: report.hasWarnings,
-    });
-    await flushAnalytics();
-    process.exit(report.hasFailures ? 1 : 0);
-  })();
+  await runDoctorCommand();
 } else if (process.argv[2] === "whoami") {
-  (async () => {
-    const supabaseConfig = loadSupabaseConfig();
-    const user = await getAuthenticatedUser(supabaseConfig);
-    if (!user) {
-      console.log("Not signed in. Run `devintern login`.");
-      process.exit(0);
-    }
-    console.log(`Signed in as ${user.email || user.id}`);
-    process.exit(0);
-  })();
+  await runWhoamiCommand();
 } else {
   // Load environment variables early (before CLI parsing)
-  loadedEnvPath = loadEnvironment();
+  loadEnvironment();
 }
 
 /**
@@ -1435,10 +591,11 @@ if (options.skipJiraComments && !options.skipComments) {
 
 // Reload environment variables if custom env file was specified
 if (options.envFile) {
-  loadedEnvPath = loadEnvironment(options.envFile);
+  loadEnvironment(options.envFile);
 } else if (options.verbose) {
-  if (loadedEnvPath) {
-    console.log(`📁 Loaded environment from: ${loadedEnvPath}`);
+  const envPath = getLoadedEnvPath();
+  if (envPath) {
+    console.log(`📁 Loaded environment from: ${envPath}`);
   } else {
     console.log("⚠️  No .env file found in standard locations");
     console.log("   Searched upward from current directory, then home and package directories.");
@@ -2234,15 +1391,6 @@ async function processSingleTask(taskKey: string, taskIndex = 0, totalTasks = 1)
 // Global lock manager instance
 let lockManager: LockManager | null = null;
 
-/**
- * Flush queued analytics events, then exit. `flushAnalytics` is bounded by its
- * own timeout, so a hung network call can never stall the exit.
- */
-async function flushAnalyticsAndExit(exitCode: number): Promise<never> {
-  await flushAnalytics();
-  process.exit(exitCode);
-}
-
 /** CLI entry: parse args, acquire lock, and process task key(s) or JQL results. */
 // oxlint-disable-next-line complexity, max-statements -- top-level CLI orchestrator: arg/JQL resolution, lock acquisition, batch loop, signal handling, and exit-code mapping; remedy: extract `resolveRunTargets`, `runTaskBatch`, and `installShutdownHandlers`.
 async function main(): Promise<void> {
@@ -2301,7 +1449,7 @@ async function main(): Promise<void> {
       const firstRun = await ensureTrackerEnvConfigured({
         automated: isAutomatedEnvironment(),
         reloadEnv: () => {
-          loadedEnvPath = loadEnvironment(options.envFile);
+          loadEnvironment(options.envFile);
         },
       });
       if (firstRun === "failed") {
