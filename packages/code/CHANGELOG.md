@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Worker PRs no longer include DevIntern runtime files (DEV-126)**: task, review, and automation subprocesses now resolve durable config (`.pid.lock`, `.devintern-code/.auth-session.json`, and the license cache) to `<workspace>/.devintern-code` through `DEVINTERN_CONFIG_DIR` instead of the throwaway worktree checkout. As a backstop, every prepared worktree adds `.devintern-code/` to `.git/info/exclude`, so an unexpected runtime write can never be swept into a task PR by `git add -A`. Already-committed `.devintern-code/settings.json` stays tracked and unchanged, and single-repo (non-workspace) behavior is unchanged
+
 ## [2.12.0] - 2026-09-23
 
 GitLab code-host release: merge requests can now be created, reviewed, kept current, and CI-repaired on GitLab.com or a Self-Managed instance, the worker connects every code host in one pass, scheduled automations choose per entry whether they open a PR, and the activation path reports where setup gets stuck.

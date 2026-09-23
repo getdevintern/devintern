@@ -70,6 +70,9 @@ describe("buildRepoEnv", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
     expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
+    // Durable config (`.pid.lock`, license cache, auth session) must resolve
+    // to the workspace home, never the throwaway worktree checkout.
+    expect(env.DEVINTERN_CONFIG_DIR).toBe(join(workspaceDir, ".devintern-code"));
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {

@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { chmodSync, copyFileSync, existsSync, readdirSync, statSync } from "fs";
 import { isAbsolute, join, resolve } from "path";
 import { Utils } from "./registry";
+import { ensureGitInfoExcluded } from "./git-exclude";
 
 /**
  * Point a linked review worktree's `core.hooksPath` at a private directory
@@ -166,6 +167,12 @@ export async function prepareWorktreeForAgent(
   const verbose = options?.verbose ?? false;
 
   try {
+    // Defensive: even if a run writes `.devintern-code/` into the worktree
+    // (e.g. an unforeseen state path), the local exclude keeps it out of
+    // `git add -A` and therefore out of the PR. `info/exclude` never touches
+    // an already-tracked committed `settings.json`.
+    ensureGitInfoExcluded(worktreePath, join(worktreePath, ".devintern-code"), ".devintern-code/");
+
     // Confine hook rewrites by dependency postinstalls (lefthook) to this
     // worktree, before `bun install` gets a chance to touch the shared
     // `.git/hooks`.

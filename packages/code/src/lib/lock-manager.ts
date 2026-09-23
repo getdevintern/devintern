@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { resolve, join } from "path";
 
+import { configDirOverride } from "./config/config-dir";
+
 export interface LockStatus {
   /** Whether the lock-holding process is still alive. */
   running: boolean;
@@ -35,7 +37,7 @@ export class LockManager {
     // Create lock file in .devintern-code directory
     const configDir = options.plainDir
       ? resolve(workingDir)
-      : resolve(workingDir, ".devintern-code");
+      : (configDirOverride() ?? resolve(workingDir, ".devintern-code"));
 
     // Ensure .devintern-code directory exists
     if (!existsSync(configDir)) {
@@ -140,7 +142,7 @@ export class LockManager {
   ): LockStatus | null {
     const configDir = options.plainDir
       ? resolve(workingDir)
-      : resolve(workingDir, ".devintern-code");
+      : (configDirOverride() ?? resolve(workingDir, ".devintern-code"));
     const lockFilePath = join(configDir, lockFileName);
     if (!existsSync(lockFilePath)) {
       return null;

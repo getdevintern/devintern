@@ -28,6 +28,15 @@ export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): 
   return join(workspaceDir, ".env");
 }
 
+/**
+ * Directory holding fleet-durable project config/state (task lock, auth
+ * session, license cache). Mirrors a project's `.devintern-code/` but lives in
+ * the workspace home so task subprocesses never write it into a checkout.
+ */
+export function workspaceConfigDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".devintern-code");
+}
+
 /** Path of the central workspace SQLite database. */
 export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "state", "queue.db");

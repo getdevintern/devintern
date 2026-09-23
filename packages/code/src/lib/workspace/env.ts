@@ -3,18 +3,25 @@
  *
  * A workspace has one shared `.env`; each repo can layer an `env_file` and
  * inline `[repos.env]` overrides on top. The composed environment also pins
- * `WEBHOOK_QUEUE_DB` to the central workspace database, so the task
+ * `WEBHOOK_QUEUE_DB` to the central workspace database and
+ * `DEVINTERN_CONFIG_DIR` to the workspace config directory, so the task
  * subprocess (which runs in a throwaway worktree) writes its queue state,
- * cursors, agent PRs, and run records to the shared fleet DB instead of a
- * per-worktree `.devintern-code/queue.db`.
+ * cursors, agent PRs, run records, task lock, and auth/license cache to the
+ * workspace home instead of the repository checkout.
  */
 
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
-import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
+import {
+  resolveWorkspaceDir,
+  workspaceConfigDir,
+  workspaceDbPath,
+  workspaceEnvPath,
+} from "./paths";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
+import { CONFIG_DIR_ENV } from "../config/config-dir";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
@@ -67,9 +74,9 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
- * (`WEBHOOK_QUEUE_DB`, stable analytics config directory, `GITHUB_REPO`
- * for GitHub remotes unless the repo layers already set it, and `PR_LABELS`
- * from the repo's `pr_labels` config).
+ * (`WEBHOOK_QUEUE_DB`, `DEVINTERN_CONFIG_DIR`, stable analytics config
+ * directory, `GITHUB_REPO` for GitHub remotes unless the repo layers already
+ * set it, and `PR_LABELS` from the repo's `pr_labels` config).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -93,6 +100,10 @@ export function buildRepoEnv(
 
   env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
   env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
+  // Pin the project config dir to the workspace home: the subprocess runs in a
+  // throwaway worktree, so the default resolution would drop `.pid.lock` and
+  // the license cache into the checkout and `git add -A` would commit them.
+  env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
   env[WORKSPACE_REPO_ENV] = repo.name;
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {
