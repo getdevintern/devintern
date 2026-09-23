@@ -1,5 +1,26 @@
 # @devintern/code Changelog
 
+## [2.12.0] - 2026-09-23
+
+GitLab code-host release: merge requests can now be created, reviewed, kept current, and CI-repaired on GitLab.com or a Self-Managed instance, the worker connects every code host in one pass, scheduled automations choose per entry whether they open a PR, and the activation path reports where setup gets stuck.
+
+### Added
+
+- **Experimental GitLab merge-request code host**: GitLab is now usable independently as the code host through a profile separate from the task tracker (`DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST=true`, `GITLAB_CODE_HOST_URL`, `GITLAB_CODE_HOST_TOKEN`, plus optional `GITLAB_CODE_HOST_ALIASES`, `GITLAB_CODE_HOST_CA_FILE`, `GITLAB_CODE_HOST_PROXY`, and a Maintainer/Owner-only `GITLAB_WEBHOOK_ADMIN_TOKEN` for hook setup). `--create-pr` remains the stable cross-provider flag and opens a merge request on a detected GitLab remote, reporting GitLab-native terminology. Supported: MR creation with duplicate recovery, labels, and stored provider/instance/project/IID metadata; manual `devintern address-review <mr-url>`; polling of DevIntern-created registered MRs with an optional `GITLAB_REVIEWER_ALLOWLIST`; guarded base/conflict synchronization (`auto` mode and `devintern resolve-conflicts <mr-url>`); CI repair through the existing `--ci-feedback` path when `[workspace].ci_failure_fix = true`; hosted-relay delivery with automatic project hooks; and repo-local direct project webhooks. GitLab.com, subgroups, custom ports, relative Self-Managed install paths, SSH aliases, custom CAs, and proxies are all handled, and the code-host token is never forwarded to a different host. Broad repository-wide `@mention` discovery and scheduled GitLab conflict windows remain deferred; see the GitLab integration guide for the capability matrix
+- **The worker connects every code host in one pass**: `devintern worker connect` now pairs all GitHub and GitLab repositories in `workspace.toml` (not just GitHub), `worker connect github` and the new `worker connect gitlab` target each code host, and `worker connect gitlab --disconnect` removes the remembered hooks/routes while leaving polling enabled. GitLab hooks are installed, tested, and rotated automatically with the configured token; a permission or network failure on one project keeps polling active and continues with the rest, and signing material is never persisted locally
+- **Per-automation pull-request opt-in (DEV-124)**: each `[[automations]]` entry now declares `open_pr` (boolean, default `false`). PR creation is pipeline policy rather than a prompt instruction, so an occurrence with `open_pr` off pushes no branch, applies no labels, and strips `--create-pr`/`--auto-review` from workspace-level `worker_task_args` (running with `--no-git` instead) — the right default for output that lands outside the repository. Set `open_pr = true` to keep the reviewed-PR behavior. The dashboard Automations table shows an **opens PR** badge, and **Run now** honors the same setting. Existing workspaces that relied on the old default must add `open_pr = true` to keep opening PRs
+- **Activation-funnel analytics (DEV-120)**: anonymous usage events now cover the path from setup to the first worker task — `setup_started`/`setup_completed`/`setup_declined`/`setup_failed`, `doctor_run`, `login_result`, `worker_init_*`, `worker_connect`, `worker_started`, and `worker_task_run`, alongside the existing run events. Only low-cardinality categories and statuses are sent (never task content, code, repository names, paths, or credentials), events no longer create person profiles, and opting out records a one-time anonymous acknowledgement. The PostHog client now flushes per event and flushes before exits so funnel events survive short-lived runs
+
+### Fixed
+
+- **GitLab CI polling preserves the exact MR identity**: the poller now matches the numeric project ID and IID rather than a reconstructed reference, so repair targets the right merge request
+- **Resolve-conflicts resets a dirty worktree before merging**: leftover uncommitted state no longer blocks the base-sync merge
+- **GitLab checkout preparation is supervised and cancellable**: admission waits before a checkout is prepared, running subprocesses receive cancellation when the worker stops, and jobs cancelled before admission prepare nothing
+
+### Technical
+
+- Internal maintenance: the `src/lib` tree was reorganized context-first (code-host, trackers, acquirers, review, relay, worker, state, observability, task, agent, config, init, automation) with provider folders at the leaves, large modules (webhook server, workspace worker, CLI program, Utils, interactive wizard, Jira client, IPC handlers) were split, and `oxlint` complexity/size rules were tightened behind a shrinking baseline
+
 ## [2.11.0] - 2026-09-09
 
 Throughput and cost-control release: host-level agent concurrency is now bounded behind an explicit acknowledgement, the auto-review loop caps itself earlier by default, and a stale persisted harness no longer warns on every restart.
