@@ -49,6 +49,8 @@ import {
 } from "../worker/usage-limit-protocol";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { reportProcessingFailure } from "./processing-failure";
+import { runTaskSteps } from "./step-runner";
+import type { TaskStep } from "./step-runner";
 
 /** Inputs for {@link runFeasibilityCheck}. */
 interface FeasibilityCheckInput {
@@ -908,6 +910,65 @@ async function transitionToInProgress(input: {
   }
 }
 
+/** Shared inputs for the ordered phases after a task prompt is prepared. */
+interface TaskExecutionContext extends ImplementationInput {
+  taskKey: string;
+  totalTasks: number;
+  skipClarityCheck: boolean;
+  attachmentMap: Map<string, string>;
+  projectSettings: ReturnType<typeof loadProjectSettings>;
+  projectKey: string;
+}
+
+const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
+  {
+    name: "prepare-branch",
+    run: async ({ taskKey, workflowKey, effectiveTargetBranch }) =>
+      ensureFeatureBranch({ taskKey, workflowKey, effectiveTargetBranch }),
+  },
+  {
+    name: "feasibility",
+    run: async ({
+      taskDetails,
+      workflowKey,
+      tracker,
+      attachmentMap,
+      totalTasks,
+      skipClarityCheck,
+    }) => {
+      if (!skipClarityCheck) {
+        await runFeasibilityCheck({ taskDetails, workflowKey, tracker, attachmentMap, totalTasks });
+      }
+    },
+  },
+  {
+    name: "in-progress",
+    run: async ({ tracker, task, workflowKey, projectSettings, projectKey }) =>
+      transitionToInProgress({ tracker, task, workflowKey, projectSettings, projectKey }),
+  },
+  {
+    name: "implement",
+    run: async ({
+      outputFile,
+      taskDir,
+      workflowKey,
+      tracker,
+      task,
+      taskDetails,
+      effectiveTargetBranch,
+    }) =>
+      runImplementation({
+        outputFile,
+        taskDir,
+        workflowKey,
+        tracker,
+        task,
+        taskDetails,
+        effectiveTargetBranch,
+      }),
+  },
+];
+
 /**
  * Run the full implementation workflow for one JIRA task key.
  *
@@ -920,7 +981,7 @@ export async function processSingleTask(
   taskIndex = 0,
   totalTasks = 1,
 ): Promise<void> {
-  const options = runContext.options;
+  const skipClarityCheck = runContext.options.skipClarityCheck;
   try {
     const prepared = await prepareTask({ taskKey, taskIndex, totalTasks });
     if (!prepared) return;
@@ -951,16 +1012,10 @@ export async function processSingleTask(
       priorRetryState,
     });
 
-    await ensureFeatureBranch({ taskKey, workflowKey, effectiveTargetBranch });
-
-    // Run clarity check first (unless skipped)
-    if (!options.skipClarityCheck) {
-      await runFeasibilityCheck({ taskDetails, workflowKey, tracker, attachmentMap, totalTasks });
-    }
-
-    await transitionToInProgress({ tracker, task, workflowKey, projectSettings, projectKey });
-
-    await runImplementation({
+    const result = await runTaskSteps(taskSteps, {
+      taskKey,
+      totalTasks,
+      skipClarityCheck,
       outputFile,
       taskDir,
       workflowKey,
@@ -968,7 +1023,14 @@ export async function processSingleTask(
       task,
       taskDetails,
       effectiveTargetBranch,
+      attachmentMap,
+      projectSettings,
+      projectKey,
     });
+    if (result.kind === "halted") {
+      await finishTaskRun("escalated", result.reason);
+      runContext.activeTaskContext = null;
+    }
   } catch (error) {
     await handleTaskFailure(error, { taskKey, taskIndex, totalTasks });
   }
