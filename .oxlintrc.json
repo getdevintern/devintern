@@ -144,7 +144,6 @@
       // cap. Split the function and remove its entry to lock in the tighter limit.
       "files": [
         "packages/code/src/lib/agent/run-harness.ts",
-        "packages/pm-desktop/src/main/ipc.ts",
         "packages/pm-desktop/src/renderer/src/App.tsx"
       ],
       "rules": {
