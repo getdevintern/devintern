@@ -19,7 +19,7 @@ import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
+import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 
