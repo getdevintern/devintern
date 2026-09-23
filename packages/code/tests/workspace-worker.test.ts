@@ -259,6 +259,61 @@ describe("createWorkspaceTaskAcquirer", () => {
     heldLock.release();
   });
 
+  test("fills free concurrency slots as new tasks become available", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 10, maxConcurrencyPerRepo: 10 });
+    const startedKeys: string[] = [];
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    tasks = [{ key: "T-10", updated: "u1", labels: ["backend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      supervisor,
+      runTask: async (taskKey) => {
+        startedKeys.push(taskKey);
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await Bun.sleep(10);
+    expect(startedKeys).toEqual(["T-10"]);
+
+    // Three tasks appear while T-10 is still running; nine slots are free.
+    tasks = [
+      { key: "T-10", updated: "u1", labels: ["backend"] },
+      { key: "T-11", updated: "u1", labels: ["backend"] },
+      { key: "T-12", updated: "u1", labels: ["backend"] },
+      { key: "T-13", updated: "u1", labels: ["backend"] },
+    ];
+    const secondTick = acquirer.tick();
+    await Bun.sleep(10);
+
+    expect(new Set(startedKeys)).toEqual(new Set(["T-10", "T-11", "T-12", "T-13"]));
+    expect(peak).toBe(4);
+    expect(supervisor.stats().running).toBe(4);
+
+    release();
+    await Promise.all([firstTick, secondTick]);
+  });
+
   test("a supervisor drain defers a task and rolls back its polling claim", async () => {
     tasks = [{ key: "T-7", updated: "u1", labels: ["backend"] }];
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
@@ -539,6 +594,7 @@ GITLAB_CODE_HOST_PROXY = ""
               throw new JobNotStartedError();
             },
             updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
           },
         });
@@ -630,6 +686,7 @@ GITLAB_CODE_HOST_PROXY = ""
               throw new JobNotStartedError();
             },
             updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
           },
         });

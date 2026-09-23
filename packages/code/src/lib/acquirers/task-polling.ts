@@ -10,10 +10,13 @@
  *    (`processed_events`), so a task re-enters only when it changes again.
  *    Skips are logged when nothing new is claimed. An empty stamp is sticky
  *    (tracker search must return `updated`) and is warned on.
- * 4. Execute — run each ready task sequentially through the CLI pipeline.
+ * 4. Execute — hand each ready task to the executor. The detect/evaluate/claim
+ *    phase is gated against overlap, but the executions are not: polling keeps
+ *    running on its interval so newly available tasks fill free concurrency
+ *    slots without waiting for the current batch to finish.
  *
- * The cursor advances only after a tick completes; a crash mid-tick re-detects
- * on restart and the dedupe prevents double execution.
+ * The cursor advances once a tick's executions settle; a crash mid-tick
+ * re-detects on restart and the dedupe prevents double execution.
  */
 
 import { spawn } from "child_process";
@@ -57,11 +60,16 @@ export interface TaskPollingAcquirerOptions {
   executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
   /**
    * Working-window gate (quiet hours). When closed, ticks start no new
-   * detection/evaluation/execution; an in-flight tick finishes naturally
-   * because execution is sequential. Manual overrides and startup catch-up
-   * are the gate's decisions surfaced as one-shot bypasses.
+   * detection/evaluation/execution; already-running executions finish
+   * naturally. Manual overrides and startup catch-up are the gate's decisions
+   * surfaced as one-shot bypasses.
    */
   gate?: PickupGate;
+  /**
+   * Optional live capacity snapshot used for verbose diagnostics, so a stalled
+   * worker is observable as "N in flight, M slots free".
+   */
+  capacity?: () => { available: number; inFlight: number };
   verbose?: boolean;
 }
 
@@ -157,6 +165,8 @@ export class TaskPollingAcquirer implements Acquirer {
   private options: TaskPollingAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  /** Task keys with an execution in flight, to avoid running one key twice at once. */
+  private readonly inFlightKeys = new Set<string>();
   private readonly gateErrors = new Set<string>();
 
   constructor(options: TaskPollingAcquirerOptions) {
@@ -195,7 +205,7 @@ export class TaskPollingAcquirer implements Acquirer {
     }
   }
 
-  /** Stop polling (an in-flight tick finishes its current task). */
+  /** Stop polling (in-flight executions continue until the supervisor drains). */
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
@@ -215,9 +225,12 @@ export class TaskPollingAcquirer implements Acquirer {
   }
 
   /**
-   * One detect → evaluate → dedupe → execute cycle. Skipped while busy, and
-   * skipped while the working-window gate is closed (unless overridden for a
-   * manual run or startup catch-up).
+   * One detect → evaluate → dedupe → execute cycle. The detect/evaluate/claim
+   * phase is skipped while busy and while the working-window gate is closed
+   * (unless overridden for a manual run or startup catch-up). The scheduled
+   * executions are awaited only after the busy gate is released, so the next
+   * interval tick keeps polling and fills free concurrency slots while the
+   * current batch runs.
    */
   async tick(bypass: { ignoreGate?: boolean } = {}): Promise<void> {
     if (this.busy) {
@@ -242,16 +255,21 @@ export class TaskPollingAcquirer implements Acquirer {
     this.busy = true;
 
     const { detector, workerState, queue, searchTasks, executeTask, verbose } = this.options;
+    const executions: Promise<void>[] = [];
+    let tickDeferred = false;
+    let holdCursor = false;
+    let cursorBefore: string | null = null;
+    let nextCursor: string | null = null;
+
     try {
-      const cursor = workerState.getCursor(detector.source)?.cursorValue ?? null;
-      const detection = await detector.changesSince(cursor);
-      let tickDeferred = false;
+      cursorBefore = workerState.getCursor(detector.source)?.cursorValue ?? null;
+      const detection = await detector.changesSince(cursorBefore);
+      nextCursor = detection.nextCursor;
 
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
         const skipped: string[] = [];
         const missingStamp: string[] = [];
-        const executions: Promise<void>[] = [];
         let pickedUp = 0;
 
         for (const task of tasks) {
@@ -263,6 +281,14 @@ export class TaskPollingAcquirer implements Acquirer {
             skipped.push(task.key);
             continue;
           }
+          if (this.inFlightKeys.has(task.key)) {
+            // The same task is still running (it was edited mid-run). Leave the
+            // new stamp unclaimed and hold the cursor so it is evaluated again
+            // once the in-flight run finishes, rather than running one task
+            // twice concurrently.
+            holdCursor = true;
+            continue;
+          }
           // Mark before executing: a persistently failing task must not loop
           // every tick. It re-enters when the ticket is updated again (new
           // stamp), and the pipeline's own incomplete-attempt check guards
@@ -272,35 +298,31 @@ export class TaskPollingAcquirer implements Acquirer {
 
           pickedUp++;
           console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+          this.inFlightKeys.add(task.key);
           executions.push(
             (async () => {
-              const result = await executeTask(task.key);
-              if (result === "deferred") {
-                // The task never started. Release the provisional claim and retain
-                // the detector cursor so this same tracker change is evaluated on
-                // the next tick. Other tasks completed in this tick stay deduped.
-                queue.unmarkProcessed(detector.source, externalId);
-                tickDeferred = true;
-                console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
-              } else {
-                console.log(
-                  result
-                    ? `✅ [${this.name}] ${task.key} completed`
-                    : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
-                );
+              try {
+                const result = await executeTask(task.key);
+                if (result === "deferred") {
+                  // The task never started. Release the provisional claim so the
+                  // same tracker change is evaluated on the next tick. Other
+                  // tasks completed in this tick stay deduped.
+                  queue.unmarkProcessed(detector.source, externalId);
+                  tickDeferred = true;
+                  console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+                } else {
+                  console.log(
+                    result
+                      ? `✅ [${this.name}] ${task.key} completed`
+                      : `⚠️  [${this.name}] ${task.key} did not complete cleanly`,
+                  );
+                }
+              } finally {
+                this.inFlightKeys.delete(task.key);
               }
             })(),
           );
         }
-
-        // Keep the tick busy until every scheduled execution settles. Waiting
-        // for all outcomes prevents one rejection from opening a second tick
-        // while sibling jobs from this batch are still running.
-        const outcomes = await Promise.allSettled(executions);
-        const rejected = outcomes.find(
-          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
-        );
-        if (rejected) throw rejected.reason;
 
         this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
         // Remember that a drain ran so working-window catch-up can tell an
@@ -309,15 +331,38 @@ export class TaskPollingAcquirer implements Acquirer {
           () => workerState.setMeta(TASK_POLL_LAST_DRAIN_KEY, String(Date.now())),
           undefined,
         );
-      }
-
-      if (!tickDeferred && detection.nextCursor !== null && detection.nextCursor !== cursor) {
-        workerState.setCursor(detector.source, detection.nextCursor);
+        this.logCapacity(pickedUp, verbose);
       }
     } catch (error) {
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
     } finally {
+      // Release the polling gate before awaiting the batch: polling must keep
+      // picking up newly available tasks while these executions run.
       this.busy = false;
+    }
+
+    const outcomes = await Promise.allSettled(executions);
+    const rejected = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+    );
+    if (rejected) {
+      console.warn(`⚠️  [${this.name}] polling tick failed: ${(rejected.reason as Error).message}`);
+      return;
+    }
+
+    if (tickDeferred) {
+      // A deferred task never started. Drop the cursor so its change is
+      // re-detected next tick; dedupe keeps completed siblings from re-running.
+      this.scheduleGuard(() => workerState.clearCursor(detector.source), undefined);
+      return;
+    }
+
+    if (!holdCursor && nextCursor !== null && nextCursor !== cursorBefore) {
+      // Compare-and-set: overlapping ticks must not regress a newer cursor.
+      const current = workerState.getCursor(detector.source)?.cursorValue ?? null;
+      if (current === cursorBefore) {
+        workerState.setCursor(detector.source, nextCursor);
+      }
     }
   }
 
@@ -341,6 +386,19 @@ export class TaskPollingAcquirer implements Acquirer {
       }
       return fallback;
     }
+  }
+
+  /**
+   * Verbose capacity line so a worker that stops filling free slots is
+   * observable from the log.
+   */
+  private logCapacity(pickedUp: number, verbose?: boolean): void {
+    if (!verbose || pickedUp === 0) return;
+    const snapshot = this.options.capacity?.();
+    if (!snapshot) return;
+    console.log(
+      `   [${this.name}] ${snapshot.inFlight} in flight, ${snapshot.available} slot(s) available`,
+    );
   }
 
   /**

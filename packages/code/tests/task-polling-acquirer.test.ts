@@ -222,6 +222,91 @@ describe("TaskPollingAcquirer", () => {
     await tick;
   });
 
+  test("keeps polling while a previous batch is still running", async () => {
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: (key) =>
+        new Promise<boolean>((resolve) => {
+          started.push(key);
+          releases.set(key, () => resolve(true));
+        }),
+    });
+
+    const firstTick = acquirer.tick();
+    await Bun.sleep(0);
+    expect(started).toEqual(["TASK-1"]);
+
+    // A new task becomes available while TASK-1 is still running: the next
+    // tick must pick it up instead of waiting for the first batch to settle.
+    tasks.push({ key: "TASK-2", updated: "b" });
+    const secondTick = acquirer.tick();
+    await Bun.sleep(0);
+    expect(started).toEqual(["TASK-1", "TASK-2"]);
+
+    releases.get("TASK-1")!();
+    releases.get("TASK-2")!();
+    await Promise.all([firstTick, secondTick]);
+  });
+
+  test("an edited task waits for its in-flight run instead of running twice", async () => {
+    const started: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        if (started.length === 1) await gate;
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await Bun.sleep(0);
+    expect(started).toEqual(["TASK-1"]);
+
+    // Edited mid-run: the new stamp must not start a concurrent second run.
+    tasks[0] = { key: "TASK-1", updated: "b" };
+    const secondTick = acquirer.tick();
+    await Bun.sleep(0);
+    expect(started).toEqual(["TASK-1"]);
+
+    release();
+    await firstTick;
+    await secondTick;
+
+    // The edit is picked up once the first run finishes.
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1", "TASK-1"]);
+  });
+
   test("does not evaluate when nothing changed", async () => {
     const executed: string[] = [];
     const { acquirer } = makeAcquirer({

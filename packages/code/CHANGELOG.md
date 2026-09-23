@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Worker fills free concurrency slots instead of stalling after the first batch (DEV-127)**: task polling no longer holds its re-entry gate until every task in a batch finishes. The detect/evaluate/claim phase stays serialized, but polling now continues on its normal interval while tasks run, so a task created during a run is picked up on the next tick and admitted to a free slot instead of waiting for the whole batch to drain. The shared admission supervisor still caps global and per-repository concurrency, a task edited mid-run waits for its in-flight execution rather than starting a concurrent duplicate, cursor compare-and-set prevents overlapping ticks from regressing a newer cursor, and deferred tasks still release their claim and re-detect
+
 ## [2.12.0] - 2026-09-23
 
 GitLab code-host release: merge requests can now be created, reviewed, kept current, and CI-repaired on GitLab.com or a Self-Managed instance, the worker connects every code host in one pass, scheduled automations choose per entry whether they open a PR, and the activation path reports where setup gets stuck.

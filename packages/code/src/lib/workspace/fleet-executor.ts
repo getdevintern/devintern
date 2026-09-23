@@ -109,6 +109,14 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
     );
 
+  const supervisor = deps.supervisor;
+  const capacity = supervisor
+    ? () => {
+        const stats = supervisor.stats();
+        return { available: stats.available, inFlight: stats.running };
+      }
+    : undefined;
+
   return new TaskPollingAcquirer({
     trackerType: team ? `${team.tracker}:${team.name}` : config.defaults.tracker,
     query,
@@ -133,6 +141,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       return { tasks };
     },
     executeTask,
+    capacity,
     verbose,
   });
 }
