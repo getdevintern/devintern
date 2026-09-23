@@ -92,6 +92,10 @@ This workflow:
 5. Applies the `prStatus` label after PR creation
 6. Posts implementation or assessment comments on the issue
 
+### Actioned issues (worker)
+
+When the worker creates a merge request it applies the `prStatus` label (when configured) and records the issue as actioned locally, so `is:open label:...` no longer re-implements it even though the issue stays open and keeps its trigger label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+
 ## Experimental merge-request creation
 
 GitLab code-host support is shipping as an experimental stack: MR creation, manual review addressing, registered-MR polling, base synchronization, CI repair, hosted relay delivery, and repo-local direct webhooks are available. Broad `@mention` discovery and scheduled GitLab conflict windows are not enabled.

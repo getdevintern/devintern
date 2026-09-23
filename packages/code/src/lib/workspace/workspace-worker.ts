@@ -23,6 +23,7 @@ import {
 import { RunStore } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
+import { actionedSourceKey, createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
@@ -682,6 +683,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query: () => findTeam(config, team.name)?.taskQuery,
         searchTasks,
         detector,
+        client,
       });
     }
   } else {
@@ -706,7 +708,16 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
   }
 
+  // Single-source workspaces keep the tracker client lazy (automations-only
+  // workspaces need no tracker credentials at startup); multi-team sources
+  // carry the client built above.
+  const singleTrackerManager = multiTeam ? undefined : new TaskTrackerManager();
   for (const source of sources) {
+    const actionedGate = createTaskActionedGate({
+      getTracker: source.client ? () => source.client! : () => singleTrackerManager!.getClient(),
+      workerState: state.workerState,
+      source: actionedSourceKey(source.tracker, source.team?.name),
+    });
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -716,6 +727,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       repoManager,
       detector: source.detector,
       searchTasks: source.searchTasks,
+      isTaskActionedUnchanged: (taskKey) => actionedGate(taskKey),
       query: source.query,
       intervalSeconds,
       gate: pickupGate,

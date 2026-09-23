@@ -246,7 +246,7 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
 
 **Fields (all optional):**
 
-- `prStatus`: Status/state/label to transition to after PR creation (e.g., "In Review")
+- `prStatus`: Status/state/label to transition to after PR creation (e.g., "In Review"). The worker also records the ticket locally as actioned so a sweep query that still matches it does not re-implement it; setting `prStatus` additionally moves it out of the tracker query. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
 - `inProgressStatus`: Status to set when starting work (e.g., "In Progress", "Doing")
 - `todoStatus`: Status to reset to if implementation fails (e.g., "To Do", "Backlog")
 - `storyPointsField`: Custom field ID for story points (e.g., `"customfield_10016"` for Jira); auto-discovered if omitted

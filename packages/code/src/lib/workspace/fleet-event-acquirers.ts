@@ -8,6 +8,7 @@ import { createFleetTaskExecutor } from "./fleet-executor";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
+import type { TaskTrackerClient } from "../trackers/client";
 
 /**
  * Reconciliation hooks exposed to the live config reload path by the fleet
@@ -30,6 +31,11 @@ export interface FleetSourceRuntime {
   query: () => string | undefined;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   detector: ChangeDetector;
+  /**
+   * Tracker client for the actioned gate. Present for multi-team sources
+   * (built at startup); single-source workspaces resolve one lazily.
+   */
+  client?: TaskTrackerClient;
 }
 
 /**

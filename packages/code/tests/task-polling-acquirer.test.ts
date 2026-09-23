@@ -9,6 +9,13 @@ import type { ReadyTask } from "../src/lib/acquirers/task-polling";
 import type { PickupGate } from "../src/lib/worker/schedule";
 import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import {
+  actionedSourceKey,
+  createTaskActionedGate,
+  recordTaskActioned,
+} from "../src/lib/task/actioned-state";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import type { Task } from "../src/types/task-tracker";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -111,6 +118,7 @@ describe("TaskPollingAcquirer", () => {
     executed: string[];
     executeResult?: boolean;
     gate?: PickupGate;
+    isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
   }) {
     let call = 0;
     const seenCursors: (string | null)[] = [];
@@ -119,6 +127,7 @@ describe("TaskPollingAcquirer", () => {
       query: "status=todo",
       intervalSeconds: 60,
       gate: options.gate,
+      isTaskActionedUnchanged: options.isTaskActionedUnchanged,
       detector: {
         source: "markdown",
         async changesSince(cursor) {
@@ -445,6 +454,131 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick(); // must not throw
     expect(workerState.getCursor("markdown")?.cursorValue).toBe("42");
+  });
+
+  describe("actioned-ticket gating", () => {
+    test("github: an actioned ticket is not re-picked, but a description edit re-arms it", async () => {
+      let githubTask: Task = {
+        key: "42",
+        summary: "Login is broken",
+        issueType: "Issue",
+        status: "open",
+        reporter: "octocat",
+        labels: ["intern"],
+        components: [],
+        fixVersions: [],
+        created: "",
+        updated: "2026-01-01T00:00:00Z",
+        raw: { number: 42, title: "Login is broken", body: "Fix login", state: "open" },
+      };
+      const tracker = {
+        getTask: async () => githubTask,
+        extractDescriptionText: (task: Task) => (task.raw as { body?: string }).body ?? "",
+      } as unknown as TaskTrackerClient;
+      const source = actionedSourceKey("github");
+      await recordTaskActioned({
+        workerState,
+        source,
+        tracker,
+        taskKey: "42",
+        fallbackTask: githubTask,
+      });
+      const gate = createTaskActionedGate({ getTracker: () => tracker, workerState, source });
+
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "42", updated: "2026-01-01T00:00:00Z" }],
+        executed,
+        isTaskActionedUnchanged: (task) => gate(task.key),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]); // PR exists; the sweep must not re-implement it
+
+      githubTask = {
+        ...githubTask,
+        raw: { ...(githubTask.raw as object), body: "Fix login and add 2FA" },
+      };
+      await acquirer.tick();
+      expect(executed).toEqual(["42"]); // a human description edit re-arms it
+    });
+
+    test("jira: a reopened actioned ticket is re-picked while an unchanged one is skipped", async () => {
+      let jiraTask: Task = {
+        key: "DEV-1",
+        summary: "Add export",
+        issueType: "Task",
+        status: "In Review",
+        reporter: "alice",
+        labels: ["intern", "in review"],
+        components: [],
+        fixVersions: [],
+        created: "",
+        updated: "2026-01-01T00:00:00Z",
+        raw: { description: "Implement the export" },
+      };
+      const tracker = {
+        getTask: async () => jiraTask,
+        extractDescriptionText: (task: Task) =>
+          (task.raw as { description?: string }).description ?? "",
+      } as unknown as TaskTrackerClient;
+      const source = actionedSourceKey("jira");
+      await recordTaskActioned({
+        workerState,
+        source,
+        tracker,
+        taskKey: "DEV-1",
+        fallbackTask: jiraTask,
+      });
+      const gate = createTaskActionedGate({ getTracker: () => tracker, workerState, source });
+
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "DEV-1", updated: "2026-01-01T00:00:00Z" }],
+        executed,
+        isTaskActionedUnchanged: (task) => gate(task.key),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+
+      jiraTask = { ...jiraTask, status: "To Do" };
+      await acquirer.tick();
+      expect(executed).toEqual(["DEV-1"]);
+    });
+
+    test("logs why an actioned ticket was skipped", async () => {
+      const gate = async () => true;
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "DEV-9", updated: "a" }],
+        executed,
+        isTaskActionedUnchanged: gate,
+      });
+
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: unknown[]) => logs.push(args.join(" "));
+      try {
+        await acquirer.tick();
+      } finally {
+        console.log = originalLog;
+      }
+
+      expect(executed).toEqual([]);
+      expect(logs.some((line) => line.includes("DEV-9") && line.includes("already actioned"))).toBe(
+        true,
+      );
+    });
   });
 
   describe("working-window gating", () => {

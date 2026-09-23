@@ -12,6 +12,9 @@
  * - `addressed_comments` — PR feedback comments this worker has already
  *   addressed. The dedupe gate for review runs is local: GitHub reactions are
  *   visual feedback for humans only.
+ * - `actioned_tasks` — tickets that already produced a PR, keyed by tracker
+ *   source. The acquirer uses this to keep an actioned ticket out of the sweep
+ *   even when it still matches the query, until its signal changes again.
  */
 
 import { Database } from "bun:sqlite";
@@ -65,6 +68,20 @@ export interface CiFixState {
   consecutiveFailures: number;
   /** Head SHA where the worker exhausted its budget and escalated. */
   escalatedSha?: string;
+}
+
+/**
+ * A ticket that already produced a PR.
+ *
+ * `signal` digests the human-editable fields (summary, description, status,
+ * labels) observed immediately after the worker's own post-PR writes, so the
+ * worker's own comment/transition does not look like a change and re-arm the
+ * ticket. Any later change by a person yields a different signal.
+ */
+export interface ActionedTask {
+  taskKey: string;
+  signal: string;
+  actionedAt: number;
 }
 
 /**
@@ -153,6 +170,16 @@ export class WorkerState {
         escalated_sha TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (repo, pr_number)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS actioned_tasks (
+        source TEXT NOT NULL,
+        task_key TEXT NOT NULL,
+        signal TEXT NOT NULL,
+        actioned_at INTEGER NOT NULL,
+        PRIMARY KEY (source, task_key)
       )
     `);
   }
@@ -507,6 +534,54 @@ export class WorkerState {
          updated_at = excluded.updated_at`,
       [repo, prNumber, state.consecutiveFailures, state.escalatedSha ?? null, Date.now()],
     );
+  }
+
+  /**
+   * Read the locally-recorded actioned state for a ticket.
+   *
+   * @param source - Tracker source key (matches the poll cursor source)
+   * @param taskKey - Tracker task key
+   * @returns The record, or `null` when the ticket was never actioned here
+   */
+  getTaskActioned(source: string, taskKey: string): ActionedTask | null {
+    const row = this.db
+      .query(
+        `SELECT task_key, signal, actioned_at FROM actioned_tasks WHERE source = ? AND task_key = ?`,
+      )
+      .get(source, taskKey) as Record<string, unknown> | null;
+    if (!row) return null;
+    return {
+      taskKey: row.task_key as string,
+      signal: row.signal as string,
+      actionedAt: row.actioned_at as number,
+    };
+  }
+
+  /**
+   * Record (or refresh) a ticket as actioned after its PR was created.
+   *
+   * @param source - Tracker source key
+   * @param taskKey - Tracker task key
+   * @param signal - Digest of the ticket's human-editable fields
+   */
+  markTaskActioned(source: string, taskKey: string, signal: string): void {
+    this.db.run(
+      `INSERT INTO actioned_tasks (source, task_key, signal, actioned_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(source, task_key) DO UPDATE SET
+         signal = excluded.signal,
+         actioned_at = excluded.actioned_at`,
+      [source, taskKey, signal, Date.now()],
+    );
+  }
+
+  /**
+   * Forget a ticket's actioned state so a genuine change can be re-implemented.
+   *
+   * @param source - Tracker source key
+   * @param taskKey - Tracker task key
+   */
+  clearTaskActioned(source: string, taskKey: string): void {
+    this.db.run(`DELETE FROM actioned_tasks WHERE source = ? AND task_key = ?`, [source, taskKey]);
   }
 
   /**

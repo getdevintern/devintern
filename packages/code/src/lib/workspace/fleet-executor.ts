@@ -43,6 +43,11 @@ export interface WorkspaceTaskAcquirerDeps {
   repoManager: RepoManagerLike;
   detector: ChangeDetector;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
+  /**
+   * Actioned gate: `true` when a task already produced a PR and has not
+   * changed since. Built by the workspace wiring with tracker access.
+   */
+  isTaskActionedUnchanged?: (taskKey: string) => Promise<boolean>;
   query: string | (() => string | undefined);
   intervalSeconds: number;
   /** Team source for multi-team workspaces; omitted in single-defaults mode. */
@@ -134,6 +139,9 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     },
     executeTask,
     verbose,
+    isTaskActionedUnchanged: deps.isTaskActionedUnchanged
+      ? (task) => deps.isTaskActionedUnchanged!(task.key)
+      : undefined,
   });
 }
 
