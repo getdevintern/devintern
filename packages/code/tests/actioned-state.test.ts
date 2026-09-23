@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -13,6 +13,8 @@ import {
 } from "../src/lib/task/actioned-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { ACTIONED_SOURCE_ENV, buildRepoEnv, buildTeamTaskEnv } from "../src/lib/workspace/env";
+import type { RepoConfig, TeamConfig } from "../src/lib/workspace/config";
 import type { Task } from "../src/types/task-tracker";
 
 /** GitHub-shaped task: description lives in `raw.body`. */
@@ -102,6 +104,70 @@ describe("actionedSourceKey", () => {
     expect(
       actionedSourceKeyFromEnv({ TASK_TRACKER: "github", DEVINTERN_WORKSPACE_TEAM: "core" }),
     ).toBe("github:core");
+  });
+
+  test("an explicitly pinned source wins over the tracker/team env", () => {
+    expect(
+      actionedSourceKeyFromEnv({
+        [ACTIONED_SOURCE_ENV]: "jira:Platform",
+        TASK_TRACKER: "github",
+        DEVINTERN_WORKSPACE_TEAM: "core",
+      }),
+    ).toBe("jira:Platform");
+  });
+
+  test("the composed task subprocess env and the workspace gate agree on one key", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "actioned-env-"));
+    try {
+      // A stale `.env` carries a tracker that disagrees with `[defaults]`; the
+      // pinned actioned source must still be authoritative.
+      writeFileSync(join(workspaceDir, ".env"), "TASK_TRACKER=github\n");
+      const repo: RepoConfig = { name: "app", remote: "git@github.com:acme/app.git", env: {} };
+      const team: TeamConfig = { name: "Platform", tracker: "jira", env: {} };
+
+      const singleEnv = buildRepoEnv(repo, workspaceDir, {
+        actionedSource: actionedSourceKey("jira"),
+      });
+      expect(actionedSourceKeyFromEnv(singleEnv)).toBe("jira");
+
+      const teamEnv = buildTeamTaskEnv(repo, team, workspaceDir, {
+        actionedSource: actionedSourceKey(team.tracker, team.name),
+      });
+      expect(actionedSourceKeyFromEnv(teamEnv)).toBe("jira:Platform");
+
+      const dbPath = join(workspaceDir, "state.db");
+      const state = new WorkerState(dbPath);
+      try {
+        let task = jiraTask({ status: "In Review", labels: ["intern", "in review"] });
+        const tracker = fakeTracker(() => task, jiraDescribe);
+        // The subprocess records under the env-derived key...
+        await recordTaskActioned({
+          workerState: state,
+          source: actionedSourceKeyFromEnv(teamEnv),
+          tracker,
+          taskKey: "DEV-1",
+          fallbackTask: task,
+        });
+        // ...and the workspace gate looks under the workspace-derived key.
+        const gate = createTaskActionedGate({
+          getTracker: () => tracker,
+          workerState: state,
+          source: actionedSourceKey(team.tracker, team.name),
+        });
+        expect(await gate("DEV-1", task.updated)).toBe(true);
+
+        task = jiraTask({
+          status: "To Do",
+          labels: ["intern", "in review"],
+          updated: "2026-02-02T00:00:00Z",
+        });
+        expect(await gate("DEV-1", task.updated)).toBe(false);
+      } finally {
+        state.close();
+      }
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -203,23 +269,72 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     expect(await gate("42")).toBe(true);
   });
 
-  test("recordTaskActioned falls back to the run's snapshot when re-read fails", async () => {
+  test("an unverified fallback record keeps suppressing until a read verifies it", async () => {
     const broken = {
       getTask: async () => {
         throw new Error("boom");
       },
       extractDescriptionText: githubDescribe,
     } as unknown as TaskTrackerClient;
+    const source = "github";
     const ok = await recordTaskActioned({
       workerState,
-      source: "github",
+      source,
       tracker: broken,
       taskKey: "42",
       fallbackTask: githubTask(),
     });
     expect(ok).toBe(true);
-    expect(workerState.getTaskActioned("github", "42")?.signal).toBe(
-      trackerActionedSignal(broken, githubTask()),
-    );
+    const stored = workerState.getTaskActioned(source, "42");
+    expect(stored?.verified).toBe(false);
+    expect(stored?.signal).toBe(trackerActionedSignal(broken, githubTask()));
+
+    // The tracker recovers with its post-transition state: a different signal
+    // from the pre-run snapshot. The gate must not read that mismatch as a
+    // human change and re-implement the ticket.
+    const recoveredTask = githubTask({
+      body: "Fix the login bug",
+      state: "closed",
+      labels: ["intern", "in review"],
+    });
+    const recovered = fakeTracker(() => recoveredTask, githubDescribe);
+    const gate = createTaskActionedGate({ getTracker: () => recovered, workerState, source });
+    expect(await gate("42")).toBe(true);
+    expect(workerState.getTaskActioned(source, "42")?.verified).toBe(true);
+
+    // Once verified, a genuine change re-arms the ticket.
+    const changed = githubTask({ body: "Please also add 2FA", state: "closed" });
+    const changing = fakeTracker(() => changed, githubDescribe);
+    const verify = createTaskActionedGate({ getTracker: () => changing, workerState, source });
+    expect(await verify("42")).toBe(false);
+    expect(workerState.getTaskActioned(source, "42")).toBeNull();
+  });
+
+  test("the persisted update stamp survives a restart and skips the read", async () => {
+    let reads = 0;
+    const task = githubTask();
+    const tracker = {
+      getTask: async () => {
+        reads++;
+        return task;
+      },
+      extractDescriptionText: githubDescribe,
+    } as unknown as TaskTrackerClient;
+    const source = "github";
+    await recordTaskActioned({ workerState, source, tracker, taskKey: "42", fallbackTask: task });
+    expect(reads).toBe(1);
+
+    // A fresh gate (simulating a worker restart with an empty in-memory cache)
+    // reads the persisted stamp and skips the tracker call for the unchanged
+    // ticket — no cold-start burst of one call per actioned ticket.
+    const restarted = createTaskActionedGate({ getTracker: () => tracker, workerState, source });
+    expect(await restarted("42", task.updated)).toBe(true);
+    expect(reads).toBe(1);
+
+    // A different stamp forces one fresh verification, then caches again.
+    expect(await restarted("42", "stamp-b")).toBe(true);
+    expect(reads).toBe(2);
+    expect(await restarted("42", "stamp-b")).toBe(true);
+    expect(reads).toBe(2);
   });
 });

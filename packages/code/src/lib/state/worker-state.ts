@@ -77,10 +77,20 @@ export interface CiFixState {
  * labels) observed immediately after the worker's own post-PR writes, so the
  * worker's own comment/transition does not look like a change and re-arm the
  * ticket. Any later change by a person yields a different signal.
+ *
+ * `verified` is false when the signal was recorded from a fallback snapshot
+ * because the tracker read failed; the gate keeps such a record suppressed
+ * until a successful read refreshes it.
+ *
+ * `updatedStamp` is the tracker's `updated` value observed at the last
+ * successful read. The gate compares a sweep's `updated` against it to skip
+ * the per-ticket tracker read; persisting it lets that cache survive restarts.
  */
 export interface ActionedTask {
   taskKey: string;
   signal: string;
+  verified: boolean;
+  updatedStamp: string | null;
   actionedAt: number;
 }
 
@@ -178,10 +188,26 @@ export class WorkerState {
         source TEXT NOT NULL,
         task_key TEXT NOT NULL,
         signal TEXT NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 1,
+        updated_stamp TEXT,
         actioned_at INTEGER NOT NULL,
         PRIMARY KEY (source, task_key)
       )
     `);
+
+    // Databases created before `verified` recorded every marker from a
+    // successful read, so backfilling 1 preserves their behavior.
+    const actionedColumns = this.db.query("PRAGMA table_info(actioned_tasks)").all() as Array<{
+      name: string;
+    }>;
+    if (!actionedColumns.some((column) => column.name === "verified")) {
+      this.db.run("ALTER TABLE actioned_tasks ADD COLUMN verified INTEGER NOT NULL DEFAULT 1");
+    }
+    // Older rows have no persisted stamp; the gate simply reads once and
+    // backfills it, so no data migration is needed.
+    if (!actionedColumns.some((column) => column.name === "updated_stamp")) {
+      this.db.run("ALTER TABLE actioned_tasks ADD COLUMN updated_stamp TEXT");
+    }
   }
 
   /** Create or migrate the change-request registry without losing legacy rows. */
@@ -546,13 +572,15 @@ export class WorkerState {
   getTaskActioned(source: string, taskKey: string): ActionedTask | null {
     const row = this.db
       .query(
-        `SELECT task_key, signal, actioned_at FROM actioned_tasks WHERE source = ? AND task_key = ?`,
+        `SELECT task_key, signal, verified, updated_stamp, actioned_at FROM actioned_tasks WHERE source = ? AND task_key = ?`,
       )
       .get(source, taskKey) as Record<string, unknown> | null;
     if (!row) return null;
     return {
       taskKey: row.task_key as string,
       signal: row.signal as string,
+      verified: (row.verified as number | null) !== 0,
+      updatedStamp: (row.updated_stamp as string | null) ?? null,
       actionedAt: row.actioned_at as number,
     };
   }
@@ -563,14 +591,27 @@ export class WorkerState {
    * @param source - Tracker source key
    * @param taskKey - Tracker task key
    * @param signal - Digest of the ticket's human-editable fields
+   * @param verified - False when the signal came from a fallback snapshot
+   *                   instead of a successful tracker read
+   * @param updatedStamp - The ticket's tracker `updated` value at recording
+   *                       time, persisted so the gate can skip re-reads
    */
-  markTaskActioned(source: string, taskKey: string, signal: string): void {
+  markTaskActioned(
+    source: string,
+    taskKey: string,
+    signal: string,
+    verified = true,
+    updatedStamp?: string,
+  ): void {
     this.db.run(
-      `INSERT INTO actioned_tasks (source, task_key, signal, actioned_at) VALUES (?, ?, ?, ?)
+      `INSERT INTO actioned_tasks (source, task_key, signal, verified, updated_stamp, actioned_at)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(source, task_key) DO UPDATE SET
          signal = excluded.signal,
+         verified = excluded.verified,
+         updated_stamp = excluded.updated_stamp,
          actioned_at = excluded.actioned_at`,
-      [source, taskKey, signal, Date.now()],
+      [source, taskKey, signal, verified ? 1 : 0, updatedStamp?.trim() || null, Date.now()],
     );
   }
 

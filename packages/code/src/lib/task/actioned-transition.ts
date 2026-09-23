@@ -42,50 +42,58 @@ export async function applyActionedTransition(input: ActionedTransitionInput): P
   const { tracker, task, taskKey, skipComments } = input;
   if (isMarkdownTaskTracker(tracker)) return;
 
-  const projectSettings = input.projectSettings ?? loadProjectSettings();
-  const projectKey = resolveProjectKey(taskKey, task);
-  const prStatus = getPrStatusForProject(projectKey, projectSettings)?.trim();
-
-  if (skipComments) {
-    console.log(
-      "\n⏭️  --skip-comments: recording the ticket as actioned locally (no tracker transition)",
-    );
-  } else if (prStatus) {
-    try {
-      console.log(`\n🔄 Transitioning ${taskKey} to '${prStatus}' after PR creation...`);
-      await tracker.transitionStatus(taskKey, prStatus);
-    } catch (statusError) {
-      // Missing label/permissions/transient API error: the PR is already
-      // created, so degrade to the local marker instead of failing the run.
-      console.warn(
-        `⚠️  Failed to transition ${taskKey} to '${prStatus}': ${(statusError as Error).message}`,
-      );
-      console.log("   PR was created; recording the ticket as actioned locally instead.");
-    }
-  } else if (isWorkerTaskProcess()) {
-    // Interactive PR runs have no sweep to loop on; keep the warning for the
-    // worker, where a missing actioned status is the duplicate-PR hazard.
-    console.warn(
-      `⚠️  No prStatus configured for ${projectKey}; recording ${taskKey} as actioned locally so it ` +
-        "is not re-implemented. Add a prStatus in .devintern-code/settings.json (or exclude " +
-        "actioned tickets in the sweep query) to also move it out of the tracker.",
-    );
-  }
-
-  const workerState = input.workerState ?? new WorkerState();
-  const ownsState = input.workerState === undefined;
+  // Loading settings or opening the state DB can throw (e.g. the "disk I/O
+  // error" case when the queue DB is deleted under an open connection). The
+  // PR is already created, so the whole body must be unable to fail the run.
+  let workerState: WorkerState | undefined;
   try {
-    const marked = await recordTaskActioned({
-      workerState,
-      source: actionedSourceKeyFromEnv(),
-      tracker,
-      taskKey,
-      fallbackTask: task,
-    });
-    if (marked) {
-      console.log(`✅ Recorded ${taskKey} as actioned`);
+    const projectSettings = input.projectSettings ?? loadProjectSettings();
+    const projectKey = resolveProjectKey(taskKey, task);
+    const prStatus = getPrStatusForProject(projectKey, projectSettings)?.trim();
+
+    if (skipComments) {
+      console.log(
+        "\n⏭️  --skip-comments: recording the ticket as actioned locally (no tracker transition)",
+      );
+    } else if (prStatus) {
+      try {
+        console.log(`\n🔄 Transitioning ${taskKey} to '${prStatus}' after PR creation...`);
+        await tracker.transitionStatus(taskKey, prStatus);
+      } catch (statusError) {
+        // Missing label/permissions/transient API error: the PR is already
+        // created, so degrade to the local marker instead of failing the run.
+        console.warn(
+          `⚠️  Failed to transition ${taskKey} to '${prStatus}': ${(statusError as Error).message}`,
+        );
+        console.log("   PR was created; recording the ticket as actioned locally instead.");
+      }
+    } else if (isWorkerTaskProcess()) {
+      // Interactive PR runs have no sweep to loop on; keep the warning for the
+      // worker, where a missing actioned status is the duplicate-PR hazard.
+      console.warn(
+        `⚠️  No prStatus configured for ${projectKey}; recording ${taskKey} as actioned locally so it ` +
+          "is not re-implemented. Add a prStatus in .devintern-code/settings.json (or exclude " +
+          "actioned tickets in the sweep query) to also move it out of the tracker.",
+      );
     }
-  } finally {
-    if (ownsState) workerState.close();
+
+    workerState = input.workerState ?? new WorkerState();
+    const ownsState = input.workerState === undefined;
+    try {
+      const marked = await recordTaskActioned({
+        workerState,
+        source: actionedSourceKeyFromEnv(),
+        tracker,
+        taskKey,
+        fallbackTask: task,
+      });
+      if (marked) {
+        console.log(`✅ Recorded ${taskKey} as actioned`);
+      }
+    } finally {
+      if (ownsState) workerState.close();
+    }
+  } catch (error) {
+    console.warn(`⚠️  Failed to record ${taskKey} as actioned: ${(error as Error).message}`);
   }
 }

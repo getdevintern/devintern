@@ -10,6 +10,7 @@ import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
+import type { ProjectSettings } from "../src/types/settings";
 
 const task: Task = {
   key: "PROJ-1",
@@ -144,6 +145,35 @@ describe("applyActionedTransition", () => {
       workerState,
     });
     // The pipeline records markdown actioned state after markDoneIfSuccessful.
+    expect(workerState.getTaskActioned(actionedSourceKeyFromEnv(), "PROJ-1")).toBeNull();
+  });
+
+  test("never throws when settings resolution fails", async () => {
+    // Opening/reading the state DB can throw ("disk I/O error"); the PR is
+    // already created, so the caller must never see a rejection it would
+    // misreport as a PR-creation failure.
+    const throwingSettings = new Proxy({} as ProjectSettings, {
+      get() {
+        throw new Error("disk I/O error");
+      },
+    });
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await applyActionedTransition({
+        tracker: fakeTracker(),
+        task,
+        taskKey: "PROJ-1",
+        skipComments: false,
+        projectSettings: throwingSettings,
+        workerState,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(warnings.some((line) => line.includes("disk I/O error"))).toBe(true);
     expect(workerState.getTaskActioned(actionedSourceKeyFromEnv(), "PROJ-1")).toBeNull();
   });
 });

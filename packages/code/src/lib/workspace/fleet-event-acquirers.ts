@@ -4,7 +4,7 @@ import { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { createFleetTaskExecutor } from "./fleet-executor";
+import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
@@ -36,6 +36,12 @@ export interface FleetSourceRuntime {
    * (built at startup); single-source workspaces resolve one lazily.
    */
   client?: TaskTrackerClient;
+  /**
+   * Actioned gate for relay task envelopes, wired by the workspace worker from
+   * the same marker/source the polling acquirer uses. Absent in legacy
+   * focused-test paths.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
 }
 
 /**
@@ -68,7 +74,12 @@ export async function buildFleetEventAcquirers(options: {
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
-  const taskSources: Array<Pick<FleetSourceRuntime, "tracker" | "team" | "query" | "searchTasks">> =
+  const taskSources: Array<
+    Pick<
+      FleetSourceRuntime,
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+    >
+  > =
     options.sources ??
     (options.searchTasks
       ? [
@@ -448,6 +459,7 @@ export async function buildFleetEventAcquirers(options: {
             skips: state.skips,
             repoManager,
             team: source.team,
+            actionedSource: resolveActionedSource(config, source.team),
             supervisor: options.supervisor,
           },
           {
@@ -463,6 +475,7 @@ export async function buildFleetEventAcquirers(options: {
             query: source.query,
             searchTasks: source.searchTasks,
             execute,
+            isTaskActionedUnchanged: source.isTaskActionedUnchanged,
             verbose,
           }),
         };

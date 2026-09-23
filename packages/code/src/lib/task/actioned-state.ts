@@ -21,6 +21,13 @@ import { createHash } from "crypto";
 import type { Task } from "../../types/task-tracker";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { WorkerState } from "../state/worker-state";
+import { sleep } from "../utils/general";
+import { ACTIONED_SOURCE_ENV } from "../workspace/env";
+
+/** Re-read attempts before recording from an unverified snapshot. */
+const REREAD_ATTEMPTS = 3;
+/** Delay between re-read attempts, in milliseconds. */
+const REREAD_DELAY_MS = 250;
 
 /** Human-editable fields whose change re-arms an actioned ticket. */
 export interface ActionedSignalInput {
@@ -80,15 +87,44 @@ export function actionedSourceKey(trackerType: string | undefined, teamName?: st
 export function actionedSourceKeyFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  const pinned = env[ACTIONED_SOURCE_ENV]?.trim();
+  if (pinned) return pinned;
   return actionedSourceKey(env.TASK_TRACKER, env.DEVINTERN_WORKSPACE_TEAM);
+}
+
+/**
+ * Re-read a ticket for its actioned signal, retrying transient tracker blips.
+ *
+ * @throws The last error once every attempt fails.
+ */
+async function rereadTask(
+  tracker: TaskTrackerClient,
+  taskKey: string,
+  attempts = REREAD_ATTEMPTS,
+  delayMs = REREAD_DELAY_MS,
+): Promise<Task> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await tracker.getTask(taskKey);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(delayMs);
+    }
+  }
+  throw lastError;
 }
 
 /**
  * Record a ticket as actioned after its PR was created.
  *
- * Re-reads the ticket so the digest reflects the post-transition state. When
- * the read fails the `fallbackTask` (the run's original snapshot) is used so a
- * transient tracker error never loses the local suppression.
+ * Re-reads the ticket so the digest reflects the post-transition state. The
+ * re-read is retried a few times; when it still fails the `fallbackTask` (the
+ * run's original snapshot) is recorded but flagged `unverified`, because that
+ * snapshot predates the worker's own status transition. The gate treats an
+ * unverified record as fail-safe and keeps suppressing the ticket until a
+ * successful read refreshes it — a transient read error must never re-arm the
+ * ticket and produce a duplicate PR.
  *
  * @returns `true` when the marker was written
  */
@@ -100,10 +136,13 @@ export async function recordTaskActioned(input: {
   fallbackTask?: Task;
 }): Promise<boolean> {
   const { workerState, source, tracker, taskKey } = input;
-  let task = input.fallbackTask;
+  let task: Task | undefined;
+  let verified = false;
   try {
-    task = await tracker.getTask(taskKey);
+    task = await rereadTask(tracker, taskKey);
+    verified = true;
   } catch (error) {
+    task = input.fallbackTask;
     if (!task) {
       console.warn(
         `⚠️  [actioned] could not read ${taskKey} to record its actioned state: ${
@@ -112,12 +151,17 @@ export async function recordTaskActioned(input: {
       );
       return false;
     }
+    console.warn(
+      `⚠️  [actioned] could not read ${taskKey}; recording an unverified marker from the run snapshot: ${
+        (error as Error).message
+      }`,
+    );
   }
   if (!task) return false;
 
   try {
     const signal = trackerActionedSignal(tracker, task);
-    workerState.markTaskActioned(source, taskKey, signal);
+    workerState.markTaskActioned(source, taskKey, signal, verified, task.updated);
     return true;
   } catch (error) {
     console.warn(
@@ -135,25 +179,51 @@ export async function recordTaskActioned(input: {
  * need tracker credentials at startup. A read failure fails safe (skip the
  * ticket) to avoid a duplicate PR.
  *
+ * A record written from a fallback snapshot is `unverified`: its digest
+ * predates the worker's own transition, so comparing it against the live
+ * ticket would look like a human change and re-arm it. The first successful
+ * read after such a record refreshes it as verified and keeps suppressing.
+ *
+ * Once verified, the ticket's `updated` stamp is persisted alongside the
+ * marker; while the caller reports the same stamp the gate skips the tracker
+ * read entirely. Because it is persisted, the cache survives a worker restart,
+ * so a cold start does not burst one API call per still-actioned ticket.
+ *
  * @returns `true` when the ticket was actioned and has not changed since
  */
 export function createTaskActionedGate(deps: {
   getTracker: () => TaskTrackerClient | Promise<TaskTrackerClient>;
   workerState: WorkerState;
   source: string;
-}): (taskKey: string) => Promise<boolean> {
-  return async (taskKey) => {
+}): (taskKey: string, updated?: string) => Promise<boolean> {
+  return async (taskKey, updated) => {
     const record = deps.workerState.getTaskActioned(deps.source, taskKey);
     if (!record) return false;
+
+    const stamp = updated?.trim();
+    // A verified marker whose persisted stamp matches the sweep result means
+    // the ticket has not changed since the last read: skip the tracker call.
+    if (stamp && record.verified && record.updatedStamp === stamp) {
+      return true;
+    }
+
     try {
       const tracker = await deps.getTracker();
       const task = await tracker.getTask(taskKey);
       const signal = trackerActionedSignal(tracker, task);
-      if (signal === record.signal) {
-        return true;
+
+      if (record.verified && signal !== record.signal) {
+        deps.workerState.clearTaskActioned(deps.source, taskKey);
+        return false;
       }
-      deps.workerState.clearTaskActioned(deps.source, taskKey);
-      return false;
+
+      // Verified match, or the first successful read since an unverified
+      // record: refresh so the marker reflects the live post-transition state,
+      // and pin the stamp so an unchanged next tick skips the read.
+      if (!record.verified || (stamp && record.updatedStamp !== stamp)) {
+        deps.workerState.markTaskActioned(deps.source, taskKey, signal, true, stamp);
+      }
+      return true;
     } catch (error) {
       console.warn(
         `⚠️  [actioned] could not verify ${taskKey}; leaving it actioned to avoid a duplicate PR: ${
