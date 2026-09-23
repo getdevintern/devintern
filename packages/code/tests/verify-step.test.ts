@@ -18,6 +18,11 @@ const feedback: ReviewFeedback = {
 
 function state(verify: FinalizeContext["verify"]): DeliveryState {
   return {
+    taskContent: "Implement the feature",
+    workingDir: process.cwd(),
+    outputDir,
+    prTargetBranch: "main",
+    warnings: [],
     context: {
       verify,
       taskFile: join(outputDir, "task.md"),

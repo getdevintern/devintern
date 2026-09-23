@@ -6,6 +6,7 @@ export interface TaskStep<Context> {
 
 export type TaskStepResult =
   | { kind: "continue" }
+  | { kind: "warn"; reason: string }
   | { kind: "halt"; reason: string }
   | { kind: "repeat"; from: string; maxRepeats: number };
 
@@ -32,11 +33,31 @@ export async function runTaskSteps<Context>(
   }
 
   const repeatCounts = new Map<number, number>();
+  const retryCounts = new Map<number, number>();
   let index = 0;
   while (index < steps.length) {
     const step = steps[index]!;
-    const result = await step.run(context);
+    let result: TaskStepResult | void;
+    try {
+      result = await step.run(context);
+    } catch (error) {
+      // A plugin can import StepExecutionError through a separately loaded
+      // public entrypoint, so identify it by name across module copies.
+      if (error instanceof Error && error.name === "StepExecutionError") {
+        const retries = (retryCounts.get(index) ?? 0) + 1;
+        retryCounts.set(index, retries);
+        if (retries <= 1) continue;
+        return { kind: "halted", step: step.name, reason: error.message };
+      }
+      throw error;
+    }
     if (!result || result.kind === "continue") {
+      index++;
+      continue;
+    }
+
+    if (result.kind === "warn") {
+      console.warn(`⚠️  ${step.name}: ${result.reason}`);
       index++;
       continue;
     }

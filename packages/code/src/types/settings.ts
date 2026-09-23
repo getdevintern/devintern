@@ -78,6 +78,20 @@ export interface AnalyticsSettings {
   enabled?: boolean;
 }
 
+/** A built-in or registered task step with step-specific options. */
+export interface PipelineStepConfig {
+  use: string;
+  [option: string]: unknown;
+}
+
+/** Task delivery steps and plugin modules loaded from the project. */
+export interface PipelineConfig {
+  /** Ordered steps, starting with implement and ending with finalize. */
+  steps?: PipelineStepConfig[];
+  /** Project-relative paths or installed package names exporting step definitions. */
+  plugins?: string[];
+}
+
 /**
  * Per-project configuration settings.
  *
@@ -91,6 +105,8 @@ export interface AnalyticsSettings {
 export interface ProjectSettings {
   /** Anonymous usage analytics preferences. */
   analytics?: AnalyticsSettings;
+  /** Optional task pipeline customization. */
+  pipeline?: PipelineConfig;
 
   /**
    * Legacy project configurations (backward compatible).
