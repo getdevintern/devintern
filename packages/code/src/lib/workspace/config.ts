@@ -163,6 +163,8 @@ export interface WorkerSettings {
    * `[worker.schedule]` table is absent or empty (pickup unrestricted).
    */
   schedule: WorkerScheduleConfig | null;
+  /** Update a global CLI install while idle, then restart the worker. */
+  autoUpdate: boolean;
 }
 
 /** Parsed and validated `workspace.toml`. */
@@ -393,6 +395,7 @@ export function parseWorkspaceConfig(
   const workerTable = asTable(document.worker, "[worker]", errors);
   const schedule = parseWorkerScheduleSection(workerTable.schedule, "[worker.schedule]");
   errors.push(...schedule.errors);
+  const autoUpdate = readOptionalBoolean(workerTable, "auto_update", "[worker]", errors) ?? true;
 
   const estimations = parseEstimationsSection(document, tracker, errors);
 
@@ -402,7 +405,7 @@ export function parseWorkspaceConfig(
 
   return {
     workspace,
-    worker: { schedule: schedule.config },
+    worker: { schedule: schedule.config, autoUpdate },
     defaults,
     teams,
     repos,

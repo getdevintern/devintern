@@ -749,6 +749,10 @@ GITLAB_CODE_HOST_PROXY = ""
             updateLimits() {},
             stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
+            holdAdmissions() {},
+            resume() {},
+            inFlightCount: () => 0,
+            queuedCount: () => 0,
           },
         });
         await (
@@ -841,6 +845,10 @@ GITLAB_CODE_HOST_PROXY = ""
             updateLimits() {},
             stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
+            holdAdmissions() {},
+            resume() {},
+            inFlightCount: () => 0,
+            queuedCount: () => 0,
           },
         });
         const watcher = acquirers.find((item) => item instanceof CiFailureWatcherAcquirer);

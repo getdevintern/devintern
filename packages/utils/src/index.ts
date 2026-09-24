@@ -4,6 +4,9 @@ export { REDACTED, redactText, redactValue } from "./redact.ts";
 export {
   detectInstallKind,
   fetchLatestVersion,
+  installGlobalCli,
+  installGlobalCliAsync,
+  isCliUpdateCheckDue,
   isNewerVersion,
   maybeOfferCliUpdate,
   parseSemver,
