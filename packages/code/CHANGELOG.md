@@ -1,6 +1,12 @@
 # @devintern/code Changelog
 
-## [Unreleased]
+## [2.14.0] - 2026-09-24
+
+Self-updating worker release: an idle worker keeps itself current from the npm registry, task polling fills free concurrency slots instead of stalling after the first batch, and worker-generated PRs no longer include DevIntern runtime files.
+
+### Added
+
+- **Worker keeps itself up to date while idle (DEV-123)**: a globally installed `devintern` (npm or bun `-g`) checks the npm registry at most once per calendar day and, when idle, installs the newer `@getdevintern/code` and restarts itself on the new version — no operator action, no interrupted work. The check that comes due while agent work is in flight waits for it to finish and runs on a later idle pass; once idle, new work is held only for the duration of the check and install, and a skip releases the hold immediately. After a successful install the worker shuts down cleanly — under a service manager (systemd user unit, launchd agent) the exit asks for a restart and the manager relaunches it, while in a plain terminal the worker hands over to a freshly spawned process on the new binary by itself. Registry, network, or install failures are logged, the current version keeps serving, and the next idle window retries after the daily interval. Source checkouts, `bun link`, and local `node_modules` installs are never self-updated, `DEVINTERN_NO_UPDATE=1` / `--no-update` skip the check entirely, and `[worker].auto_update = false` disables it for a workspace durably (live-reloaded). Steps are logged into the same capture files the dashboard tails (`[update] checking npm …`, skip reasons, `⬆ Auto-updating devintern X → Y`, and the restart)
 
 ### Fixed
 
