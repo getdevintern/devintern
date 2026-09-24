@@ -20,6 +20,17 @@ export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
 
 /**
+ * Explicit actioned-ticket source key pinned into a task subprocess.
+ *
+ * The workspace gate is built from `[defaults].tracker`/team identity, while
+ * the subprocess records with `TASK_TRACKER`/`DEVINTERN_WORKSPACE_TEAM`. Those
+ * can disagree when a stale `.env` carries a different tracker (or a shell
+ * `DEVINTERN_WORKSPACE_TEAM` leaks into a single-source workspace), which
+ * silently disables suppression. Pinning the derived key removes the guesswork.
+ */
+export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
+
+/**
  * Parse a dotenv-style file into a record (same semantics as the tracker
  * config loader: `KEY=value`, `#` comments, optional single/double quotes).
  * Missing files yield an empty record.
@@ -73,11 +84,14 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.actionedSource - Actioned-ticket source key to pin (see
+ *                                 {@link ACTIONED_SOURCE_ENV}).
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { actionedSource?: string } = {},
 ): Record<string, string | undefined> {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -94,6 +108,12 @@ export function buildRepoEnv(
   env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
   env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
   env[WORKSPACE_REPO_ENV] = repo.name;
+  // `buildTeamTaskEnv` sets the team after layering; a non-team repo env must
+  // never inherit a team name leaked from the shell.
+  delete env[WORKSPACE_TEAM_ENV];
+  if (options.actionedSource) {
+    env[ACTIONED_SOURCE_ENV] = options.actionedSource;
+  }
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {
     const slug = gitHubSlugFromRemote(repo.remote);
@@ -156,13 +176,16 @@ export function buildTeamEnv(
  * @param repo - Workspace repo the task routed to.
  * @param team - Team that acquired the task.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.actionedSource - Actioned-ticket source key to pin (see
+ *                                 {@link ACTIONED_SOURCE_ENV}).
  */
 export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { actionedSource?: string } = {},
 ): Record<string, string | undefined> {
-  const env = buildRepoEnv(repo, workspaceDir);
+  const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;

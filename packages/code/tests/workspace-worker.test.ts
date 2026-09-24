@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { parseWorkspaceConfig, findTeam } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
@@ -13,11 +13,20 @@ import {
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  resolveActionedSource,
   resolveWorkspaceAutomationContext,
   startWorktreeSweeper,
   sweepAllWorktrees,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import {
+  actionedSourceKey,
+  createTaskActionedGate,
+  recordTaskActioned,
+} from "../src/lib/task/actioned-state";
+import { ACTIONED_SOURCE_ENV } from "../src/lib/workspace/env";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import type { Task } from "../src/types/task-tracker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
 import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
@@ -228,6 +237,71 @@ describe("createWorkspaceTaskAcquirer", () => {
 
     expect(ran).toHaveLength(0);
     expect(state.skips.list()[0]).toMatchObject({ reason: "unrouted", candidates: [] });
+  });
+
+  test("passes each task's updated stamp into the actioned gate (no re-read on an unchanged tick)", async () => {
+    // A real gate over a read-counting tracker, wired exactly as the workspace
+    // worker wires it. If the acquirer dropped `task.updated`, the gate's stamp
+    // cache would miss and re-read the tracker on every tick.
+    const source = actionedSourceKey("markdown");
+    const actionedTask: Task = {
+      key: "T-9",
+      summary: "Already actioned",
+      issueType: "Task",
+      status: "In Review",
+      reporter: "alice",
+      labels: ["intern"],
+      components: [],
+      fixVersions: [],
+      created: "",
+      updated: "u1",
+      raw: { description: "done" },
+    };
+    let reads = 0;
+    const tracker = {
+      getTask: async () => {
+        reads++;
+        return actionedTask;
+      },
+      extractDescriptionText: (task: Task) =>
+        (task.raw as { description?: string }).description ?? "",
+    } as unknown as TaskTrackerClient;
+    await recordTaskActioned({
+      workerState: state.workerState,
+      source,
+      tracker,
+      taskKey: "T-9",
+      fallbackTask: actionedTask,
+    });
+    expect(reads).toBe(1);
+    const gate = createTaskActionedGate({
+      getTracker: () => tracker,
+      workerState: state.workerState,
+      source,
+    });
+
+    tasks = [{ key: "T-9", updated: "u1", labels: ["backend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      isTaskActionedUnchanged: (taskKey, updated) => gate(taskKey, updated),
+      runTask: async () => {
+        throw new Error("must not run");
+      },
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(ran).toHaveLength(0); // actioned: kept out of the sweep both ticks
+    expect(reads).toBe(1); // unchanged stamp: no per-tick tracker read
   });
 
   test("task execution no longer holds the legacy whole-run repo lock", async () => {
@@ -505,6 +579,71 @@ describe("createFleetTaskExecutor serialization", () => {
 
     expect(observed?.env.DEVINTERN_RUN_ORIGIN).toBe("error_monitor");
     expect(observed?.args).toContain("--skip-clarity-check");
+  });
+
+  test("pins the resolved actioned source into the subprocess env", async () => {
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        actionedSource: resolveActionedSource(CONFIG),
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend" },
+    );
+
+    await executor("T-PIN", toRoutableTask({ key: "T-PIN", labels: [], components: [] }));
+
+    // The single-source key the polling gate would use for this tracker.
+    expect(observed?.[ACTIONED_SOURCE_ENV]).toBe(actionedSourceKey(CONFIG.defaults.tracker));
+  });
+
+  test("the retry-path actioned source equals the team gate's source key", async () => {
+    // Mirrors the retry-queue wiring: a retry resolves its persisted team, and
+    // the pinned source must equal the key the team's polling gate uses.
+    const teamConfig = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "labels = devintern"
+repo = "backend"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+`);
+    const retryTeam = findTeam(teamConfig, "platform")!;
+    const retryActionedSource = resolveActionedSource(teamConfig, retryTeam);
+    expect(retryActionedSource).toBe(actionedSourceKey(retryTeam.tracker, retryTeam.name));
+
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: teamConfig,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        team: retryTeam,
+        actionedSource: retryActionedSource,
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend", source: "retry" },
+    );
+
+    await executor("T-RETRY", toRoutableTask({ key: "T-RETRY", labels: [], components: [] }));
+    expect(observed?.[ACTIONED_SOURCE_ENV]).toBe(retryActionedSource);
   });
 });
 

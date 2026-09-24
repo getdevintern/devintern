@@ -213,6 +213,20 @@ If a run completes but you want a different result, move the ticket back to your
 
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
+### Tickets already actioned after a PR
+
+Once a ticket's pull request is created the worker records it as **actioned** in `.devintern-code/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
+
+If the project configures `prStatus` in `.devintern-code/settings.json`, the worker also moves the ticket to that status/label first. The local marker is recorded even when no `prStatus` is set (the worker logs a warning suggesting one), and even when the transition fails — a missing label, missing permission, or transient API error never makes the worker lose track of the ticket or fail the run that just created the PR.
+
+A ticket re-arms when any field the marker records changes:
+
+- **Edit** the summary or description,
+- **Re-open** a closed ticket (status/state change), or
+- **Add or remove a label**.
+
+The marker is captured *after* the worker's own comment and status transition, so those never re-trigger a run. A ticket that still matches the query but is skipped is logged as `⏭️ skipping KEY (already actioned; no change since the PR)`.
+
 ### Interrupted runs are recovered on startup
 
 A graceful stop (Ctrl-C, `SIGTERM`) comments on an in-flight ticket and moves it back to To Do. A hard crash — power cut, kernel panic, `kill -9`, a laptop that died — skips that cleanup, which used to leave the ticket stranded in "In Progress".
@@ -235,6 +249,7 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 - `📌 picking up KEY` — it was claimed on this tick.
 - `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
+- `⏭️ skipping KEY (already actioned; no change since the PR)` — a PR was already created for this ticket. Edit its summary/description, re-open it, or change its labels to re-arm it; see [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
@@ -281,7 +296,7 @@ Unattended automation is exactly where sandboxing the agent matters most: set `A
 
 ## Review feedback on the agent's PRs
 
-In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker (and PRs that disappear because a repository was renamed, transferred, or deleted) drop out of the open count within one poll.
+In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open.
 
 The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 

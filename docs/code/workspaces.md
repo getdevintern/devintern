@@ -250,6 +250,9 @@ Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, 
 3. Inline `[repos.env]` values (highest precedence)
 
 For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL.
+GitHub review, CI, mention, and relay requests use the matching repo's `GITHUB_TOKEN` layers.
+When a fixed GitHub team targets that repo, its `env_file` and `[teams.env]` can override the
+token. Without a repo or team override, those requests use the workspace token.
 
 ## Running
 

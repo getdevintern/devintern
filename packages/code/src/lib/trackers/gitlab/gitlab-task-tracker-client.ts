@@ -150,6 +150,10 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
     });
   }
 
+  actionedStatusLabels(): string[] {
+    return [...this.statusLabels];
+  }
+
   extractDescriptionText(task: Task): string {
     return (task.raw as GitLabIssue).description || "";
   }
