@@ -6,8 +6,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { CONFIG_DIR_ENV, WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
-import { LockManager, shouldSkipRunLock } from "../src/lib/lock-manager";
+import { LockManager } from "../src/lib/lock-manager";
 
 describe("LockManager", () => {
   let testDir: string;
@@ -174,64 +173,6 @@ describe("LockManager custom lock file", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("LockManager fleet config override (DEV-126)", () => {
-  const savedConfigDir = process.env[CONFIG_DIR_ENV];
-  const savedWorkerFlag = process.env[WORKER_SUBPROCESS_ENV];
-
-  afterEach(() => {
-    if (savedConfigDir === undefined) delete process.env[CONFIG_DIR_ENV];
-    else process.env[CONFIG_DIR_ENV] = savedConfigDir;
-    if (savedWorkerFlag === undefined) delete process.env[WORKER_SUBPROCESS_ENV];
-    else process.env[WORKER_SUBPROCESS_ENV] = savedWorkerFlag;
-  });
-
-  test("skips the shared CLI lock for a supervised worker subprocess", () => {
-    const root = join(
-      tmpdir(),
-      `lock-manager-override-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-    );
-    mkdirSync(root, { recursive: true });
-    process.env[CONFIG_DIR_ENV] = join(root, "workspace", ".devintern-code");
-    process.env[WORKER_SUBPROCESS_ENV] = "1";
-
-    try {
-      // Two repos' subprocesses share the pinned config dir, so the default
-      // per-directory lock would make unrelated repos collide...
-      expect(shouldSkipRunLock()).toBe(true);
-      const first = new LockManager(join(root, "repo-a"));
-      expect(first.acquire().success).toBe(true);
-      expect(new LockManager(join(root, "repo-b")).acquire().success).toBe(false);
-      first.release();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("keeps the per-directory lock when only the config dir is pinned", () => {
-    // An operator exporting DEVINTERN_CONFIG_DIR (or a `.env` that sets it)
-    // must not silently lose the guard against concurrent manual runs.
-    const root = join(
-      tmpdir(),
-      `lock-manager-override-only-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-    );
-    mkdirSync(root, { recursive: true });
-    process.env[CONFIG_DIR_ENV] = join(root, "workspace", ".devintern-code");
-    delete process.env[WORKER_SUBPROCESS_ENV];
-
-    try {
-      expect(shouldSkipRunLock()).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("keeps the per-directory lock without a pinned config dir", () => {
-    delete process.env[CONFIG_DIR_ENV];
-    delete process.env[WORKER_SUBPROCESS_ENV];
-    expect(shouldSkipRunLock()).toBe(false);
   });
 });
 

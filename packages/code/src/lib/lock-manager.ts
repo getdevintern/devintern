@@ -1,8 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { resolve, join } from "path";
 
-import { configDirOverride, isWorkerSubprocess } from "./config/config-dir";
-
 export interface LockStatus {
   /** Whether the lock-holding process is still alive. */
   running: boolean;
@@ -11,24 +9,6 @@ export interface LockStatus {
   startedAt?: string;
   /** Absolute path of the lock file the status was read from. */
   path?: string;
-}
-
-/**
- * Whether the CLI's per-directory run lock is redundant for this process.
- *
- * A fleet task subprocess shares one `DEVINTERN_CONFIG_DIR` across every
- * repository, so the default `.pid.lock` would make unrelated repos collide
- * even though each runs in its own worktree. The workspace supervisor already
- * enforces the global and per-repository concurrency limits, so the CLI lock
- * is skipped for those subprocesses.
- *
- * The skip is scoped to supervised worker subprocesses (the
- * `DEVINTERN_WORKER_SUBPROCESS` marker `buildRepoEnv` sets), not to every
- * process with a pinned config dir: an operator who exports
- * `DEVINTERN_CONFIG_DIR` still gets the guard against concurrent manual runs.
- */
-export function shouldSkipRunLock(): boolean {
-  return configDirOverride() !== undefined && isWorkerSubprocess();
 }
 
 export class LockManager {
@@ -55,7 +35,7 @@ export class LockManager {
     // Create lock file in .devintern-code directory
     const configDir = options.plainDir
       ? resolve(workingDir)
-      : (configDirOverride() ?? resolve(workingDir, ".devintern-code"));
+      : resolve(workingDir, ".devintern-code");
 
     // Ensure .devintern-code directory exists
     if (!existsSync(configDir)) {
@@ -160,7 +140,7 @@ export class LockManager {
   ): LockStatus | null {
     const configDir = options.plainDir
       ? resolve(workingDir)
-      : (configDirOverride() ?? resolve(workingDir, ".devintern-code"));
+      : resolve(workingDir, ".devintern-code");
     const lockFilePath = join(configDir, lockFileName);
     if (!existsSync(lockFilePath)) {
       return null;

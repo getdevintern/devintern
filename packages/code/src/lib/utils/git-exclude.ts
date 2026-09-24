@@ -58,3 +58,17 @@ export function ensureGitInfoExcluded(cwd: string, pattern: string, target?: str
     // Excluding tool state is a safety net, never a requirement.
   }
 }
+
+/** Keep known runtime artifacts out of fleet PRs while allowing repo config. */
+export function excludeWorkerRuntimeFiles(cwd: string): void {
+  for (const name of [
+    ".pid.lock",
+    ".auth-session.json",
+    "license-cache.json",
+    "queue.db*",
+    "relay.json",
+    "github-app.json",
+  ]) {
+    ensureGitInfoExcluded(cwd, `.devintern-code/${name}`);
+  }
+}

@@ -166,7 +166,7 @@ export async function prepareWorktreeForAgent(
   const verbose = options?.verbose ?? false;
 
   try {
-    // NOTE: `.devintern-code/` is kept out of `git add -A` by the fleet
+    // NOTE: `.devintern-code/` runtime files are kept out of `git add -A` by the fleet
     // worktree creator (`RepoManager.addWorktree`), which owns the local
     // `.git/info/exclude` write so review worktrees made from a user's own
     // checkout never modify the user's repository.

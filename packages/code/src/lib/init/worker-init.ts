@@ -14,7 +14,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 
 import {
@@ -56,8 +56,11 @@ import {
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { gitHubSlugFromRemote } from "../workspace/env";
-import { workspaceConfigDir, workspaceConfigPath } from "../workspace/paths";
-import { configDirOverride, CONFIG_DIR_ENV } from "../config/config-dir";
+import {
+  ensureWorkspaceCodeState,
+  workspaceCodeStateDir,
+  workspaceConfigPath,
+} from "../workspace/paths";
 import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
@@ -144,7 +147,7 @@ export interface WorkerInitDeps {
   /** Evaluate the ready-tasks query; returns the number of matching tasks. */
   dryRunQuery?: (query: string) => Promise<number>;
   /** Automation license check; returns a human-readable failure, or null when entitled. */
-  checkAutomationLicense?: () => Promise<string | null>;
+  checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */
   ensureTracker?: (ctx: { cwd: string; prompt: PromptFn; log: LogFn }) => Promise<string | null>;
   /** Override workspace write. */
@@ -433,8 +436,7 @@ async function defaultEnsureTracker(
  * Resolve the auth-session path `worker init` reads and writes.
  *
  * Once the workspace is known the session must live in the workspace config
- * dir — the same `DEVINTERN_CONFIG_DIR` that `buildRepoEnv` pins for the
- * daemon and every task/review/automation subprocess. Otherwise signing in
+ * dir — the same store used by the daemon and task subprocesses. Otherwise signing in
  * during `worker init` would write the session beside the imported checkout,
  * where the unattended worker never looks, and its license check would fail.
  *
@@ -443,9 +445,20 @@ async function defaultEnsureTracker(
  */
 export function workerAuthSessionPath(projectRoot: string, workspaceDir?: string): string {
   const configDir = workspaceDir
-    ? workspaceConfigDir(workspaceDir)
-    : (configDirOverride() ?? join(projectRoot, ".devintern-code"));
+    ? workspaceCodeStateDir(workspaceDir)
+    : join(projectRoot, ".devintern-code");
   return join(configDir, ".auth-session.json");
+}
+
+/** Reuse an existing project sign-in when setting up its first worker. */
+export function copyProjectSessionToWorkspace(projectRoot: string, workspaceDir: string): boolean {
+  const source = join(projectRoot, ".devintern-code", ".auth-session.json");
+  const target = workerAuthSessionPath(projectRoot, workspaceDir);
+  if (!existsSync(source) || existsSync(target)) return false;
+  mkdirSync(workspaceCodeStateDir(workspaceDir), { recursive: true, mode: 0o700 });
+  copyFileSync(source, target);
+  chmodSync(target, 0o600);
+  return true;
 }
 
 function projectAuthConfig(projectRoot: string, workspaceDir?: string) {
@@ -499,7 +512,7 @@ async function defaultConnectRelay(
   const getAccessToken = async () => {
     const user = await requireAuthenticatedUser(
       projectAuthConfig(options.projectRoot, options.workspaceDir),
-      "devintern login",
+      "devintern worker login",
     );
     return user.accessToken;
   };
@@ -688,11 +701,11 @@ async function runSentryStep(
 }
 
 /** Step 6: license is reported but never aborts setup. */
-async function runLicenseStep(ctx: InitContext): Promise<void> {
+async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<void> {
   if (!ctx.deps.checkAutomationLicense) return;
   ctx.log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
   try {
-    const failure = await ctx.deps.checkAutomationLicense();
+    const failure = await ctx.deps.checkAutomationLicense(workspaceDir);
     if (failure === null) {
       ctx.log("✅ Automation license OK.");
     } else {
@@ -775,7 +788,9 @@ async function runRelayStep(
 
   const user = await resolveRelayUser(ctx, workspaceDir);
   if (!user) {
-    ctx.log("   Relay skipped. Run `devintern login`, then re-run `devintern worker init` later.");
+    ctx.log(
+      "   Relay skipped. Run `devintern worker login`, then re-run `devintern worker init` later.",
+    );
     return { relayConnected, relayConnect };
   }
 
@@ -1118,10 +1133,16 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     if (!workspace) return abort;
     const { workspaceDir, repoName } = workspace;
 
-    // Pin the remainder of init (license check, sign-in, relay) to the
-    // workspace config dir, so it agrees with the daemon's auth/license
-    // resolution instead of reading the imported repo's config dir.
-    process.env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
+    ensureWorkspaceCodeState(workspaceDir);
+
+    try {
+      if (copyProjectSessionToWorkspace(projectRoot, workspaceDir)) {
+        log("🔑 Reused this project's sign-in for the worker workspace.");
+      }
+    } catch (error) {
+      log(`⚠️  Could not copy the project sign-in: ${(error as Error).message}`);
+      log("   Run `devintern worker login` to sign in for the workspace.");
+    }
 
     // 3. Ready-tasks query, validated with a live dry run, then task_query.
     const query = await promptReadyQuery(ctx, tracker.trackerName, tracker.queryExample);
@@ -1143,7 +1164,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     await runSentryStep(ctx, workspaceDir, repoName);
 
     // 6. Automation license — any SKU; do not special-case workspace.
-    await runLicenseStep(ctx);
+    await runLicenseStep(ctx, workspaceDir);
 
     // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.

@@ -24,7 +24,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
-import { ensureGitInfoExcluded } from "../utils/git-exclude";
+import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
 
@@ -279,9 +279,9 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
-    // Worktrees are throwaway checkouts; a stale `.devintern-code/` from an
-    // interrupted or older run must never be staged into a task PR.
-    ensureGitInfoExcluded(path, ".devintern-code/");
+    // Exclude only runtime artifacts: new settings.json, .env.example and
+    // automations.toml must remain eligible for a worker-generated PR.
+    excludeWorkerRuntimeFiles(path);
   }
 
   /** Serialize compound Git administration without nesting public locks. */

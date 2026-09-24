@@ -4,7 +4,7 @@
  * Connect is the interactive step: the CLI authenticates with the signed-in
  * Supabase session, the control plane confirms automation entitlement, and
  * (for GitHub / tracker sources) registers the callback. Pairing metadata and
- * the minted relay token persist under the workspace's `.devintern-code`
+ * the minted relay token persist under the workspace's `state/code`
  * directory. The worker then long-polls with that durable relay token;
  * `LICENSE_KEY` remains the local unattended license gate for
  * `devintern worker`.
@@ -18,7 +18,7 @@ import { saveGitHubAppRecord } from "../code-host/github/app-setup";
 import { GitLabWebhookAdminClient } from "../code-host/gitlab/webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "../code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
-import { configDirOverride } from "../config/config-dir";
+import { workspaceCodeStateDir, workspaceConfigPath } from "../workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -183,12 +183,22 @@ export function resolveRelayUrl(): string {
   return (process.env.WORKER_RELAY_URL || DEFAULT_RELAY_URL).replace(/\/+$/, "");
 }
 
+function relayConfigDir(workingDir: string): string {
+  if (
+    existsSync(workspaceConfigPath(workingDir)) ||
+    existsSync(workspaceCodeStateDir(workingDir))
+  ) {
+    return workspaceCodeStateDir(workingDir);
+  }
+  return resolve(workingDir, ".devintern-code");
+}
+
 function relayStatePath(workingDir: string): string {
-  return join(configDirOverride() ?? resolve(workingDir, ".devintern-code"), "relay.json");
+  return join(relayConfigDir(workingDir), "relay.json");
 }
 
 function authSessionPath(workingDir: string): string {
-  return join(configDirOverride() ?? resolve(workingDir, ".devintern-code"), ".auth-session.json");
+  return join(relayConfigDir(workingDir), ".auth-session.json");
 }
 
 /**
@@ -209,7 +219,7 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
   }
 }
 
-/** Persist connect state to `.devintern-code/relay.json`. */
+/** Persist connect state beside the auth session. */
 export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
   const path = relayStatePath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
@@ -287,13 +297,16 @@ async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> 
   if (deps.getAccessToken) {
     return deps.getAccessToken();
   }
-  const workingDirs = [...new Set([deps.workingDir ?? process.cwd(), process.cwd()])];
+  const primaryDir = deps.workingDir ?? process.cwd();
+  const isWorkspace =
+    existsSync(workspaceConfigPath(primaryDir)) || existsSync(workspaceCodeStateDir(primaryDir));
+  const workingDirs = isWorkspace ? [primaryDir] : [...new Set([primaryDir, process.cwd()])];
   let lastError: unknown;
   for (const workingDir of workingDirs) {
     try {
       const user = await requireAuthenticatedUser(
         createDefaultSupabaseAuthConfig(authSessionPath(workingDir)),
-        "devintern login",
+        isWorkspace ? "devintern worker login" : "devintern login",
       );
       return user.accessToken;
     } catch (error) {

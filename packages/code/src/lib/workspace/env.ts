@@ -3,25 +3,18 @@
  *
  * A workspace has one shared `.env`; each repo can layer an `env_file` and
  * inline `[repos.env]` overrides on top. The composed environment also pins
- * `WEBHOOK_QUEUE_DB` to the central workspace database and
- * `DEVINTERN_CONFIG_DIR` to the workspace config directory, so the task
- * subprocess (which runs in a throwaway worktree) writes its queue state,
- * cursors, agent PRs, run records, task lock, and auth/license cache to the
- * workspace home instead of the repository checkout.
+ * `WEBHOOK_QUEUE_DB` to the central workspace database and passes workspace
+ * context to each task subprocess. The subprocess resolves auth and license
+ * state in the workspace rather than its throwaway checkout.
  */
 
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
-import {
-  resolveWorkspaceDir,
-  workspaceConfigDir,
-  workspaceDbPath,
-  workspaceEnvPath,
-} from "./paths";
+import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
-import { CONFIG_DIR_ENV, WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
@@ -74,7 +67,7 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
- * (`WEBHOOK_QUEUE_DB`, `DEVINTERN_CONFIG_DIR`, stable analytics config
+ * (`WEBHOOK_QUEUE_DB`, workspace context, stable analytics config
  * directory, `GITHUB_REPO` for GitHub remotes unless the repo layers already
  * set it, and `PR_LABELS` from the repo's `pr_labels` config).
  *
@@ -98,16 +91,8 @@ export function buildRepoEnv(
     ...repo.env,
   };
 
-  env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
-  env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
-  // Pin the project config dir to the workspace home: the subprocess runs in a
-  // throwaway worktree, so the default resolution would drop `.pid.lock` and
-  // the license cache into the checkout and `git add -A` would commit them.
-  env[CONFIG_DIR_ENV] = workspaceConfigDir(workspaceDir);
-  // Distinguish a supervised subprocess from an operator who only exported
-  // DEVINTERN_CONFIG_DIR, so process-level guards (e.g. the CLI run lock) can
-  // scope themselves to fleet runs.
-  env[WORKER_SUBPROCESS_ENV] = "1";
+  // The subprocess runs in a throwaway worktree; keep runtime paths out of it.
+  pinWorkerRuntimeEnv(env, workspaceDir);
   env[WORKSPACE_REPO_ENV] = repo.name;
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {
@@ -161,7 +146,7 @@ export function buildTeamEnv(
  * credentials between the repo layers and the final pin:
  *
  * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
- * team `env_file` < team inline < `TASK_TRACKER` pin.
+ * team `env_file` < team inline < worker runtime paths and `TASK_TRACKER` pin.
  *
  * The team wins ties because its credentials describe the tracker that
  * acquired the task (status transitions must hit that board, even if a stale
@@ -179,6 +164,7 @@ export function buildTeamTaskEnv(
 ): Record<string, string | undefined> {
   const env = buildRepoEnv(repo, workspaceDir);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
+  pinWorkerRuntimeEnv(env, workspaceDir);
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
@@ -201,5 +187,15 @@ export function buildErrorMonitorEnv(
   const sourceFileEnv = source.envFile
     ? parseEnvFile(isAbsolute(source.envFile) ? source.envFile : join(workspaceDir, source.envFile))
     : {};
-  return { ...env, ...sourceFileEnv, ...source.env };
+  const result = { ...env, ...sourceFileEnv, ...source.env };
+  pinWorkerRuntimeEnv(result, workspaceDir);
+  return result;
+}
+
+/** Keep worker-owned paths and the subprocess marker above credential layers. */
+function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceDir: string): void {
+  env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
+  env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
+  env[WORKER_SUBPROCESS_ENV] = "1";
 }

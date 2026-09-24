@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **Worker PRs no longer include DevIntern runtime files (DEV-126)**: task, review, and automation subprocesses now resolve durable config (`.pid.lock`, `.auth-session.json`, and the license cache) to `<workspace>/.devintern-code` through `DEVINTERN_CONFIG_DIR` instead of the throwaway worktree checkout. As a backstop, every worker-managed worktree lists `.devintern-code/` in its clone's `.git/info/exclude`, so an unexpected runtime write can never be swept into a task PR by `git add -A`; review worktrees made from your own checkout are left alone. Because those subprocesses share one config directory while running in separate worktrees, the CLI's per-directory run lock is skipped for them (the workspace supervisor already enforces the global and per-repository limits), so concurrent runs for different repositories no longer collide. Already-committed `.devintern-code/settings.json` stays tracked and unchanged, and single-repo (non-workspace) behavior is unchanged
+- **Worker PRs no longer include DevIntern runtime files (DEV-126)**: task subprocesses derive auth and license state from their worker workspace and keep it under `<workspace>/state/code` instead of a throwaway worktree. Worker-managed clones exclude known runtime files from Git while allowing new project config files in PRs. Worker setup copies an existing project sign-in when the workspace has none, existing workspace credentials and relay pairing are migrated, and `devintern worker login` signs in to the workspace later. Regular single-repo commands remain project scoped.
 
 ## [2.12.0] - 2026-09-23
 

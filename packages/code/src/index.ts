@@ -23,7 +23,7 @@ import {
   trackersSupportingEstimate,
   trackersSupportingQuery,
 } from "./lib/trackers/capabilities";
-import { LockManager, shouldSkipRunLock } from "./lib/lock-manager";
+import { LockManager } from "./lib/lock-manager";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -210,22 +210,17 @@ async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
 
-    // Acquire lock to prevent multiple instances. Supervised fleet
-    // subprocesses skip it: they share one pinned config dir across repos
-    // (so a single `.pid.lock` would collide) while the supervisor already
-    // serializes per repository and globally.
-    if (!shouldSkipRunLock()) {
-      runContext.lockManager = new LockManager();
-      const lockResult = runContext.lockManager.acquire();
+    // Acquire lock to prevent multiple instances
+    runContext.lockManager = new LockManager();
+    const lockResult = runContext.lockManager.acquire();
 
-      if (!lockResult.success) {
-        console.error(`❌ ${lockResult.message}`);
-        console.error("   Please wait for the other instance to complete or stop it manually.");
-        if (lockResult.pid) {
-          console.error(`   You can stop the other instance with: kill ${lockResult.pid}`);
-        }
-        process.exit(1);
+    if (!lockResult.success) {
+      console.error(`❌ ${lockResult.message}`);
+      console.error("   Please wait for the other instance to complete or stop it manually.");
+      if (lockResult.pid) {
+        console.error(`   You can stop the other instance with: kill ${lockResult.pid}`);
       }
+      process.exit(1);
     }
 
     // Check for flags that require specific tracker support before env validation
