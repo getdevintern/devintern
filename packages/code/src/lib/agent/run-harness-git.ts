@@ -2,11 +2,8 @@ import { captureError } from "@devintern/utils";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { runContext } from "../cli/context";
 import { PRManager } from "../code-host";
-import {
-  getPrStatusForProject,
-  loadProjectSettings,
-  resolveProjectKey,
-} from "../config/project-settings";
+import { loadProjectSettings } from "../config/project-settings";
+import { applyActionedTransition } from "../task/actioned-transition";
 import { recordRunPr } from "../state/run-recorder";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -213,20 +210,17 @@ export function createGitHelpers(ctx: FinalizeContext) {
           recordRunPr({ ...runChange, url: prResult.url });
         }
 
-        if (taskKey && tracker && !skipComments) {
-          const projectKey = resolveProjectKey(taskKey, task);
-          const prStatus = getPrStatusForProject(projectKey, projectSettings);
-          if (prStatus && prStatus.trim()) {
-            try {
-              console.log("\n🔄 Transitioning JIRA status after PR creation...");
-              await tracker.transitionStatus(taskKey, prStatus.trim());
-            } catch (statusError) {
-              console.warn(
-                `⚠️  Failed to transition JIRA status: ${(statusError as Error).message}`,
-              );
-              console.log("   PR was created successfully, but status transition failed");
-            }
-          }
+        if (taskKey && tracker) {
+          // Move the ticket to its actioned status (when configured) and record
+          // a local actioned marker so the next sweep does not re-implement it.
+          // Never allowed to fail the run that just created the PR.
+          await applyActionedTransition({
+            tracker,
+            task,
+            taskKey,
+            skipComments,
+            projectSettings,
+          });
         } else if (skipComments) {
           console.log("\n⏭️  Skipping task tracker status transition (--skip-comments)");
         }

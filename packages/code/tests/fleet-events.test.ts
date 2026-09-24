@@ -362,4 +362,35 @@ describe("createFleetTaskEvaluator", () => {
     await evaluate("T-1");
     expect(ran).toEqual(["T-1"]);
   });
+
+  test("a relayed change for an already-actioned ticket is not re-implemented", async () => {
+    const ran: string[] = [];
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const execute = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async (taskKey) => {
+        ran.push(taskKey);
+        return true;
+      },
+    });
+    let actioned = true;
+    const evaluate = createFleetTaskEvaluator({
+      query: "status=todo",
+      searchTasks: async () => ({ tasks: [{ key: "T-1", updated: "u1", labels: ["backend"] }] }),
+      execute,
+      // Mirrors the polling gate: true while the PR exists and the ticket is
+      // unchanged. The relay event can be the worker's own post-PR transition.
+      isTaskActionedUnchanged: async () => actioned,
+    });
+
+    expect(await evaluate("T-1")).toBe(true);
+    expect(ran).toHaveLength(0);
+
+    actioned = false;
+    await evaluate("T-1");
+    expect(ran).toEqual(["T-1"]);
+  });
 });

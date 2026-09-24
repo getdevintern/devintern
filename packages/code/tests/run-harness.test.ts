@@ -137,6 +137,7 @@ mock.module("../src/lib/state/run-recorder", () => ({
   recordRunStage: () => {},
 }));
 mock.module("../src/lib/state/worker-state", () => ({
+  ...realWorkerState,
   parseGitHubPrUrl: () => ({ repo: "o/r", prNumber: 1 }),
   recordAgentPrFromUrl: () => {},
 }));

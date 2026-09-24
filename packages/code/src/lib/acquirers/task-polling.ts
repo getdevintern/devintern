@@ -56,6 +56,14 @@ export interface TaskPollingAcquirerOptions {
   /** Execute step: process, fail, or defer one ready task (injected for tests). */
   executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
   /**
+   * Actioned gate: `true` when the task already produced a PR and has not
+   * changed since, so it must not be re-implemented even though it still
+   * matches the sweep query. Injected by the workspace wiring, which has
+   * tracker access to compare the ticket's current signal (see
+   * lib/task/actioned-state.ts). Omitted in focused tests.
+   */
+  isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
+  /**
    * Working-window gate (quiet hours). When closed, ticks start no new
    * detection/evaluation/execution; an in-flight tick finishes naturally
    * because execution is sequential. Manual overrides and startup catch-up
@@ -250,6 +258,7 @@ export class TaskPollingAcquirer implements Acquirer {
       if (detection.changed) {
         const { tasks } = await searchTasks(query);
         const skipped: string[] = [];
+        const actionedSkips: string[] = [];
         const missingStamp: string[] = [];
         const executions: Promise<void>[] = [];
         let pickedUp = 0;
@@ -257,6 +266,15 @@ export class TaskPollingAcquirer implements Acquirer {
         for (const task of tasks) {
           if (!hasUpdateStamp(task)) {
             missingStamp.push(task.key);
+          }
+          // Already actioned (a PR exists) and unchanged: keep it out of the
+          // sweep even though the query still matches, until a human changes it.
+          if (
+            this.options.isTaskActionedUnchanged &&
+            (await this.options.isTaskActionedUnchanged(task))
+          ) {
+            actionedSkips.push(task.key);
+            continue;
           }
           const externalId = processedTaskId(task);
           if (queue.hasProcessed(detector.source, externalId)) {
@@ -302,7 +320,7 @@ export class TaskPollingAcquirer implements Acquirer {
         );
         if (rejected) throw rejected.reason;
 
-        this.logEvaluate(tasks.length, skipped, missingStamp, pickedUp, verbose);
+        this.logEvaluate(tasks.length, skipped, actionedSkips, missingStamp, pickedUp, verbose);
         // Remember that a drain ran so working-window catch-up can tell an
         // elapsed-but-idle window apart from one that was already served.
         this.scheduleGuard(
@@ -350,6 +368,7 @@ export class TaskPollingAcquirer implements Acquirer {
   private logEvaluate(
     matched: number,
     skipped: string[],
+    actionedSkips: string[],
     missingStamp: string[],
     pickedUp: number,
     verbose?: boolean,
@@ -364,6 +383,14 @@ export class TaskPollingAcquirer implements Acquirer {
     if (skipped.length > 0 && (pickedUp === 0 || verbose)) {
       console.log(
         `⏭️  [${this.name}] skipping ${skipped.join(", ")} (already processed at this update)`,
+      );
+    }
+
+    // An actioned-but-unchanged ticket still matching the query is the exact
+    // duplicate-PR hazard this gate prevents; always say why it was skipped.
+    if (actionedSkips.length > 0) {
+      console.log(
+        `⏭️  [${this.name}] skipping ${actionedSkips.join(", ")} (already actioned; no change since the PR)`,
       );
     }
 

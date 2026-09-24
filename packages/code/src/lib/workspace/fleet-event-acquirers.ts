@@ -5,10 +5,11 @@ import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
-import { createFleetTaskExecutor } from "./fleet-executor";
+import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
+import type { TaskTrackerClient } from "../trackers/client";
 
 type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
 
@@ -33,6 +34,17 @@ export interface FleetSourceRuntime {
   query: () => string | undefined;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   detector: ChangeDetector;
+  /**
+   * Tracker client for the actioned gate. Present for multi-team sources
+   * (built at startup); single-source workspaces resolve one lazily.
+   */
+  client?: TaskTrackerClient;
+  /**
+   * Actioned gate for relay task envelopes, wired by the workspace worker from
+   * the same marker/source the polling acquirer uses. Absent in legacy
+   * focused-test paths.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
 }
 
 /** Resolve the GitHub credential used for events in one workspace repository. */
@@ -91,6 +103,76 @@ function hasFleetGitHubCredentials(
   );
 }
 
+/** Build the CI provider used by the fleet's CI-failure watcher. */
+function buildFleetCiProvider(
+  gh: (slug: string) => FleetGitHubClient,
+  ownerOf: (slug: string) => string,
+  nameOf: (slug: string) => string,
+  isGitHubNotFound: (error: unknown) => boolean,
+) {
+  return createGitHubCiProvider({
+    fetchPr: async (repo, n, etag) => {
+      try {
+        return await gh(repo).conditionalGet(
+          `/repos/${repo}/pulls/${n}`,
+          ownerOf(repo),
+          nameOf(repo),
+          etag,
+        );
+      } catch (error) {
+        if (isGitHubNotFound(error)) {
+          return { data: null, notModified: false, gone: true };
+        }
+        throw error;
+      }
+    },
+    fetchWorkflowRuns: async (repo, sha, etag) => {
+      const result = await gh(repo).conditionalGet<{
+        workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
+      }>(
+        `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
+        ownerOf(repo),
+        nameOf(repo),
+        etag,
+      );
+      return {
+        data: result.data?.workflow_runs ?? null,
+        etag: result.etag,
+        notModified: result.notModified,
+      };
+    },
+    fetchCommitStatus: (repo, sha, etag) =>
+      gh(repo).getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+    fetchFailingJobLogs: async (repo, sha) => {
+      const owner = ownerOf(repo);
+      const name = nameOf(repo);
+      const runs = await gh(repo)
+        .getWorkflowRunsForSha(owner, name, sha)
+        .catch(() => []);
+      const chunks: string[] = [];
+      for (const run of runs.slice(0, 3)) {
+        const jobs = await gh(repo)
+          .getWorkflowRunJobs(owner, name, run.id)
+          .catch(() => []);
+        for (const job of jobs
+          .filter(
+            (candidate) =>
+              candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
+          )
+          .slice(0, 5)) {
+          const log = await gh(repo)
+            .getJobLogs(owner, name, job.id)
+            .catch(() => null);
+          if (log) chunks.push(`## Job: ${job.name}\n${log}`);
+        }
+      }
+      return chunks.length > 0 ? chunks.join("\n\n") : null;
+    },
+    postComment: (repo, n, body) =>
+      gh(repo).postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
+  });
+}
+
 /**
  * Wire the fleet's event acquirers: review polling on the agent's own PRs,
  * a mention sweep per GitHub repo, and the relay when configured.
@@ -121,7 +203,12 @@ export async function buildFleetEventAcquirers(options: {
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
-  const taskSources: Array<Pick<FleetSourceRuntime, "tracker" | "team" | "query" | "searchTasks">> =
+  const taskSources: Array<
+    Pick<
+      FleetSourceRuntime,
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+    >
+  > =
     options.sources ??
     (options.searchTasks
       ? [
@@ -242,9 +329,8 @@ export async function buildFleetEventAcquirers(options: {
             );
           } catch (error) {
             if (isGitHubNotFound(error)) {
-              // Renamed/transferred/deleted repo or PR (or lost App
-              // access): report gone so the reconciler unregisters the
-              // row instead of erroring on every tick.
+              // Deletion and missing repository access both return 404.
+              // Preserve the watch until a closed PR state is confirmed.
               return { data: null, notModified: false, gone: true };
             }
             throw error;
@@ -290,67 +376,7 @@ export async function buildFleetEventAcquirers(options: {
       enabled: () => config.workspace.ciFailureFix,
       workerState: state.workerState,
       queue: state.queue,
-      provider: createGitHubCiProvider({
-        fetchPr: async (repo, n, etag) => {
-          try {
-            return await gh(repo).conditionalGet(
-              `/repos/${repo}/pulls/${n}`,
-              ownerOf(repo),
-              nameOf(repo),
-              etag,
-            );
-          } catch (error) {
-            if (isGitHubNotFound(error)) {
-              return { data: null, notModified: false, gone: true };
-            }
-            throw error;
-          }
-        },
-        fetchWorkflowRuns: async (repo, sha, etag) => {
-          const result = await gh(repo).conditionalGet<{
-            workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
-          }>(
-            `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
-            ownerOf(repo),
-            nameOf(repo),
-            etag,
-          );
-          return {
-            data: result.data?.workflow_runs ?? null,
-            etag: result.etag,
-            notModified: result.notModified,
-          };
-        },
-        fetchCommitStatus: (repo, sha, etag) =>
-          gh(repo).getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
-        fetchFailingJobLogs: async (repo, sha) => {
-          const owner = ownerOf(repo);
-          const name = nameOf(repo);
-          const runs = await gh(repo)
-            .getWorkflowRunsForSha(owner, name, sha)
-            .catch(() => []);
-          const chunks: string[] = [];
-          for (const run of runs.slice(0, 3)) {
-            const jobs = await gh(repo)
-              .getWorkflowRunJobs(owner, name, run.id)
-              .catch(() => []);
-            for (const job of jobs
-              .filter(
-                (candidate) =>
-                  candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
-              )
-              .slice(0, 5)) {
-              const log = await gh(repo)
-                .getJobLogs(owner, name, job.id)
-                .catch(() => null);
-              if (log) chunks.push(`## Job: ${job.name}\n${log}`);
-            }
-          }
-          return chunks.length > 0 ? chunks.join("\n\n") : null;
-        },
-        postComment: (repo, n, body) =>
-          gh(repo).postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
-      }),
+      provider: buildFleetCiProvider(gh, ownerOf, nameOf, isGitHubNotFound),
       fixPr,
       verbose,
     });
@@ -506,6 +532,7 @@ export async function buildFleetEventAcquirers(options: {
             skips: state.skips,
             repoManager,
             team: source.team,
+            actionedSource: resolveActionedSource(config, source.team),
             supervisor: options.supervisor,
           },
           {
@@ -521,6 +548,7 @@ export async function buildFleetEventAcquirers(options: {
             query: source.query,
             searchTasks: source.searchTasks,
             execute,
+            isTaskActionedUnchanged: source.isTaskActionedUnchanged,
             verbose,
           }),
         };
