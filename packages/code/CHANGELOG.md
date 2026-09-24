@@ -1,5 +1,19 @@
 # @devintern/code Changelog
 
+## [2.13.0] - 2026-09-24
+
+Actioned-ticket release: the worker now records every ticket it opens a PR for and keeps it out of the sweep until the ticket genuinely changes, so label-based trackers stop re-implementing the same open issue in a loop, with per-repo GitHub credentials for fleet events and steadier PR watching when GitHub returns 404.
+
+### Added
+
+- **Actioned markers stop re-implemented tickets (DEV-125)**: once a pull request is created, the worker records the ticket as **actioned** in `.devintern-code/queue.db` and skips it on later sweeps even when it still matches `[defaults].task_query` — the loop a label-based tracker (GitHub, GitLab) would otherwise fall into. This works for every polled tracker. The marker captures the summary, description, status/state, and labels and re-arms when any of them changes (edit, re-open, or add/remove a label); it is captured *after* the worker's own comment and status transition so those never re-trigger a run. If the project configures `prStatus` in `.devintern-code/settings.json` the worker also moves the ticket to that status/label first, and a missing label, missing permission, or transient API error never loses track of the ticket or fails the PR run — the marker is recorded anyway with a warning suggesting a `prStatus`. Skips are logged as `⏭️ skipping KEY (already actioned; no change since the PR)`. The marker gates polling, dashboard retries, and relayed changes, and uses a pinned `DEVINTERN_ACTIONED_SOURCE` key so the subprocess recorder and the workspace gate can never derive different keys from a stale `.env` `TASK_TRACKER` or a leaked team env
+
+### Fixed
+
+- **Actioned marker is race- and failure-hardened**: a relayed `task.changed` caused by the worker's own post-PR label/comment is no longer re-implemented, an unreadable tracker record is persisted as an unverified marker that keeps suppressing and refreshes to verified on the first successful read, the gate caches the last-verified ticket `updated` stamp (persisted so it survives a restart) to avoid re-reading the tracker per ticket on every poll, and a state-DB or disk-I/O failure during the transition warns instead of being misreported as a PR-creation failure
+- **Open PRs stay watched when GitHub returns 404**: the review poller, CI watcher, and PR reconciler now treat a GitHub 404 as "still open, access warning" rather than "gone", because GitHub returns 404 for an inaccessible PR that is still open; only a definite closed/merged state drops a PR from the watch list
+- **Fleet events use per-repo GitHub credentials**: GitHub review, CI, mention, and relay requests now resolve the matching repo's `GITHUB_TOKEN` layers (with a fixed team's `env_file`/`[teams.env]` able to override), falling back to the workspace token only when no repo or team override exists
+
 ## [2.12.0] - 2026-09-23
 
 GitLab code-host release: merge requests can now be created, reviewed, kept current, and CI-repaired on GitLab.com or a Self-Managed instance, the worker connects every code host in one pass, scheduled automations choose per entry whether they open a PR, and the activation path reports where setup gets stuck.
