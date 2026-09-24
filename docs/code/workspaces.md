@@ -116,6 +116,8 @@ max_concurrency_per_repo = 1
 
 `max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, and estimations. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
 
+The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
+
 Raising either limit above 1 requires the explicit `best_effort_host` value. This mode is **not a security or isolation boundary**. Concurrent jobs share the host kernel, network namespace, localhost ports, process table, Docker daemon, browser profiles, package-manager caches, and linked Git metadata. Typical consequences include `EADDRINUSE`, Docker Compose published-port conflicts, cache/profile lock contention, Git ref-lock failures, and several jobs consuming the same agent account quota. Leftover child processes from one run may affect another. Each tracker task still has a separate worktree, but that does not isolate those host resources.
 
 Use concurrency only for repositories and tasks that tolerate those conflicts. A later isolated execution mode will retain these capacity keys while running each workflow in its own private clone and microVM.

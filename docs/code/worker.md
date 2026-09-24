@@ -191,7 +191,7 @@ How a poll cycle works:
 1. A cheap change detector asks the tracker "did anything change since the last cursor?" and nothing else.
 2. Only when something changed, the worker re-runs your query to get the tasks that are actually ready.
 3. Each ready task is picked up once per change: the worker remembers the task's last seen update stamp, so a task re-enters only when it is updated again.
-4. Tasks run one at a time through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`).
+4. Each ready task is handed to the workspace's admission supervisor and runs through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`). Polling keeps running while tasks are in flight, so a task created during a run is picked up on the next tick and fills a free concurrency slot instead of waiting for the current batch to finish.
 
 Cursors persist in `.devintern-code/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
@@ -252,6 +252,8 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 - `⏭️ skipping KEY (already actioned; no change since the PR)` — a PR was already created for this ticket. Edit its summary/description, re-open it, or change its labels to re-arm it; see [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
 - No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
+
+One exception: an edit that arrives while that ticket's run is still in flight advances the cursor but is remembered durably in `.devintern-code/queue.db` and re-admitted once the run settles — including after a worker crash or restart — so the edit is not lost. A task deferred because its repository was busy is tracked the same way and retried on the next poll.
 
 ## Working windows (quiet hours)
 

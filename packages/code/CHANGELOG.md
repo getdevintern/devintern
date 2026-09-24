@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Worker fills free concurrency slots instead of stalling after the first batch (DEV-127)**: task polling no longer holds its re-entry gate until every task in a batch finishes. The detect/evaluate/claim phase stays serialized, but polling now continues on its normal interval while tasks run, so a task created during a run is picked up on the next tick and admitted to a free slot instead of waiting for the whole batch to drain. The shared admission supervisor still caps global and per-repository concurrency, a task edited mid-run waits for its in-flight execution rather than starting a concurrent duplicate, cursor compare-and-set prevents overlapping ticks from regressing a newer cursor, and deferred tasks still release their claim and re-detect
+
 ## [2.13.0] - 2026-09-24
 
 Actioned-ticket release: the worker now records every ticket it opens a PR for and keeps it out of the sweep until the ticket genuinely changes, so label-based trackers stop re-implementing the same open issue in a loop, with per-repo GitHub credentials for fleet events and steadier PR watching when GitHub returns 404.

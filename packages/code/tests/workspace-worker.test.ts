@@ -36,6 +36,16 @@ import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watche
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay/connect";
 
+/** Deterministic synchronization gate for tests (preferred over sleeps). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  // oxlint-disable-next-line promise/avoid-new -- test synchronization gate.
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -331,6 +341,65 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
     expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
     heldLock.release();
+  });
+
+  test("fills free concurrency slots as new tasks become available", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 10, maxConcurrencyPerRepo: 10 });
+    const startedKeys: string[] = [];
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    const allStarted = deferred();
+    tasks = [{ key: "T-10", updated: "u1", labels: ["backend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      supervisor,
+      runTask: async (taskKey) => {
+        startedKeys.push(taskKey);
+        if (startedKeys.length === 1) firstStarted.resolve();
+        if (startedKeys.length === 4) allStarted.resolve();
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+    expect(startedKeys).toEqual(["T-10"]);
+
+    // Three tasks appear while T-10 is still running; nine slots are free.
+    tasks = [
+      { key: "T-10", updated: "u1", labels: ["backend"] },
+      { key: "T-11", updated: "u1", labels: ["backend"] },
+      { key: "T-12", updated: "u1", labels: ["backend"] },
+      { key: "T-13", updated: "u1", labels: ["backend"] },
+    ];
+    const secondTick = acquirer.tick();
+    await allStarted.promise;
+
+    expect(new Set(startedKeys)).toEqual(new Set(["T-10", "T-11", "T-12", "T-13"]));
+    expect(peak).toBe(4);
+    expect(supervisor.stats().running).toBe(4);
+
+    release();
+    await Promise.all([firstTick, secondTick]);
   });
 
   test("a supervisor drain defers a task and rolls back its polling claim", async () => {
@@ -678,6 +747,7 @@ GITLAB_CODE_HOST_PROXY = ""
               throw new JobNotStartedError();
             },
             updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
           },
         });
@@ -769,6 +839,7 @@ GITLAB_CODE_HOST_PROXY = ""
               throw new JobNotStartedError();
             },
             updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
             async drain() {},
           },
         });
