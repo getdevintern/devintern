@@ -12,6 +12,9 @@
  * - `addressed_comments` — PR feedback comments this worker has already
  *   addressed. The dedupe gate for review runs is local: GitHub reactions are
  *   visual feedback for humans only.
+ * - `actioned_tasks` — tickets that already produced a PR, keyed by tracker
+ *   source. The acquirer uses this to keep an actioned ticket out of the sweep
+ *   even when it still matches the query, until its signal changes again.
  */
 
 import { Database } from "bun:sqlite";
@@ -65,6 +68,34 @@ export interface CiFixState {
   consecutiveFailures: number;
   /** Head SHA where the worker exhausted its budget and escalated. */
   escalatedSha?: string;
+}
+
+/**
+ * A ticket that already produced a PR.
+ *
+ * `signal` digests the human-editable fields (summary, description, status,
+ * labels) observed immediately after the worker's own post-PR writes, so the
+ * worker's own comment/transition does not look like a change and re-arm the
+ * ticket. Any later change by a person yields a different signal.
+ *
+ * `verified` is false when the signal was recorded from a fallback snapshot
+ * because the tracker read failed; the gate keeps such a record suppressed
+ * until a successful read refreshes it.
+ *
+ * `updatedStamp` is the tracker's `updated` value observed at the last
+ * successful read. The gate compares a sweep's `updated` against it to skip
+ * the per-ticket tracker read; persisting it lets that cache survive restarts.
+ */
+export interface ActionedTask {
+  taskKey: string;
+  signal: string;
+  verified: boolean;
+  updatedStamp: string | null;
+  pending: boolean;
+  fallbackSnapshot: string | null;
+  transitioned: boolean;
+  transitionStatus: string | null;
+  actionedAt: number;
 }
 
 /**
@@ -155,6 +186,46 @@ export class WorkerState {
         PRIMARY KEY (repo, pr_number)
       )
     `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS actioned_tasks (
+        source TEXT NOT NULL,
+        task_key TEXT NOT NULL,
+        signal TEXT NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 1,
+        updated_stamp TEXT,
+        pending INTEGER NOT NULL DEFAULT 0,
+        fallback_snapshot TEXT,
+        transitioned INTEGER NOT NULL DEFAULT 0,
+        transition_status TEXT,
+        actioned_at INTEGER NOT NULL,
+        PRIMARY KEY (source, task_key)
+      )
+    `);
+
+    // Databases created before `verified` recorded every marker from a
+    // successful read, so backfilling 1 preserves their behavior.
+    const actionedColumns = this.db.query("PRAGMA table_info(actioned_tasks)").all() as Array<{
+      name: string;
+    }>;
+    if (!actionedColumns.some((column) => column.name === "verified")) {
+      this.db.run("ALTER TABLE actioned_tasks ADD COLUMN verified INTEGER NOT NULL DEFAULT 1");
+    }
+    // Older rows have no persisted stamp; the gate simply reads once and
+    // backfills it, so no data migration is needed.
+    if (!actionedColumns.some((column) => column.name === "updated_stamp")) {
+      this.db.run("ALTER TABLE actioned_tasks ADD COLUMN updated_stamp TEXT");
+    }
+    for (const [name, definition] of [
+      ["pending", "INTEGER NOT NULL DEFAULT 0"],
+      ["fallback_snapshot", "TEXT"],
+      ["transitioned", "INTEGER NOT NULL DEFAULT 0"],
+      ["transition_status", "TEXT"],
+    ]) {
+      if (!actionedColumns.some((column) => column.name === name)) {
+        this.db.run(`ALTER TABLE actioned_tasks ADD COLUMN ${name} ${definition}`);
+      }
+    }
   }
 
   /** Create or migrate the change-request registry without losing legacy rows. */
@@ -507,6 +578,97 @@ export class WorkerState {
          updated_at = excluded.updated_at`,
       [repo, prNumber, state.consecutiveFailures, state.escalatedSha ?? null, Date.now()],
     );
+  }
+
+  /**
+   * Read the locally-recorded actioned state for a ticket.
+   *
+   * @param source - Tracker source key (matches the poll cursor source)
+   * @param taskKey - Tracker task key
+   * @returns The record, or `null` when the ticket was never actioned here
+   */
+  getTaskActioned(source: string, taskKey: string): ActionedTask | null {
+    const row = this.db
+      .query(
+        `SELECT task_key, signal, verified, updated_stamp, pending, fallback_snapshot,
+                transitioned, transition_status, actioned_at
+         FROM actioned_tasks WHERE source = ? AND task_key = ?`,
+      )
+      .get(source, taskKey) as Record<string, unknown> | null;
+    if (!row) return null;
+    return {
+      taskKey: row.task_key as string,
+      signal: row.signal as string,
+      verified: (row.verified as number | null) !== 0,
+      updatedStamp: (row.updated_stamp as string | null) ?? null,
+      pending: row.pending === 1,
+      fallbackSnapshot: (row.fallback_snapshot as string | null) ?? null,
+      transitioned: row.transitioned === 1,
+      transitionStatus: (row.transition_status as string | null) ?? null,
+      actionedAt: row.actioned_at as number,
+    };
+  }
+
+  /**
+   * Record (or refresh) a ticket as actioned after its PR was created.
+   *
+   * @param source - Tracker source key
+   * @param taskKey - Tracker task key
+   * @param signal - Digest of the ticket's human-editable fields
+   * @param verified - False when the signal came from a fallback snapshot
+   *                   instead of a successful tracker read
+   * @param updatedStamp - The ticket's tracker `updated` value at recording
+   *                       time, persisted so the gate can skip re-reads
+   */
+  markTaskActioned(
+    source: string,
+    taskKey: string,
+    signal: string,
+    verified = true,
+    updatedStamp?: string,
+    options: {
+      pending?: boolean;
+      fallbackSnapshot?: string;
+      transitioned?: boolean;
+      transitionStatus?: string;
+    } = {},
+  ): void {
+    this.db.run(
+      `INSERT INTO actioned_tasks (source, task_key, signal, verified, updated_stamp,
+                                  pending, fallback_snapshot, transitioned, transition_status, actioned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source, task_key) DO UPDATE SET
+         signal = excluded.signal,
+         verified = excluded.verified,
+         updated_stamp = excluded.updated_stamp,
+         pending = excluded.pending,
+         fallback_snapshot = excluded.fallback_snapshot,
+         transitioned = excluded.transitioned,
+         transition_status = excluded.transition_status,
+         actioned_at = excluded.actioned_at`,
+      [
+        source,
+        taskKey,
+        signal,
+        verified ? 1 : 0,
+        updatedStamp?.trim() || null,
+        options.pending ? 1 : 0,
+        options.fallbackSnapshot ?? null,
+        options.transitioned ? 1 : 0,
+        options.transitionStatus ?? null,
+        Date.now(),
+      ],
+    );
+  }
+
+  /**
+   * Forget a ticket's actioned state so a genuine change can be re-implemented.
+   *
+   * @param source - Tracker source key
+   * @param taskKey - Tracker task key
+   */
+  clearTaskActioned(source: string, taskKey: string): void {
+    this.db.run(`DELETE FROM actioned_tasks WHERE source = ? AND task_key = ?`, [source, taskKey]);
   }
 
   /**

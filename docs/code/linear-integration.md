@@ -87,6 +87,10 @@ This workflow:
 5. Moves the issue to `prStatus` after PR creation
 6. Posts implementation or assessment comments on the issue
 
+### Actioned issues (worker)
+
+When the worker creates a PR it moves the issue to `prStatus` (when configured) and records it as actioned locally, so your ready-tasks query no longer re-implements it. The local marker also covers the case where no `prStatus` is set or the transition fails. Re-arm an actioned issue by editing its summary or description, moving it back to a ready state, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+
 ## Batch processing with --query
 
 Select multiple issues with a [Linear IssueFilter](https://studio.linear.app/graphql) expressed as JSON:

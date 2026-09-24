@@ -15,6 +15,7 @@ import { buildRepoEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import { actionedSourceKey } from "../task/actioned-state";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -43,6 +44,16 @@ export interface WorkspaceTaskAcquirerDeps {
   repoManager: RepoManagerLike;
   detector: ChangeDetector;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
+  /**
+   * Actioned gate: `true` when a task already produced a PR and has not
+   * changed since. Built by the workspace wiring with tracker access.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Explicit actioned-ticket source key pinned into each task subprocess (see
+   * `ACTIONED_SOURCE_ENV`), so the recorder and gate can never disagree.
+   */
+  actionedSource?: string;
   query: string | (() => string | undefined);
   intervalSeconds: number;
   /** Team source for multi-team workspaces; omitted in single-defaults mode. */
@@ -73,6 +84,17 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
 export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
   const args = fleetTaskArgs(config);
   return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
+}
+
+/**
+ * Resolve the actioned-ticket source key for a workspace source/team.
+ *
+ * The polling gate and every executor path (poll, retry, relay) derive the key
+ * here so the task subprocess's `DEVINTERN_ACTIONED_SOURCE` pin and the gate
+ * can never disagree. `team` is the already-resolved team, if any.
+ */
+export function resolveActionedSource(config: WorkspaceConfig, team?: TeamConfig): string {
+  return actionedSourceKey(team?.tracker ?? config.defaults.tracker, team?.name);
 }
 
 /**
@@ -109,6 +131,14 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
     );
 
+  const supervisor = deps.supervisor;
+  const capacity = supervisor
+    ? () => {
+        const stats = supervisor.stats();
+        return { available: stats.available, inFlight: stats.running };
+      }
+    : undefined;
+
   return new TaskPollingAcquirer({
     trackerType: team ? `${team.tracker}:${team.name}` : config.defaults.tracker,
     query,
@@ -133,14 +163,25 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
       return { tasks };
     },
     executeTask,
+    capacity,
     verbose,
+    isTaskActionedUnchanged: deps.isTaskActionedUnchanged
+      ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
+      : undefined,
   });
 }
 
 /** Routed-execution slice of {@link WorkspaceTaskAcquirerDeps}. */
 export type FleetExecutorDeps = Pick<
   WorkspaceTaskAcquirerDeps,
-  "config" | "workspaceDir" | "skips" | "repoManager" | "runTask" | "team" | "supervisor"
+  | "config"
+  | "workspaceDir"
+  | "skips"
+  | "repoManager"
+  | "runTask"
+  | "team"
+  | "supervisor"
+  | "actionedSource"
 >;
 
 /**
@@ -237,8 +278,10 @@ export function createFleetTaskExecutor(
             cwd: worktree,
             env: {
               ...(team
-                ? buildTeamTaskEnv(repo, team, workspaceDir)
-                : buildRepoEnv(repo, workspaceDir)),
+                ? buildTeamTaskEnv(repo, team, workspaceDir, {
+                    actionedSource: deps.actionedSource,
+                  })
+                : buildRepoEnv(repo, workspaceDir, { actionedSource: deps.actionedSource })),
               [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
             },
             signal,

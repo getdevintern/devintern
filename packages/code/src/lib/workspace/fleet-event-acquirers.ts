@@ -4,10 +4,14 @@ import { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { createFleetTaskExecutor } from "./fleet-executor";
+import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
+import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
+import type { TaskTrackerClient } from "../trackers/client";
+
+type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
 
 /**
  * Reconciliation hooks exposed to the live config reload path by the fleet
@@ -30,6 +34,143 @@ export interface FleetSourceRuntime {
   query: () => string | undefined;
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   detector: ChangeDetector;
+  /**
+   * Tracker client for the actioned gate. Present for multi-team sources
+   * (built at startup); single-source workspaces resolve one lazily.
+   */
+  client?: TaskTrackerClient;
+  /**
+   * Actioned gate for relay task envelopes, wired by the workspace worker from
+   * the same marker/source the polling acquirer uses. Absent in legacy
+   * focused-test paths.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+}
+
+/** Resolve the GitHub credential used for events in one workspace repository. */
+export function fleetGitHubTokenForRepo(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  slug: string,
+): string | undefined {
+  const repo = config.repos.find(
+    (candidate) =>
+      (candidate.env.GITHUB_REPO ?? gitHubSlugFromRemote(candidate.remote))?.toLowerCase() ===
+      slug.toLowerCase(),
+  );
+  if (!repo) return process.env.GITHUB_TOKEN;
+  const team = config.teams.find(
+    (candidate) => candidate.tracker === "github" && candidate.repo === repo.name,
+  );
+  return (team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir))
+    .GITHUB_TOKEN;
+}
+
+function createFleetGitHubClientResolver(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  usesHostedApp: boolean,
+  Client: typeof import("../code-host/github/reviews").GitHubReviewsClient,
+): (slug: string) => import("../code-host/github/reviews").GitHubReviewsClient {
+  const clients = new Map<
+    string,
+    { token: string | undefined; client: import("../code-host/github/reviews").GitHubReviewsClient }
+  >();
+  return (slug) => {
+    const token = fleetGitHubTokenForRepo(config, workspaceDir, slug);
+    const cached = clients.get(slug);
+    if (cached && cached.token === token) return cached.client;
+    const client = new Client({ authMode: usesHostedApp ? "token-only" : "app-first", token });
+    clients.set(slug, { token, client });
+    return client;
+  };
+}
+
+function hasFleetGitHubCredentials(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  slugs: string[],
+  usesHostedApp: boolean,
+): boolean {
+  const hasCustomAppCredentials = Boolean(
+    process.env.GITHUB_APP_ID &&
+    (process.env.GITHUB_APP_PRIVATE_KEY_PATH || process.env.GITHUB_APP_PRIVATE_KEY_BASE64),
+  );
+  return (
+    Boolean(process.env.GITHUB_TOKEN) ||
+    (!usesHostedApp && hasCustomAppCredentials) ||
+    slugs.some((slug) => Boolean(fleetGitHubTokenForRepo(config, workspaceDir, slug)))
+  );
+}
+
+/** Build the CI provider used by the fleet's CI-failure watcher. */
+function buildFleetCiProvider(
+  gh: (slug: string) => FleetGitHubClient,
+  ownerOf: (slug: string) => string,
+  nameOf: (slug: string) => string,
+  isGitHubNotFound: (error: unknown) => boolean,
+) {
+  return createGitHubCiProvider({
+    fetchPr: async (repo, n, etag) => {
+      try {
+        return await gh(repo).conditionalGet(
+          `/repos/${repo}/pulls/${n}`,
+          ownerOf(repo),
+          nameOf(repo),
+          etag,
+        );
+      } catch (error) {
+        if (isGitHubNotFound(error)) {
+          return { data: null, notModified: false, gone: true };
+        }
+        throw error;
+      }
+    },
+    fetchWorkflowRuns: async (repo, sha, etag) => {
+      const result = await gh(repo).conditionalGet<{
+        workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
+      }>(
+        `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
+        ownerOf(repo),
+        nameOf(repo),
+        etag,
+      );
+      return {
+        data: result.data?.workflow_runs ?? null,
+        etag: result.etag,
+        notModified: result.notModified,
+      };
+    },
+    fetchCommitStatus: (repo, sha, etag) =>
+      gh(repo).getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
+    fetchFailingJobLogs: async (repo, sha) => {
+      const owner = ownerOf(repo);
+      const name = nameOf(repo);
+      const runs = await gh(repo)
+        .getWorkflowRunsForSha(owner, name, sha)
+        .catch(() => []);
+      const chunks: string[] = [];
+      for (const run of runs.slice(0, 3)) {
+        const jobs = await gh(repo)
+          .getWorkflowRunJobs(owner, name, run.id)
+          .catch(() => []);
+        for (const job of jobs
+          .filter(
+            (candidate) =>
+              candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
+          )
+          .slice(0, 5)) {
+          const log = await gh(repo)
+            .getJobLogs(owner, name, job.id)
+            .catch(() => null);
+          if (log) chunks.push(`## Job: ${job.name}\n${log}`);
+        }
+      }
+      return chunks.length > 0 ? chunks.join("\n\n") : null;
+    },
+    postComment: (repo, n, body) =>
+      gh(repo).postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
+  });
 }
 
 /**
@@ -62,7 +203,12 @@ export async function buildFleetEventAcquirers(options: {
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
-  const taskSources: Array<Pick<FleetSourceRuntime, "tracker" | "team" | "query" | "searchTasks">> =
+  const taskSources: Array<
+    Pick<
+      FleetSourceRuntime,
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+    >
+  > =
     options.sources ??
     (options.searchTasks
       ? [
@@ -126,15 +272,9 @@ export async function buildFleetEventAcquirers(options: {
     process.env.GITHUB_BOT_ALIASES = [...aliasNames].join(",");
   }
 
-  const hasCustomAppCredentials = Boolean(
-    process.env.GITHUB_APP_ID &&
-    (process.env.GITHUB_APP_PRIVATE_KEY_PATH || process.env.GITHUB_APP_PRIVATE_KEY_BASE64),
-  );
-  const hasGitHubCreds = usesHostedApp
-    ? Boolean(process.env.GITHUB_TOKEN)
-    : Boolean(process.env.GITHUB_TOKEN || hasCustomAppCredentials);
   const slugs = fleetGitHubSlugs(config);
-  let github: import("../code-host/github/reviews").GitHubReviewsClient | undefined;
+  const hasGitHubCreds = hasFleetGitHubCredentials(config, workspaceDir, slugs, usesHostedApp);
+  let githubFor: ((slug: string) => FleetGitHubClient) | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
     | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
@@ -143,8 +283,13 @@ export async function buildFleetEventAcquirers(options: {
   // Built whenever credentials exist — even with zero GitHub repos today —
   // so a repo added to the config at runtime gets full event coverage.
   if (hasGitHubCreds) {
-    github = new GitHubReviewsClient({ authMode: usesHostedApp ? "token-only" : "app-first" });
-    const gh = github;
+    githubFor = createFleetGitHubClientResolver(
+      config,
+      workspaceDir,
+      usesHostedApp,
+      GitHubReviewsClient,
+    );
+    const gh = githubFor;
     const ownerOf = (slug: string) => slug.split("/")[0] as string;
     const nameOf = (slug: string) => slug.split("/")[1] as string;
 
@@ -153,7 +298,7 @@ export async function buildFleetEventAcquirers(options: {
       workspaceDir,
       repoManager,
       userHasPushAccess: (owner: string, repo: string, user: string) =>
-        gh.userHasPushAccess(owner, repo, user),
+        gh(`${owner}/${repo}`).userHasPushAccess(owner, repo, user),
       verbose,
       supervisor: options.supervisor,
     };
@@ -176,7 +321,7 @@ export async function buildFleetEventAcquirers(options: {
       github: {
         fetchPr: async (repo, n, etag) => {
           try {
-            return await gh.conditionalGet(
+            return await gh(repo).conditionalGet(
               `/repos/${repo}/pulls/${n}`,
               ownerOf(repo),
               nameOf(repo),
@@ -184,23 +329,22 @@ export async function buildFleetEventAcquirers(options: {
             );
           } catch (error) {
             if (isGitHubNotFound(error)) {
-              // Renamed/transferred/deleted repo or PR (or lost App
-              // access): report gone so the reconciler unregisters the
-              // row instead of erroring on every tick.
+              // Deletion and missing repository access both return 404.
+              // Preserve the watch until a closed PR state is confirmed.
               return { data: null, notModified: false, gone: true };
             }
             throw error;
           }
         },
         fetchReviews: (repo, n, etag) =>
-          gh.conditionalGet(
+          gh(repo).conditionalGet(
             `/repos/${repo}/pulls/${n}/reviews?per_page=100`,
             ownerOf(repo),
             nameOf(repo),
             etag,
           ),
         fetchReviewCommentsSince: async (repo, n, sinceIso) => {
-          const result = await gh.conditionalGet<
+          const result = await gh(repo).conditionalGet<
             Array<{ id: number; user: { login: string; type: string }; created_at: string }>
           >(
             `/repos/${repo}/pulls/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
@@ -232,61 +376,7 @@ export async function buildFleetEventAcquirers(options: {
       enabled: () => config.workspace.ciFailureFix,
       workerState: state.workerState,
       queue: state.queue,
-      provider: createGitHubCiProvider({
-        fetchPr: async (repo, n, etag) => {
-          try {
-            return await gh.conditionalGet(
-              `/repos/${repo}/pulls/${n}`,
-              ownerOf(repo),
-              nameOf(repo),
-              etag,
-            );
-          } catch (error) {
-            if (isGitHubNotFound(error)) {
-              return { data: null, notModified: false, gone: true };
-            }
-            throw error;
-          }
-        },
-        fetchWorkflowRuns: async (repo, sha, etag) => {
-          const result = await gh.conditionalGet<{
-            workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
-          }>(
-            `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
-            ownerOf(repo),
-            nameOf(repo),
-            etag,
-          );
-          return {
-            data: result.data?.workflow_runs ?? null,
-            etag: result.etag,
-            notModified: result.notModified,
-          };
-        },
-        fetchCommitStatus: (repo, sha, etag) =>
-          gh.getCombinedStatus(ownerOf(repo), nameOf(repo), sha, etag),
-        fetchFailingJobLogs: async (repo, sha) => {
-          const owner = ownerOf(repo);
-          const name = nameOf(repo);
-          const runs = await gh.getWorkflowRunsForSha(owner, name, sha).catch(() => []);
-          const chunks: string[] = [];
-          for (const run of runs.slice(0, 3)) {
-            const jobs = await gh.getWorkflowRunJobs(owner, name, run.id).catch(() => []);
-            for (const job of jobs
-              .filter(
-                (candidate) =>
-                  candidate.conclusion === "failure" || candidate.conclusion === "timed_out",
-              )
-              .slice(0, 5)) {
-              const log = await gh.getJobLogs(owner, name, job.id).catch(() => null);
-              if (log) chunks.push(`## Job: ${job.name}\n${log}`);
-            }
-          }
-          return chunks.length > 0 ? chunks.join("\n\n") : null;
-        },
-        postComment: (repo, n, body) =>
-          gh.postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
-      }),
+      provider: buildFleetCiProvider(gh, ownerOf, nameOf, isGitHubNotFound),
       fixPr,
       verbose,
     });
@@ -310,7 +400,7 @@ export async function buildFleetEventAcquirers(options: {
         queue: state.queue,
         github: {
           fetchIssueCommentsSince: async (sinceIso) => {
-            const result = await gh.conditionalGet<
+            const result = await gh(slug).conditionalGet<
               Array<{
                 id: number;
                 body: string | null;
@@ -327,7 +417,7 @@ export async function buildFleetEventAcquirers(options: {
             return result.data ?? [];
           },
           fetchReviewCommentsSince: async (sinceIso) => {
-            const result = await gh.conditionalGet<
+            const result = await gh(slug).conditionalGet<
               Array<{
                 id: number;
                 body: string | null;
@@ -343,9 +433,9 @@ export async function buildFleetEventAcquirers(options: {
             );
             return result.data ?? [];
           },
-          getBotUsername: () => gh.getBotUsername(repoOwner, repoName),
+          getBotUsername: () => gh(slug).getBotUsername(repoOwner, repoName),
           getPr: async (prNumber) => {
-            const pr = await gh.getPullRequest(repoOwner, repoName, prNumber);
+            const pr = await gh(slug).getPullRequest(repoOwner, repoName, prNumber);
             return {
               number: pr.number,
               state: pr.state,
@@ -354,7 +444,7 @@ export async function buildFleetEventAcquirers(options: {
             };
           },
           postComment: async (prNumber, body) => {
-            await gh.postPullRequestComment(repoOwner, repoName, prNumber, body);
+            await gh(slug).postPullRequestComment(repoOwner, repoName, prNumber, body);
           },
         },
         handleMention: (comment, prNumber) => fleetHandleMention(slug, comment, prNumber),
@@ -442,6 +532,7 @@ export async function buildFleetEventAcquirers(options: {
             skips: state.skips,
             repoManager,
             team: source.team,
+            actionedSource: resolveActionedSource(config, source.team),
             supervisor: options.supervisor,
           },
           {
@@ -457,6 +548,7 @@ export async function buildFleetEventAcquirers(options: {
             query: source.query,
             searchTasks: source.searchTasks,
             execute,
+            isTaskActionedUnchanged: source.isTaskActionedUnchanged,
             verbose,
           }),
         };
@@ -485,7 +577,7 @@ export async function buildFleetEventAcquirers(options: {
               return false;
             },
             handlePrComment: async (repo, prNumber, commentId) => {
-              if (!github || !handleMention) {
+              if (!githubFor || !handleMention) {
                 if (verbose) {
                   console.log(
                     `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
@@ -495,7 +587,7 @@ export async function buildFleetEventAcquirers(options: {
                 return;
               }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
-              const { data: comment } = await github.conditionalGet<{
+              const { data: comment } = await githubFor(repo).conditionalGet<{
                 id: number;
                 body: string | null;
                 user: { login: string; type: string };
@@ -503,7 +595,7 @@ export async function buildFleetEventAcquirers(options: {
                 html_url: string;
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
               if (!comment) return;
-              const botName = await github.getBotUsername(repoOwner, repoName);
+              const botName = await githubFor(repo).getBotUsername(repoOwner, repoName);
               const botNames = botMentionCandidates(botName);
               if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
               await handleMention(repo, comment, prNumber);

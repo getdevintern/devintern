@@ -29,9 +29,21 @@ export interface DrainOptions {
   graceMs?: number;
 }
 
+/** Point-in-time capacity snapshot for diagnostics and metrics. */
+export interface SupervisorStats {
+  /** Jobs whose callbacks are currently running. */
+  running: number;
+  /** Admitted-but-not-yet-running jobs waiting for a free slot. */
+  queued: number;
+  maxConcurrency: number;
+  /** Free global slots right now (never negative). */
+  available: number;
+}
+
 export interface TaskSupervisor {
   schedule<T>(request: ScheduleRequest<T>): Promise<T>;
   updateLimits(limits: SupervisorLimits): void;
+  stats(): SupervisorStats;
   drain(options?: DrainOptions): Promise<void>;
 }
 
@@ -200,6 +212,15 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
       validateLimits(next);
       limits = { ...next };
       pump();
+    },
+
+    stats(): SupervisorStats {
+      return {
+        running: running.size,
+        queued: queued.length,
+        maxConcurrency: limits.maxConcurrency,
+        available: Math.max(0, limits.maxConcurrency - running.size),
+      };
     },
 
     async drain(options: DrainOptions = {}): Promise<void> {

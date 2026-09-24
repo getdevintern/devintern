@@ -102,6 +102,10 @@ This workflow:
 5. Moves the card to `prStatus` after PR creation
 6. Posts implementation or assessment comments on the card
 
+### Actioned cards (worker)
+
+When the worker creates a PR it moves the card to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned card by editing its description, moving the card back to a ready list, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+
 ## Batch processing with --query
 
 Select multiple cards with [Trello search operators](https://support.atlassian.com/trello/docs/searching-for-cards-all-boards/), scoped to `TRELLO_DEFAULT_BOARD_ID` when set:

@@ -26,6 +26,8 @@ import {
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
+import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
+import { WorkerState } from "../state/worker-state";
 import {
   RunStore,
   beginRun,
@@ -260,6 +262,23 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   if (implementationIncomplete) {
     await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
   } else {
+    // Markdown tasks have no remote PR, so `applyActionedTransition` is a
+    // no-op for them; record the (now Done) file as actioned here so a
+    // status-less sweep does not re-implement it until the file changes.
+    if (isMarkdownTaskTracker(tracker)) {
+      const workerState = new WorkerState();
+      try {
+        await recordTaskActioned({
+          workerState,
+          source: actionedSourceKeyFromEnv(),
+          tracker,
+          taskKey: workflowKey,
+          fallbackTask: task,
+        });
+      } finally {
+        workerState.close();
+      }
+    }
     await finishTaskRun("succeeded");
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);

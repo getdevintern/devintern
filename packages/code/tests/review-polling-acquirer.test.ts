@@ -997,8 +997,10 @@ describe("ReviewPollingAcquirer", () => {
     expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
-  test("a PR deleted on GitHub (404 → gone) is unwatched within one tick", async () => {
+  test("a 404 leaves the PR watched and skips feedback requests", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let inaccessible = true;
+    let fetches = 0;
     const acquirer = new ReviewPollingAcquirer({
       intervalSeconds: 60,
       workerState,
@@ -1006,13 +1008,18 @@ describe("ReviewPollingAcquirer", () => {
       github: {
         // The workspace adapter maps 404 responses to `gone`.
         async fetchPr() {
-          return { data: null, notModified: false, gone: true };
+          fetches++;
+          return inaccessible
+            ? { data: null, notModified: false, gone: true }
+            : { data: { state: "open" }, notModified: false };
         },
         async fetchReviews() {
-          throw new Error("must not be called for a gone PR");
+          if (inaccessible) throw new Error("must not be called for an inaccessible PR");
+          return { data: [], notModified: false };
         },
         async fetchReviewCommentsSince() {
-          throw new Error("must not be called for a gone PR");
+          if (inaccessible) throw new Error("must not be called for an inaccessible PR");
+          return [];
         },
       },
       addressPr: async () => {
@@ -1021,8 +1028,14 @@ describe("ReviewPollingAcquirer", () => {
     });
 
     await acquirer.tick();
-    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
-    expect(workerState.countAgentPrs().closed).toBe(1);
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    expect(workerState.countAgentPrs().closed).toBe(0);
+    expect(fetches).toBe(1);
+
+    inaccessible = false;
+    await acquirer.tick();
+    expect(fetches).toBe(2);
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
   });
 
   test("reconciliation shares one PR fetch with the poll loop", async () => {

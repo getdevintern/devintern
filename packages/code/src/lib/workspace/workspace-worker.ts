@@ -23,6 +23,7 @@ import {
 import { RunStore } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
+import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
@@ -54,6 +55,7 @@ import {
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  resolveActionedSource,
 } from "./fleet-executor";
 import type { RepoManagerLike } from "./fleet-executor";
 import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
@@ -515,15 +517,17 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   acquirers.push(
     new RetryQueueAcquirer({
       store: retryQueue,
-      execute: (taskKey, routable, retry) =>
-        createFleetTaskExecutor(
+      execute: (taskKey, routable, retry) => {
+        const retryTeam = retry.team ? findTeam(config, retry.team) : undefined;
+        return createFleetTaskExecutor(
           {
             config,
             workspaceDir,
             skips: state.skips,
             repoManager,
             supervisor,
-            ...(retry.team ? { team: findTeam(config, retry.team) } : {}),
+            ...(retryTeam ? { team: retryTeam } : {}),
+            actionedSource: resolveActionedSource(config, retryTeam),
           },
           // The persisted repo/team make retries deterministic even when
           // task keys overlap or the original route depended on labels.
@@ -532,7 +536,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
             repo: retry.repo,
             source: "retry",
           },
-        )(taskKey, routable),
+        )(taskKey, routable);
+      },
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
     }),
@@ -682,6 +687,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         query: () => findTeam(config, team.name)?.taskQuery,
         searchTasks,
         detector,
+        client,
       });
     }
   } else {
@@ -706,7 +712,23 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
   }
 
+  // Single-source workspaces keep the tracker client lazy (automations-only
+  // workspaces need no tracker credentials at startup); multi-team sources
+  // carry the client built above.
+  const singleTrackerManager = multiTeam ? undefined : new TaskTrackerManager();
   for (const source of sources) {
+    // Derive the actioned source key once and reuse it verbatim for the gate
+    // and the subprocess env (`DEVINTERN_ACTIONED_SOURCE`), so a stale `.env`
+    // tracker or a leaked team name cannot make the recorder and gate disagree.
+    const actionedSource = resolveActionedSource(config, source.team);
+    const actionedGate = createTaskActionedGate({
+      getTracker: source.client ? () => source.client! : () => singleTrackerManager!.getClient(),
+      workerState: state.workerState,
+      source: actionedSource,
+    });
+    // Share the gate with the relay task evaluator so a relayed change caused
+    // by the worker's own post-PR transition is not re-implemented either.
+    source.isTaskActionedUnchanged = actionedGate;
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -716,6 +738,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       repoManager,
       detector: source.detector,
       searchTasks: source.searchTasks,
+      isTaskActionedUnchanged: (taskKey, updated) => actionedGate(taskKey, updated),
+      actionedSource,
       query: source.query,
       intervalSeconds,
       gate: pickupGate,
@@ -933,6 +957,7 @@ export {
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  resolveActionedSource,
   buildFleetEventAcquirers,
 };
 export type { FleetEventReloadHooks, FleetSourceRuntime, RepoManagerLike };

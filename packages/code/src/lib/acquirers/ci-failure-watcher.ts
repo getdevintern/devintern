@@ -571,8 +571,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     const prCursor = workerState.getCursor(prSource);
     const prResult = await provider.fetchChange(repo, prNumber, prCursor?.etag);
     if (prResult.gone) {
-      this.markClosed(repo, prNumber);
-      return "removed";
+      // GitHub also returns 404 when this credential lost repository access.
+      // Only a confirmed closed state may remove a PR from the registry.
+      return "active";
     }
     if (!prResult.notModified) {
       if (prResult.etag) {
