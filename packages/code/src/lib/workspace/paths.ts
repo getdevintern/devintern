@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -26,6 +26,28 @@ export function workspaceConfigPath(workspaceDir: string = resolveWorkspaceDir()
 /** Path of the shared workspace `.env` file. */
 export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, ".env");
+}
+
+/**
+ * Directory holding the worker's auth session and license cache. Runtime
+ * state lives alongside the shared queue database, outside repo checkouts.
+ */
+export function workspaceCodeStateDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "state", "code");
+}
+
+/** Preserve worker credentials and relay pairing from the old workspace path. */
+export function ensureWorkspaceCodeState(workspaceDir: string): void {
+  const targetDir = workspaceCodeStateDir(workspaceDir);
+  mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+  const legacyDir = join(workspaceDir, ".devintern-code");
+  for (const name of [".auth-session.json", "relay.json"]) {
+    const source = join(legacyDir, name);
+    const target = join(targetDir, name);
+    if (!existsSync(source) || existsSync(target)) continue;
+    copyFileSync(source, target);
+    chmodSync(target, 0o600);
+  }
 }
 
 /** Path of the central workspace SQLite database. */

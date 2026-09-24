@@ -24,6 +24,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
+import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
 
@@ -278,6 +279,9 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
+    // Exclude only runtime artifacts: new settings.json, .env.example and
+    // automations.toml must remain eligible for a worker-generated PR.
+    excludeWorkerRuntimeFiles(path);
   }
 
   /** Serialize compound Git administration without nesting public locks. */

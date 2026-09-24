@@ -15,7 +15,12 @@ import type { RelayConnectTarget, WorkspaceRelayConnectDeps } from "../relay/con
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { buildRepoEnv, buildTeamEnv, gitHubSlugFromRemote, parseEnvFile } from "../workspace/env";
-import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import {
+  ensureWorkspaceCodeState,
+  resolveWorkspaceDir,
+  workspaceConfigPath,
+  workspaceEnvPath,
+} from "../workspace/paths";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentrySetupPromptFn, SentryValidationOptions } from "./worker-sentry-setup";
 
@@ -538,6 +543,7 @@ export async function runWorkerConnectCommand(
     return 1;
   }
   const { workspaceDir, configPath, config } = workspace;
+  ensureWorkspaceCodeState(workspaceDir);
   const runConnect = deps.runConnect ?? connectRelayTarget;
 
   if (parsed.target === "all") {

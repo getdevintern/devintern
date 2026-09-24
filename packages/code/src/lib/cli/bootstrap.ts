@@ -5,8 +5,9 @@ import { config } from "dotenv";
 import { createDefaultSupabaseAuthConfig } from "@devintern/auth";
 import { LicenseCheckError, requireLicense } from "@devintern/license-check";
 import type { LicenseCheckResult } from "@devintern/license-check";
-import { findEnvFile, maybeOfferCliUpdate, resolveConfigDir } from "@devintern/utils";
+import { findEnvFile, maybeOfferCliUpdate } from "@devintern/utils";
 import { isAutomatedEnvironment } from "../config/env-detector";
+import { resolveRuntimeStateDir } from "../config/config-dir";
 import { isInteractive } from "../init/wizard";
 import { flushAnalytics } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
@@ -88,8 +89,7 @@ function loadEnvironmentInner(envFile?: string): string | null {
 }
 
 /** Build Supabase auth config pointing at the project session file. */
-export function loadSupabaseConfig() {
-  const configDir = resolveConfigDir({ configDirName: ".devintern-code" });
+export function loadSupabaseConfig(configDir: string = resolveRuntimeStateDir()) {
   return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 

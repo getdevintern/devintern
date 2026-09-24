@@ -9,6 +9,40 @@ import {
 } from "../cli/bootstrap";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { TaskTrackerManager } from "../trackers/manager";
+import {
+  ensureWorkspaceCodeState,
+  resolveWorkspaceDir,
+  workspaceCodeStateDir,
+  workspaceConfigPath,
+} from "../workspace/paths";
+
+/** Sign in to the selected worker workspace without changing project login. */
+async function runWorkerLoginSubcommand(args: string[]): Promise<never> {
+  if (hasHelpArg(args)) {
+    console.log("Usage: devintern worker login [method] [--workspace <path>]");
+    console.log("Sign in for the worker workspace (github | google | x | email).");
+    process.exit(0);
+  }
+  const workspaceFlag = args.indexOf("--workspace");
+  const workspacePath = workspaceFlag >= 0 ? args[workspaceFlag + 1] : undefined;
+  if (workspaceFlag >= 0 && (!workspacePath || workspacePath.startsWith("-"))) {
+    console.error("❌ --workspace requires a path to workspace.toml.");
+    process.exit(1);
+  }
+  const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+  const configPath = workspacePath ? resolve(workspacePath) : workspaceConfigPath(workspaceDir);
+  if (!existsSync(configPath)) {
+    console.error(`❌ No workspace.toml at ${configPath}.`);
+    process.exit(1);
+  }
+  const loginArgs =
+    workspaceFlag < 0
+      ? args
+      : args.filter((_, index) => index !== workspaceFlag && index !== workspaceFlag + 1);
+  ensureWorkspaceCodeState(workspaceDir);
+  const { runLoginCommand } = await import("../account/cli");
+  return runLoginCommand(["devintern", "login", ...loginArgs], workspaceCodeStateDir(workspaceDir));
+}
 
 /** True when `args` contains a `--help`/`-h` flag. */
 function hasHelpArg(args: string[]): boolean {
@@ -131,10 +165,10 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       const result = await trackerManager.getClient().searchTasks(query);
       return result.tasks.length;
     },
-    checkAutomationLicense: async () => {
+    checkAutomationLicense: async (workspaceDir) => {
       const license = await checkLicense({
         productKey: "devintern/code",
-        supabaseConfig: loadSupabaseConfig(),
+        supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
         requireAutomation: true,
       });
       return license.valid ? null : license.message;
@@ -183,7 +217,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     } else if (arg === "-v" || arg === "--verbose") {
       verbose = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: devintern worker [init|scaffold|add-repo|run-now] [options]");
+      console.log("Usage: devintern worker [init|login|scaffold|add-repo|run-now] [options]");
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log("");
       console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
@@ -199,6 +233,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log(
         "                      query, operating policy, optional Sentry, and license check",
       );
+      console.log("  login               Sign in for this worker workspace");
       console.log("  scaffold            Create workspace.toml and the shared .env only");
       console.log("  add-repo            Add the current repository to the worker workspace");
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
@@ -234,6 +269,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   const selectedWorkspaceDir = workspacePath
     ? dirname(resolve(workspacePath))
     : resolveWorkspaceDir();
+  ensureWorkspaceCodeState(selectedWorkspaceDir);
   for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)))) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
@@ -242,7 +278,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   // requires an automation entitlement.
   const licenseResult = await checkLicense({
     productKey: "devintern/code",
-    supabaseConfig: loadSupabaseConfig(),
+    supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(selectedWorkspaceDir)),
     requireAutomation: true,
   });
   await enforceLicenseOrExit(licenseResult);
@@ -269,5 +305,6 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "add-repo") return runWorkerAddRepoSubcommand(rest);
   if (subcommand === "run-now") return runWorkerRunNowSubcommand(rest);
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
+  if (subcommand === "login") return runWorkerLoginSubcommand(rest);
   return runWorkerDaemon(args);
 }

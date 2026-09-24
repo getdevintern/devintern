@@ -3,9 +3,9 @@ import { loadSupabaseConfig } from "../cli/bootstrap";
 import { flushAnalytics, trackLoginResult } from "../observability/analytics";
 
 /** `devintern login` — sign in and persist the local auth session. */
-export async function runLoginCommand(argv: string[]): Promise<never> {
+export async function runLoginCommand(argv: string[], configDir?: string): Promise<never> {
   try {
-    const supabaseConfig = loadSupabaseConfig();
+    const supabaseConfig = loadSupabaseConfig(configDir);
     const resolved = await resolveLogin(argv);
     const user = await login(supabaseConfig, resolved);
     console.log(`✅ Signed in as ${user.email || user.id}`);

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Worker PRs no longer include DevIntern runtime files (DEV-126)**: task subprocesses derive auth and license state from their worker workspace and keep it under `<workspace>/state/code` instead of a throwaway worktree. Worker-managed clones exclude known runtime files from Git while allowing new project config files in PRs. Worker setup copies an existing project sign-in when the workspace has none, existing workspace credentials and relay pairing are migrated, and `devintern worker login` signs in to the workspace later. Regular single-repo commands remain project scoped.
 - **Worker fills free concurrency slots instead of stalling after the first batch (DEV-127)**: task polling no longer holds its re-entry gate until every task in a batch finishes. The detect/evaluate/claim phase stays serialized, but polling now continues on its normal interval while tasks run, so a task created during a run is picked up on the next tick and admitted to a free slot instead of waiting for the whole batch to drain. The shared admission supervisor still caps global and per-repository concurrency, a task edited mid-run waits for its in-flight execution rather than starting a concurrent duplicate, cursor compare-and-set prevents overlapping ticks from regressing a newer cursor, and deferred tasks still release their claim and re-detect
 
 ## [2.13.0] - 2026-09-24
