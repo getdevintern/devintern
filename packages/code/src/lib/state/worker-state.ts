@@ -91,6 +91,10 @@ export interface ActionedTask {
   signal: string;
   verified: boolean;
   updatedStamp: string | null;
+  pending: boolean;
+  fallbackSnapshot: string | null;
+  transitioned: boolean;
+  transitionStatus: string | null;
   actionedAt: number;
 }
 
@@ -190,6 +194,10 @@ export class WorkerState {
         signal TEXT NOT NULL,
         verified INTEGER NOT NULL DEFAULT 1,
         updated_stamp TEXT,
+        pending INTEGER NOT NULL DEFAULT 0,
+        fallback_snapshot TEXT,
+        transitioned INTEGER NOT NULL DEFAULT 0,
+        transition_status TEXT,
         actioned_at INTEGER NOT NULL,
         PRIMARY KEY (source, task_key)
       )
@@ -207,6 +215,16 @@ export class WorkerState {
     // backfills it, so no data migration is needed.
     if (!actionedColumns.some((column) => column.name === "updated_stamp")) {
       this.db.run("ALTER TABLE actioned_tasks ADD COLUMN updated_stamp TEXT");
+    }
+    for (const [name, definition] of [
+      ["pending", "INTEGER NOT NULL DEFAULT 0"],
+      ["fallback_snapshot", "TEXT"],
+      ["transitioned", "INTEGER NOT NULL DEFAULT 0"],
+      ["transition_status", "TEXT"],
+    ]) {
+      if (!actionedColumns.some((column) => column.name === name)) {
+        this.db.run(`ALTER TABLE actioned_tasks ADD COLUMN ${name} ${definition}`);
+      }
     }
   }
 
@@ -572,7 +590,9 @@ export class WorkerState {
   getTaskActioned(source: string, taskKey: string): ActionedTask | null {
     const row = this.db
       .query(
-        `SELECT task_key, signal, verified, updated_stamp, actioned_at FROM actioned_tasks WHERE source = ? AND task_key = ?`,
+        `SELECT task_key, signal, verified, updated_stamp, pending, fallback_snapshot,
+                transitioned, transition_status, actioned_at
+         FROM actioned_tasks WHERE source = ? AND task_key = ?`,
       )
       .get(source, taskKey) as Record<string, unknown> | null;
     if (!row) return null;
@@ -581,6 +601,10 @@ export class WorkerState {
       signal: row.signal as string,
       verified: (row.verified as number | null) !== 0,
       updatedStamp: (row.updated_stamp as string | null) ?? null,
+      pending: row.pending === 1,
+      fallbackSnapshot: (row.fallback_snapshot as string | null) ?? null,
+      transitioned: row.transitioned === 1,
+      transitionStatus: (row.transition_status as string | null) ?? null,
       actionedAt: row.actioned_at as number,
     };
   }
@@ -602,16 +626,38 @@ export class WorkerState {
     signal: string,
     verified = true,
     updatedStamp?: string,
+    options: {
+      pending?: boolean;
+      fallbackSnapshot?: string;
+      transitioned?: boolean;
+      transitionStatus?: string;
+    } = {},
   ): void {
     this.db.run(
-      `INSERT INTO actioned_tasks (source, task_key, signal, verified, updated_stamp, actioned_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO actioned_tasks (source, task_key, signal, verified, updated_stamp,
+                                  pending, fallback_snapshot, transitioned, transition_status, actioned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(source, task_key) DO UPDATE SET
          signal = excluded.signal,
          verified = excluded.verified,
          updated_stamp = excluded.updated_stamp,
+         pending = excluded.pending,
+         fallback_snapshot = excluded.fallback_snapshot,
+         transitioned = excluded.transitioned,
+         transition_status = excluded.transition_status,
          actioned_at = excluded.actioned_at`,
-      [source, taskKey, signal, verified ? 1 : 0, updatedStamp?.trim() || null, Date.now()],
+      [
+        source,
+        taskKey,
+        signal,
+        verified ? 1 : 0,
+        updatedStamp?.trim() || null,
+        options.pending ? 1 : 0,
+        options.fallbackSnapshot ?? null,
+        options.transitioned ? 1 : 0,
+        options.transitionStatus ?? null,
+        Date.now(),
+      ],
     );
   }
 

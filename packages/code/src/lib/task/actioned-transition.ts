@@ -19,7 +19,11 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { isMarkdownTaskTracker } from "../trackers/markdown/markdown-task-tracker-client";
-import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
+import {
+  actionedSourceKeyFromEnv,
+  markTaskActionedPending,
+  recordTaskActioned,
+} from "./actioned-state";
 
 export interface ActionedTransitionInput {
   tracker: TaskTrackerClient;
@@ -50,6 +54,24 @@ export async function applyActionedTransition(input: ActionedTransitionInput): P
     const projectSettings = input.projectSettings ?? loadProjectSettings();
     const projectKey = resolveProjectKey(taskKey, task);
     const prStatus = getPrStatusForProject(projectKey, projectSettings)?.trim();
+    const source = actionedSourceKeyFromEnv();
+    let transitioned = false;
+
+    // Claim the ticket before transitionStatus can emit a relay event. The
+    // gate holds this provisional marker until the final post-write read.
+    try {
+      workerState = input.workerState ?? new WorkerState();
+      markTaskActionedPending({
+        workerState,
+        source,
+        tracker,
+        task,
+        taskKey,
+        transitionStatus: skipComments ? undefined : prStatus,
+      });
+    } catch (error) {
+      console.warn(`⚠️  Could not reserve ${taskKey} as actioned: ${(error as Error).message}`);
+    }
 
     if (skipComments) {
       console.log(
@@ -59,6 +81,7 @@ export async function applyActionedTransition(input: ActionedTransitionInput): P
       try {
         console.log(`\n🔄 Transitioning ${taskKey} to '${prStatus}' after PR creation...`);
         await tracker.transitionStatus(taskKey, prStatus);
+        transitioned = true;
       } catch (statusError) {
         // Missing label/permissions/transient API error: the PR is already
         // created, so degrade to the local marker instead of failing the run.
@@ -77,21 +100,22 @@ export async function applyActionedTransition(input: ActionedTransitionInput): P
       );
     }
 
-    workerState = input.workerState ?? new WorkerState();
-    const ownsState = input.workerState === undefined;
+    workerState ??= input.workerState ?? new WorkerState();
     try {
       const marked = await recordTaskActioned({
         workerState,
-        source: actionedSourceKeyFromEnv(),
+        source,
         tracker,
         taskKey,
         fallbackTask: task,
+        transitioned,
+        transitionStatus: transitioned ? prStatus : undefined,
       });
       if (marked) {
         console.log(`✅ Recorded ${taskKey} as actioned`);
       }
     } finally {
-      if (ownsState) workerState.close();
+      if (input.workerState === undefined) workerState.close();
     }
   } catch (error) {
     console.warn(`⚠️  Failed to record ${taskKey} as actioned: ${(error as Error).message}`);

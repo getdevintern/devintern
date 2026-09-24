@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 
 import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
 import { applyActionedTransition } from "../src/lib/task/actioned-transition";
-import { actionedSourceKeyFromEnv } from "../src/lib/task/actioned-state";
+import { actionedSourceKeyFromEnv, createTaskActionedGate } from "../src/lib/task/actioned-state";
 import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
@@ -74,6 +74,35 @@ describe("applyActionedTransition", () => {
 
     expect(calls).toEqual([["PROJ-1", "In Review"]]);
     expect(workerState.getTaskActioned(actionedSourceKeyFromEnv(), "PROJ-1")).not.toBeNull();
+  });
+
+  test("holds a provisional marker while the transition emits a relay event", async () => {
+    let reads = 0;
+    const tracker = fakeTracker({
+      getTask: async () => {
+        reads++;
+        return { ...task, status: "In Review", updated: "2026-01-02T00:00:00Z" };
+      },
+      transitionStatus: async () => {
+        const gate = createTaskActionedGate({
+          getTracker: () => tracker,
+          workerState,
+          source: actionedSourceKeyFromEnv(),
+        });
+        expect(await gate("PROJ-1", "2026-01-02T00:00:00Z")).toBe(true);
+        expect(reads).toBe(0);
+      },
+    });
+    await applyActionedTransition({
+      tracker,
+      task,
+      taskKey: "PROJ-1",
+      skipComments: false,
+      projectSettings: { jira: { projects: { PROJ: { prStatus: "In Review" } } } },
+      workerState,
+    });
+    expect(reads).toBe(1);
+    expect(workerState.getTaskActioned(actionedSourceKeyFromEnv(), "PROJ-1")?.pending).toBe(false);
   });
 
   test("a failed transition still records the ticket locally and does not throw", async () => {

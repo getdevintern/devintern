@@ -20,7 +20,7 @@ import { createHash } from "crypto";
 
 import type { Task } from "../../types/task-tracker";
 import type { TaskTrackerClient } from "../trackers/client";
-import type { WorkerState } from "../state/worker-state";
+import type { ActionedTask, WorkerState } from "../state/worker-state";
 import { sleep } from "../utils/general";
 import { ACTIONED_SOURCE_ENV } from "../workspace/env";
 
@@ -28,6 +28,8 @@ import { ACTIONED_SOURCE_ENV } from "../workspace/env";
 const REREAD_ATTEMPTS = 3;
 /** Delay between re-read attempts, in milliseconds. */
 const REREAD_DELAY_MS = 250;
+/** A crashed task subprocess cannot leave a provisional marker locked forever. */
+const PENDING_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Human-editable fields whose change re-arms an actioned ticket. */
 export interface ActionedSignalInput {
@@ -35,6 +37,10 @@ export interface ActionedSignalInput {
   description?: string;
   status?: string;
   labels?: string[];
+}
+
+interface FallbackSnapshot extends ActionedSignalInput {
+  statusLabels?: string[];
 }
 
 /**
@@ -63,12 +69,42 @@ export function computeActionedSignal(input: ActionedSignalInput): string {
 
 /** Digest a normalized task using the tracker's own description extraction. */
 export function trackerActionedSignal(tracker: TaskTrackerClient, task: Task): string {
-  return computeActionedSignal({
+  return computeActionedSignal(trackerActionedSnapshot(tracker, task));
+}
+
+function trackerActionedSnapshot(tracker: TaskTrackerClient, task: Task): FallbackSnapshot {
+  return {
     summary: task.summary,
     description: tracker.extractDescriptionText(task),
     status: task.status,
     labels: task.labels,
-  });
+    statusLabels: tracker.actionedStatusLabels?.(),
+  };
+}
+
+/** Reserve the ticket before our own transition can emit a relay event. */
+export function markTaskActionedPending(input: {
+  workerState: WorkerState;
+  source: string;
+  tracker: TaskTrackerClient;
+  task: Task;
+  taskKey: string;
+  transitionStatus?: string;
+}): void {
+  const snapshot = trackerActionedSnapshot(input.tracker, input.task);
+  input.workerState.markTaskActioned(
+    input.source,
+    input.taskKey,
+    computeActionedSignal(snapshot),
+    false,
+    input.task.updated,
+    {
+      pending: true,
+      fallbackSnapshot: JSON.stringify(snapshot),
+      transitioned: Boolean(input.transitionStatus),
+      transitionStatus: input.transitionStatus,
+    },
+  );
 }
 
 /**
@@ -134,6 +170,8 @@ export async function recordTaskActioned(input: {
   tracker: TaskTrackerClient;
   taskKey: string;
   fallbackTask?: Task;
+  transitioned?: boolean;
+  transitionStatus?: string;
 }): Promise<boolean> {
   const { workerState, source, tracker, taskKey } = input;
   let task: Task | undefined;
@@ -161,7 +199,13 @@ export async function recordTaskActioned(input: {
 
   try {
     const signal = trackerActionedSignal(tracker, task);
-    workerState.markTaskActioned(source, taskKey, signal, verified, task.updated);
+    workerState.markTaskActioned(source, taskKey, signal, verified, task.updated, {
+      fallbackSnapshot: verified
+        ? undefined
+        : JSON.stringify(trackerActionedSnapshot(tracker, task)),
+      transitioned: input.transitioned,
+      transitionStatus: input.transitionStatus,
+    });
     return true;
   } catch (error) {
     console.warn(
@@ -169,6 +213,71 @@ export async function recordTaskActioned(input: {
     );
     return false;
   }
+}
+
+/** Account for the issue label swap when checking a recovered snapshot. */
+function labelsChangedSinceTransition(
+  before: FallbackSnapshot,
+  now: FallbackSnapshot,
+  isIssueTracker: boolean,
+  expectedIssueClose: boolean,
+  requestedStatus: string,
+): boolean {
+  const expected = new Set((before.labels ?? []).map((label) => label.trim().toLowerCase()));
+  const actual = new Set((now.labels ?? []).map((label) => label.trim().toLowerCase()));
+  if (isIssueTracker && !expectedIssueClose) {
+    // Reconstruct the exact label set the issue status policy writes.
+    const statusLabels = new Set((before.statusLabels ?? []).map((label) => label.toLowerCase()));
+    for (const label of expected) {
+      if (statusLabels.has(label) && label !== requestedStatus) expected.delete(label);
+    }
+    expected.add(requestedStatus);
+  }
+  return expected.size !== actual.size || [...expected].some((label) => !actual.has(label));
+}
+
+/** Compare a recovered ticket with the snapshot saved when the read failed. */
+function changedSinceUnverifiedSnapshot(
+  record: ActionedTask,
+  source: string,
+  tracker: TaskTrackerClient,
+  task: Task,
+  signal: string,
+): boolean {
+  if (!record.fallbackSnapshot) return false;
+  const before = JSON.parse(record.fallbackSnapshot) as FallbackSnapshot;
+  const now = trackerActionedSnapshot(tracker, task);
+  if (
+    before.summary?.trim() !== now.summary?.trim() ||
+    before.description?.trim() !== now.description?.trim()
+  )
+    return true;
+  if (!record.transitioned) return signal !== record.signal;
+
+  const requestedStatus = record.transitionStatus?.trim().toLowerCase();
+  const expectedIssueClose = ["closed", "done", "complete", "completed"].includes(
+    requestedStatus ?? "",
+  );
+  const isIssueTracker = ["github", "gitlab"].includes(source.split(":", 1)[0] ?? "");
+  const currentStatus = now.status?.trim().toLowerCase();
+  if (isIssueTracker) {
+    if (expectedIssueClose && currentStatus !== "closed") return true;
+    if (!expectedIssueClose && !["open", "opened"].includes(currentStatus ?? "")) return true;
+  } else {
+    const completionStatuses = ["closed", "done", "complete", "completed"];
+    const expectedStatuses = completionStatuses.includes(requestedStatus ?? "")
+      ? completionStatuses
+      : [requestedStatus];
+    if (!expectedStatuses.includes(currentStatus)) return true;
+  }
+
+  return labelsChangedSinceTransition(
+    before,
+    now,
+    isIssueTracker,
+    expectedIssueClose,
+    requestedStatus ?? "",
+  );
 }
 
 /**
@@ -181,8 +290,8 @@ export async function recordTaskActioned(input: {
  *
  * A record written from a fallback snapshot is `unverified`: its digest
  * predates the worker's own transition, so comparing it against the live
- * ticket would look like a human change and re-arm it. The first successful
- * read after such a record refreshes it as verified and keeps suppressing.
+ * ticket would look like a human change and re-arm it. A successful read
+ * compares fields the worker did not change before refreshing the marker.
  *
  * Once verified, the ticket's `updated` stamp is persisted alongside the
  * marker; while the caller reports the same stamp the gate skips the tracker
@@ -200,6 +309,11 @@ export function createTaskActionedGate(deps: {
     const record = deps.workerState.getTaskActioned(deps.source, taskKey);
     if (!record) return false;
 
+    // The post-PR transition may still be running. Do not turn its own label
+    // or status write into a second task run. A crash leaves the provisional
+    // marker in the DB; after the lease expires it follows the unverified path.
+    if (record.pending && Date.now() - record.actionedAt < PENDING_TIMEOUT_MS) return true;
+
     const stamp = updated?.trim();
     // A verified marker whose persisted stamp matches the sweep result means
     // the ticket has not changed since the last read: skip the tracker call.
@@ -212,7 +326,11 @@ export function createTaskActionedGate(deps: {
       const task = await tracker.getTask(taskKey);
       const signal = trackerActionedSignal(tracker, task);
 
-      if (record.verified && signal !== record.signal) {
+      if (
+        (!record.verified &&
+          changedSinceUnverifiedSnapshot(record, deps.source, tracker, task, signal)) ||
+        (record.verified && signal !== record.signal)
+      ) {
         deps.workerState.clearTaskActioned(deps.source, taskKey);
         return false;
       }

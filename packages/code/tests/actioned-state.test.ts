@@ -283,6 +283,8 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
       tracker: broken,
       taskKey: "42",
       fallbackTask: githubTask(),
+      transitioned: true,
+      transitionStatus: "In Review",
     });
     expect(ok).toBe(true);
     const stored = workerState.getTaskActioned(source, "42");
@@ -294,7 +296,6 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     // human change and re-implement the ticket.
     const recoveredTask = githubTask({
       body: "Fix the login bug",
-      state: "closed",
       labels: ["intern", "in review"],
     });
     const recovered = fakeTracker(() => recoveredTask, githubDescribe);
@@ -303,11 +304,178 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     expect(workerState.getTaskActioned(source, "42")?.verified).toBe(true);
 
     // Once verified, a genuine change re-arms the ticket.
-    const changed = githubTask({ body: "Please also add 2FA", state: "closed" });
+    const changed = githubTask({ body: "Please also add 2FA", labels: ["intern", "in review"] });
     const changing = fakeTracker(() => changed, githubDescribe);
     const verify = createTaskActionedGate({ getTracker: () => changing, workerState, source });
     expect(await verify("42")).toBe(false);
     expect(workerState.getTaskActioned(source, "42")).toBeNull();
+  });
+
+  test("a human edit after an unverified no-transition marker re-arms on recovery", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: githubDescribe,
+    } as unknown as TaskTrackerClient;
+    const source = "github";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "42",
+      fallbackTask: githubTask(),
+    });
+    const changed = githubTask({ body: "Fix login and add 2FA", updated: "2026-01-02T00:00:00Z" });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => changed, githubDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("42", changed.updated)).toBe(false);
+    expect(workerState.getTaskActioned(source, "42")).toBeNull();
+  });
+
+  test("a description edit after an unverified transition re-arms on recovery", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: jiraDescribe,
+    } as unknown as TaskTrackerClient;
+    const source = "jira";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "DEV-1",
+      fallbackTask: jiraTask(),
+      transitioned: true,
+      transitionStatus: "In Review",
+    });
+    const changed = jiraTask({
+      description: "Implement export and CSV download",
+      status: "In Review",
+      updated: "2026-01-02T00:00:00Z",
+    });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => changed, jiraDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("DEV-1", changed.updated)).toBe(false);
+  });
+
+  test("a reopen after an unverified status transition re-arms on recovery", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: jiraDescribe,
+    } as unknown as TaskTrackerClient;
+    const source = "jira";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "DEV-1",
+      fallbackTask: jiraTask(),
+      transitioned: true,
+      transitionStatus: "In Review",
+    });
+    const reopened = jiraTask({ updated: "2026-01-02T00:00:00Z" });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => reopened, jiraDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("DEV-1", reopened.updated)).toBe(false);
+  });
+
+  test("an extra label after an unverified GitHub transition re-arms on recovery", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: githubDescribe,
+    } as unknown as TaskTrackerClient;
+    const source = "github";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "42",
+      fallbackTask: githubTask(),
+      transitioned: true,
+      transitionStatus: "In Review",
+    });
+    const changed = githubTask({
+      labels: ["intern", "In Review", "urgent"],
+      updated: "2026-01-02T00:00:00Z",
+    });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => changed, githubDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("42", changed.updated)).toBe(false);
+  });
+
+  test("a removed non-status label after a GitHub transition re-arms on recovery", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: githubDescribe,
+      actionedStatusLabels: () => ["To Do", "In Review"],
+    } as unknown as TaskTrackerClient;
+    const source = "github";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "42",
+      fallbackTask: githubTask({ labels: ["intern", "To Do"] }),
+      transitioned: true,
+      transitionStatus: "In Review",
+    });
+    const changed = githubTask({ labels: ["In Review"], updated: "2026-01-02T00:00:00Z" });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => changed, githubDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("42", changed.updated)).toBe(false);
+  });
+
+  test("removing an old status label during a GitHub transition stays actioned", async () => {
+    const broken = {
+      getTask: async () => {
+        throw new Error("tracker down");
+      },
+      extractDescriptionText: githubDescribe,
+      actionedStatusLabels: () => ["To Do", "In Review"],
+    } as unknown as TaskTrackerClient;
+    const source = "github";
+    await recordTaskActioned({
+      workerState,
+      source,
+      tracker: broken,
+      taskKey: "42",
+      fallbackTask: githubTask({ labels: ["intern", "To Do"] }),
+      transitioned: true,
+      transitionStatus: "In Review",
+    });
+    const transitioned = githubTask({
+      labels: ["intern", "In Review"],
+      updated: "2026-01-02T00:00:00Z",
+    });
+    const gate = createTaskActionedGate({
+      getTracker: () => fakeTracker(() => transitioned, githubDescribe),
+      workerState,
+      source,
+    });
+    expect(await gate("42", transitioned.updated)).toBe(true);
   });
 
   test("the persisted update stamp survives a restart and skips the read", async () => {

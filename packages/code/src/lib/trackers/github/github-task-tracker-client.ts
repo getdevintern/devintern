@@ -137,6 +137,10 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
     });
   }
 
+  actionedStatusLabels(): string[] {
+    return [...this.statusLabels];
+  }
+
   extractDescriptionText(task: Task): string {
     return (task.raw as GitHubIssue).body || "";
   }
