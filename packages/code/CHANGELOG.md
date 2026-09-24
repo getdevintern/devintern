@@ -2,9 +2,59 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worker PRs no longer include DevIntern runtime files (DEV-126)**: task subprocesses derive auth and license state from their worker workspace and keep it under `<workspace>/state/code` instead of a throwaway worktree. Worker-managed clones exclude known runtime files from Git while allowing new project config files in PRs. Worker setup copies an existing project sign-in when the workspace has none, existing workspace credentials and relay pairing are migrated, and `devintern worker login` signs in to the workspace later. Regular single-repo commands remain project scoped.
+- **Worker fills free concurrency slots instead of stalling after the first batch (DEV-127)**: task polling no longer holds its re-entry gate until every task in a batch finishes. The detect/evaluate/claim phase stays serialized, but polling now continues on its normal interval while tasks run, so a task created during a run is picked up on the next tick and admitted to a free slot instead of waiting for the whole batch to drain. The shared admission supervisor still caps global and per-repository concurrency, a task edited mid-run waits for its in-flight execution rather than starting a concurrent duplicate, cursor compare-and-set prevents overlapping ticks from regressing a newer cursor, and deferred tasks still release their claim and re-detect
+
+## [2.13.0] - 2026-09-24
+
+Actioned-ticket release: the worker now records every ticket it opens a PR for and keeps it out of the sweep until the ticket genuinely changes, so label-based trackers stop re-implementing the same open issue in a loop, with per-repo GitHub credentials for fleet events and steadier PR watching when GitHub returns 404.
+
+### Added
+
+- **Actioned markers stop re-implemented tickets (DEV-125)**: once a pull request is created, the worker records the ticket as **actioned** in `.devintern-code/queue.db` and skips it on later sweeps even when it still matches `[defaults].task_query` — the loop a label-based tracker (GitHub, GitLab) would otherwise fall into. This works for every polled tracker. The marker captures the summary, description, status/state, and labels and re-arms when any of them changes (edit, re-open, or add/remove a label); it is captured *after* the worker's own comment and status transition so those never re-trigger a run. If the project configures `prStatus` in `.devintern-code/settings.json` the worker also moves the ticket to that status/label first, and a missing label, missing permission, or transient API error never loses track of the ticket or fails the PR run — the marker is recorded anyway with a warning suggesting a `prStatus`. Skips are logged as `⏭️ skipping KEY (already actioned; no change since the PR)`. The marker gates polling, dashboard retries, and relayed changes, and uses a pinned `DEVINTERN_ACTIONED_SOURCE` key so the subprocess recorder and the workspace gate can never derive different keys from a stale `.env` `TASK_TRACKER` or a leaked team env
+
+### Fixed
+
+- **Actioned marker is race- and failure-hardened**: a relayed `task.changed` caused by the worker's own post-PR label/comment is no longer re-implemented, an unreadable tracker record is persisted as an unverified marker that keeps suppressing and refreshes to verified on the first successful read, the gate caches the last-verified ticket `updated` stamp (persisted so it survives a restart) to avoid re-reading the tracker per ticket on every poll, and a state-DB or disk-I/O failure during the transition warns instead of being misreported as a PR-creation failure
+- **Open PRs stay watched when GitHub returns 404**: the review poller, CI watcher, and PR reconciler now treat a GitHub 404 as "still open, access warning" rather than "gone", because GitHub returns 404 for an inaccessible PR that is still open; only a definite closed/merged state drops a PR from the watch list
+- **Fleet events use per-repo GitHub credentials**: GitHub review, CI, mention, and relay requests now resolve the matching repo's `GITHUB_TOKEN` layers (with a fixed team's `env_file`/`[teams.env]` able to override), falling back to the workspace token only when no repo or team override exists
+
+## [2.12.0] - 2026-09-23
+
+GitLab code-host release: merge requests can now be created, reviewed, kept current, and CI-repaired on GitLab.com or a Self-Managed instance, the worker connects every code host in one pass, scheduled automations choose per entry whether they open a PR, and the activation path reports where setup gets stuck.
+
+### Added
+
+- **Experimental GitLab merge-request code host**: GitLab is now usable independently as the code host through a profile separate from the task tracker (`DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST=true`, `GITLAB_CODE_HOST_URL`, `GITLAB_CODE_HOST_TOKEN`, plus optional `GITLAB_CODE_HOST_ALIASES`, `GITLAB_CODE_HOST_CA_FILE`, `GITLAB_CODE_HOST_PROXY`, and a Maintainer/Owner-only `GITLAB_WEBHOOK_ADMIN_TOKEN` for hook setup). `--create-pr` remains the stable cross-provider flag and opens a merge request on a detected GitLab remote, reporting GitLab-native terminology. Supported: MR creation with duplicate recovery, labels, and stored provider/instance/project/IID metadata; manual `devintern address-review <mr-url>`; polling of DevIntern-created registered MRs with an optional `GITLAB_REVIEWER_ALLOWLIST`; guarded base/conflict synchronization (`auto` mode and `devintern resolve-conflicts <mr-url>`); CI repair through the existing `--ci-feedback` path when `[workspace].ci_failure_fix = true`; hosted-relay delivery with automatic project hooks; and repo-local direct project webhooks. GitLab.com, subgroups, custom ports, relative Self-Managed install paths, SSH aliases, custom CAs, and proxies are all handled, and the code-host token is never forwarded to a different host. Broad repository-wide `@mention` discovery and scheduled GitLab conflict windows remain deferred; see the GitLab integration guide for the capability matrix
+- **The worker connects every code host in one pass**: `devintern worker connect` now pairs all GitHub and GitLab repositories in `workspace.toml` (not just GitHub), `worker connect github` and the new `worker connect gitlab` target each code host, and `worker connect gitlab --disconnect` removes the remembered hooks/routes while leaving polling enabled. GitLab hooks are installed, tested, and rotated automatically with the configured token; a permission or network failure on one project keeps polling active and continues with the rest, and signing material is never persisted locally
+- **Per-automation pull-request opt-in (DEV-124)**: each `[[automations]]` entry now declares `open_pr` (boolean, default `false`). PR creation is pipeline policy rather than a prompt instruction, so an occurrence with `open_pr` off pushes no branch, applies no labels, and strips `--create-pr`/`--auto-review` from workspace-level `worker_task_args` (running with `--no-git` instead) — the right default for output that lands outside the repository. Set `open_pr = true` to keep the reviewed-PR behavior. The dashboard Automations table shows an **opens PR** badge, and **Run now** honors the same setting. Existing workspaces that relied on the old default must add `open_pr = true` to keep opening PRs
+- **Activation-funnel analytics (DEV-120)**: anonymous usage events now cover the path from setup to the first worker task — `setup_started`/`setup_completed`/`setup_declined`/`setup_failed`, `doctor_run`, `login_result`, `worker_init_*`, `worker_connect`, `worker_started`, and `worker_task_run`, alongside the existing run events. Only low-cardinality categories and statuses are sent (never task content, code, repository names, paths, or credentials), events no longer create person profiles, and opting out records a one-time anonymous acknowledgement. The PostHog client now flushes per event and flushes before exits so funnel events survive short-lived runs
+
+### Fixed
+
+- **GitLab CI polling preserves the exact MR identity**: the poller now matches the numeric project ID and IID rather than a reconstructed reference, so repair targets the right merge request
+- **Resolve-conflicts resets a dirty worktree before merging**: leftover uncommitted state no longer blocks the base-sync merge
+- **GitLab checkout preparation is supervised and cancellable**: admission waits before a checkout is prepared, running subprocesses receive cancellation when the worker stops, and jobs cancelled before admission prepare nothing
+
+### Technical
+
+- Internal maintenance: the `src/lib` tree was reorganized context-first (code-host, trackers, acquirers, review, relay, worker, state, observability, task, agent, config, init, automation) with provider folders at the leaves, large modules (webhook server, workspace worker, CLI program, Utils, interactive wizard, Jira client, IPC handlers) were split, and `oxlint` complexity/size rules were tightened behind a shrinking baseline
+
+## [2.11.0] - 2026-09-09
+
+Throughput and cost-control release: host-level agent concurrency is now bounded behind an explicit acknowledgement, the auto-review loop caps itself earlier by default, and a stale persisted harness no longer warns on every restart.
+
 ### Added
 
 - **Opt-in bounded host concurrency**: `[workspace.execution]` now supports global and per-repository agent limits behind an explicit `isolation = "best_effort_host"` acknowledgement. Polling tasks, retries, error fixes, PR feedback, CI repair, conflict resolution, automations, and estimations share one admission supervisor; task worktrees may overlap within a repository while jobs using its persistent base checkout remain serialized. Concurrent jobs still share host ports, processes, Docker, caches, and linked Git metadata and are documented as best-effort throughput rather than VM isolation
+- **One shared auto-review iteration cap (DEV-121)**: `--auto-review-iterations` and a matching `AUTO_REVIEW_ITERATIONS` env var are now the only controls for the review–fix cycle ceiling, honored identically by direct CLI runs, workspace/worker runs (`worker_task_args` passes the same flag through), and the webhook server. The webhook-only `WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS` env var still works as a deprecated fallback with a migration warning, and the `--auto-review-max-iterations` name that appeared in past release notes never existed in the CLI — use `--auto-review-iterations`
+- **Auto-review defaults to 2 review–fix cycles instead of 5**: most PRs converge in 1–2 passes or start thrashing, so the default cap now stops self-review sooner — humans see the PR earlier and agent spend per ticket drops. The cap is a ceiling, not a quota (approval or no remaining important issues still stops the loop early), `1` means a single review pass, and `0` is rejected rather than treated as unlimited. Invalid values (non-numeric or less than 1) for the flag or env var are rejected with a clear error before any agent runs
+
+### Fixed
+
+- **Stale persisted active harness is re-pointed on startup (DEV-122)**: when the saved failover harness is no longer in the current `AGENT_HARNESS` chain (e.g. after editing or shortening it), the worker already fell back in memory but kept the removed name stored, repeating the `Persisted active harness "..." is not in the current AGENT_HARNESS chain` warning on every restart. The selected fallback — the highest-priority available entry, or the parked primary while every entry is still limited — is now written back to the queue database, so the warning appears once and later restarts stay quiet. Unchanged chains keep their existing failover/failback behavior
 
 ## [2.10.0] - 2026-09-08
 

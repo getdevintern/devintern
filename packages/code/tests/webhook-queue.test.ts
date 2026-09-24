@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -9,7 +9,7 @@ import {
   WebhookQueue,
   prepareQueueDbDirectory,
   resolveQueueDbPath,
-} from "../src/lib/webhook-queue";
+} from "../src/lib/state/webhook-queue";
 
 describe("WebhookQueue", () => {
   let dbPath: string;
@@ -261,6 +261,32 @@ describe("resolveQueueDbPath", () => {
       // Untracked-but-ignored: `git add -A` cannot sweep it into a commit and
       // `git clean` cannot delete it.
       expect(execSync("git status --porcelain", { cwd: projectDir }).toString()).toBe("");
+      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not write info/exclude when .gitignore already covers the database", () => {
+    delete process.env.WEBHOOK_QUEUE_DB;
+
+    const projectDir = join(
+      tmpdir(),
+      `queue-ignore-existing-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(projectDir, { recursive: true });
+    execSync("git init -q .", { cwd: projectDir });
+    writeFileSync(join(projectDir, ".gitignore"), ".devintern-code/\n", "utf8");
+
+    try {
+      const dbPath = resolveQueueDbPath(projectDir);
+      prepareQueueDbDirectory(dbPath);
+      writeFileSync(dbPath, "state\n", "utf8");
+
+      // The project's own ignore rules already hide the file, so the
+      // redundant pattern is not appended to the local exclude.
+      const exclude = readFileSync(join(projectDir, ".git", "info", "exclude"), "utf8");
+      expect(exclude).not.toContain("queue.db");
       expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
     } finally {
       rmSync(projectDir, { recursive: true, force: true });

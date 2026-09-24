@@ -1,17 +1,34 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { createMarkdownChangeDetector } from "../src/lib/change-detector";
-import { processedTaskId, TaskPollingAcquirer } from "../src/lib/task-polling-acquirer";
-import type { ReadyTask } from "../src/lib/task-polling-acquirer";
-import type { PickupGate } from "../src/lib/schedule";
-import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/worker-state";
-import { WebhookQueue } from "../src/lib/webhook-queue";
+import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
+import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
+import type { ReadyTask } from "../src/lib/acquirers/task-polling";
+import type { PickupGate } from "../src/lib/worker/schedule";
+import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import {
+  actionedSourceKey,
+  createTaskActionedGate,
+  recordTaskActioned,
+} from "../src/lib/task/actioned-state";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import type { Task } from "../src/types/task-tracker";
 
 function uniqueDir(prefix: string): string {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+}
+
+/** Deterministic synchronization gate for tests (preferred over sleeps). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  // oxlint-disable-next-line promise/avoid-new -- test synchronization gate.
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 describe("createMarkdownChangeDetector", () => {
@@ -111,6 +128,7 @@ describe("TaskPollingAcquirer", () => {
     executed: string[];
     executeResult?: boolean;
     gate?: PickupGate;
+    isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
   }) {
     let call = 0;
     const seenCursors: (string | null)[] = [];
@@ -119,6 +137,7 @@ describe("TaskPollingAcquirer", () => {
       query: "status=todo",
       intervalSeconds: 60,
       gate: options.gate,
+      isTaskActionedUnchanged: options.isTaskActionedUnchanged,
       detector: {
         source: "markdown",
         async changesSince(cursor) {
@@ -192,6 +211,7 @@ describe("TaskPollingAcquirer", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const bothStarted = deferred();
     const acquirer = new TaskPollingAcquirer({
       trackerType: "markdown",
       query: "status=todo",
@@ -210,16 +230,475 @@ describe("TaskPollingAcquirer", () => {
       }),
       executeTask: async (key) => {
         started.push(key);
+        if (started.length === 2) bothStarted.resolve();
         await gate;
         return true;
       },
     });
 
     const tick = acquirer.tick();
-    await Bun.sleep(0);
+    await bothStarted.promise;
     expect(started).toEqual(["TASK-1", "TASK-2"]);
     release();
     await tick;
+  });
+
+  test("keeps polling while a previous batch is still running", async () => {
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const startedSignals = new Map<string, ReturnType<typeof deferred>>();
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: (key) => {
+        started.push(key);
+        startedSignals.get(key)?.resolve();
+        // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+        return new Promise<boolean>((resolve) => {
+          releases.set(key, () => resolve(true));
+        });
+      },
+    });
+
+    const firstStarted = deferred();
+    startedSignals.set("TASK-1", firstStarted);
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+    expect(started).toEqual(["TASK-1"]);
+
+    // A new task becomes available while TASK-1 is still running: the next
+    // tick must pick it up instead of waiting for the first batch to settle.
+    const secondStarted = deferred();
+    startedSignals.set("TASK-2", secondStarted);
+    tasks.push({ key: "TASK-2", updated: "b" });
+    const secondTick = acquirer.tick();
+    await secondStarted.promise;
+    expect(started).toEqual(["TASK-1", "TASK-2"]);
+
+    releases.get("TASK-1")!();
+    releases.get("TASK-2")!();
+    await Promise.all([firstTick, secondTick]);
+  });
+
+  test("an edited task waits for its in-flight run instead of running twice", async () => {
+    const started: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        if (started.length === 1) {
+          firstStarted.resolve();
+          await gate;
+        }
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+    expect(started).toEqual(["TASK-1"]);
+
+    // Edited mid-run: the new stamp must not start a concurrent second run.
+    tasks[0] = { key: "TASK-1", updated: "b" };
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1"]);
+
+    release();
+    await firstTick;
+
+    // The edit is picked up once the first run finishes.
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1", "TASK-1"]);
+  });
+
+  test("an edited in-flight task advances the cursor without re-querying every tick", async () => {
+    const started: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let searchCalls = 0;
+    // Cursor-based detector: the high-water mark is the latest observed change.
+    let latestChange = "1";
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async (cursor) => ({
+          changed: cursor === null || Number(cursor) < Number(latestChange),
+          nextCursor: latestChange,
+        }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => {
+        searchCalls++;
+        return { tasks };
+      },
+      executeTask: async (key) => {
+        started.push(key);
+        if (started.length === 1) {
+          firstStarted.resolve();
+          await gate;
+        }
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+
+    // Edited mid-run: the cursor advances past the edit instead of being held.
+    tasks[0] = { key: "TASK-1", updated: "b" };
+    latestChange = "2";
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1"]);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("2");
+    expect(searchCalls).toBe(2);
+
+    // Ticks while the run is still in flight must not re-query the tracker.
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(searchCalls).toBe(2);
+
+    release();
+    await firstTick;
+
+    // The settled run re-admits the edit exactly once, then stops re-querying.
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1", "TASK-1"]);
+    expect(searchCalls).toBe(3);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("2");
+  });
+
+  test("a rejected sibling does not suppress the deferred cursor rollback", async () => {
+    const tasks: ReadyTask[] = [
+      { key: "TASK-1", updated: "a" },
+      { key: "TASK-2", updated: "b" },
+    ];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        if (key === "TASK-2") {
+          throw new Error("boom");
+        }
+        firstStarted.resolve();
+        await gate;
+        return "deferred";
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+
+    // An overlapping tick sees no new work and advances the cursor first.
+    await acquirer.tick();
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("2");
+
+    release();
+    await firstTick; // must not throw despite the rejected sibling
+
+    // The deferred task rolled the cursor back so its change is re-detected,
+    // even though its sibling rejected.
+    expect(queue.hasProcessed("markdown", "task:TASK-1:a")).toBe(false);
+    expect(workerState.getCursor("markdown")).toBeNull();
+  });
+
+  test("a searchTasks failure does not advance the cursor", async () => {
+    workerState.setCursor("markdown", "42");
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: "100" }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => {
+        throw new Error("tracker down");
+      },
+      executeTask: async () => true,
+    });
+
+    try {
+      await acquirer.tick(); // must not throw
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("42");
+    expect(warnings.some((line) => line.includes("tracker down"))).toBe(true);
+  });
+
+  test("start() arms the interval before the first batch settles", async () => {
+    const started: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let releaseFirst!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = deferred();
+    const secondStarted = deferred();
+    let cursor = 0;
+
+    const interval = spyOn(globalThis, "setInterval").mockImplementation(
+      (() => 0) as unknown as typeof setInterval,
+    );
+
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        if (key === "TASK-1") {
+          firstStarted.resolve();
+          await gate;
+        } else {
+          secondStarted.resolve();
+        }
+        return true;
+      },
+    });
+
+    try {
+      const startPromise = acquirer.start();
+      await firstStarted.promise;
+      // The interval was armed while the first batch was still running.
+      expect(interval).toHaveBeenCalledTimes(1);
+      const fireInterval = interval.mock.calls[0]![0] as unknown as () => void;
+
+      // A task appearing mid-batch is picked up on the next interval fire.
+      tasks.push({ key: "TASK-2", updated: "b" });
+      fireInterval();
+      await secondStarted.promise;
+      expect(started).toEqual(["TASK-1", "TASK-2"]);
+
+      releaseFirst();
+      await startPromise;
+    } finally {
+      interval.mockRestore();
+    }
+  });
+
+  test("a deferred task clears the cursor even after an overlapping tick advanced it", async () => {
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let cursor = 0;
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async () => {
+        firstStarted.resolve();
+        await gate;
+        return "deferred";
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+
+    // An overlapping tick sees no new work and advances the cursor first.
+    const secondTick = acquirer.tick();
+    await secondTick;
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("2");
+
+    release();
+    await firstTick;
+
+    // The deferred task dropped its claim and cleared the cursor so the change
+    // is re-detected instead of being consumed by the overlapping tick.
+    expect(queue.hasProcessed("markdown", "task:TASK-1:a")).toBe(false);
+    expect(workerState.getCursor("markdown")).toBeNull();
+  });
+
+  test("a deferred task is re-evaluated even when the cursor was not rolled back", async () => {
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    const started: string[] = [];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let latestChange = "2";
+    workerState.setCursor("markdown", "1");
+    const acquirer = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector: {
+        source: "markdown",
+        changesSince: async (cursor) => ({
+          changed: cursor === null || Number(cursor) < Number(latestChange),
+          nextCursor: latestChange,
+        }),
+      },
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        firstStarted.resolve();
+        await gate;
+        return "deferred";
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+
+    // An overlapping tick detects an unrelated newer change and advances the
+    // cursor past the deferred task's stamp, so the rollback below cannot win.
+    latestChange = "3";
+    await acquirer.tick();
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("3");
+
+    release();
+    await firstTick;
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("3");
+
+    // Only the explicit deferred tracking can bring the task back: detection
+    // reports no change at the newer cursor.
+    await acquirer.tick();
+    expect(started).toEqual(["TASK-1", "TASK-1"]);
+  });
+
+  test("a mid-run edit is re-admitted after a worker restart", async () => {
+    const started: string[] = [];
+    const tasks: ReadyTask[] = [{ key: "TASK-1", updated: "a" }];
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    let cursor = 0;
+    const detector = {
+      source: "markdown",
+      changesSince: async () => ({ changed: true, nextCursor: String(++cursor) }),
+    };
+    const first = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector,
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        if (started.length === 1) {
+          firstStarted.resolve();
+          await gate;
+        }
+        return true;
+      },
+    });
+
+    const firstTick = first.tick();
+    await firstStarted.promise;
+
+    // Edited mid-run: the new stamp is persisted and the cursor advances.
+    tasks[0] = { key: "TASK-1", updated: "b" };
+    await first.tick();
+    expect(started).toEqual(["TASK-1"]);
+    expect(workerState.getCursor("markdown")?.cursorValue).toBe("2");
+
+    // Simulate a crash before the in-flight run settles: a fresh acquirer has
+    // no in-memory pending state but must replay the persisted edit.
+    const restarted = new TaskPollingAcquirer({
+      trackerType: "markdown",
+      query: "status=todo",
+      intervalSeconds: 60,
+      detector,
+      workerState,
+      queue,
+      searchTasks: async () => ({ tasks }),
+      executeTask: async (key) => {
+        started.push(key);
+        return true;
+      },
+    });
+    await restarted.tick();
+    expect(started).toEqual(["TASK-1", "TASK-1"]);
+
+    release();
+    await firstTick;
   });
 
   test("does not evaluate when nothing changed", async () => {
@@ -445,6 +924,131 @@ describe("TaskPollingAcquirer", () => {
 
     await acquirer.tick(); // must not throw
     expect(workerState.getCursor("markdown")?.cursorValue).toBe("42");
+  });
+
+  describe("actioned-ticket gating", () => {
+    test("github: an actioned ticket is not re-picked, but a description edit re-arms it", async () => {
+      let githubTask: Task = {
+        key: "42",
+        summary: "Login is broken",
+        issueType: "Issue",
+        status: "open",
+        reporter: "octocat",
+        labels: ["intern"],
+        components: [],
+        fixVersions: [],
+        created: "",
+        updated: "2026-01-01T00:00:00Z",
+        raw: { number: 42, title: "Login is broken", body: "Fix login", state: "open" },
+      };
+      const tracker = {
+        getTask: async () => githubTask,
+        extractDescriptionText: (task: Task) => (task.raw as { body?: string }).body ?? "",
+      } as unknown as TaskTrackerClient;
+      const source = actionedSourceKey("github");
+      await recordTaskActioned({
+        workerState,
+        source,
+        tracker,
+        taskKey: "42",
+        fallbackTask: githubTask,
+      });
+      const gate = createTaskActionedGate({ getTracker: () => tracker, workerState, source });
+
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "42", updated: "2026-01-01T00:00:00Z" }],
+        executed,
+        isTaskActionedUnchanged: (task) => gate(task.key),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]); // PR exists; the sweep must not re-implement it
+
+      githubTask = {
+        ...githubTask,
+        raw: { ...(githubTask.raw as object), body: "Fix login and add 2FA" },
+      };
+      await acquirer.tick();
+      expect(executed).toEqual(["42"]); // a human description edit re-arms it
+    });
+
+    test("jira: a reopened actioned ticket is re-picked while an unchanged one is skipped", async () => {
+      let jiraTask: Task = {
+        key: "DEV-1",
+        summary: "Add export",
+        issueType: "Task",
+        status: "In Review",
+        reporter: "alice",
+        labels: ["intern", "in review"],
+        components: [],
+        fixVersions: [],
+        created: "",
+        updated: "2026-01-01T00:00:00Z",
+        raw: { description: "Implement the export" },
+      };
+      const tracker = {
+        getTask: async () => jiraTask,
+        extractDescriptionText: (task: Task) =>
+          (task.raw as { description?: string }).description ?? "",
+      } as unknown as TaskTrackerClient;
+      const source = actionedSourceKey("jira");
+      await recordTaskActioned({
+        workerState,
+        source,
+        tracker,
+        taskKey: "DEV-1",
+        fallbackTask: jiraTask,
+      });
+      const gate = createTaskActionedGate({ getTracker: () => tracker, workerState, source });
+
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [
+          { changed: true, nextCursor: "100" },
+          { changed: true, nextCursor: "200" },
+        ],
+        tasks: [{ key: "DEV-1", updated: "2026-01-01T00:00:00Z" }],
+        executed,
+        isTaskActionedUnchanged: (task) => gate(task.key),
+      });
+
+      await acquirer.tick();
+      expect(executed).toEqual([]);
+
+      jiraTask = { ...jiraTask, status: "To Do" };
+      await acquirer.tick();
+      expect(executed).toEqual(["DEV-1"]);
+    });
+
+    test("logs why an actioned ticket was skipped", async () => {
+      const gate = async () => true;
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "100" }],
+        tasks: [{ key: "DEV-9", updated: "a" }],
+        executed,
+        isTaskActionedUnchanged: gate,
+      });
+
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: unknown[]) => logs.push(args.join(" "));
+      try {
+        await acquirer.tick();
+      } finally {
+        console.log = originalLog;
+      }
+
+      expect(executed).toEqual([]);
+      expect(logs.some((line) => line.includes("DEV-9") && line.includes("already actioned"))).toBe(
+        true,
+      );
+    });
   });
 
   describe("working-window gating", () => {

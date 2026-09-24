@@ -9,7 +9,7 @@ import {
   isGitHubIP,
   containsBotMention,
   reviewMentionsBot,
-} from "../src/lib/webhook-handler";
+} from "../src/lib/code-host/github/webhook";
 import type {
   PullRequestReviewEvent,
   GitHubReviewComment,

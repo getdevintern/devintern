@@ -11,11 +11,11 @@ import {
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
-} from "../src/lib/dashboard-api";
-import { RunStore } from "../src/lib/run-recorder";
-import type { RunStats } from "../src/lib/run-recorder";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+} from "../src/lib/observability/dashboard-api";
+import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunStats } from "../src/lib/state/run-recorder";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 import { isLoopbackDashboardHost, startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -341,6 +341,17 @@ describe("dashboard API", () => {
       taskKey: "DEV-1",
       ticketUrl: "https://acme.atlassian.net/browse/DEV-1",
     });
+    state.recordAgentChangeRequest(
+      {
+        provider: "gitlab",
+        instanceUrl: "https://git.example.test",
+        projectId: "23",
+        projectPath: "acme/platform/api",
+        number: 11,
+        webUrl: "https://git.example.test/acme/platform/api/-/merge_requests/11",
+      },
+      { taskKey: "DEV-3" },
+    );
     state.recordAgentPr({ repo: "acme/webapp", prNumber: 8, taskKey: "DEV-2" });
     state.markAgentPrClosed("acme/webapp", 8);
     state.close();
@@ -357,7 +368,7 @@ describe("dashboard API", () => {
         ticketUrl?: string;
       }[];
     };
-    expect(body.prs).toHaveLength(1);
+    expect(body.prs).toHaveLength(2);
     expect(body.prs[0]).toMatchObject({
       repo: "acme/webapp",
       prNumber: 7,
@@ -365,6 +376,15 @@ describe("dashboard API", () => {
       branch: "feature/dev-1",
       taskKey: "DEV-1",
       ticketUrl: "https://acme.atlassian.net/browse/DEV-1",
+    });
+    expect(body.prs[1]).toMatchObject({
+      provider: "gitlab",
+      instanceUrl: "https://git.example.test",
+      projectId: "23",
+      projectPath: "acme/platform/api",
+      repo: "acme/platform/api",
+      prNumber: 11,
+      prUrl: "https://git.example.test/acme/platform/api/-/merge_requests/11",
     });
   });
 

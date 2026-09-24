@@ -226,6 +226,75 @@ async function checkEntitlementViaWebsite(
   }
 }
 
+/** Validate an explicit `LICENSE_KEY` against the Polar customer portal. */
+async function checkExplicitLicenseKey(
+  explicitKey: string,
+  productKey: string,
+  supabaseConfig: LicenseCheckOptions["supabaseConfig"],
+  requireAutomation: boolean,
+): Promise<LicenseCheckResult> {
+  try {
+    const result = await validatePolarLicenseKey(explicitKey);
+    if (!result.valid) {
+      clearCachedEntitlement(supabaseConfig);
+      return {
+        valid: false,
+        source: "license-key",
+        message: "License key is invalid or revoked.",
+      };
+    }
+
+    const allowed = getAllowedBenefits(productKey);
+    const matched = result.benefitId ? allowed.find((b) => b.id === result.benefitId) : undefined;
+
+    if (allowed.length > 0 && !matched && result.benefitId) {
+      clearCachedEntitlement(supabaseConfig);
+      return {
+        valid: false,
+        source: "license-key",
+        message: "License key is valid but does not match this product.",
+      };
+    }
+
+    if (requireAutomation && !isAutomationSource(matched?.source)) {
+      clearCachedEntitlement(supabaseConfig);
+      return {
+        valid: false,
+        source: "license-key",
+        message:
+          "Automated execution requires an automation license (Supporter, Team, or Business). " +
+          "Purchase one at https://devintern.com/pricing.",
+      };
+    }
+
+    writeCachedEntitlement(supabaseConfig, {
+      productKey,
+      automation: requireAutomation || isAutomationSource(matched?.source),
+      source: "license-key",
+      entitlementSource: matched?.source,
+    });
+
+    return {
+      valid: true,
+      source: "license-key",
+      entitlementSource: matched?.source,
+      message: "License key is valid.",
+    };
+  } catch (error) {
+    // Infrastructure failure (Polar unreachable / 5xx): honor the grace window.
+    const msg = error instanceof Error ? error.message : String(error);
+    const cached = readCachedEntitlement(supabaseConfig, productKey, requireAutomation);
+    if (cached) {
+      return graceResult(cached, msg);
+    }
+    return {
+      valid: false,
+      source: "license-key",
+      message: `License validation failed: ${msg}`,
+    };
+  }
+}
+
 /**
  * Resolves whether the caller may use a devintern CLI product.
  *
@@ -262,66 +331,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   // 1. Direct license key validation via Polar public customer portal API
   const explicitKey = licenseKey || process.env.LICENSE_KEY;
   if (explicitKey) {
-    try {
-      const result = await validatePolarLicenseKey(explicitKey);
-      if (!result.valid) {
-        clearCachedEntitlement(supabaseConfig);
-        return {
-          valid: false,
-          source: "license-key",
-          message: "License key is invalid or revoked.",
-        };
-      }
-
-      const allowed = getAllowedBenefits(productKey);
-      const matched = result.benefitId ? allowed.find((b) => b.id === result.benefitId) : undefined;
-
-      if (allowed.length > 0 && !matched && result.benefitId) {
-        clearCachedEntitlement(supabaseConfig);
-        return {
-          valid: false,
-          source: "license-key",
-          message: "License key is valid but does not match this product.",
-        };
-      }
-
-      if (requireAutomation && !isAutomationSource(matched?.source)) {
-        clearCachedEntitlement(supabaseConfig);
-        return {
-          valid: false,
-          source: "license-key",
-          message:
-            "Automated execution requires an automation license (Supporter, Team, or Business). " +
-            "Purchase one at https://devintern.com/pricing.",
-        };
-      }
-
-      writeCachedEntitlement(supabaseConfig, {
-        productKey,
-        automation: requireAutomation || isAutomationSource(matched?.source),
-        source: "license-key",
-        entitlementSource: matched?.source,
-      });
-
-      return {
-        valid: true,
-        source: "license-key",
-        entitlementSource: matched?.source,
-        message: "License key is valid.",
-      };
-    } catch (error) {
-      // Infrastructure failure (Polar unreachable / 5xx): honor the grace window.
-      const msg = error instanceof Error ? error.message : String(error);
-      const cached = readCachedEntitlement(supabaseConfig, productKey, requireAutomation);
-      if (cached) {
-        return graceResult(cached, msg);
-      }
-      return {
-        valid: false,
-        source: "license-key",
-        message: `License validation failed: ${msg}`,
-      };
-    }
+    return checkExplicitLicenseKey(explicitKey, productKey, supabaseConfig, requireAutomation);
   }
 
   // 2. Authenticated user → check Polar entitlements via devintern.com

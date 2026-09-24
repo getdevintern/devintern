@@ -8,7 +8,7 @@ import {
   defaultAnalysisRunOptions,
   runAnalysisWithFallback,
   shouldRetryInDefaultMode,
-} from "../src/lib/analysis-mode";
+} from "../src/lib/agent/analysis-mode";
 
 const readonlyHarness: AgentHarness = {
   name: "fake-readonly",

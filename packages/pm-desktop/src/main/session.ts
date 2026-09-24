@@ -377,6 +377,61 @@ async function attachProjectBinding(
   }
 }
 
+/** Populate `status` from a loaded engine and config, best-effort per capability. */
+async function populateEngineStatus(
+  status: ProjectStatus,
+  engine: Awaited<ReturnType<typeof createEngine>>,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  configuredTrackers: NonNullable<ProjectStatus["configuredTrackers"]>,
+): Promise<void> {
+  status.configured = true;
+  status.backendName = engine.backendName;
+  status.activeTrackerId = config.backend.type;
+  status.activeTrackerDisplayName = getTrackerDisplayName(config.backend.type);
+  status.activeHarnessName = config.agent.harness.name;
+  status.harnessDisplayName = config.agent.harness.displayName;
+  status.activeModel = process.env.AGENT_MODEL?.trim() || undefined;
+  status.activeEffort = process.env.AGENT_EFFORT?.trim() || undefined;
+  status.availableHarnesses = availableHarnessesForStatus(
+    config.agent.harness.name,
+    config.agent.harness.displayName,
+  );
+  status.supportsIssueTypes = engine.supportsIssueTypes;
+  status.supportsEpicLinking = engine.supportsEpicLinking;
+  status.supportsLabels = engine.supportsLabels;
+  status.supportsFreeformLabels = engine.supportsFreeformLabels;
+  status.supportsAttachments = engine.supportsAttachments;
+  status.defaultProjectKey = engine.defaultProjectKey;
+  status.supportsProjectSwitch = Boolean(
+    configuredTrackers.find((t) => t.id === config.backend.type)?.projectKeyEnv,
+  );
+
+  try {
+    status.projects = await engine.listProjects();
+  } catch (error) {
+    status.projects = undefined;
+    status.projectsError = error instanceof Error ? error.message : String(error);
+  }
+  if (engine.supportsIssueTypes) {
+    try {
+      status.issueTypes = await engine.listIssueTypes(status.defaultProjectKey);
+    } catch {
+      status.issueTypes = [...DEFAULT_ISSUE_TYPES];
+    }
+  }
+  if (engine.supportsLabels) {
+    try {
+      const catalog = await engine.listLabels(status.defaultProjectKey);
+      status.labels = catalog.labels;
+      status.labelsTruncated = catalog.truncated;
+    } catch (error) {
+      status.labels = [];
+      status.labelsTruncated = false;
+      status.labelsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+}
+
 /**
  * Load (or reload) the session for a project directory and report its status.
  *
@@ -491,53 +546,7 @@ export async function loadProject(
         effort,
       });
       current = { projectDir, config, engine };
-
-      status.configured = true;
-      status.backendName = engine.backendName;
-      status.activeTrackerId = config.backend.type;
-      status.activeTrackerDisplayName = getTrackerDisplayName(config.backend.type);
-      status.activeHarnessName = config.agent.harness.name;
-      status.harnessDisplayName = config.agent.harness.displayName;
-      status.activeModel = process.env.AGENT_MODEL?.trim() || undefined;
-      status.activeEffort = process.env.AGENT_EFFORT?.trim() || undefined;
-      status.availableHarnesses = availableHarnessesForStatus(
-        config.agent.harness.name,
-        config.agent.harness.displayName,
-      );
-      status.supportsIssueTypes = engine.supportsIssueTypes;
-      status.supportsEpicLinking = engine.supportsEpicLinking;
-      status.supportsLabels = engine.supportsLabels;
-      status.supportsFreeformLabels = engine.supportsFreeformLabels;
-      status.supportsAttachments = engine.supportsAttachments;
-      status.defaultProjectKey = engine.defaultProjectKey;
-      status.supportsProjectSwitch = Boolean(
-        configuredTrackers.find((t) => t.id === config.backend.type)?.projectKeyEnv,
-      );
-
-      try {
-        status.projects = await engine.listProjects();
-      } catch (error) {
-        status.projects = undefined;
-        status.projectsError = error instanceof Error ? error.message : String(error);
-      }
-      if (engine.supportsIssueTypes) {
-        try {
-          status.issueTypes = await engine.listIssueTypes(status.defaultProjectKey);
-        } catch {
-          status.issueTypes = [...DEFAULT_ISSUE_TYPES];
-        }
-      }
-      if (engine.supportsLabels) {
-        try {
-          const catalog = await engine.listLabels(status.defaultProjectKey);
-          status.labels = catalog.labels;
-          status.labelsTruncated = catalog.truncated;
-        } catch (error) {
-          status.labels = [];
-          status.labelsTruncated = false;
-          status.labelsError = error instanceof Error ? error.message : String(error);
-        }
-      }
+      await populateEngineStatus(status, engine, config, configuredTrackers);
     } catch (error) {
       status.configError = error instanceof Error ? error.message : String(error);
     }

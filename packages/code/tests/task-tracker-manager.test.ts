@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { TaskTrackerManager, createTrackerClient } from "../src/lib/task-tracker-manager";
+import { TaskTrackerManager, createTrackerClient } from "../src/lib/trackers/manager";
 import { JiraTaskTrackerClient } from "../src/lib/trackers/jira/jira-task-tracker-client";
 import { AsanaTaskTrackerClient } from "../src/lib/trackers/asana/asana-task-tracker-client";
 import { AzureDevOpsTaskTrackerClient } from "../src/lib/trackers/azure-devops/azure-devops-task-tracker-client";

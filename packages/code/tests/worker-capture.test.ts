@@ -2,8 +2,11 @@ import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 
-import { parseTimestampPrefix } from "../src/lib/worker-logs";
-import { startWorkerCapture, WORKER_CAPTURE_ROTATE_BYTES } from "../src/lib/worker-capture";
+import { parseTimestampPrefix } from "../src/lib/observability/worker-logs";
+import {
+  startWorkerCapture,
+  WORKER_CAPTURE_ROTATE_BYTES,
+} from "../src/lib/observability/worker-capture";
 
 describe("startWorkerCapture", () => {
   let tempDir: string;

@@ -10,18 +10,18 @@
  * gating of its own.
  */
 
-import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
-import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
+import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../acquirers/review-polling";
+import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
 import { randomUUID } from "crypto";
-import type { CiFixResult } from "../ci-failure-watcher-acquirer";
-import type { AutomaticResolveResult } from "../review-polling-acquirer";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
+import type { CiFixResult } from "../acquirers/ci-failure-watcher";
+import type { AutomaticResolveResult } from "../acquirers/review-polling";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
-import { JobNotStartedError } from "../task-supervisor";
-import type { TaskSupervisor } from "../task-supervisor";
+import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
+import { JobNotStartedError } from "../worker/supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -44,7 +44,12 @@ export interface FleetEventDeps {
     repo: string,
     prNumber: number,
     feedbackPath: string,
-    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      expectedHeadSha?: string;
+      signal?: AbortSignal;
+    },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
@@ -228,9 +233,14 @@ export function createFleetResolveConflicts(
 /** Build the fleet CI-fix runner using the repo checkout and shared run gate. */
 export function createFleetCiFix(
   deps: FleetEventDeps,
-): (slug: string, prNumber: number, feedbackPath: string) => Promise<CiFixResult> {
+): (
+  slug: string,
+  prNumber: number,
+  feedbackPath: string,
+  expectedHeadSha?: string,
+) => Promise<CiFixResult> {
   const runCiFix = deps.runCiFix ?? runCiFixViaCli;
-  return async (slug, prNumber, feedbackPath) => {
+  return async (slug, prNumber, feedbackPath, expectedHeadSha) => {
     const repo = repoBySlug(deps.config, slug);
     if (!repo) {
       console.warn(`⚠️  [fleet] CI failure for ${slug}#${prNumber} has no workspace repo.`);
@@ -243,6 +253,7 @@ export function createFleetCiFix(
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
         env: buildRepoEnv(repo, deps.workspaceDir),
+        ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });
     };
@@ -312,6 +323,13 @@ export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
+  /**
+   * Actioned gate mirroring the polling acquirer: `true` when a task already
+   * produced a PR and has not changed since. A relayed `task.changed` can be
+   * the worker's own post-PR transition, so without this check the ticket
+   * would be re-implemented and could get a duplicate PR.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
@@ -330,6 +348,13 @@ export function createFleetTaskEvaluator(options: {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
       return false;
+    }
+    if (
+      options.isTaskActionedUnchanged &&
+      (await options.isTaskActionedUnchanged(taskKey, task.updated))
+    ) {
+      console.log(`⏭️  [fleet] relay task ${taskKey} is already actioned; not re-implementing.`);
+      return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(

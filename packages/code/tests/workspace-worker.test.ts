@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { parseWorkspaceConfig, findTeam } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
@@ -12,17 +13,38 @@ import {
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  resolveActionedSource,
   resolveWorkspaceAutomationContext,
   startWorktreeSweeper,
   sweepAllWorktrees,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import {
+  actionedSourceKey,
+  createTaskActionedGate,
+  recordTaskActioned,
+} from "../src/lib/task/actioned-state";
+import { ACTIONED_SOURCE_ENV } from "../src/lib/workspace/env";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import type { Task } from "../src/types/task-tracker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import type { ChangeDetector } from "../src/lib/change-detector";
-import { createTaskSupervisor } from "../src/lib/task-supervisor";
+import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
 import { toRoutableTask } from "../src/lib/workspace/router";
-import { saveRelayState } from "../src/lib/relay-connect";
+import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
+import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
+import { saveRelayState } from "../src/lib/relay/connect";
+
+/** Deterministic synchronization gate for tests (preferred over sleeps). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  // oxlint-disable-next-line promise/avoid-new -- test synchronization gate.
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
 
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
@@ -217,6 +239,71 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(state.skips.list()[0]).toMatchObject({ reason: "unrouted", candidates: [] });
   });
 
+  test("passes each task's updated stamp into the actioned gate (no re-read on an unchanged tick)", async () => {
+    // A real gate over a read-counting tracker, wired exactly as the workspace
+    // worker wires it. If the acquirer dropped `task.updated`, the gate's stamp
+    // cache would miss and re-read the tracker on every tick.
+    const source = actionedSourceKey("markdown");
+    const actionedTask: Task = {
+      key: "T-9",
+      summary: "Already actioned",
+      issueType: "Task",
+      status: "In Review",
+      reporter: "alice",
+      labels: ["intern"],
+      components: [],
+      fixVersions: [],
+      created: "",
+      updated: "u1",
+      raw: { description: "done" },
+    };
+    let reads = 0;
+    const tracker = {
+      getTask: async () => {
+        reads++;
+        return actionedTask;
+      },
+      extractDescriptionText: (task: Task) =>
+        (task.raw as { description?: string }).description ?? "",
+    } as unknown as TaskTrackerClient;
+    await recordTaskActioned({
+      workerState: state.workerState,
+      source,
+      tracker,
+      taskKey: "T-9",
+      fallbackTask: actionedTask,
+    });
+    expect(reads).toBe(1);
+    const gate = createTaskActionedGate({
+      getTracker: () => tracker,
+      workerState: state.workerState,
+      source,
+    });
+
+    tasks = [{ key: "T-9", updated: "u1", labels: ["backend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      isTaskActionedUnchanged: (taskKey, updated) => gate(taskKey, updated),
+      runTask: async () => {
+        throw new Error("must not run");
+      },
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(ran).toHaveLength(0); // actioned: kept out of the sweep both ticks
+    expect(reads).toBe(1); // unchanged stamp: no per-tick tracker read
+  });
+
   test("task execution no longer holds the legacy whole-run repo lock", async () => {
     tasks = [{ key: "T-5", updated: "u1", labels: ["backend"] }];
     let lockAvailableDuringRun = false;
@@ -254,6 +341,65 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(state.workerState.getCursor("markdown")?.cursorValue).toBe("1");
     expect(state.queue.hasProcessed("markdown", "task:T-6:u1")).toBe(true);
     heldLock.release();
+  });
+
+  test("fills free concurrency slots as new tasks become available", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 10, maxConcurrencyPerRepo: 10 });
+    const startedKeys: string[] = [];
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    // oxlint-disable-next-line promise/avoid-new -- controlled execution gate.
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstStarted = deferred();
+    const allStarted = deferred();
+    tasks = [{ key: "T-10", updated: "u1", labels: ["backend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      supervisor,
+      runTask: async (taskKey) => {
+        startedKeys.push(taskKey);
+        if (startedKeys.length === 1) firstStarted.resolve();
+        if (startedKeys.length === 4) allStarted.resolve();
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return true;
+      },
+    });
+
+    const firstTick = acquirer.tick();
+    await firstStarted.promise;
+    expect(startedKeys).toEqual(["T-10"]);
+
+    // Three tasks appear while T-10 is still running; nine slots are free.
+    tasks = [
+      { key: "T-10", updated: "u1", labels: ["backend"] },
+      { key: "T-11", updated: "u1", labels: ["backend"] },
+      { key: "T-12", updated: "u1", labels: ["backend"] },
+      { key: "T-13", updated: "u1", labels: ["backend"] },
+    ];
+    const secondTick = acquirer.tick();
+    await allStarted.promise;
+
+    expect(new Set(startedKeys)).toEqual(new Set(["T-10", "T-11", "T-12", "T-13"]));
+    expect(peak).toBe(4);
+    expect(supervisor.stats().running).toBe(4);
+
+    release();
+    await Promise.all([firstTick, secondTick]);
   });
 
   test("a supervisor drain defers a task and rolls back its polling claim", async () => {
@@ -434,6 +580,71 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(observed?.env.DEVINTERN_RUN_ORIGIN).toBe("error_monitor");
     expect(observed?.args).toContain("--skip-clarity-check");
   });
+
+  test("pins the resolved actioned source into the subprocess env", async () => {
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        actionedSource: resolveActionedSource(CONFIG),
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend" },
+    );
+
+    await executor("T-PIN", toRoutableTask({ key: "T-PIN", labels: [], components: [] }));
+
+    // The single-source key the polling gate would use for this tracker.
+    expect(observed?.[ACTIONED_SOURCE_ENV]).toBe(actionedSourceKey(CONFIG.defaults.tracker));
+  });
+
+  test("the retry-path actioned source equals the team gate's source key", async () => {
+    // Mirrors the retry-queue wiring: a retry resolves its persisted team, and
+    // the pinned source must equal the key the team's polling gate uses.
+    const teamConfig = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+
+[[teams]]
+name = "platform"
+tracker = "jira"
+task_query = "labels = devintern"
+repo = "backend"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+`);
+    const retryTeam = findTeam(teamConfig, "platform")!;
+    const retryActionedSource = resolveActionedSource(teamConfig, retryTeam);
+    expect(retryActionedSource).toBe(actionedSourceKey(retryTeam.tracker, retryTeam.name));
+
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: teamConfig,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        team: retryTeam,
+        actionedSource: retryActionedSource,
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend", source: "retry" },
+    );
+
+    await executor("T-RETRY", toRoutableTask({ key: "T-RETRY", labels: [], components: [] }));
+    expect(observed?.[ACTIONED_SOURCE_ENV]).toBe(retryActionedSource);
+  });
 });
 
 describe("fleetTaskArgs", () => {
@@ -470,6 +681,203 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
+  test.each(["review", "conflict"])(
+    "GitLab %s does not prepare checkout before supervisor admission",
+    async (kind) => {
+      const workspaceDir = join(tmpdir(), `ws-gitlab-supervision-${crypto.randomUUID()}`);
+      mkdirSync(workspaceDir, { recursive: true });
+      const state = openWorkspaceState(workspaceDir);
+      const config = parseWorkspaceConfig(`
+[workspace]
+conflict_resolution = "auto"
+[defaults]
+tracker = "markdown"
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/widgets.git"
+[repos.env]
+DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true"
+GITLAB_CODE_HOST_TOKEN = "test-token"
+GITLAB_CODE_HOST_URL = "https://gitlab.com"
+GITLAB_CODE_HOST_CA_FILE = ""
+GITLAB_CODE_HOST_PROXY = ""
+`);
+      state.workerState.recordAgentChangeRequest({
+        provider: "gitlab",
+        instanceUrl: "https://gitlab.com",
+        projectPath: "acme/widgets",
+        projectId: "42",
+        number: 17,
+        webUrl: "https://gitlab.com/acme/widgets/-/merge_requests/17",
+      });
+      const snapshot = spyOn(GitLabReviewsClient.prototype, "getPollingSnapshot").mockResolvedValue(
+        {
+          state: "opened",
+          headSha: "head",
+          baseSha: "base",
+          sourceBranch: "feature",
+          targetBranch: "main",
+          webUrl: "https://gitlab.com/acme/widgets/-/merge_requests/17",
+          mergeability: kind === "conflict" ? "conflicts" : "mergeable",
+          assignedReviewerIds: [8],
+          feedback: [
+            {
+              discussionId: "d",
+              noteId: 1,
+              author: { id: 8, username: "reviewer" },
+              createdAt: new Date(Date.now() + 1000).toISOString(),
+            },
+          ],
+        },
+      );
+      const manager = new FakeRepoManager(workspaceDir);
+      const scheduled: string[] = [];
+      try {
+        const acquirers = await buildFleetEventAcquirers({
+          config,
+          workspaceDir,
+          state,
+          repoManager: manager,
+          searchTasks: async () => ({ tasks: [] }),
+          query: "",
+          intervalSeconds: 60,
+          supervisor: {
+            async schedule(request) {
+              scheduled.push(request.kind);
+              throw new JobNotStartedError();
+            },
+            updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
+            async drain() {},
+            holdAdmissions() {},
+            resume() {},
+            inFlightCount: () => 0,
+            queuedCount: () => 0,
+          },
+        });
+        await (
+          acquirers.find(
+            (a) => a instanceof GitLabReviewPollingAcquirer,
+          ) as GitLabReviewPollingAcquirer
+        ).tick();
+        expect(scheduled).toEqual([kind]);
+        expect(manager.calls).toEqual([]);
+      } finally {
+        snapshot.mockRestore();
+        state.close();
+        rmSync(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["closed", "repair"])(
+    "GitLab CI keeps same-project MR identities separate: %s",
+    async (scenario) => {
+      const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
+      mkdirSync(workspaceDir, { recursive: true });
+      const state = openWorkspaceState(workspaceDir);
+      const config = parseWorkspaceConfig(`
+[workspace]
+ci_failure_fix = true
+[defaults]
+tracker = "markdown"
+[[repos]]
+name = "gitlab"
+remote = "https://gitlab.com/acme/widgets.git"
+[repos.env]
+DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST = "true"
+GITLAB_CODE_HOST_TOKEN = "test-token"
+GITLAB_CODE_HOST_URL = "https://gitlab.com"
+GITLAB_CODE_HOST_CA_FILE = ""
+GITLAB_CODE_HOST_PROXY = ""
+`);
+      for (const number of [17, 18]) {
+        state.workerState.recordAgentChangeRequest({
+          provider: "gitlab",
+          instanceUrl: "https://gitlab.com",
+          projectId: "42",
+          projectPath: "acme/widgets",
+          number,
+          webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+        });
+      }
+      const fetched: number[] = [];
+      const getChange = spyOn(GitLabReviewsClient.prototype, "getChangeRequest").mockImplementation(
+        async (_project, number) => {
+          fetched.push(number);
+          return {
+            number,
+            title: `MR ${number}`,
+            state: scenario === "closed" && number === 17 ? "closed" : "opened",
+            head: { ref: `fix-${number}`, sha: "shared-head-sha" },
+            base: { ref: "main", sha: "base" },
+            mergeability: "mergeable",
+            webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${number}`,
+          };
+        },
+      );
+      const getCi = spyOn(GitLabReviewsClient.prototype, "getCiSnapshot").mockResolvedValue({
+        state: scenario === "repair" ? "failure" : "success",
+        failures:
+          scenario === "repair"
+            ? [{ externalId: "job:42:123", name: "test", conclusion: "failure" }]
+            : [],
+        jobIds: [123],
+      });
+      const getLogs = spyOn(GitLabReviewsClient.prototype, "getJobTraces").mockResolvedValue(
+        "test failed",
+      );
+      const scheduled: string[] = [];
+      try {
+        const acquirers = await buildFleetEventAcquirers({
+          config,
+          workspaceDir,
+          state,
+          repoManager: new FakeRepoManager(workspaceDir),
+          searchTasks: async () => ({ tasks: [] }),
+          query: "status=todo",
+          intervalSeconds: 60,
+          supervisor: {
+            async schedule(request) {
+              scheduled.push(request.label ?? "");
+              throw new JobNotStartedError();
+            },
+            updateLimits() {},
+            stats: () => ({ running: 0, queued: 0, maxConcurrency: 1, available: 1 }),
+            async drain() {},
+            holdAdmissions() {},
+            resume() {},
+            inFlightCount: () => 0,
+            queuedCount: () => 0,
+          },
+        });
+        const watcher = acquirers.find((item) => item instanceof CiFailureWatcherAcquirer);
+        expect(watcher).toBeInstanceOf(CiFailureWatcherAcquirer);
+        await (watcher as CiFailureWatcherAcquirer).tick();
+        if (scenario === "closed") {
+          expect(
+            state.workerState.listOpenAgentChangeRequests().map((mr) => mr.changeNumber),
+          ).toEqual([18]);
+          expect(scheduled).toEqual([]);
+        } else {
+          // Same SHA deliberately prevents the head guard from masking incorrect MR selection.
+          expect(fetched).toEqual([17, 17, 18, 18]);
+          expect(scheduled).toEqual(["acme/widgets!17", "acme/widgets!18"]);
+          expect(
+            state.workerState.getCiFixState("https://gitlab.com:acme/widgets", 17)
+              .consecutiveFailures,
+          ).toBe(0);
+        }
+      } finally {
+        getChange.mockRestore();
+        getCi.mockRestore();
+        getLogs.mockRestore();
+        state.close();
+        rmSync(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("legacy relay registration still selects token-only auth and the hosted alias", async () => {
     const workspaceDir = join(
       tmpdir(),

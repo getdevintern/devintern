@@ -7,15 +7,16 @@ This directory contains the TypeScript source code for @devintern/code.
 ```
 src/
 ├── index.ts              # Main CLI entry point
-├── lib/                  # Core library modules
-│   ├── trackers/jira/    # JIRA task tracker client, formatter, extractor
-│   ├── task-formatter.ts   # Task prompt formatter
-│   └── utils.ts          # Utility functions
-├── types/                # TypeScript type definitions
-│   ├── index.ts          # Main types export
-│   └── jira.ts           # JIRA-specific interfaces
-└── examples/             # Example usage
-    └── demo.ts           # Demo script with mock data
+├── worker.ts             # Worker daemon entry point
+├── webhook-server.ts     # Direct webhook server entry point
+├── dashboard-server.ts   # Local dashboard server entry point
+├── lib/                  # Core library modules (context-first, provider-second)
+│   ├── code-host/        # PR/MR providers: provider.ts, shared.ts, github/, gitlab/, bitbucket/
+│   ├── trackers/         # Task trackers: client.ts, manager.ts, capabilities.ts, <provider>/
+│   ├── acquirers/ review/ relay/ worker/ state/ observability/
+│   ├── task/ agent/ config/ init/ automation/ workspace/
+│   └── utils.ts lock-manager.ts   # cross-cutting low-level helpers
+└── types/                # TypeScript type definitions
 ```
 
 ## Development

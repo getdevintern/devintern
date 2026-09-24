@@ -11,8 +11,8 @@ import {
   SERVICE_MANAGED_MARKER,
   SYSTEMD_UNIT_NAME,
   systemdUnitPath,
-} from "../src/lib/worker-service";
-import type { RunCommandFn, WorkerServiceDeps } from "../src/lib/worker-service";
+} from "../src/lib/worker/service";
+import type { RunCommandFn, WorkerServiceDeps } from "../src/lib/worker/service";
 
 /** In-memory fs + command recorder so rollback behavior is directly assertable. */
 function fakeServiceDeps(options: {

@@ -4,7 +4,7 @@ import {
   formatReplyMessage,
   formatSingleCommentPrompt,
   formatCiFixPrompt,
-} from "../src/lib/review-formatter";
+} from "../src/lib/review/formatter";
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../src/types/github-webhooks";
 
 describe("Review Formatter", () => {

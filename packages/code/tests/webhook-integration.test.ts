@@ -84,7 +84,7 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
       if (existsSync(testDir)) {
         rmSync(testDir, { recursive: true, force: true });
       }
-    } catch (e) {
+    } catch {
       // Ignore cleanup errors
     }
   });

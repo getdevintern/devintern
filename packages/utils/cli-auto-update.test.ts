@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -107,6 +115,62 @@ describe("detectInstallKind", () => {
         scriptPath: "/Users/test/my-app/node_modules/@getdevintern/code/dist/index.js",
         packageName: "@getdevintern/code",
         homeDir: home,
+      }),
+    ).toBe("local");
+  });
+
+  test("recognizes Bun's cache-based global install through its launcher", () => {
+    const home = tempDir();
+    const script = join(
+      home,
+      ".cache/.bun/install/global/node_modules/@getdevintern/code/dist/index.js",
+    );
+    const launcher = join(home, ".cache/.bun/bin/devintern");
+    mkdirSync(join(script, ".."), { recursive: true });
+    mkdirSync(join(launcher, ".."), { recursive: true });
+    writeFileSync(script, "");
+    symlinkSync(script, launcher);
+    expect(
+      detectInstallKind({
+        scriptPath: launcher,
+        packageName: "@getdevintern/code",
+        homeDir: home,
+        env: {},
+      }),
+    ).toBe("bun-global");
+  });
+
+  test("honors BUN_INSTALL and keeps linked source checkouts local", () => {
+    const home = tempDir();
+    const bunRoot = join(home, "custom-bun");
+    const globalScript = join(
+      bunRoot,
+      "install/global/node_modules/@getdevintern/code/dist/index.js",
+    );
+    const sourceScript = join(home, "project/packages/code/dist/index.js");
+    mkdirSync(join(globalScript, ".."), { recursive: true });
+    mkdirSync(join(sourceScript, ".."), { recursive: true });
+    writeFileSync(globalScript, "");
+    writeFileSync(sourceScript, "");
+    const launcher = join(bunRoot, "bin/devintern");
+    mkdirSync(join(launcher, ".."), { recursive: true });
+    symlinkSync(globalScript, launcher);
+    expect(
+      detectInstallKind({
+        scriptPath: launcher,
+        packageName: "@getdevintern/code",
+        homeDir: home,
+        env: { BUN_INSTALL: bunRoot },
+      }),
+    ).toBe("bun-global");
+    rmSync(launcher);
+    symlinkSync(sourceScript, launcher);
+    expect(
+      detectInstallKind({
+        scriptPath: launcher,
+        packageName: "@getdevintern/code",
+        homeDir: home,
+        env: { BUN_INSTALL: bunRoot },
       }),
     ).toBe("local");
   });

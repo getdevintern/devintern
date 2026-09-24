@@ -7,6 +7,7 @@ import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/work
 import {
   buildErrorMonitorEnv,
   buildRepoEnv,
+  buildTeamTaskEnv,
   gitHubSlugFromRemote,
   parseEnvFile,
 } from "../src/lib/workspace/env";
@@ -70,6 +71,8 @@ describe("buildRepoEnv", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
     expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
+    expect(env.DEVINTERN_WORKSPACE_DIR).toBe(workspaceDir);
+    expect(env.DEVINTERN_WORKER_SUBPROCESS).toBe("1");
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {
@@ -129,6 +132,43 @@ describe("buildRepoEnv", () => {
     expect(env.SENTRY_AUTH_TOKEN).toBe("source-inline");
     expect(env.DEVINTERN_WORKSPACE_REPO).toBe("backend");
     expect(env.DEVINTERN_WORKSPACE_TEAM).toBe("platform");
+  });
+
+  test("team and error-monitor layers cannot override worker runtime paths", () => {
+    const poisoned = {
+      DEVINTERN_WORKSPACE_DIR: "/tmp/not-the-workspace",
+      DEVINTERN_WORKER_SUBPROCESS: "0",
+      WEBHOOK_QUEUE_DB: "/tmp/queue.db",
+      DEVINTERN_ANALYTICS_CONFIG_DIR: "/tmp/analytics",
+    };
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "jira",
+      taskQuery: "project = PLAT",
+      env: poisoned,
+    };
+    const source: ErrorMonitorConfig = {
+      id: "api-production",
+      provider: "sentry",
+      enabled: true,
+      repo: "backend",
+      organization: "acme",
+      project: "api",
+      intervalSeconds: 60,
+      minOccurrences: 5,
+      maxIssuesPerTick: 3,
+      commentOnAction: false,
+      env: poisoned,
+    };
+    const expected = {
+      DEVINTERN_WORKSPACE_DIR: workspaceDir,
+      DEVINTERN_WORKER_SUBPROCESS: "1",
+      WEBHOOK_QUEUE_DB: join(workspaceDir, "state", "queue.db"),
+      DEVINTERN_ANALYTICS_CONFIG_DIR: workspaceDir,
+    };
+    expect(buildTeamTaskEnv(repo(), team, workspaceDir)).toMatchObject(expected);
+    expect(buildErrorMonitorEnv(source, repo(), team, workspaceDir)).toMatchObject(expected);
+    expect(buildErrorMonitorEnv(source, repo(), undefined, workspaceDir)).toMatchObject(expected);
   });
 
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {

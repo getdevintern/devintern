@@ -3,17 +3,18 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/ci-failure-watcher-acquirer";
+import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/acquirers/ci-failure-watcher";
 import type {
-  CiConditionalResult,
   CiFailureWatcherGitHub,
-  CiFixResult,
   PolledCiPr,
   WatchedStatusState,
   WatchedWorkflowRun,
-} from "../src/lib/ci-failure-watcher-acquirer";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+} from "../src/lib/code-host/github/ci-provider";
+import { createGitHubCiProvider } from "../src/lib/code-host/github/ci-provider";
+import type { CiConditionalResult } from "../src/lib/code-host/ci-provider";
+import type { CiFixResult } from "../src/lib/acquirers/ci-failure-watcher";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 describe("truncateCiLogs", () => {
   test("returns null for empty input", () => {
@@ -175,7 +176,7 @@ describe("CiFailureWatcherAcquirer", () => {
       intervalSeconds: 60,
       workerState,
       queue,
-      github,
+      provider: createGitHubCiProvider(github),
       fixPr: async (repo, n) => {
         fixed.push(`${repo}#${n}`);
         return overrides.fixResults?.shift() ?? true;
@@ -218,6 +219,45 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toEqual(["acme/widgets#42"]);
   });
 
+  test("a PR 404 keeps the CI watch when the credential loses access", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh = makeGithub({ prState: "open", headSha: sha1, workflowRuns: [] });
+    let inaccessible = true;
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...gh,
+        fetchPr: async (...args) =>
+          inaccessible ? { data: null, notModified: false, gone: true } : gh.fetchPr(...args),
+      }),
+      fixPr: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    inaccessible = false;
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+  });
+
+  test("relay reconciliation bypasses the timer for one registered change", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(150)],
+    };
+    const { acquirer, fixed } = makeAcquirer(gh);
+
+    await acquirer.reconcile("acme/other", 1);
+    expect(gh.prCalls ?? 0).toBe(0);
+
+    await acquirer.reconcile("acme/widgets", 42);
+    expect(fixed).toEqual(["acme/widgets#42"]);
+  });
+
   test("pending and non-failure conclusions never trigger", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
@@ -234,6 +274,41 @@ describe("CiFailureWatcherAcquirer", () => {
 
     await acquirer.tick();
     expect(fixed).toEqual([]);
+  });
+
+  test("provider hooks reuse retry and dedupe semantics in an isolated namespace", async () => {
+    const key = "https://gitlab.example:acme/widgets";
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [
+        {
+          ...failingRun(201),
+          externalId: "gitlab:https://gitlab.example:job:42:aaaa:201",
+        },
+      ],
+    };
+    const fixed: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider(makeGithub(gh)),
+      watchedChanges: () => [{ repo: key, prNumber: 17 }],
+      namespace: "gitlab",
+      fixPr: async (repo, n, _path, expectedHead) => {
+        fixed.push(`${repo}!${n}@${expectedHead}`);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+
+    expect(fixed).toEqual([`${key}!17@${sha1}`]);
+    expect(queue.hasProcessed("gitlab:ci", "gitlab:https://gitlab.example:job:42:aaaa:201")).toBe(
+      true,
+    );
   });
 
   test("dedupe survives worker restarts (new instance, shared queue)", async () => {

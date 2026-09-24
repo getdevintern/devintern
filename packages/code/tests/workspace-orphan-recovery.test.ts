@@ -4,8 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
-import { RunStore } from "../src/lib/run-recorder";
-import { ScheduledRetryStore } from "../src/lib/run-retry";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
 

@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
-import type { TaskSupervisor } from "../src/lib/task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
+import type { TaskSupervisor } from "../src/lib/worker/supervisor";
+import { WORKER_READY_FILE_ENV_VAR } from "../src/lib/worker/handover";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
 import { toRoutableTask } from "../src/lib/workspace/router";
@@ -17,8 +19,8 @@ import {
   WORKER_AUTO_UPDATE_TICK_MS,
 } from "../src/lib/workspace/worker-auto-update";
 import type { IdleAutoUpdaterOptions } from "../src/lib/workspace/worker-auto-update";
-import { createFleetTaskExecutor } from "../src/lib/workspace/workspace-worker";
-import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import { createFleetTaskExecutor } from "../src/lib/workspace/fleet-executor";
+import type { RepoManagerLike } from "../src/lib/workspace/fleet-executor";
 
 type SpawnFn = typeof import("node:child_process").spawn;
 
@@ -575,14 +577,14 @@ describe("createIdleWorkerAutoUpdater", () => {
       env: {},
       spawnFn: ((_path: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
         successorEnv = opts.env;
+        writeFileSync(opts.env?.[WORKER_READY_FILE_ENV_VAR] ?? "", "4242");
         return {
           pid: 4242,
           unref: () => undefined,
-          once: (event: string, handler: () => void) => {
-            if (event === "spawn") queueMicrotask(handler);
-          },
+          once: () => undefined,
         } as unknown as ChildProcess;
       }) as unknown as SpawnFn,
+      signalFn: (() => true) as typeof process.kill,
     });
     expect(handedOver).toBe(true);
     expect(successorEnv?.DEVINTERN_HANDOVER).toBe("1");
@@ -617,6 +619,7 @@ describe("createIdleWorkerAutoUpdater", () => {
     const supervisor: TaskSupervisor = {
       schedule: () => Promise.reject(new JobNotStartedError()),
       updateLimits: () => undefined,
+      stats: () => ({ running: 0, queued: 2, maxConcurrency: 2, available: 2 }),
       drain: async () => undefined,
       holdAdmissions: () => {
         held = true;
@@ -724,6 +727,42 @@ describe("spawnWorkerSuccessor", () => {
     console.warn = originalWarn;
   });
 
+  test("waits for a real replacement process to acknowledge readiness", async () => {
+    const script = join(tempDir(), "replacement.ts");
+    const handoverModule = join(import.meta.dir, "../src/lib/worker/handover.ts");
+    writeFileSync(
+      script,
+      `import { acknowledgeWorkerHandover } from ${JSON.stringify(handoverModule)};\n` +
+        "acknowledgeWorkerHandover();\nsetInterval(() => undefined, 1000);\n",
+    );
+    let child: ChildProcess | undefined;
+    try {
+      const ok = await spawnWorkerSuccessor({
+        execPath: process.execPath,
+        argv: [process.execPath, script],
+        verifyTimeoutMs: 5_000,
+        spawnFn: ((command: string, args: string[], options: Parameters<typeof spawn>[2]) => {
+          child = spawn(command, args, options);
+          return child;
+        }) as typeof spawn,
+      });
+      expect(ok).toBe(true);
+    } finally {
+      child?.kill("SIGTERM");
+    }
+  });
+
+  test("rejects a replacement process that exits during startup", async () => {
+    const script = join(tempDir(), "broken-replacement.ts");
+    writeFileSync(script, "process.exit(3);\n");
+    const ok = await spawnWorkerSuccessor({
+      execPath: process.execPath,
+      argv: [process.execPath, script],
+      verifyTimeoutMs: 5_000,
+    });
+    expect(ok).toBe(false);
+  });
+
   interface FakeChild {
     pid: number;
     unref: () => undefined;
@@ -735,11 +774,14 @@ describe("spawnWorkerSuccessor", () => {
    * synchronously; `emit` then fires one of them from a microtask.
    */
   const fakeChildSpawn =
-    (emit: (fire: (event: string, error?: Error) => void) => void) =>
-    (path: string, args: string[], opts: { detached: boolean }): ChildProcess => {
+    (emit: (fire: (event: string, error?: Error) => void) => void, ready = false) =>
+    (
+      path: string,
+      args: string[],
+      opts: { detached: boolean; env?: NodeJS.ProcessEnv },
+    ): ChildProcess => {
       void path;
       void args;
-      void opts;
       const handlers = new Map<string, (error?: Error) => void>();
       const child: FakeChild = {
         pid: 4321,
@@ -748,13 +790,14 @@ describe("spawnWorkerSuccessor", () => {
           handlers.set(event, handler);
         },
       };
-      queueMicrotask(() =>
+      queueMicrotask(() => {
+        if (ready) writeFileSync(opts.env?.[WORKER_READY_FILE_ENV_VAR] ?? "", "4321");
         emit((event, error) => {
           const handler = handlers.get(event);
           if (event === "spawn") handler?.();
           else handler?.(error);
-        }),
-      );
+        });
+      });
       return child as unknown as ChildProcess;
     };
 
@@ -766,9 +809,9 @@ describe("spawnWorkerSuccessor", () => {
       env: {},
       spawnFn: ((path: string, args: string[], opts: { detached: boolean }) => {
         spawned.push({ execPath: path, args, detached: opts.detached });
-        return fakeChildSpawn(() => undefined)(path, args, opts);
+        return fakeChildSpawn(() => undefined, true)(path, args, opts);
       }) as unknown as SpawnFn,
-      signalFn: () => true,
+      signalFn: (() => true) as typeof process.kill,
     });
     expect(ok).toBe(true);
     expect(spawned).toEqual([
@@ -788,26 +831,27 @@ describe("spawnWorkerSuccessor", () => {
       env: { DEVINTERN_NO_UPDATE: "1" },
       spawnFn: ((_path: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
         childEnv = opts.env;
+        writeFileSync(opts.env?.[WORKER_READY_FILE_ENV_VAR] ?? "", "4242");
         return {
           pid: 4242,
           unref: () => undefined,
-          once: (event: string, handler: () => void) => {
-            if (event === "spawn") queueMicrotask(handler);
-          },
+          once: () => undefined,
         } as unknown as ChildProcess;
       }) as unknown as SpawnFn,
+      signalFn: (() => true) as typeof process.kill,
     });
     expect(ok).toBe(true);
     expect(childEnv?.DEVINTERN_HANDOVER).toBe("1");
     expect(childEnv?.DEVINTERN_NO_UPDATE).toBe("1");
   });
 
-  test("resolves true once the child reports a successful spawn", async () => {
+  test("spawn alone does not count as a successful handover", async () => {
     const ok = await spawnWorkerSuccessor({
       argv: GLOBAL_ARGV,
+      verifyTimeoutMs: 80,
       spawnFn: fakeChildSpawn((fire) => fire("spawn")) as unknown as SpawnFn,
     });
-    expect(ok).toBe(true);
+    expect(ok).toBe(false);
   });
 
   test("resolves false when the child reports an async spawn error", async () => {
@@ -821,7 +865,7 @@ describe("spawnWorkerSuccessor", () => {
     expect(warns.some((line) => line.includes("failed to start"))).toBe(true);
   });
 
-  test("assumes success when the successor process is alive at the verdict wait", async () => {
+  test("a live child without a readiness marker is not a successful handover", async () => {
     const ok = await spawnWorkerSuccessor({
       argv: GLOBAL_ARGV,
       verifyTimeoutMs: 1,
@@ -832,7 +876,7 @@ describe("spawnWorkerSuccessor", () => {
           once: () => undefined,
         }) as unknown as ChildProcess) as unknown as SpawnFn,
     });
-    expect(ok).toBe(true);
+    expect(ok).toBe(false);
   });
 
   test("resolves false when the successor process is dead at the verdict wait", async () => {
@@ -840,20 +884,22 @@ describe("spawnWorkerSuccessor", () => {
     const esrch = Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
     const ok = await spawnWorkerSuccessor({
       argv: GLOBAL_ARGV,
-      verifyTimeoutMs: 1,
-      spawnFn: (() =>
-        ({
+      verifyTimeoutMs: 80,
+      spawnFn: ((_path: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+        writeFileSync(opts.env?.[WORKER_READY_FILE_ENV_VAR] ?? "", "4242");
+        return {
           pid: 4242,
           unref: () => undefined,
           once: () => undefined,
-        }) as unknown as ChildProcess) as unknown as SpawnFn,
+        } as unknown as ChildProcess;
+      }) as unknown as SpawnFn,
       signalFn: (() => {
         throw esrch;
       }) as typeof process.kill,
       warn: (message) => warns.push(message),
     });
     expect(ok).toBe(false);
-    expect(warns.some((line) => line.includes("not running"))).toBe(true);
+    expect(warns.some((line) => line.includes("exited before it became ready"))).toBe(true);
   });
 
   test("resolves false when the successor never received a pid", async () => {

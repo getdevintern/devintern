@@ -5,6 +5,10 @@
  * particular tracker (JIRA, Linear, Trello, etc.).
  */
 
+import { TaskTrackerError } from "./task-tracker-errors";
+
+export { AuthenticationError, TaskTrackerError, TransitionError } from "./task-tracker-errors";
+
 export interface TaskTrackerConfig {
   type: string;
   // Tracker-specific configuration is added by concrete implementations
@@ -106,30 +110,9 @@ export interface TaskTrackerCommentContent {
 // Error hierarchy
 // ------------------------------------------------------------------
 
-export class TaskTrackerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "TaskTrackerError";
-  }
-}
-
 export class TaskNotFoundError extends TaskTrackerError {
   constructor(taskKey: string) {
     super(`Task not found: ${taskKey}`);
     this.name = "TaskNotFoundError";
-  }
-}
-
-export class AuthenticationError extends TaskTrackerError {
-  constructor(message = "Authentication failed") {
-    super(message);
-    this.name = "AuthenticationError";
-  }
-}
-
-export class TransitionError extends TaskTrackerError {
-  constructor(statusName: string, taskKey: string) {
-    super(`Failed to transition ${taskKey} to "${statusName}"`);
-    this.name = "TransitionError";
   }
 }

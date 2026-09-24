@@ -87,6 +87,474 @@ function activeProjectLabel(status: ProjectStatus): string | null {
   return only ? formatProjectLabel(only.name, only.key) : null;
 }
 
+interface ProjectMenuProps {
+  status: ProjectStatus;
+  recentProjects: string[];
+  contextBusy: boolean;
+  busyTitle: string | null;
+  onRecentMenuOpenChange?: (open: boolean) => void;
+  onConnectGitHub?: () => void;
+  onChangeProject: () => void;
+  onOpenRecentProject?: (dir: string) => void;
+}
+
+function ProjectMenu({
+  status,
+  recentProjects,
+  contextBusy,
+  busyTitle,
+  onRecentMenuOpenChange,
+  onConnectGitHub,
+  onChangeProject,
+  onOpenRecentProject,
+}: ProjectMenuProps) {
+  // Prefer GitHub remote label for managed (and any bound) remotes.
+  const remoteLabel = status.projectBinding?.remote;
+  // Include the active dir so its label disambiguates against recent siblings.
+  const dirLabelAmong = recentProjects.includes(status.projectDir)
+    ? recentProjects
+    : [status.projectDir, ...recentProjects];
+  const dirLabel = remoteLabel ?? formatProjectDirLabel(status.projectDir, dirLabelAmong);
+  const changeProjectTitle =
+    busyTitle ??
+    `${remoteLabel ? `${remoteLabel} — ` : ""}${status.projectDir} — Connect GitHub repository or open folder`;
+  const ProjectIcon = remoteLabel ? GitPullRequest : FolderOpen;
+
+  return (
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (open) onRecentMenuOpenChange?.(true);
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="min-w-0 max-w-full"
+          disabled={contextBusy}
+          title={changeProjectTitle}
+          aria-label={`Project: ${dirLabel}`}
+        >
+          <ProjectIcon data-icon="inline-start" />
+          <span className="truncate">{dirLabel}</span>
+          <ChevronsUpDown data-icon="inline-end" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-56 max-w-96">
+        <DropdownMenuLabel>Recent projects</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {recentProjects.length === 0 ? (
+          <DropdownMenuItem disabled data-testid="recent-projects-empty">
+            No recent projects
+          </DropdownMenuItem>
+        ) : (
+          recentProjects.map((dir) => {
+            const active = dir === status.projectDir;
+            return (
+              <DropdownMenuItem
+                key={dir}
+                disabled={active || contextBusy || !onOpenRecentProject}
+                title={dir}
+                onSelect={() => onOpenRecentProject?.(dir)}
+              >
+                <span className={cn("min-w-0 flex-1 truncate", active && "font-medium")}>
+                  {formatProjectDirLabel(dir, recentProjects)}
+                </span>
+                {active && (
+                  <Badge variant="outline" className="shrink-0 text-[0.6rem]">
+                    active
+                  </Badge>
+                )}
+              </DropdownMenuItem>
+            );
+          })
+        )}
+        <DropdownMenuSeparator />
+        {onConnectGitHub ? (
+          <DropdownMenuItem
+            disabled={contextBusy}
+            onSelect={() => onConnectGitHub()}
+            data-testid="recent-projects-connect"
+          >
+            <GitPullRequest data-icon="inline-start" />
+            Connect GitHub repository…
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem
+          disabled={contextBusy}
+          onSelect={() => onChangeProject()}
+          data-testid="recent-projects-open"
+        >
+          <FolderOpen data-icon="inline-start" />
+          Open existing folder…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+interface GitStatusChipsProps {
+  status: ProjectStatus;
+  updatingFromRemote: boolean;
+  contextBusy: boolean;
+  busyTitle: string | null;
+  onUpdateFromRemote?: () => void;
+}
+
+function GitStatusChips({
+  status,
+  updatingFromRemote,
+  contextBusy,
+  busyTitle,
+  onUpdateFromRemote,
+}: GitStatusChipsProps) {
+  const gitSync = status.gitSync;
+  const branchName = gitSync?.branch;
+  const syncLabel = gitSync ? projectGitSyncLabel(gitSync) : null;
+  const showUpdate = Boolean(onUpdateFromRemote) && shouldShowUpdateFromRemote(gitSync);
+  const updateEnabled = canUpdateProjectFromRemote(gitSync) && !contextBusy;
+  const updateTitle =
+    busyTitle ??
+    (gitSync?.kind === "skipped_dirty"
+      ? gitSync.message
+      : (gitSync?.message ?? "Get the latest changes from the online repository"));
+
+  return (
+    <>
+      {branchName ? (
+        <Badge
+          variant="outline"
+          title={`Current branch: ${branchName}`}
+          aria-label={`Current branch: ${branchName}`}
+          className={cn(contextChipClassName, "max-w-56 truncate")}
+          data-testid="git-branch"
+        >
+          <GitBranch data-icon="inline-start" />
+          <span className="truncate">{branchName}</span>
+        </Badge>
+      ) : null}
+
+      {syncLabel ? (
+        <Badge
+          variant={
+            gitSync?.kind === "skipped_dirty" || gitSync?.kind === "diverged"
+              ? "destructive"
+              : "outline"
+          }
+          title={gitSync?.message}
+          aria-label={`Project updates: ${syncLabel}`}
+          className={cn(contextChipSizeClassName, "max-w-48 truncate")}
+          data-testid="git-sync-status"
+        >
+          {syncLabel}
+        </Badge>
+      ) : null}
+
+      {showUpdate ? (
+        <Button
+          variant={gitSync?.kind === "behind" ? "default" : "outline"}
+          size="sm"
+          onClick={onUpdateFromRemote}
+          disabled={!updateEnabled}
+          title={updateTitle}
+          aria-label="Get latest changes"
+          data-testid="update-from-remote"
+        >
+          <CloudDownload
+            data-icon="inline-start"
+            className={updatingFromRemote ? "animate-pulse" : ""}
+          />
+          Get updates
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
+interface TrackerChipProps {
+  status: ProjectStatus;
+  contextBusy: boolean;
+  busyTitle: string | null;
+  onSwitchTracker: (trackerId: string) => void;
+  onChangeTrackerSettings?: () => void;
+}
+
+function TrackerChip({
+  status,
+  contextBusy,
+  busyTitle,
+  onSwitchTracker,
+  onChangeTrackerSettings,
+}: TrackerChipProps) {
+  const trackers = status.configuredTrackers ?? [];
+  const trackerLabel =
+    status.activeTrackerDisplayName ?? status.backendName ?? status.activeTrackerId;
+  if (!trackerLabel) return null;
+
+  // Offer a menu when multiple trackers are ready, when the active one failed
+  // to load but another configured tracker can take over, or when the user can
+  // open the update wizard (post-init PM settings entry point).
+  const activeTrackerConfigured = trackers.some((t) => t.id === status.activeTrackerId);
+  const canChangeTrackerSettings = Boolean(onChangeTrackerSettings);
+  const canSwitchTracker =
+    trackers.length > 1 || !activeTrackerConfigured || canChangeTrackerSettings;
+  const trackerTitle = busyTitle ?? "Switch task tracker";
+
+  if (!canSwitchTracker) {
+    return (
+      <Badge
+        variant="outline"
+        title="Active task tracker"
+        aria-label={`Task tracker: ${trackerLabel}`}
+        className={contextChipClassName}
+      >
+        <ContextRoleLabel>Tracker</ContextRoleLabel>
+        <span className="truncate">{trackerLabel}</span>
+      </Badge>
+    );
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={contextBusy}
+          aria-label={`Task tracker: ${trackerLabel}`}
+          title={trackerTitle}
+          className={contextChipClassName}
+        >
+          <ContextRoleLabel>Tracker</ContextRoleLabel>
+          <span className="truncate">{trackerLabel}</span>
+          <ChevronsUpDown data-icon="inline-end" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-48">
+        <DropdownMenuLabel>Task tracker</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {trackers.map((tracker) => {
+          const active = tracker.id === status.activeTrackerId;
+          return (
+            <DropdownMenuItem
+              key={tracker.id}
+              disabled={active || contextBusy}
+              onSelect={() => onSwitchTracker(tracker.id)}
+            >
+              <span className={cn("flex-1", active && "font-medium")}>{tracker.displayName}</span>
+              {active && (
+                <Badge variant="outline" className="text-[0.6rem]">
+                  active
+                </Badge>
+              )}
+            </DropdownMenuItem>
+          );
+        })}
+        {canChangeTrackerSettings ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={contextBusy}
+              onSelect={() => onChangeTrackerSettings?.()}
+              data-testid="tracker-change-settings"
+            >
+              <Settings2 data-icon="inline-start" />
+              Add or change tracker…
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+interface ProjectChipProps {
+  status: ProjectStatus;
+  contextBusy: boolean;
+  busyTitle: string | null;
+  onSwitchProjectKey: (projectKey: string) => void;
+}
+
+function ProjectChip({ status, contextBusy, busyTitle, onSwitchProjectKey }: ProjectChipProps) {
+  if (!status.configured || !status.supportsProjectSwitch) return null;
+
+  const projects = status.projects ?? [];
+  const projectLabel = activeProjectLabel(status);
+  // Offer the header switcher whenever the tracker returned multiple projects.
+  // Project choice lives here (not in the composer) so it persists as the
+  // session default via onSwitchProjectKey.
+  const canSwitchProject =
+    Boolean(status.supportsProjectSwitch) &&
+    status.configured &&
+    projects.length > 1 &&
+    !status.projectsError;
+  const projectValue = projectLabel ?? "Select project";
+  const projectTitle = busyTitle ?? "Switch project";
+
+  if (canSwitchProject) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={contextBusy}
+            aria-label={`Project: ${projectValue}`}
+            title={projectTitle}
+            className={cn(contextChipClassName, "max-w-56")}
+          >
+            <ContextRoleLabel>Project</ContextRoleLabel>
+            <span className="truncate">{projectValue}</span>
+            <ChevronsUpDown data-icon="inline-end" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-56 max-w-80">
+          <DropdownMenuLabel>Project</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {projects.map((project) => {
+            const active = project.key === status.defaultProjectKey;
+            return (
+              <DropdownMenuItem
+                key={project.key}
+                disabled={active || contextBusy}
+                onSelect={() => onSwitchProjectKey(project.key)}
+              >
+                <span className={cn("min-w-0 flex-1 truncate", active && "font-medium")}>
+                  {project.name}
+                  {project.name !== project.key ? (
+                    <span className="text-muted-foreground"> ({project.key})</span>
+                  ) : null}
+                </span>
+                {active && (
+                  <Badge variant="outline" className="shrink-0 text-[0.6rem]">
+                    active
+                  </Badge>
+                )}
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
+  if (status.projectsError) {
+    return (
+      <Badge
+        variant="destructive"
+        title={status.projectsError}
+        aria-label="Project: Projects unavailable"
+        className={contextChipSizeClassName}
+      >
+        <ContextRoleLabel>Project</ContextRoleLabel>
+        <span className="truncate">Projects unavailable</span>
+      </Badge>
+    );
+  }
+
+  if (projectLabel) {
+    return (
+      <Badge
+        variant="outline"
+        title="Active project"
+        aria-label={`Project: ${projectLabel}`}
+        className={contextChipClassName}
+      >
+        <ContextRoleLabel>Project</ContextRoleLabel>
+        <span className="max-w-40 truncate">{projectLabel}</span>
+      </Badge>
+    );
+  }
+
+  if (projects.length === 0) {
+    return (
+      <Badge
+        variant="outline"
+        title="No remote projects returned"
+        aria-label="Project: No projects"
+        className={contextChipClassName}
+      >
+        <ContextRoleLabel>Project</ContextRoleLabel>
+        <span className="truncate">No projects</span>
+      </Badge>
+    );
+  }
+
+  return null;
+}
+
+interface HarnessChipProps {
+  status: ProjectStatus;
+  contextBusy: boolean;
+  busyTitle: string | null;
+  onSwitchHarness: (harnessName: string) => void;
+}
+
+function HarnessChip({ status, contextBusy, busyTitle, onSwitchHarness }: HarnessChipProps) {
+  const harnessLabel = status.harnessDisplayName;
+  if (!harnessLabel) return null;
+
+  const harnesses = status.availableHarnesses ?? [];
+  // Show the switcher whenever multiple harnesses are installed; busy states
+  // keep the dropdown mounted and disable it (same idea as the tracker chip).
+  const canSwitchHarness = harnesses.length > 1;
+  const harnessTitle = busyTitle ?? "Switch agent harness";
+
+  if (!canSwitchHarness) {
+    return (
+      <Badge
+        variant="outline"
+        title="Agent harness"
+        aria-label={`Harness: ${harnessLabel}`}
+        className={contextChipClassName}
+      >
+        <ContextRoleLabel>Harness</ContextRoleLabel>
+        <span className="max-w-40 truncate">{harnessLabel}</span>
+      </Badge>
+    );
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={contextBusy}
+          aria-label={`Harness: ${harnessLabel}`}
+          title={harnessTitle}
+          className={cn(contextChipClassName, "max-w-56")}
+        >
+          <ContextRoleLabel>Harness</ContextRoleLabel>
+          <span className="truncate">{harnessLabel}</span>
+          <ChevronsUpDown data-icon="inline-end" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-48">
+        <DropdownMenuLabel>Agent harness</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {harnesses.map((harness) => {
+          const active = harness.name === status.activeHarnessName;
+          return (
+            <DropdownMenuItem
+              key={harness.name}
+              disabled={active || contextBusy}
+              onSelect={() => onSwitchHarness(harness.name)}
+            >
+              <span className={cn("flex-1", active && "font-medium")}>{harness.displayName}</span>
+              {active && (
+                <Badge variant="outline" className="text-[0.6rem]">
+                  active
+                </Badge>
+              )}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function ProjectBar({
   onConnectGitHub,
   onChangeProject,
@@ -108,42 +576,7 @@ export function ProjectBar({
   const agentRunning = useAnyTicketBusy();
   // ProjectBar only mounts once a project is loaded, but guard defensively.
   if (!status) return null;
-  const trackers = status.configuredTrackers ?? [];
-  const trackerLabel =
-    status.activeTrackerDisplayName ?? status.backendName ?? status.activeTrackerId;
-  // Offer a menu when multiple trackers are ready, when the active one failed
-  // to load but another configured tracker can take over, or when the user can
-  // open the update wizard (post-init PM settings entry point).
-  const activeTrackerConfigured = trackers.some((t) => t.id === status.activeTrackerId);
-  // Tracker/project controls only apply to git-connected folders.
-  const gitReady = status.isGitRepository;
-  const canChangeTrackerSettings = Boolean(onChangeTrackerSettings) && gitReady;
-  const canSwitchTracker =
-    gitReady && (trackers.length > 1 || !activeTrackerConfigured || canChangeTrackerSettings);
-  const projectLabel = activeProjectLabel(status);
-  // Prefer GitHub remote label for managed (and any bound) remotes.
-  const remoteLabel = status.projectBinding?.remote;
-  // Include the active dir so its label disambiguates against recent siblings.
-  const dirLabelAmong = recentProjects.includes(status.projectDir)
-    ? recentProjects
-    : [status.projectDir, ...recentProjects];
-  const dirLabel = remoteLabel ?? formatProjectDirLabel(status.projectDir, dirLabelAmong);
-  const projects = status.projects ?? [];
-  // Offer the header switcher whenever the tracker returned multiple projects.
-  // Project choice lives here (not in the composer) so it persists as the
-  // session default via onSwitchProjectKey.
-  const canSwitchProject =
-    gitReady &&
-    Boolean(status.supportsProjectSwitch) &&
-    status.configured &&
-    projects.length > 1 &&
-    !status.projectsError;
-  const projectValue = projectLabel ?? "Select project";
-  const harnessLabel = status.harnessDisplayName;
-  const harnesses = status.availableHarnesses ?? [];
-  // Show the switcher whenever multiple harnesses are installed; busy states
-  // keep the dropdown mounted and disable it (same idea as the tracker chip).
-  const canSwitchHarness = harnesses.length > 1;
+
   const contextBusy = switching || agentRunning || updatingFromRemote;
   const busyTitle = agentRunning
     ? "Unavailable while an agent is running"
@@ -152,23 +585,8 @@ export function ProjectBar({
       : switching
         ? "Unavailable while switching"
         : null;
-  const changeProjectTitle =
-    busyTitle ??
-    `${remoteLabel ? `${remoteLabel} — ` : ""}${status.projectDir} — Connect GitHub repository or open folder`;
-  const trackerTitle = busyTitle ?? "Switch task tracker";
-  const projectTitle = busyTitle ?? "Switch project";
-  const harnessTitle = busyTitle ?? "Switch agent harness";
-  const gitSync = status.gitSync;
-  const branchName = gitSync?.branch;
-  const syncLabel = gitSync ? projectGitSyncLabel(gitSync) : null;
-  const showUpdate = Boolean(onUpdateFromRemote) && shouldShowUpdateFromRemote(gitSync);
-  const updateEnabled = canUpdateProjectFromRemote(gitSync) && !contextBusy;
-  const updateTitle =
-    busyTitle ??
-    (gitSync?.kind === "skipped_dirty"
-      ? gitSync.message
-      : (gitSync?.message ?? "Get the latest changes from the online repository"));
-  const ProjectIcon = remoteLabel ? GitPullRequest : FolderOpen;
+  // Tracker/project controls only apply to git-connected folders.
+  const gitReady = status.isGitRepository;
 
   return (
     <header className="flex min-w-0 items-center gap-2 border-b bg-card px-3 py-2">
@@ -177,320 +595,51 @@ export function ProjectBar({
         <span className="product-sep">/</span>
         <span>pm</span>
       </span>
-      <DropdownMenu
-        onOpenChange={(open) => {
-          if (open) onRecentMenuOpenChange?.(true);
-        }}
-      >
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="min-w-0 max-w-full"
-            disabled={contextBusy}
-            title={changeProjectTitle}
-            aria-label={`Project: ${dirLabel}`}
-          >
-            <ProjectIcon data-icon="inline-start" />
-            <span className="truncate">{dirLabel}</span>
-            <ChevronsUpDown data-icon="inline-end" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-56 max-w-96">
-          <DropdownMenuLabel>Recent projects</DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          {recentProjects.length === 0 ? (
-            <DropdownMenuItem disabled data-testid="recent-projects-empty">
-              No recent projects
-            </DropdownMenuItem>
-          ) : (
-            recentProjects.map((dir) => {
-              const active = dir === status.projectDir;
-              return (
-                <DropdownMenuItem
-                  key={dir}
-                  disabled={active || contextBusy || !onOpenRecentProject}
-                  title={dir}
-                  onSelect={() => onOpenRecentProject?.(dir)}
-                >
-                  <span className={cn("min-w-0 flex-1 truncate", active && "font-medium")}>
-                    {formatProjectDirLabel(dir, recentProjects)}
-                  </span>
-                  {active && (
-                    <Badge variant="outline" className="shrink-0 text-[0.6rem]">
-                      active
-                    </Badge>
-                  )}
-                </DropdownMenuItem>
-              );
-            })
-          )}
-          <DropdownMenuSeparator />
-          {onConnectGitHub ? (
-            <DropdownMenuItem
-              disabled={contextBusy}
-              onSelect={() => onConnectGitHub()}
-              data-testid="recent-projects-connect"
-            >
-              <GitPullRequest data-icon="inline-start" />
-              Connect GitHub repository…
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem
-            disabled={contextBusy}
-            onSelect={() => onChangeProject()}
-            data-testid="recent-projects-open"
-          >
-            <FolderOpen data-icon="inline-start" />
-            Open existing folder…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
 
-      {gitReady && branchName ? (
-        <Badge
-          variant="outline"
-          title={`Current branch: ${branchName}`}
-          aria-label={`Current branch: ${branchName}`}
-          className={cn(contextChipClassName, "max-w-56 truncate")}
-          data-testid="git-branch"
-        >
-          <GitBranch data-icon="inline-start" />
-          <span className="truncate">{branchName}</span>
-        </Badge>
-      ) : null}
+      <ProjectMenu
+        status={status}
+        recentProjects={recentProjects}
+        contextBusy={contextBusy}
+        busyTitle={busyTitle}
+        onRecentMenuOpenChange={onRecentMenuOpenChange}
+        onConnectGitHub={onConnectGitHub}
+        onChangeProject={onChangeProject}
+        onOpenRecentProject={onOpenRecentProject}
+      />
 
-      {gitReady && syncLabel ? (
-        <Badge
-          variant={
-            gitSync?.kind === "skipped_dirty" || gitSync?.kind === "diverged"
-              ? "destructive"
-              : "outline"
-          }
-          title={gitSync?.message}
-          aria-label={`Project updates: ${syncLabel}`}
-          className={cn(contextChipSizeClassName, "max-w-48 truncate")}
-          data-testid="git-sync-status"
-        >
-          {syncLabel}
-        </Badge>
-      ) : null}
-
-      {gitReady && showUpdate ? (
-        <Button
-          variant={gitSync?.kind === "behind" ? "default" : "outline"}
-          size="sm"
-          onClick={onUpdateFromRemote}
-          disabled={!updateEnabled}
-          title={updateTitle}
-          aria-label="Get latest changes"
-          data-testid="update-from-remote"
-        >
-          <CloudDownload
-            data-icon="inline-start"
-            className={updatingFromRemote ? "animate-pulse" : ""}
-          />
-          Get updates
-        </Button>
+      {gitReady ? (
+        <GitStatusChips
+          status={status}
+          updatingFromRemote={updatingFromRemote}
+          contextBusy={contextBusy}
+          busyTitle={busyTitle}
+          onUpdateFromRemote={onUpdateFromRemote}
+        />
       ) : null}
 
       <span className="ml-auto flex min-w-0 shrink items-center gap-2">
-        {gitReady && trackerLabel ? (
-          canSwitchTracker ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={contextBusy}
-                  aria-label={`Task tracker: ${trackerLabel}`}
-                  title={trackerTitle}
-                  className={contextChipClassName}
-                >
-                  <ContextRoleLabel>Tracker</ContextRoleLabel>
-                  <span className="truncate">{trackerLabel}</span>
-                  <ChevronsUpDown data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-48">
-                <DropdownMenuLabel>Task tracker</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {trackers.map((tracker) => {
-                  const active = tracker.id === status.activeTrackerId;
-                  return (
-                    <DropdownMenuItem
-                      key={tracker.id}
-                      disabled={active || contextBusy}
-                      onSelect={() => onSwitchTracker(tracker.id)}
-                    >
-                      <span className={cn("flex-1", active && "font-medium")}>
-                        {tracker.displayName}
-                      </span>
-                      {active && (
-                        <Badge variant="outline" className="text-[0.6rem]">
-                          active
-                        </Badge>
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-                {canChangeTrackerSettings ? (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      disabled={contextBusy}
-                      onSelect={() => onChangeTrackerSettings?.()}
-                      data-testid="tracker-change-settings"
-                    >
-                      <Settings2 data-icon="inline-start" />
-                      Add or change tracker…
-                    </DropdownMenuItem>
-                  </>
-                ) : null}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <Badge
-              variant="outline"
-              title="Active task tracker"
-              aria-label={`Task tracker: ${trackerLabel}`}
-              className={contextChipClassName}
-            >
-              <ContextRoleLabel>Tracker</ContextRoleLabel>
-              <span className="truncate">{trackerLabel}</span>
-            </Badge>
-          )
-        ) : null}
-
-        {gitReady && status.configured && status.supportsProjectSwitch ? (
-          canSwitchProject ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={contextBusy}
-                  aria-label={`Project: ${projectValue}`}
-                  title={projectTitle}
-                  className={cn(contextChipClassName, "max-w-56")}
-                >
-                  <ContextRoleLabel>Project</ContextRoleLabel>
-                  <span className="truncate">{projectValue}</span>
-                  <ChevronsUpDown data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-56 max-w-80">
-                <DropdownMenuLabel>Project</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {projects.map((project) => {
-                  const active = project.key === status.defaultProjectKey;
-                  return (
-                    <DropdownMenuItem
-                      key={project.key}
-                      disabled={active || contextBusy}
-                      onSelect={() => onSwitchProjectKey(project.key)}
-                    >
-                      <span className={cn("min-w-0 flex-1 truncate", active && "font-medium")}>
-                        {project.name}
-                        {project.name !== project.key ? (
-                          <span className="text-muted-foreground"> ({project.key})</span>
-                        ) : null}
-                      </span>
-                      {active && (
-                        <Badge variant="outline" className="shrink-0 text-[0.6rem]">
-                          active
-                        </Badge>
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : status.projectsError ? (
-            <Badge
-              variant="destructive"
-              title={status.projectsError}
-              aria-label="Project: Projects unavailable"
-              className={contextChipSizeClassName}
-            >
-              <ContextRoleLabel>Project</ContextRoleLabel>
-              <span className="truncate">Projects unavailable</span>
-            </Badge>
-          ) : projectLabel ? (
-            <Badge
-              variant="outline"
-              title="Active project"
-              aria-label={`Project: ${projectLabel}`}
-              className={contextChipClassName}
-            >
-              <ContextRoleLabel>Project</ContextRoleLabel>
-              <span className="max-w-40 truncate">{projectLabel}</span>
-            </Badge>
-          ) : projects.length === 0 ? (
-            <Badge
-              variant="outline"
-              title="No remote projects returned"
-              aria-label="Project: No projects"
-              className={contextChipClassName}
-            >
-              <ContextRoleLabel>Project</ContextRoleLabel>
-              <span className="truncate">No projects</span>
-            </Badge>
-          ) : null
-        ) : null}
-
-        {gitReady && harnessLabel ? (
-          canSwitchHarness ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={contextBusy}
-                  aria-label={`Harness: ${harnessLabel}`}
-                  title={harnessTitle}
-                  className={cn(contextChipClassName, "max-w-56")}
-                >
-                  <ContextRoleLabel>Harness</ContextRoleLabel>
-                  <span className="truncate">{harnessLabel}</span>
-                  <ChevronsUpDown data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-48">
-                <DropdownMenuLabel>Agent harness</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {harnesses.map((harness) => {
-                  const active = harness.name === status.activeHarnessName;
-                  return (
-                    <DropdownMenuItem
-                      key={harness.name}
-                      disabled={active || contextBusy}
-                      onSelect={() => onSwitchHarness(harness.name)}
-                    >
-                      <span className={cn("flex-1", active && "font-medium")}>
-                        {harness.displayName}
-                      </span>
-                      {active && (
-                        <Badge variant="outline" className="text-[0.6rem]">
-                          active
-                        </Badge>
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <Badge
-              variant="outline"
-              title="Agent harness"
-              aria-label={`Harness: ${harnessLabel}`}
-              className={contextChipClassName}
-            >
-              <ContextRoleLabel>Harness</ContextRoleLabel>
-              <span className="max-w-40 truncate">{harnessLabel}</span>
-            </Badge>
-          )
+        {gitReady ? (
+          <>
+            <TrackerChip
+              status={status}
+              contextBusy={contextBusy}
+              busyTitle={busyTitle}
+              onSwitchTracker={onSwitchTracker}
+              onChangeTrackerSettings={onChangeTrackerSettings}
+            />
+            <ProjectChip
+              status={status}
+              contextBusy={contextBusy}
+              busyTitle={busyTitle}
+              onSwitchProjectKey={onSwitchProjectKey}
+            />
+            <HarnessChip
+              status={status}
+              contextBusy={contextBusy}
+              busyTitle={busyTitle}
+              onSwitchHarness={onSwitchHarness}
+            />
+          </>
         ) : null}
         <AnalyticsSettings
           projectDir={status.projectDir}

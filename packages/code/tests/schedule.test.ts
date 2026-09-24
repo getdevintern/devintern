@@ -14,12 +14,12 @@ import {
   parseTimeWindowSpec,
   parseWorkerScheduleSection,
   pickupAllowedAt,
-} from "../src/lib/schedule";
+} from "../src/lib/worker/schedule";
 import type {
   ParsedTimeWindow,
   ScheduleTransition,
   WorkerScheduleConfig,
-} from "../src/lib/schedule";
+} from "../src/lib/worker/schedule";
 
 function windowSpec(spec: string): ParsedTimeWindow {
   return parseTimeWindowSpec(spec);

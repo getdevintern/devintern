@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/task-supervisor";
-import type { HostCheckoutClass } from "../src/lib/task-supervisor";
+import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
+import type { HostCheckoutClass } from "../src/lib/worker/supervisor";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -191,6 +191,49 @@ describe("TaskSupervisor", () => {
     await expect(
       supervisor.schedule(request({ id: "late", repo: "repo", run: async () => undefined })),
     ).rejects.toBeInstanceOf(JobNotStartedError);
+  });
+
+  test("reports running, queued, and available capacity", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    const jobs = gates.map((gate, index) =>
+      supervisor.schedule(
+        request({
+          id: `stat-${index}`,
+          repo: `repo-${index}`,
+          run: async () => {
+            await gate.promise;
+          },
+        }),
+      ),
+    );
+
+    await Promise.resolve();
+    expect(supervisor.stats()).toEqual({
+      running: 2,
+      queued: 1,
+      maxConcurrency: 2,
+      available: 0,
+    });
+
+    gates[0]!.resolve();
+    await jobs[0];
+    expect(supervisor.stats()).toEqual({
+      running: 2,
+      queued: 0,
+      maxConcurrency: 2,
+      available: 0,
+    });
+
+    gates[1]!.resolve();
+    gates[2]!.resolve();
+    await Promise.all(jobs);
+    expect(supervisor.stats()).toEqual({
+      running: 0,
+      queued: 0,
+      maxConcurrency: 2,
+      available: 2,
+    });
   });
 
   test("limit increases admit queued work and decreases do not cancel running work", async () => {

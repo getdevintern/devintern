@@ -4,7 +4,7 @@ import {
   createAsanaChangeDetector,
   createChangeDetector,
   createTrelloChangeDetector,
-} from "../src/lib/change-detector";
+} from "../src/lib/acquirers/change-detector";
 
 describe("createTrelloChangeDetector", () => {
   test("first run establishes the cursor at the newest action and drains", async () => {

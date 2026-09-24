@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { classifyPushProbe } from "../src/lib/github-push-probe";
+import { classifyPushProbe } from "../src/lib/code-host/github/push-probe";
 
 const DENIED = [
   "remote: Permission to getdevintern/devintern.git denied to danii1.",

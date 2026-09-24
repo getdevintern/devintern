@@ -1,21 +1,22 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { UsageLimitError } from "@devintern/agent-harness";
 
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
   resetWorkerFailover,
   runWithFailover,
   startWorkerFailover,
-} from "../src/lib/worker-failover";
+} from "../src/lib/worker/failover";
 import {
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   writeUsageLimitHint,
-} from "../src/lib/usage-limit-protocol";
+} from "../src/lib/worker/usage-limit-protocol";
 
 afterEach(() => {
   resetWorkerFailover();
@@ -67,6 +68,51 @@ describe("runWithFailover", () => {
       return 0;
     });
     expect(result).toBe("ok");
+  });
+});
+
+describe("worker startup with a stale persisted active harness", () => {
+  test("the selected fallback is persisted so the next start does not re-warn", () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-stale-active-"));
+    const dbPath = join(dir, "queue.db");
+    const seed = new WebhookQueue({ dbPath });
+    seed.setActiveHarness("codex");
+    seed.close();
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    try {
+      console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+      const firstQueue = new WebhookQueue({ dbPath });
+      startWorkerFailover({
+        checkInstalled: false,
+        raw: "opencode,grok,cursor",
+        queue: firstQueue,
+        log: () => {},
+      });
+      firstQueue.close();
+      expect(warnings.filter((line) => line.includes("Persisted active harness"))).toHaveLength(1);
+
+      const reopened = new WebhookQueue({ dbPath });
+      expect(reopened.getActiveHarness()).toBe("opencode");
+
+      const secondWarnings: string[] = [];
+      console.warn = (...args: unknown[]) => secondWarnings.push(args.join(" "));
+      startWorkerFailover({
+        checkInstalled: false,
+        raw: "opencode,grok,cursor",
+        queue: reopened,
+        log: () => {},
+      });
+      reopened.close();
+      expect(secondWarnings.filter((line) => line.includes("Persisted active harness"))).toEqual(
+        [],
+      );
+    } finally {
+      console.warn = originalWarn;
+      resetWorkerFailover();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

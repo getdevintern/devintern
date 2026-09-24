@@ -17,7 +17,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
@@ -127,7 +127,7 @@ export function parseSemver(version: string): [number, number, number] | null {
 /**
  * Classify how the running script was installed.
  *
- * Global bun installs live under `~/.bun/install/global`. Global npm installs
+ * Global bun installs live under the Bun install/cache directory. Global npm installs
  * typically live under a `.../lib/node_modules/@scope/pkg` prefix. Monorepo
  * sources and local project `node_modules` are treated as local (no update).
  */
@@ -135,13 +135,17 @@ export function detectInstallKind(options: {
   scriptPath: string;
   packageName: string;
   homeDir?: string;
+  env?: NodeJS.ProcessEnv;
 }): InstallKind {
   const scriptPath = options.scriptPath.trim();
   if (!scriptPath) return "unknown";
 
   let resolved: string;
   try {
-    resolved = resolve(scriptPath);
+    const path = resolve(scriptPath);
+    // Global launchers are symlinks. Following them also keeps `bun link`
+    // pointed at a source checkout classified as local.
+    resolved = existsSync(path) ? realpathSync(path) : path;
   } catch {
     return "unknown";
   }
@@ -152,8 +156,18 @@ export function detectInstallKind(options: {
   }
 
   const home = options.homeDir ?? homedir();
-  const bunGlobalRoot = join(home, ".bun", "install", "global");
-  if (resolved.startsWith(bunGlobalRoot + sep) || resolved.startsWith(bunGlobalRoot)) {
+  const env = options.env ?? process.env;
+  const bunRoots = [
+    join(home, ".bun"),
+    join(env.XDG_CACHE_HOME ?? join(home, ".cache"), ".bun"),
+    ...(env.BUN_INSTALL ? [env.BUN_INSTALL] : []),
+  ];
+  if (
+    bunRoots.some((root) => {
+      const globalRoot = join(root, "install", "global");
+      return resolved === globalRoot || resolved.startsWith(globalRoot + sep);
+    })
+  ) {
     return "bun-global";
   }
 
@@ -393,6 +407,7 @@ export async function installGlobalCliAsync(opts: {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards the exit, close, error, and timeout events.
       resolve(ok);
     };
     // 'close' covers children that report the end of their stdio without a
@@ -440,59 +455,14 @@ function packageManagerForKind(kind: InstallKind): "npm" | "bun" | null {
  */
 export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"updated" | "skipped"> {
   const log = config.log ?? ((message: string) => console.log(message));
-  const argv = config.argv ?? process.argv;
-  const env = config.env ?? process.env;
-  const now = config.now ?? Date.now;
-  const homeDir = config.homeDir ?? homedir();
-  const cachePath = config.cachePath ?? defaultCachePath(homeDir);
-  const checkIntervalMs = config.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
-  const currentVersion = config.currentVersion;
-
   try {
-    if (shouldSkipUpdateCheck({ argv, env, noUpdateEnv: config.noUpdateEnv })) {
+    const context = await prepareUpdateContext(config);
+    if (!context) {
       return "skipped";
     }
 
-    // Dev / unset version — never treat as stale.
-    if (!currentVersion || currentVersion === "0.0.0") {
-      return "skipped";
-    }
-
-    const scriptPath = config.scriptPath ?? argv[1] ?? "";
-    const installKind =
-      config.installKind ??
-      detectInstallKind({
-        scriptPath,
-        packageName: config.packageName,
-        homeDir,
-      });
-    const packageManager = packageManagerForKind(installKind);
-    if (!packageManager) {
-      return "skipped";
-    }
-
-    const cache = readCache(cachePath);
-    const entry = cache[config.packageName] ?? { checkedAt: 0 };
-    const age = now() - (entry.checkedAt || 0);
-    let latestVersion = entry.latestVersion;
-
-    if (age >= checkIntervalMs || !latestVersion) {
-      const fetched = await fetchLatestVersion(config.packageName, {
-        fetchFn: config.fetchFn,
-        timeoutMs: config.fetchTimeoutMs,
-      });
-      entry.checkedAt = now();
-      if (fetched) {
-        entry.latestVersion = fetched;
-        latestVersion = fetched;
-      }
-      cache[config.packageName] = entry;
-      writeCache(cachePath, cache);
-    }
-
-    if (!latestVersion || !isNewerVersion(latestVersion, currentVersion)) {
-      return "skipped";
-    }
+    const { packageManager, entry, latestVersion, installCmd } = context;
+    const env = config.env ?? process.env;
 
     // User already declined this exact version in a prior interactive prompt.
     if (entry.declinedVersion === latestVersion && config.isInteractive) {
@@ -506,31 +476,27 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
       (config.autoUpdateEnv != null &&
         (env[config.autoUpdateEnv] === "1" || env[config.autoUpdateEnv] === "true"));
 
-    const installCmd =
-      packageManager === "bun"
-        ? `bun install -g ${config.packageName}@${latestVersion}`
-        : `npm install -g ${config.packageName}@${latestVersion}`;
-
     let shouldInstall = false;
 
     if (config.isInteractive) {
-      log(`⬆  ${config.binName} ${latestVersion} is available (current: ${currentVersion}).`);
+      log(
+        `⬆  ${config.binName} ${latestVersion} is available (current: ${config.currentVersion}).`,
+      );
       const confirm = config.confirm ?? defaultConfirm;
       const accepted = await confirm(`Update ${config.binName} now?`);
       if (!accepted) {
         entry.declinedVersion = latestVersion;
-        cache[config.packageName] = entry;
-        writeCache(cachePath, cache);
+        persistCacheEntry(context, config.packageName, entry);
         log(`   Skipped. Update later with: ${installCmd}`);
         return "skipped";
       }
       shouldInstall = true;
     } else if (autoUpdate) {
       if (config.autoInstall === true) {
-        log(`⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion}...`);
+        log(`⬆  Auto-updating ${config.binName} ${config.currentVersion} → ${latestVersion}...`);
       } else {
         log(
-          `⬆  Auto-updating ${config.binName} ${currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
+          `⬆  Auto-updating ${config.binName} ${config.currentVersion} → ${latestVersion} (${config.autoUpdateEnv ?? "DEVINTERN_AUTO_UPDATE"} is set)...`,
         );
       }
       shouldInstall = true;
@@ -538,11 +504,10 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
       // Safe default for non-interactive: never mutate the global install.
       if (entry.notifiedVersion !== latestVersion) {
         log(
-          `ℹ  ${config.binName} ${latestVersion} is available (current: ${currentVersion}). Non-interactive session — skipping update. Run: ${installCmd}`,
+          `ℹ  ${config.binName} ${latestVersion} is available (current: ${config.currentVersion}). Non-interactive session — skipping update. Run: ${installCmd}`,
         );
         entry.notifiedVersion = latestVersion;
-        cache[config.packageName] = entry;
-        writeCache(cachePath, cache);
+        persistCacheEntry(context, config.packageName, entry);
       }
       return "skipped";
     }
@@ -557,7 +522,7 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
     });
 
     if (!ok) {
-      log(`⚠️  Failed to update ${config.binName}. Continuing with ${currentVersion}.`);
+      log(`⚠️  Failed to update ${config.binName}. Continuing with ${config.currentVersion}.`);
       log(`   Try manually: ${installCmd}`);
       return "skipped";
     }
@@ -568,14 +533,95 @@ export async function maybeOfferCliUpdate(config: CliUpdateConfig): Promise<"upd
     entry.declinedVersion = undefined;
     entry.notifiedVersion = undefined;
     entry.latestVersion = latestVersion;
-    entry.checkedAt = now();
-    cache[config.packageName] = entry;
-    writeCache(cachePath, cache);
+    entry.checkedAt = context.now();
+    persistCacheEntry(context, config.packageName, entry);
 
     const reexec = config.reexecFn ?? defaultReexec;
-    reexec(argv);
+    reexec(config.argv ?? process.argv);
     return "updated";
   } catch {
     return "skipped";
   }
+}
+
+interface UpdateContext {
+  packageManager: "npm" | "bun";
+  entry: CacheEntry;
+  latestVersion: string;
+  installCmd: string;
+  cache: UpdateCache;
+  cachePath: string;
+  now: () => number;
+}
+
+/**
+ * Apply the skip checks, resolve the install kind, and read/fetch the latest
+ * version from the cache or npm registry.
+ *
+ * @param config - CLI update configuration.
+ * @returns Everything the caller needs to prompt/install, or `null` to skip.
+ */
+async function prepareUpdateContext(config: CliUpdateConfig): Promise<UpdateContext | null> {
+  const env = config.env ?? process.env;
+  const argv = config.argv ?? process.argv;
+  const now = config.now ?? Date.now;
+  const homeDir = config.homeDir ?? homedir();
+  const cachePath = config.cachePath ?? defaultCachePath(homeDir);
+
+  if (shouldSkipUpdateCheck({ argv, env, noUpdateEnv: config.noUpdateEnv })) {
+    return null;
+  }
+
+  // Dev / unset version — never treat as stale.
+  if (!config.currentVersion || config.currentVersion === "0.0.0") {
+    return null;
+  }
+
+  const scriptPath = config.scriptPath ?? argv[1] ?? "";
+  const installKind =
+    config.installKind ??
+    detectInstallKind({
+      scriptPath,
+      packageName: config.packageName,
+      homeDir,
+    });
+  const packageManager = packageManagerForKind(installKind);
+  if (!packageManager) {
+    return null;
+  }
+
+  const cache = readCache(cachePath);
+  const entry = cache[config.packageName] ?? { checkedAt: 0 };
+  const age = now() - (entry.checkedAt || 0);
+  let latestVersion = entry.latestVersion;
+
+  if (age >= (config.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS) || !latestVersion) {
+    const fetched = await fetchLatestVersion(config.packageName, {
+      fetchFn: config.fetchFn,
+      timeoutMs: config.fetchTimeoutMs,
+    });
+    entry.checkedAt = now();
+    if (fetched) {
+      entry.latestVersion = fetched;
+      latestVersion = fetched;
+    }
+    cache[config.packageName] = entry;
+    writeCache(cachePath, cache);
+  }
+
+  if (!latestVersion || !isNewerVersion(latestVersion, config.currentVersion)) {
+    return null;
+  }
+
+  const installCmd =
+    packageManager === "bun"
+      ? `bun install -g ${config.packageName}@${latestVersion}`
+      : `npm install -g ${config.packageName}@${latestVersion}`;
+
+  return { packageManager, entry, latestVersion, installCmd, cache, cachePath, now };
+}
+
+function persistCacheEntry(context: UpdateContext, packageName: string, entry: CacheEntry): void {
+  context.cache[packageName] = entry;
+  writeCache(context.cachePath, context.cache);
 }

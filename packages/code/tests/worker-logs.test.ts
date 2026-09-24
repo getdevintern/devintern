@@ -10,7 +10,7 @@ import {
   readWorkerLogs,
   redactSecrets,
   stripAnsi,
-} from "../src/lib/worker-logs";
+} from "../src/lib/observability/worker-logs";
 
 describe("worker log parsing", () => {
   test("stripAnsi removes color/cursor codes and carriage returns", () => {

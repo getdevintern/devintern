@@ -78,7 +78,7 @@ export class LockManager {
           );
           console.log("   Removing stale lock and continuing...");
           unlinkSync(this.lockFilePath);
-        } catch (error) {
+        } catch {
           // If we can't read or parse the lock file, assume it's corrupted and remove it
           console.log("⚠️  Found corrupted lock file, removing and continuing...");
           unlinkSync(this.lockFilePath);

@@ -32,6 +32,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   detectInstallKind,
   installGlobalCliAsync,
@@ -39,7 +42,8 @@ import {
   maybeOfferCliUpdate,
   shouldSkipUpdateCheck,
 } from "@devintern/utils";
-import type { TaskSupervisor } from "../task-supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
+import { WORKER_READY_FILE_ENV_VAR } from "../worker/handover";
 import type { WorkspaceConfig } from "./config";
 
 /** How often the armed timer re-evaluates the update conditions. */
@@ -52,10 +56,10 @@ const BUSY_LOG_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * How long the successor handover waits for the child's spawn/error verdict
- * before assuming the spawn worked (spawn failures surface asynchronously).
+ * Maximum time for the replacement to start its acquirers and acknowledge
+ * readiness. A mere process spawn does not prove that it can serve work.
  */
-const SUCCESSOR_SPAWN_VERIFY_MS = 500;
+const SUCCESSOR_READY_TIMEOUT_MS = 30_000;
 
 const PACKAGE_NAME = "@getdevintern/code";
 const BIN_NAME = "devintern";
@@ -190,20 +194,18 @@ function isProcessAlive(
  * hangups. The successor is tagged `DEVINTERN_HANDOVER=1` so its own update
  * cycle cannot mistake macOS's reparent-to-launchd (pid 1) for service-
  * manager supervision and exit non-zero for a restart that will never come.
- * Resolves false when the spawn could not even be started — either
- * `spawn()` threw synchronously, the child reported an async spawn error
- * (e.g. EAGAIN/ENOENT), or the successor process is not actually running
- * when the spawn-verdict wait ends — so the caller can fall back to the
- * restart-requested exit code instead of exiting 0 with no daemon.
+ * Resolves true only after the replacement has started its acquirers and
+ * acknowledged readiness. Early exits, spawn errors, and startup timeouts
+ * fail the handover instead of letting the parent exit successfully.
  */
 export function spawnWorkerSuccessor(options?: {
   argv?: string[];
   execPath?: string;
   env?: NodeJS.ProcessEnv;
   spawnFn?: typeof spawn;
-  /** Override the spawn-verdict wait (tests). */
+  /** Override the startup readiness timeout (tests). */
   verifyTimeoutMs?: number;
-  /** Override the liveness probe used at the verdict wait (tests). */
+  /** Override the liveness probe used after readiness (tests). */
   signalFn?: typeof process.kill;
   log?: (message: string) => void;
   warn?: (message: string) => void;
@@ -214,7 +216,19 @@ export function spawnWorkerSuccessor(options?: {
   const args = (options?.argv ?? process.argv).slice(1);
   const spawnFn = options?.spawnFn ?? spawn;
   const signalFn = options?.signalFn ?? process.kill;
-  const env = { ...(options?.env ?? process.env), [WORKER_HANDOVER_ENV_VAR]: "1" };
+  let readyDir: string;
+  try {
+    readyDir = mkdtempSync(join(tmpdir(), "devintern-handover-"));
+  } catch (error) {
+    warn(`⚠️  [update] could not prepare worker handover: ${(error as Error).message}`);
+    return Promise.resolve(false);
+  }
+  const readyFile = join(readyDir, "ready");
+  const env = {
+    ...(options?.env ?? process.env),
+    [WORKER_HANDOVER_ENV_VAR]: "1",
+    [WORKER_READY_FILE_ENV_VAR]: readyFile,
+  };
   try {
     const child = spawnFn(execPath, args, {
       detached: true,
@@ -223,42 +237,56 @@ export function spawnWorkerSuccessor(options?: {
     });
     child.unref();
     log(`🔁 [update] handing over to the updated worker (pid ${child.pid ?? "?"})`);
-    // spawn() rarely throws synchronously; failures surface later via the
-    // 'error' event. Wait briefly for the spawn/error verdict before letting
-    // the caller decide the exit code.
-    // oxlint-disable-next-line promise/avoid-new -- deliberate event-to-promise bridge for the spawn verdict.
+    // The successor writes the marker only after the lock, acquirers, and
+    // shutdown handlers are ready. Keep the timer referenced while waiting:
+    // the detached child itself does not keep the parent alive.
+    // oxlint-disable-next-line promise/avoid-new -- deliberate event-to-promise bridge for readiness.
     return new Promise<boolean>((resolve) => {
       let settled = false;
-      const settle = (spawned: boolean): void => {
+      const poll = setInterval(() => {
+        try {
+          if (readFileSync(readyFile, "utf8") !== String(child.pid)) return;
+        } catch {
+          return;
+        }
+        if (isProcessAlive(child.pid, signalFn)) settle(true);
+        else {
+          warn("⚠️  [update] replacement worker exited before it became ready.");
+          settle(false);
+        }
+      }, 50);
+      const timeout = setTimeout(() => {
+        warn(
+          `⚠️  [update] replacement worker did not become ready within ${options?.verifyTimeoutMs ?? SUCCESSOR_READY_TIMEOUT_MS}ms.`,
+        );
+        try {
+          child.kill?.("SIGTERM");
+        } catch {
+          // The child may have exited concurrently.
+        }
+        settle(false);
+      }, options?.verifyTimeoutMs ?? SUCCESSOR_READY_TIMEOUT_MS);
+      const settle = (ready: boolean): void => {
         if (settled) return;
         settled = true;
-        resolve(spawned);
+        clearInterval(poll);
+        // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards every completion path.
+        clearTimeout(timeout);
+        rmSync(readyDir, { recursive: true, force: true });
+        // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards every completion path.
+        resolve(ready);
       };
-      child.once("spawn", () => settle(true));
       child.once("error", (error) => {
         warn(`⚠️  [update] replacement worker failed to start: ${(error as Error).message}`);
         settle(false);
       });
-      // Neither event fired (custom spawnFn, slow runtime): only assume the
-      // handover worked when the successor process is actually alive. An
-      // async 'error' (e.g. EAGAIN under load) can arrive after this wait,
-      // when the caller is already committed to its exit code — exiting 0
-      // with no daemon running would leave the worker down until a manual
-      // restart, so a non-running successor must read as a failed handover.
-      const timeout = setTimeout(() => {
-        if (settled) return;
-        if (isProcessAlive(child.pid, signalFn)) {
-          settle(true);
-          return;
-        }
-        warn(
-          `⚠️  [update] replacement worker (pid ${child.pid ?? "?"}) is not running; treating the handover as failed.`,
-        );
+      child.once("exit", () => {
+        warn("⚠️  [update] replacement worker exited before it became ready.");
         settle(false);
-      }, options?.verifyTimeoutMs ?? SUCCESSOR_SPAWN_VERIFY_MS);
-      timeout.unref?.();
+      });
     });
   } catch (error) {
+    rmSync(readyDir, { recursive: true, force: true });
     warn(`⚠️  [update] could not start the updated worker: ${(error as Error).message}`);
     return Promise.resolve(false);
   }
@@ -282,6 +310,7 @@ export function createIdleWorkerAutoUpdater(
   const installKind = detectInstallKind({
     scriptPath: argv[1] ?? "",
     packageName: PACKAGE_NAME,
+    env,
   });
   const globalInstall = installKind === "npm-global" || installKind === "bun-global";
 

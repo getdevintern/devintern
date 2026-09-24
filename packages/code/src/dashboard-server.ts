@@ -24,9 +24,9 @@ import {
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
-} from "./lib/dashboard-api";
-import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/dashboard-api";
-import type { DashboardAutomationActions } from "./lib/automation-acquirer";
+} from "./lib/observability/dashboard-api";
+import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
+import type { DashboardAutomationActions } from "./lib/automation/acquirer";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
 const LOOPBACK_DASHBOARD_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -47,7 +47,7 @@ export interface DashboardServerOptions {
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
-  scheduleSnapshot?: () => import("./lib/schedule").ScheduleSnapshot | null;
+  scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
   /**
    * Retry execution mode (default `spawn`). The workspace worker passes
    * `schedule` so dashboard retries are drained through the fleet pipeline;
