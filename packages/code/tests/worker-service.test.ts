@@ -500,5 +500,9 @@ describe("renderers keep self-capture semantics", () => {
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<key>KeepAlive</key>");
     expect(plist).not.toContain("StandardOutPath");
+    // launchd exports no identifying variables; the definition must opt the
+    // worker into service-manager restarts explicitly.
+    expect(plist).toContain("<key>DEVINTERN_SERVICE</key>");
+    expect(plist).toContain("<string>1</string>");
   });
 });

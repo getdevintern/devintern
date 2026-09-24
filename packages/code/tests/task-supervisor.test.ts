@@ -193,6 +193,49 @@ describe("TaskSupervisor", () => {
     ).rejects.toBeInstanceOf(JobNotStartedError);
   });
 
+  test("reports running, queued, and available capacity", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    const jobs = gates.map((gate, index) =>
+      supervisor.schedule(
+        request({
+          id: `stat-${index}`,
+          repo: `repo-${index}`,
+          run: async () => {
+            await gate.promise;
+          },
+        }),
+      ),
+    );
+
+    await Promise.resolve();
+    expect(supervisor.stats()).toEqual({
+      running: 2,
+      queued: 1,
+      maxConcurrency: 2,
+      available: 0,
+    });
+
+    gates[0]!.resolve();
+    await jobs[0];
+    expect(supervisor.stats()).toEqual({
+      running: 2,
+      queued: 0,
+      maxConcurrency: 2,
+      available: 0,
+    });
+
+    gates[1]!.resolve();
+    gates[2]!.resolve();
+    await Promise.all(jobs);
+    expect(supervisor.stats()).toEqual({
+      running: 0,
+      queued: 0,
+      maxConcurrency: 2,
+      available: 2,
+    });
+  });
+
   test("limit increases admit queued work and decreases do not cancel running work", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     const gates = [deferred<void>(), deferred<void>()];
@@ -218,5 +261,144 @@ describe("TaskSupervisor", () => {
     supervisor.updateLimits({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     gates.forEach((gate) => gate.resolve());
     await Promise.all(jobs);
+  });
+
+  test("inFlightCount reports running jobs only", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    expect(supervisor.inFlightCount()).toBe(0);
+    const gate = deferred<void>();
+    const job = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+        },
+      }),
+    );
+    await Promise.resolve();
+    expect(supervisor.inFlightCount()).toBe(1);
+    gate.resolve();
+    await job;
+    expect(supervisor.inFlightCount()).toBe(0);
+  });
+
+  test("queuedCount reports admitted-but-unstarted jobs and drops them on hold", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const gate = deferred<void>();
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+        },
+      }),
+    );
+    await Promise.resolve();
+    expect(supervisor.queuedCount()).toBe(0);
+
+    const queued = supervisor.schedule(
+      request({ id: "queued", repo: "repo-2", run: async () => undefined }),
+    );
+    await Promise.resolve();
+    expect(supervisor.queuedCount()).toBe(1);
+
+    supervisor.holdAdmissions();
+    await expect(queued).rejects.toBeInstanceOf(JobNotStartedError);
+    // The hold emptied the queue, so idle detection sees an idle supervisor.
+    expect(supervisor.queuedCount()).toBe(0);
+
+    supervisor.resume();
+    gate.resolve();
+    await running;
+    expect(supervisor.queuedCount()).toBe(0);
+  });
+
+  test("holdAdmissions rejects new work without interrupting running jobs, and resume re-admits", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const gate = deferred<void>();
+    let finished = false;
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: async () => {
+          await gate.promise;
+          finished = true;
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    supervisor.holdAdmissions();
+
+    await expect(
+      supervisor.schedule(request({ id: "held", repo: "repo", run: async () => undefined })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    gate.resolve();
+    await running;
+    // The held-period job kept running to completion; nothing was aborted.
+    expect(finished).toBe(true);
+
+    // admissions are still closed while the running job was in flight
+    await expect(
+      supervisor.schedule(request({ id: "still-held", repo: "repo", run: async () => undefined })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    supervisor.resume();
+    const admitted = await supervisor.schedule(
+      request({ id: "after-resume", repo: "repo", run: async () => "ran" }),
+    );
+    expect(admitted).toBe("ran");
+  });
+
+  test("resume cannot lift a shutdown drain", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    await supervisor.drain();
+    supervisor.resume();
+    await expect(
+      supervisor.schedule(request({ id: "post-drain", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+  });
+
+  test("an update hold finishing mid-drain does not re-admit work (SIGTERM race)", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const running = supervisor.schedule(
+      request({
+        id: "running",
+        repo: "repo",
+        run: (signal) =>
+          new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          }),
+      }),
+    );
+    await Promise.resolve();
+
+    // The idle self-update holds admissions for its check...
+    supervisor.holdAdmissions();
+    await expect(
+      supervisor.schedule(request({ id: "held", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    // ...and SIGTERM arrives while the check is still awaiting the
+    // registry/install, starting the shutdown drain.
+    await supervisor.drain({ graceMs: 0 });
+
+    // The updater's tick later completes and releases its hold — the
+    // shutdown drain must stay closed so no work is admitted mid-drain.
+    supervisor.resume();
+    await expect(
+      supervisor.schedule(request({ id: "late", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
+
+    await expect(running).resolves.toBeUndefined();
+    supervisor.resume();
+    // The drain remains terminal even after a subsequent resume.
+    await expect(
+      supervisor.schedule(request({ id: "still-closed", repo: "repo", run: async () => "ran" })),
+    ).rejects.toBeInstanceOf(JobNotStartedError);
   });
 });

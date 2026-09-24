@@ -12,6 +12,7 @@
 
 import { flushErrorTracking } from "@devintern/utils";
 import { LockManager } from "./lib/lock-manager";
+import { acknowledgeWorkerHandover } from "./lib/worker/handover";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { startWorkerCapture } from "./lib/observability/worker-capture";
 import type { WorkerCaptureHandle } from "./lib/observability/worker-capture";
@@ -41,6 +42,14 @@ export interface WorkerOptions {
   onShutdown?: () => Promise<void> | void;
   /** Maximum time allowed for `onShutdown` before the worker exits. */
   shutdownTimeoutMs?: number;
+  /**
+   * Invoked once after cleanup completed (lock released, capture stopped,
+   * error tracking flushed), immediately before the process exits. A returned
+   * number overrides the exit code — the idle self-update path uses this to
+   * exit non-zero so a service manager restarts the worker on the freshly
+   * installed version.
+   */
+  finalExitCode?: () => number | Promise<number | undefined> | undefined;
 }
 
 /** Default bound for mode-specific graceful shutdown work. */
@@ -63,6 +72,7 @@ export interface WorkerShutdownDependencies {
   beginShutdown?: () => Promise<void> | void;
   onShutdown?: () => Promise<void> | void;
   shutdownTimeoutMs?: number;
+  finalExitCode?: () => number | Promise<number | undefined> | undefined;
   flush?: () => Promise<void>;
   exit?: (code: number) => void;
 }
@@ -172,7 +182,18 @@ export function createWorkerShutdownHandler(
     }
     console.log("👋 Worker stopped");
     if (!forceExitRequested) {
-      exit(0);
+      let code = 0;
+      if (dependencies.finalExitCode) {
+        try {
+          const override = await dependencies.finalExitCode();
+          if (typeof override === "number") {
+            code = override;
+          }
+        } catch (error) {
+          console.warn(`⚠️  Final exit hook failed: ${(error as Error).message}`);
+        }
+      }
+      exit(code);
     }
   };
 }
@@ -244,8 +265,10 @@ export async function startWorker(
     beginShutdown: options.beginShutdown,
     onShutdown: options.onShutdown,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
+    finalExitCode: options.finalExitCode,
   });
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  acknowledgeWorkerHandover();
 }

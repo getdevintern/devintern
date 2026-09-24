@@ -19,11 +19,13 @@ import {
 } from "../src/lib/observability/analytics";
 import {
   configureWorkerOperatingPolicy,
+  copyProjectSessionToWorkspace,
   generateWebhookSecret,
   renderLaunchdPlist,
   renderSystemdUnit,
   runWorkerInit,
   upsertEnvVars,
+  workerAuthSessionPath,
   workspaceGitHubRepos,
 } from "../src/lib/init/worker-init";
 
@@ -252,6 +254,20 @@ describe("runWorkerInit", () => {
     expect(result.ok).toBe(true);
     expect(logs.join("\n")).toContain("No automation license found.");
     expect(logs.join("\n")).toContain("devintern.com/pricing");
+  });
+
+  test("passes the workspace to the license check (DEV-126)", async () => {
+    let observedWorkspaceDir: string | undefined;
+    const result = await runWorkerInit(
+      deps(["status=todo"], {
+        checkAutomationLicense: async (selectedWorkspaceDir) => {
+          observedWorkspaceDir = selectedWorkspaceDir;
+          return null;
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(observedWorkspaceDir).toBe(workspaceDir);
   });
 
   test("validates and adds an opt-in Sentry monitor with a protected token file", async () => {
@@ -766,5 +782,39 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       }),
     );
     expect(result.ok).toBe(true);
+  });
+});
+
+test("worker setup copies an existing project session without replacing workspace sign-in", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "worker-session-copy-"));
+  try {
+    const project = path.join(root, "project");
+    const workspace = path.join(root, "workspace");
+    mkdirSync(path.join(project, ".devintern-code"), { recursive: true });
+    writeFileSync(path.join(project, ".devintern-code", ".auth-session.json"), "project-session");
+    expect(copyProjectSessionToWorkspace(project, workspace)).toBe(true);
+    const target = path.join(workspace, "state", "code", ".auth-session.json");
+    expect(readFileSync(target, "utf8")).toBe("project-session");
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    writeFileSync(target, "workspace-session");
+    expect(copyProjectSessionToWorkspace(project, workspace)).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("workspace-session");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+describe("workerAuthSessionPath (DEV-126)", () => {
+  test("resolves to the workspace's code state directory", () => {
+    const workspaceDir = path.join(tmpdir(), "worker-auth-ws");
+    expect(workerAuthSessionPath("/imported/repo", workspaceDir)).toBe(
+      path.join(workspaceDir, "state", "code", ".auth-session.json"),
+    );
+  });
+
+  test("falls back to the project config dir before the workspace exists", () => {
+    expect(workerAuthSessionPath("/imported/repo")).toBe(
+      path.join("/imported/repo", ".devintern-code", ".auth-session.json"),
+    );
   });
 });

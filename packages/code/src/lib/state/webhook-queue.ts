@@ -7,11 +7,11 @@
  */
 
 import { Database } from "bun:sqlite";
-import { spawnSync } from "child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { copyFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 
 import { findConfigDir } from "@devintern/utils";
+import { ensureGitInfoExcluded } from "../utils/git-exclude";
 import { configureSqliteConnection } from "./sqlite";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
@@ -105,38 +105,7 @@ const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
  * failure (not a repo, read-only .git) is ignored.
  */
 function ensureDbIgnored(dbPath: string): void {
-  try {
-    const dir = dirname(dbPath);
-
-    // Already covered by a .gitignore (or a previous run of this helper).
-    const check = spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: dir });
-    if (check.status !== 1) {
-      return; // 0 = ignored, 128 = not a git repository
-    }
-
-    const gitDir = spawnSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd: dir,
-      encoding: "utf8",
-    });
-    if (gitDir.status !== 0) {
-      return;
-    }
-
-    const excludeFile = join(resolve(dir, gitDir.stdout.trim()), "info", "exclude");
-    const existing = existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "";
-    if (existing.includes(QUEUE_DB_IGNORE_PATTERN)) {
-      return;
-    }
-
-    mkdirSync(dirname(excludeFile), { recursive: true });
-    const separator = existing && !existing.endsWith("\n") ? "\n" : "";
-    appendFileSync(
-      excludeFile,
-      `${separator}\n# @devintern/code local state (not committed)\n${QUEUE_DB_IGNORE_PATTERN}\n`,
-    );
-  } catch {
-    // Ignoring the database is a convenience, never a requirement.
-  }
+  ensureGitInfoExcluded(dirname(dbPath), QUEUE_DB_IGNORE_PATTERN, dbPath);
 }
 
 /**

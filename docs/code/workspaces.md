@@ -21,7 +21,7 @@ Workspace mode runs under the same automation license as the rest of the worker:
 - A team can set `repo` for a fixed destination. A team spanning repositories omits `repo` and uses routing rules. A task runs only when its applicable rules agree on one repository; unmatched or ambiguous work is recorded rather than guessed. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
 - The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
 - Every task worktree is ready for the agent before it starts: git hooks are isolated when the worktree is created (so package postinstalls like lefthook cannot rewrite the shared `.git/hooks`), then dependencies are installed after the task's final branch is prepared by auto-detecting the package manager from the lockfile (bun/pnpm/yarn/npm, uv/poetry/pip, bundle, go, cargo, composer, maven, gradle). The install inherits the same layered workspace, repo, and team environment as the agent, including registry auth; if no lockfile is found or the install fails, the run continues with a warning — the agent can still set dependencies up itself.
-- All worker state (queue, cursors, agent PR registry, run records, routing skips) lives in one database at `~/.devintern/state/queue.db`.
+- The worker queue, cursors, PR registry, run records, and routing skips live at `~/.devintern/state/queue.db`. Worker auth, license, and relay state lives at `~/.devintern/state/code/`. Task subprocesses derive that path from their worker workspace context; regular CLI commands remain project scoped. `devintern worker init` copies an existing project sign-in there if the workspace has no session, and existing workspace credentials and relay pairing are carried forward from the old location. Use `devintern worker login` (or `devintern worker login --workspace /path/to/workspace.toml`) to sign in later. Worker-managed clones also exclude known `.devintern-code/` runtime files through `.git/info/exclude`, while new project `settings.json`, `.env.example`, and `automations.toml` remain stageable in task PRs. Checkouts under `/tmp` made from your own repository are not modified.
 - Agent runs use one workspace supervisor. The default global and per-repository limits are both 1; you can explicitly opt into bounded host concurrency as described below. One systemd unit (or one terminal) drives the whole fleet.
 
 ## workspace.toml
@@ -72,6 +72,9 @@ repo = "frontend"
 project = "WEB"
 labels = ["frontend"]
 
+[worker]
+auto_update = true           # false disables the worker's idle CLI self-update
+
 [worker.schedule]
 active = ["22:00-06:00"]     # optional quiet hours: drain new tasks only at night
 blocked = []                 # subtract from active windows (conflicts resolve to quiet)
@@ -99,6 +102,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
+- `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
@@ -115,6 +119,8 @@ max_concurrency_per_repo = 1
 ```
 
 `max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, and estimations. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+
+The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
 
 Raising either limit above 1 requires the explicit `best_effort_host` value. This mode is **not a security or isolation boundary**. Concurrent jobs share the host kernel, network namespace, localhost ports, process table, Docker daemon, browser profiles, package-manager caches, and linked Git metadata. Typical consequences include `EADDRINUSE`, Docker Compose published-port conflicts, cache/profile lock contention, Git ref-lock failures, and several jobs consuming the same agent account quota. Leftover child processes from one run may affect another. Each tracker task still has a separate worktree, but that does not isolate those host resources.
 
@@ -252,6 +258,9 @@ Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, 
 3. Inline `[repos.env]` values (highest precedence)
 
 For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL.
+GitHub review, CI, mention, and relay requests use the matching repo's `GITHUB_TOKEN` layers.
+When a fixed GitHub team targets that repo, its `env_file` and `[teams.env]` can override the
+token. Without a repo or team override, those requests use the workspace token.
 
 ## Running
 
@@ -268,7 +277,7 @@ While the daemon is running you can request one immediate drain (for example whi
 
 The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
 
-- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, and conflict-resolution mode/schedules apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, conflict-resolution mode/schedules, and `[worker].auto_update` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
 - **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.

@@ -5,13 +5,12 @@ import type { ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { resolveConfigDir } from "@devintern/utils";
-
 import type { Acquirer } from "../../worker";
 import type { AutomationConfig } from "./config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
+import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { getWorkerFailover } from "../worker/failover";
 import {
@@ -559,13 +558,7 @@ export class AutomationAcquirer implements Acquirer {
  * disposable worktrees where no parent config exists).
  */
 export function automationTaskDir(context: AutomationRunContext): string {
-  return (
-    context.taskFileDir ??
-    join(
-      resolveConfigDir({ configDirName: ".devintern-code", startDir: context.cwd }),
-      "automations",
-    )
-  );
+  return context.taskFileDir ?? join(resolveProjectConfigDir(context.cwd), "automations");
 }
 
 /**

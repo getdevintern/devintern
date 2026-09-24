@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, statSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -65,6 +65,19 @@ describe("relay-connect auth", () => {
     expect(hasGitHubRelayRegistration(state)).toBe(true);
     expect(hasGitHubRelayRegistration(state, "ACME/WIDGETS")).toBe(true);
     expect(hasGitHubRelayRegistration(state, "acme/other")).toBe(false);
+  });
+
+  test("workspace relay pairing uses the same state directory as the daemon", () => {
+    writeFileSync(join(dir, "workspace.toml"), "[defaults]\ntracker = 'jira'\n");
+    const state: RelayConnectState = {
+      relayUrl: RELAY_URL,
+      customerId: "user_1",
+      connectedAt: new Date(0).toISOString(),
+      registrations: [],
+    };
+    saveRelayState(state, dir);
+    expect(readFileSync(join(dir, "state", "code", "relay.json"), "utf8")).toContain("user_1");
+    expect(loadRelayState(dir)?.customerId).toBe("user_1");
   });
 
   test("runtime relay routing preserves a live legacy repo registration", () => {

@@ -3,9 +3,8 @@
  *
  * Keeps the `agent_prs` registry (worker-state.ts) truthful against GitHub.
  * The dashboard's "N agent PRs open" count reads this registry, so a PR
- * closed or deleted outside the worker (merged by a human, closed from the
- * GitHub UI, repo renamed or transferred) must leave the registry within one
- * poll cycle instead of being counted as open forever.
+ * closed outside the worker (merged by a human or closed from the GitHub UI)
+ * must leave the registry within one poll cycle.
  *
  * The review poller fetches every watched PR's state on each tick anyway, so
  * `applyAgentPrFetch` folds reconciliation into that fetch (no extra API
@@ -32,9 +31,8 @@ export interface ConditionalResult<T> {
   etag?: string;
   notModified: boolean;
   /**
-   * GitHub answered 404: the PR or repo is gone (renamed, transferred,
-   * deleted, or the credential has no access). Such rows can never be
-   * fetched again and must not stay open in the registry.
+   * GitHub answered 404. This can mean either deletion or missing access for
+   * this credential, so it cannot prove the PR should be unwatched.
    */
   gone?: boolean;
 }
@@ -48,7 +46,7 @@ export interface AgentPrReconcileGitHub {
 export interface AgentPrClosure {
   repo: string;
   prNumber: number;
-  /** Why the row was closed: the PR's GitHub state, or "gone from GitHub". */
+  /** The PR's confirmed GitHub state. */
   reason: string;
 }
 
@@ -72,7 +70,7 @@ export function agentPrKey(repo: string, prNumber: number): string {
 
 /**
  * Apply one fetched PR state to the registry: persist the ETag cursor and
- * close the row when the PR is no longer open on GitHub or is gone.
+ * close the row only when GitHub confirms that it is no longer open.
  *
  * @returns The closure record, or `null` when the PR stays watched.
  */
@@ -84,8 +82,8 @@ export function applyAgentPrFetch(
   if (!result.notModified && result.etag) {
     workerState.setCursor(agentPrStateCursorSource(pr.repo, pr.prNumber), "state", result.etag);
   }
-  if (result.gone || (result.data && result.data.state !== "open")) {
-    const reason = result.gone ? "gone from GitHub" : (result.data?.state ?? "closed");
+  if (result.data && result.data.state !== "open") {
+    const reason = result.data.state;
     workerState.markAgentPrClosed(pr.repo, pr.prNumber);
     return { repo: pr.repo, prNumber: pr.prNumber, reason };
   }
@@ -96,9 +94,8 @@ export function applyAgentPrFetch(
  * Reconcile the open-PR registry with GitHub.
  *
  * Every watched row that belongs to an allowed repo is checked once; rows
- * whose PR is closed/merged or gone are closed. Failures (network errors,
- * rate limits) leave the row open — it is retried next pass, never closed
- * on missing information.
+ * whose PR is confirmed closed/merged are closed. Missing information,
+ * including a 404 that may reflect access loss, leaves the row open.
  *
  * @param options.workerState - Registry store
  * @param options.github - GitHub client (the review poller's, so App auth applies)
@@ -143,7 +140,8 @@ export async function reconcileOpenAgentPrs(options: {
       fresh?.delete(agentPrKey(pr.repo, pr.prNumber));
       continue;
     }
-    if (result.data && fresh) {
+    if (result.gone) summary.failed += 1;
+    if ((result.data || result.gone) && fresh) {
       fresh.set(agentPrKey(pr.repo, pr.prNumber), result);
     }
   }

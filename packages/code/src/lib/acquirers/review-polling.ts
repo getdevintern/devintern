@@ -2,7 +2,7 @@
  * Review polling acquirer (worker Mode 1, Tier 1): watch the agent's own PRs.
  *
  * Each tick, for every open PR in the `agent_prs` registry:
- * 1. The reconciler conditionally GETs the PR itself — closed/merged/gone
+ * 1. The reconciler conditionally GETs the PR itself — closed/merged
  *    PRs leave the watch list (and the dashboard's open count); 304s
  *    (rate-limit-free) reuse cached metadata for base-sync checks.
  * 2. Conditional GET on the review list — a new `changes_requested` review
@@ -755,6 +755,17 @@ export class ReviewPollingAcquirer implements Acquirer {
     );
   }
 
+  private warnPrInaccessible(repo: string, prNumber: number): void {
+    const now = this.now();
+    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) return;
+    this.lastAuthWarnAt = now;
+    console.warn(
+      `⚠️  [${this.name}] GitHub returned 404 for ${repo}#${prNumber}. ` +
+        "The PR may still be open but inaccessible to this worker's GitHub credential; " +
+        "keeping it watched. Check GITHUB_TOKEN access to this repository.",
+    );
+  }
+
   /** Poll a single PR; triggers at most one address-review run. */
   private async pollPr(
     repo: string,
@@ -765,7 +776,7 @@ export class ReviewPollingAcquirer implements Acquirer {
   ): Promise<void> {
     const { workerState, github, addressPr, resolveConflicts } = this.options;
 
-    // 1. PR state (ETag-cached): unwatch closed/merged/gone PRs. When the
+    // 1. PR state (ETag-cached): unwatch confirmed closed/merged PRs. When the
     //    reconciliation pass already fetched this PR, its result is reused
     //    (and already applied), so no second request is spent here.
     const prSource = agentPrStateCursorSource(repo, prNumber);
@@ -777,6 +788,10 @@ export class ReviewPollingAcquirer implements Acquirer {
         prNumber,
         this.prCache.has(prKey) ? workerState.getCursor(prSource)?.etag : undefined,
       ));
+    if (prResult.gone) {
+      this.warnPrInaccessible(repo, prNumber);
+      return;
+    }
     if (!prefetched) {
       const closure = applyAgentPrFetch(workerState, { repo, prNumber }, prResult);
       if (closure) {

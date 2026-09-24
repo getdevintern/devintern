@@ -6,7 +6,7 @@ import type { JobKind, TaskSupervisor } from "../worker/supervisor";
 import type { AgentPr } from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
-import type { RepoManagerLike } from "./workspace-worker";
+import type { RepoManagerLike } from "./fleet-executor";
 import { buildRepoEnv } from "./env";
 
 /** Registered GitLab polling and relay reconciliation share one live repository resolver. */

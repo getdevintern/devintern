@@ -207,7 +207,9 @@ export class MentionSweepAcquirer implements Acquirer {
         botNames,
       );
     } catch (error) {
-      console.warn(`⚠️  [${this.name}] sweep failed: ${(error as Error).message}`);
+      console.warn(
+        `⚠️  [${this.name}] ${this.options.repo} sweep failed: ${(error as Error).message}`,
+      );
     } finally {
       this.busy = false;
     }

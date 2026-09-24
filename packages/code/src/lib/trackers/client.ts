@@ -34,6 +34,9 @@ export interface TaskTrackerClient {
   /** Transition a task to a named workflow status. */
   transitionStatus(taskKey: string, statusName: string): Promise<void>;
 
+  /** Status labels replaced by a GitHub/GitLab issue transition, when applicable. */
+  actionedStatusLabels?(): string[];
+
   /** Extract plain text from a task's description field. */
   extractDescriptionText(task: Task): string;
 

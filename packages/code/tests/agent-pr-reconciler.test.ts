@@ -51,7 +51,7 @@ describe("agent PR reconciler", () => {
     expect(workerState.countAgentPrs()).toEqual({ open: 0, closed: 1 });
   });
 
-  test("a gone PR (renamed, deleted, or inaccessible) is closed", async () => {
+  test("a 404 leaves an inaccessible PR watched for a later retry", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 8 });
     const summary = await reconcileOpenAgentPrs({
       workerState,
@@ -63,10 +63,9 @@ describe("agent PR reconciler", () => {
       watched: workerState.listOpenAgentPrs(),
     });
 
-    expect(summary.closed).toEqual([
-      { repo: "acme/widgets", prNumber: 8, reason: "gone from GitHub" },
-    ]);
-    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    expect(summary.failed).toBe(1);
+    expect(summary.closed).toEqual([]);
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
   });
 
   test("failures (rate limits, network) leave the row open", async () => {

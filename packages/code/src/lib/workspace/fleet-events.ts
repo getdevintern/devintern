@@ -19,7 +19,7 @@ import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
+import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 
@@ -323,6 +323,13 @@ export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
+  /**
+   * Actioned gate mirroring the polling acquirer: `true` when a task already
+   * produced a PR and has not changed since. A relayed `task.changed` can be
+   * the worker's own post-PR transition, so without this check the ticket
+   * would be re-implemented and could get a duplicate PR.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
@@ -341,6 +348,13 @@ export function createFleetTaskEvaluator(options: {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
       return false;
+    }
+    if (
+      options.isTaskActionedUnchanged &&
+      (await options.isTaskActionedUnchanged(taskKey, task.updated))
+    ) {
+      console.log(`⏭️  [fleet] relay task ${taskKey} is already actioned; not re-implementing.`);
+      return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(
