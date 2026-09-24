@@ -219,6 +219,29 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toEqual(["acme/widgets#42"]);
   });
 
+  test("a PR 404 keeps the CI watch when the credential loses access", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh = makeGithub({ prState: "open", headSha: sha1, workflowRuns: [] });
+    let inaccessible = true;
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...gh,
+        fetchPr: async (...args) =>
+          inaccessible ? { data: null, notModified: false, gone: true } : gh.fetchPr(...args),
+      }),
+      fixPr: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    inaccessible = false;
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+  });
+
   test("relay reconciliation bypasses the timer for one registered change", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {

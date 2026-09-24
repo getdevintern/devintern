@@ -329,9 +329,8 @@ export async function buildFleetEventAcquirers(options: {
             );
           } catch (error) {
             if (isGitHubNotFound(error)) {
-              // Renamed/transferred/deleted repo or PR (or lost App
-              // access): report gone so the reconciler unregisters the
-              // row instead of erroring on every tick.
+              // Deletion and missing repository access both return 404.
+              // Preserve the watch until a closed PR state is confirmed.
               return { data: null, notModified: false, gone: true };
             }
             throw error;

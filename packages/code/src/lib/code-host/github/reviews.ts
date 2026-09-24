@@ -117,10 +117,9 @@ export interface CreateReviewCommentOptions {
 
 /**
  * Whether an error thrown by a GitHub API client call is an HTTP 404
- * (`Not Found`): the repo or PR was renamed, transferred, or deleted, or
- * the credential has no access. Callers mapping PR fetches to the agent PR
- * registry use this to stop watching rows that can never be fetched again
- * instead of erroring on every poll tick.
+ * (`Not Found`): the repo or PR may be gone, or this credential may lack
+ * access. Callers must preserve watched PRs because 404 alone cannot
+ * distinguish those cases.
  *
  * @param error - Error thrown by `apiRequest` / `conditionalGet`
  */
