@@ -228,6 +228,9 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("`worker connect` configures relay integrations and Sentry auto-fixes;");
       console.log("see `devintern worker connect --help` for targets and options.");
       console.log("");
+      console.log("Unattended runs require automation access. A signed-in workspace runs the");
+      console.log("no-card Worker Pilot for 14 days (no task limit) until a license is added.");
+      console.log("");
       console.log("Configure polling, the dashboard, and per-task flags in workspace.toml");
       console.log("(~/.devintern/workspace.toml). See `devintern worker init`.");
       console.log("");

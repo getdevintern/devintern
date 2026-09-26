@@ -125,6 +125,7 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).not.toContain("--skip-jira-comments");
     expect(result.stdout).toContain("devintern PROJ-123 PROJ-456 PROJ-789 --create-pr");
     expect(result.stdout).toContain("devintern ENG-42 ENG-43 ENG-44 --create-pr");
+    expect(result.stdout).toContain("Worker Pilot");
     expect(result.stdout).toContain("webhook serve");
     expect(result.stdout).not.toContain("Deprecated alias for 'webhook serve'");
     expect(result.exitCode).toBe(0);
@@ -153,6 +154,7 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stdout).toContain("scaffold");
     expect(result.stdout).toContain("add-repo");
     expect(result.stdout).toContain("connect");
+    expect(result.stdout).toContain("Worker Pilot");
     expect(result.stdout).not.toContain("--repo");
     expect(result.stdout).toContain("--workspace <path>");
     expect(result.stdout).toContain("workspace.toml");
