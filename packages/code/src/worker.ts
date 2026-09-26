@@ -55,6 +55,9 @@ export interface Acquirer {
   name: string;
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
+  /** Suspend acquisition without stopping active work, when stop() shuts it down. */
+  pause?(): Promise<void> | void;
+  resume?(): Promise<void> | void;
 }
 
 export interface WorkerAccessMonitor {
@@ -64,7 +67,8 @@ export interface WorkerAccessMonitor {
 
 /**
  * Pause acquisition when automation access expires and resume it after access is restored.
- * An in-flight acquirer tick is allowed to finish; `stop` prevents subsequent ticks.
+ * An in-flight acquirer tick is allowed to finish. Acquirers with destructive
+ * stop behavior provide pause/resume so active work remains alive.
  */
 export function startWorkerAccessMonitor(options: {
   acquirers: Acquirer[];
@@ -85,10 +89,16 @@ export function startWorkerAccessMonitor(options: {
       if (!result.valid && !paused) {
         paused = true;
         console.warn(`⚠️  Automation access paused: ${result.message}`);
-        for (const acquirer of options.acquirers) await acquirer.stop();
+        for (const acquirer of options.acquirers) {
+          if (acquirer.pause) await acquirer.pause();
+          else await acquirer.stop();
+        }
         console.warn("   In-flight work may finish; no new work will be acquired.");
       } else if (result.valid && paused) {
-        for (const acquirer of options.acquirers) await acquirer.start();
+        for (const acquirer of options.acquirers) {
+          if (acquirer.resume) await acquirer.resume();
+          else await acquirer.start();
+        }
         paused = false;
         console.log("✅ Automation access restored; worker acquisition resumed.");
       }

@@ -24,7 +24,6 @@ import {
 import {
   activateWorkerTrial,
   checkLicense,
-  claimWorkerTrialTask,
   LicenseCheckError,
   requireLicense,
 } from "@devintern/license-check";
@@ -2249,15 +2248,11 @@ async function main(): Promise<void> {
         requireAutomation: true,
         allowTrial: process.env.DEVINTERN_WORKER_TRIAL === "1",
       });
-      enforceLicenseOrExit(licenseResult, AUTOMATION_ACCESS_EXIT_CODE);
-      if (licenseResult.source === "trial" && taskKeys[0]) {
-        const claim = await claimWorkerTrialTask({
-          productKey: "devintern/code",
-          supabaseConfig,
-          taskId: `${process.env[RUN_ORIGIN_ENV] ?? "worker"}:${taskKeys[0]}`,
-        });
-        enforceLicenseOrExit(claim, AUTOMATION_ACCESS_EXIT_CODE);
+      if (licenseResult.trialAvailable) {
+        licenseResult.valid = false;
+        licenseResult.message = "Start `devintern worker` once to activate the free Worker Pilot.";
       }
+      enforceLicenseOrExit(licenseResult, AUTOMATION_ACCESS_EXIT_CODE);
     }
 
     // Pull latest changes from remote (unless git is disabled)

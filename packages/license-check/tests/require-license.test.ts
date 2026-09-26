@@ -101,11 +101,11 @@ describe("requireLicense failure path", () => {
       requireLicense({
         valid: true,
         source: "trial",
-        message: "Free Worker Pilot active until 2026-09-22, 9 task(s) remaining.",
+        message: "Free Worker Pilot active until 2026-09-22.",
       }),
     ).not.toThrow();
     expect(logSpy).toHaveBeenCalledWith(
-      "⏳ Free Worker Pilot active until 2026-09-22, 9 task(s) remaining.\n",
+      "⏳ Free Worker Pilot active until 2026-09-22.\n",
     );
   });
 });

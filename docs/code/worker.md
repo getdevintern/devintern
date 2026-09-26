@@ -350,6 +350,6 @@ Running `devintern worker` in a terminal remains fully supported and is the only
 
 ## Worker Pilot and licenses
 
-The no-card **Worker Pilot** lets a signed-in user evaluate the unattended product for 14 days or 10 new tasks, whichever comes first. It begins only after workspace validation succeeds and the worker is ready to start its event sources. Run `devintern login`, then `devintern worker`; creating an account or using the free interactive CLI does not consume trial time.
+The no-card **Worker Pilot** lets a signed-in user evaluate the unattended product for 14 days with no task-count limit. It begins only after workspace validation succeeds and the worker is ready to start its event sources. Run `devintern login`, then `devintern worker`; creating an account or using the free interactive CLI does not consume trial time.
 
 After the pilot, the worker requires an automation license (Supporter, Team, or Business). It revalidates access while running. If access expires, in-flight work may finish but event sources pause before acquiring more work; adding a license lets them resume on the next check. Paid `LICENSE_KEY` use does not require login, and interactive runs stay free under the FSL license.

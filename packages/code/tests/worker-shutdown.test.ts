@@ -45,6 +45,45 @@ describe("startWorkerAccessMonitor", () => {
       console.log = log;
     }
   });
+
+  test("uses non-destructive pause and resume when an acquirer provides them", async () => {
+    const events: string[] = [];
+    let valid = false;
+    const warn = console.warn;
+    const log = console.log;
+    console.warn = () => undefined;
+    console.log = () => undefined;
+    try {
+      const monitor = startWorkerAccessMonitor({
+        acquirers: [
+          {
+            name: "scheduled",
+            start: () => {
+              events.push("start");
+            },
+            stop: () => {
+              events.push("stop");
+            },
+            pause: () => {
+              events.push("pause");
+            },
+            resume: () => {
+              events.push("resume");
+            },
+          },
+        ],
+        check: async () => ({ valid, message: "pilot expired" }),
+      });
+      await monitor.checkNow();
+      valid = true;
+      await monitor.checkNow();
+      monitor.stop();
+      expect(events).toEqual(["pause", "resume"]);
+    } finally {
+      console.warn = warn;
+      console.log = log;
+    }
+  });
 });
 
 describe("createWorkerShutdownHandler", () => {

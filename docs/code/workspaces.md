@@ -13,7 +13,7 @@ Workspace mode lets one `devintern worker` process serve every repository you au
 
 The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace, validates `[defaults].task_query`, and asks about task pickup hours, conflict handling, and automatic CI repair. Add more repos later with `devintern worker add-repo`.
 
-Workspace mode runs under the same automation access as the rest of the worker: any Supporter, Team, or Business key covers it, and a signed-in user can first use the no-card Worker Pilot for 14 days or 10 new tasks. One entitlement spans all applicable repositories in the fleet.
+Workspace mode runs under the same automation access as the rest of the worker: any Supporter, Team, or Business key covers it, and a signed-in user can first use the no-card Worker Pilot for 14 days with no task-count limit. One entitlement spans all applicable repositories in the fleet.
 
 ## How it works
 

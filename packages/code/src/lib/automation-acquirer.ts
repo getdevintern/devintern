@@ -128,6 +128,7 @@ export class AutomationAcquirer implements Acquirer {
   private active = new Map<string, ActiveAutomationRun>();
   private tickPromise: Promise<void> | null = null;
   private stopped = true;
+  private paused = false;
 
   constructor(options: AutomationAcquirerOptions) {
     this.options = options;
@@ -155,6 +156,17 @@ export class AutomationAcquirer implements Acquirer {
     for (const active of this.active.values()) active.run.terminate();
     await Promise.allSettled([...this.active.values()].map((active) => active.lifecycle));
     this.store.close();
+  }
+
+  /** Suspend new scheduled and manual runs while active runs keep their leases. */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /** Resume acquisition after automation access has been restored. */
+  async resume(): Promise<void> {
+    this.paused = false;
+    await this.tick();
   }
 
   /** Public for deterministic tests; production calls it through one setTimeout. */
@@ -241,7 +253,7 @@ export class AutomationAcquirer implements Acquirer {
         state = this.store.get(stateId);
         if (!state) continue;
       }
-      if (state.nextDueAt > this.now()) continue;
+      if (this.paused || state.nextDueAt > this.now()) continue;
 
       const overlapNow = this.now();
       if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > overlapNow) {
@@ -283,7 +295,7 @@ export class AutomationAcquirer implements Acquirer {
           this.store.release(stateId, this.owner);
           continue;
         }
-        if (this.stopped) {
+        if (this.stopped || this.paused) {
           this.store.release(stateId, this.owner);
           await context.release();
           continue;
@@ -383,6 +395,9 @@ export class AutomationAcquirer implements Acquirer {
     if (this.stopped) {
       return { ok: false, reason: "the worker is shutting down; try again after it restarts" };
     }
+    if (this.paused) {
+      return { ok: false, reason: "automation access is paused; try again after it is restored" };
+    }
     if (this.active.has(automationId)) {
       return { ok: false, reason: `automation "${automationId}" is already running` };
     }
@@ -436,10 +451,15 @@ export class AutomationAcquirer implements Acquirer {
         reason: `the repository for "${automationId}" is busy with another run; try again shortly`,
       };
     }
-    if (this.stopped) {
+    if (this.stopped || this.paused) {
       this.store.release(stateId, this.owner);
       await context.release();
-      return { ok: false, reason: "the worker is shutting down; try again after it restarts" };
+      return {
+        ok: false,
+        reason: this.stopped
+          ? "the worker is shutting down; try again after it restarts"
+          : "automation access is paused; try again after it is restored",
+      };
     }
     if (!this.store.heartbeat(stateId, this.owner, this.now(), leaseMs)) {
       await context.release();
@@ -503,7 +523,7 @@ export class AutomationAcquirer implements Acquirer {
     if (this.timer) (this.options.clearTimer ?? clearTimeout)(this.timer);
     const now = this.now();
     const dueTimes = this.options.automations
-      .filter((item) => item.enabled)
+      .filter((item) => item.enabled && !this.paused)
       .map((item) => this.store.get(this.stateId(item))?.nextDueAt)
       .filter((value): value is number => value !== undefined);
     const heartbeatAt =

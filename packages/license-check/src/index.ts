@@ -15,7 +15,6 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getAuthenticatedUser } from "@devintern/auth";
 import type { AuthenticatedUser, SupabaseAuthConfig } from "@devintern/auth";
@@ -50,8 +49,6 @@ export interface LicenseCheckResult {
   entitlementSource?: EntitlementSource;
   /** Server-authoritative worker-trial expiry. */
   trialEndsAt?: string;
-  /** Remaining new worker tasks, when the trial is usage-capped. */
-  trialTasksRemaining?: number;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
 }
@@ -157,7 +154,6 @@ interface EntitlementResponse {
   trial?: {
     status: "available" | "active";
     endsAt?: string;
-    tasksRemaining?: number;
   };
 }
 
@@ -166,8 +162,6 @@ function trialResult(response: EntitlementResponse): LicenseCheckResult | null {
   const { trial } = response;
   if (
     (trial.status !== "available" && trial.status !== "active") ||
-    !Number.isInteger(trial.tasksRemaining) ||
-    (trial.tasksRemaining ?? -1) < 0 ||
     (trial.status === "active" &&
       (!trial.endsAt ||
         !Number.isFinite(Date.parse(trial.endsAt)) ||
@@ -179,17 +173,14 @@ function trialResult(response: EntitlementResponse): LicenseCheckResult | null {
       message: "The license server returned an invalid or expired Worker Pilot response.",
     };
   }
-  const remaining =
-    trial.tasksRemaining === undefined ? "" : `, ${trial.tasksRemaining} task(s) remaining`;
   return {
     valid: true,
     source: "trial",
     message:
       trial.status === "available"
         ? "Free Worker Pilot available; it starts after the worker is ready."
-        : `Free Worker Pilot active until ${trial.endsAt ?? "the server-provided expiry"}${remaining}.`,
+        : `Free Worker Pilot active until ${trial.endsAt ?? "the server-provided expiry"}.`,
     trialEndsAt: trial.endsAt,
-    trialTasksRemaining: trial.tasksRemaining,
     trialAvailable: trial.status === "available",
   };
 }
@@ -554,71 +545,6 @@ export async function activateWorkerTrial(options: {
       valid: false,
       source: "none",
       message: `Could not start the free Worker Pilot: ${error instanceof Error ? error.message : String(error)}.`,
-    };
-  }
-}
-
-/** Atomically reserve one new task from an active Worker Pilot's server-side allowance. */
-export async function claimWorkerTrialTask(options: {
-  productKey: string;
-  supabaseConfig: SupabaseAuthConfig;
-  /** Stable task/occurrence identity used by the server to make retries idempotent. */
-  taskId: string;
-  retryBaseDelayMs?: number;
-}): Promise<LicenseCheckResult> {
-  let user: AuthenticatedUser | null = null;
-  try {
-    user = await getAuthenticatedUser(options.supabaseConfig);
-  } catch {
-    // Render the same actionable login requirement as a missing session.
-  }
-  if (!user?.accessToken) {
-    return {
-      valid: false,
-      source: "none",
-      message: "The free Worker Pilot requires `devintern login`.",
-    };
-  }
-
-  const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
-  const taskFingerprint = createHash("sha256").update(`${user.id}:${options.taskId}`).digest("hex");
-  try {
-    const response = await fetchWithRetry(
-      `${base}/api/license/trial/task`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${user.accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ productKey: options.productKey, taskFingerprint }),
-      },
-      {
-        maxRetries: ENTITLEMENT_MAX_RETRIES,
-        baseDelay: options.retryBaseDelayMs ?? 500,
-        jitter: false,
-      },
-    );
-    if (!response.ok) {
-      return {
-        valid: false,
-        source: "none",
-        message: `The free Worker Pilot cannot start another task (${formatEntitlementHttpError(response.status, await response.text())}).`,
-      };
-    }
-    const body = (await response.json()) as EntitlementResponse;
-    const result = trialResult(body);
-    if (result && !result.trialAvailable) return result;
-    return {
-      valid: false,
-      source: "none",
-      message: "The license server did not reserve a Worker Pilot task.",
-    };
-  } catch (error) {
-    return {
-      valid: false,
-      source: "none",
-      message: `Could not reserve a Worker Pilot task: ${error instanceof Error ? error.message : String(error)}.`,
     };
   }
 }

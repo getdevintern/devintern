@@ -22,7 +22,7 @@ Keep the worker running and use [working windows](#working-windows-quiet-hours) 
 
 ## Free Worker Pilot or automation license
 
-Signed-in users can evaluate the worker without a card for 14 days or 10 new tasks, whichever comes first. Continued unattended execution requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds neither an active Worker Pilot nor a matching license, the run fails immediately with:
+Signed-in users can evaluate the worker without a card for 14 days with no task-count limit. Continued unattended execution requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds neither an active Worker Pilot nor a matching license, the run fails immediately with:
 
 ```
 ❌ License check failed

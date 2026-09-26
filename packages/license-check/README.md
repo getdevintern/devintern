@@ -12,17 +12,12 @@ The pilot is server-authoritative. The CLI never derives eligibility or expiry f
 {
   "entitled": true,
   "source": "worker-trial",
-  "trial": {
-    "status": "available",
-    "tasksRemaining": 10
-  }
+  "trial": { "status": "available" }
 }
 ```
 
-An active trial uses `"status": "active"` and also returns an ISO `endsAt`. Expired, exhausted, and ineligible trials return the normal `entitled: false` response with a human-readable `reason`.
+An active trial uses `"status": "active"` and also returns an ISO `endsAt`. Expired and ineligible trials return the normal `entitled: false` response with a human-readable `reason`.
 
 `POST /api/license/trial` with `{ "productKey": "devintern/code" }` atomically activates an eligible trial and returns the active response. Repeated activation is idempotent and must not move `endsAt`.
 
-`POST /api/license/trial/task` with `{ "productKey": "devintern/code", "taskFingerprint": "<sha256>" }` atomically reserves one task. The fingerprint is computed locally from the authenticated user id and task identity, so raw tracker keys and paths are never sent. Repeated claims with the same authenticated user and fingerprint are idempotent and return the current active response without decrementing twice. A successful response includes the post-claim `tasksRemaining`; exhausted or expired trials return a non-2xx response.
-
-The intended policy is 14 calendar days or 10 distinct worker task claims, whichever comes first. Trial responses are deliberately excluded from the paid-entitlement cache and its 72-hour outage grace.
+The pilot lasts 14 calendar days from activation, with no task-count limit. Trial responses are deliberately excluded from the paid-entitlement cache and its 72-hour outage grace. The relay may be connected during setup, but it only delivers events after activation.

@@ -257,7 +257,7 @@ describe("checkLicense entitlement API", () => {
       return Response.json({
         entitled: true,
         source: "worker-trial",
-        trial: { status: "available", tasksRemaining: 10 },
+        trial: { status: "available" },
       });
     }) as typeof fetch;
 
@@ -273,7 +273,6 @@ describe("checkLicense entitlement API", () => {
       valid: true,
       source: "trial",
       trialAvailable: true,
-      trialTasksRemaining: 10,
     });
     expect(urls[0]).toContain("trial=1");
   });
@@ -310,7 +309,6 @@ describe("checkLicense entitlement API", () => {
         trial: {
           status: "active",
           endsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-          tasksRemaining: 10,
         },
       });
     }) as typeof fetch;
@@ -325,39 +323,11 @@ describe("checkLicense entitlement API", () => {
       valid: true,
       source: "trial",
       trialAvailable: false,
-      trialTasksRemaining: 10,
     });
     expect(request?.url).toEndWith("/api/license/trial");
     expect(request?.init?.method).toBe("POST");
     expect(request?.init?.headers).toMatchObject({ Authorization: "Bearer test-access-token" });
   });
 
-  test("claims a trial task with an idempotent task identity", async () => {
-    let body = "";
-    globalThis.fetch = (async (_input, init) => {
-      body = String(init?.body);
-      return Response.json({
-        entitled: true,
-        source: "worker-trial",
-        trial: {
-          status: "active",
-          endsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-          tasksRemaining: 9,
-        },
-      });
-    }) as typeof fetch;
 
-    const { claimWorkerTrialTask } = await import(`../src/index.ts?trial-claim=${Date.now()}`);
-    const result = await claimWorkerTrialTask({
-      productKey: "devintern/code",
-      supabaseConfig: freshSupabaseConfig(),
-      taskId: "worker:DEV-42",
-    });
-
-    expect(JSON.parse(body)).toEqual({
-      productKey: "devintern/code",
-      taskFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
-    });
-    expect(result.trialTasksRemaining).toBe(9);
-  });
 });
