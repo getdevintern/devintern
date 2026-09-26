@@ -45,7 +45,13 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
     productKey: "devintern/code",
     supabaseConfig: loadSupabaseConfig(),
     requireAutomation: true,
+    allowTrial: true,
   });
+  if (licenseResult.trialAvailable) {
+    licenseResult.valid = false;
+    licenseResult.source = "none";
+    licenseResult.message = "Start `devintern worker` once to activate the free Worker Pilot.";
+  }
   await enforceLicenseOrExit(licenseResult);
 
   const { startDashboardServer } = await import("../../dashboard-server");

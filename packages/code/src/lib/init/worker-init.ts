@@ -705,14 +705,35 @@ async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<v
   if (!ctx.deps.checkAutomationLicense) return;
   ctx.log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
   try {
-    const failure = await ctx.deps.checkAutomationLicense(workspaceDir);
+    let failure = await ctx.deps.checkAutomationLicense(workspaceDir);
     if (failure === null) {
       ctx.log("✅ Automation license OK.");
     } else {
       ctx.log(`⚠️  ${failure}`);
-      ctx.log("   The worker will refuse to start until this is fixed:");
-      ctx.log("   get a Supporter, Team, or Business key at https://devintern.com/pricing");
-      ctx.log("   and set LICENSE_KEY in .devintern-code/.env (or sign in).");
+      const loginAnswer = (
+        await ctx.prompt("Sign in now to start a free Worker Pilot (no card required)? [Y/n]: ")
+      )
+        .trim()
+        .toLowerCase();
+      if (loginAnswer !== "n" && loginAnswer !== "no") {
+        try {
+          const signIn = ctx.deps.signIn ?? defaultSignIn;
+          const user = await signIn(ctx.projectRoot, workspaceDir);
+          if (user) {
+            ctx.log(`✅ Signed in as ${user.email || user.id}.`);
+            failure = await ctx.deps.checkAutomationLicense(workspaceDir);
+          }
+        } catch (error) {
+          ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
+        }
+      }
+      if (failure === null) {
+        ctx.log("✅ Free Worker Pilot available. It starts when the worker is ready.");
+      } else {
+        ctx.log("   The worker will refuse to start until this is fixed:");
+        ctx.log("   sign in for a free Worker Pilot, or get an automation license at");
+        ctx.log("   https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.");
+      }
     }
   } catch (error) {
     ctx.log(

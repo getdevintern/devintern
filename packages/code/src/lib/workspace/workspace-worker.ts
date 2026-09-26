@@ -27,7 +27,13 @@ import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildRepoEnv, buildTeamEnv } from "./env";
+import {
+  applyWorkspaceProcessEnv,
+  buildErrorMonitorEnv,
+  buildRepoEnv,
+  buildTeamEnv,
+  buildWorkspaceContextEnv,
+} from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -234,7 +240,13 @@ export async function resolveWorkspaceAutomationContext(
     : config.repos.length === 1
       ? config.repos[0]
       : undefined;
-  if (!repo) return { cwd: workspaceDir, env: { ...process.env }, taskFileDir, release() {} };
+  if (!repo)
+    return {
+      cwd: workspaceDir,
+      env: buildWorkspaceContextEnv(workspaceDir),
+      taskFileDir,
+      release() {},
+    };
 
   await repoManager.ensureBareClone(repo);
   await repoManager.fetch(repo.name);
@@ -376,6 +388,10 @@ export interface RunWorkspaceWorkerOptions {
   verbose?: boolean;
   /** CLI release attached to anonymous worker startup analytics. */
   cliVersion?: string;
+  /** Activate an eligible Worker Pilot after validation, before sources acquire work. */
+  beforeAcquirersStart?: () => Promise<void>;
+  /** Revalidate paid or trial automation access while the daemon remains alive. */
+  accessCheck?: () => Promise<{ valid: boolean; message: string }>;
 }
 
 function formatClockTime(at: number): string {
@@ -648,7 +664,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     dbPath: state.dbPath,
     resolveContext: (estimation) =>
       withSupervisorSlot(
-        async () => ({ cwd: workspaceDir, env: { ...process.env }, release() {} }),
+        async () => ({
+          cwd: workspaceDir,
+          env: buildWorkspaceContextEnv(workspaceDir),
+          release() {},
+        }),
         supervisor,
         {
           source: `estimation:${estimation.id}`,
@@ -927,6 +947,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
+      beforeAcquirersStart: options.beforeAcquirersStart,
+      accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
         reloader.stop();

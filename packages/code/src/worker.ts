@@ -28,6 +28,12 @@ export interface WorkerOptions {
   logDir?: string;
   /** Called once after every configured event source starts successfully. */
   onStarted?: (acquirerNames: string[]) => Promise<void> | void;
+  /** Runs after workspace validation and lock acquisition, before any source can acquire work. */
+  beforeAcquirersStart?: () => Promise<void> | void;
+  /** Periodically revalidate automation access; invalid access pauses all sources. */
+  accessCheck?: () => Promise<{ valid: boolean; message: string }>;
+  /** Automation access recheck cadence (defaults to one hour). */
+  accessCheckIntervalMs?: number;
   /**
    * Starts mode-specific shutdown work before acquirers stop. The returned
    * promise is awaited after they stop, allowing admission drains and
@@ -54,6 +60,7 @@ export interface WorkerOptions {
 
 /** Default bound for mode-specific graceful shutdown work. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+export const DEFAULT_ACCESS_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
  * An event acquirer turns "something changed at the source" into queued work.
@@ -63,6 +70,75 @@ export interface Acquirer {
   name: string;
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
+  /** Suspend acquisition without stopping active work, when stop() shuts it down. */
+  pause?(): Promise<void> | void;
+  resume?(): Promise<void> | void;
+}
+
+export interface WorkerAccessMonitor {
+  checkNow(): Promise<void>;
+  stop(): void;
+}
+
+/**
+ * Pause acquisition when automation access expires and resume it after access is restored.
+ * An in-flight acquirer tick is allowed to finish. Acquirers with destructive
+ * stop behavior provide pause/resume so active work remains alive.
+ */
+export function startWorkerAccessMonitor(options: {
+  acquirers: Acquirer[];
+  check: () => Promise<{ valid: boolean; message: string }>;
+  intervalMs?: number;
+  setInterval?: typeof setInterval;
+  clearInterval?: typeof clearInterval;
+}): WorkerAccessMonitor {
+  let checking = false;
+  let paused = false;
+  let stopped = false;
+
+  const checkNow = async (): Promise<void> => {
+    if (checking || stopped) return;
+    checking = true;
+    try {
+      const result = await options.check();
+      if (!result.valid && !paused) {
+        paused = true;
+        console.warn(`⚠️  Automation access paused: ${result.message}`);
+        for (const acquirer of options.acquirers) {
+          if (acquirer.pause) await acquirer.pause();
+          else await acquirer.stop();
+        }
+        console.warn("   In-flight work may finish; no new work will be acquired.");
+      } else if (result.valid && paused) {
+        for (const acquirer of options.acquirers) {
+          if (acquirer.resume) await acquirer.resume();
+          else await acquirer.start();
+        }
+        paused = false;
+        console.log("✅ Automation access restored; worker acquisition resumed.");
+      }
+    } catch (error) {
+      console.warn(`⚠️  Automation access recheck failed: ${(error as Error).message}`);
+    } finally {
+      checking = false;
+    }
+  };
+
+  const schedule = options.setInterval ?? setInterval;
+  const cancel = options.clearInterval ?? clearInterval;
+  const timer = schedule(
+    () => void checkNow(),
+    options.intervalMs ?? DEFAULT_ACCESS_CHECK_INTERVAL_MS,
+  );
+  timer.unref?.();
+
+  return {
+    checkNow,
+    stop() {
+      stopped = true;
+      cancel(timer);
+    },
+  };
 }
 
 export interface WorkerShutdownDependencies {
@@ -253,17 +329,45 @@ export async function startWorker(
     process.exit(1);
   }
 
-  for (const acquirer of acquirers) {
-    await acquirer.start();
+  try {
+    await options.beforeAcquirersStart?.();
+  } catch (error) {
+    lock.release();
+    capture?.stop();
+    throw error;
   }
-  await options.onStarted?.(acquirers.map((acquirer) => acquirer.name));
+
+  const startedAcquirers: Acquirer[] = [];
+  try {
+    for (const acquirer of acquirers) {
+      await acquirer.start();
+      startedAcquirers.push(acquirer);
+    }
+    await options.onStarted?.(acquirers.map((acquirer) => acquirer.name));
+  } catch (error) {
+    for (const acquirer of startedAcquirers) await acquirer.stop();
+    lock.release();
+    capture?.stop();
+    throw error;
+  }
+
+  const accessMonitor = options.accessCheck
+    ? startWorkerAccessMonitor({
+        acquirers,
+        check: options.accessCheck,
+        intervalMs: options.accessCheckIntervalMs,
+      })
+    : null;
 
   const shutdown = createWorkerShutdownHandler({
     acquirers,
     lock,
     capture,
     beginShutdown: options.beginShutdown,
-    onShutdown: options.onShutdown,
+    onShutdown: async () => {
+      accessMonitor?.stop();
+      await options.onShutdown?.();
+    },
     shutdownTimeoutMs: options.shutdownTimeoutMs,
     finalExitCode: options.finalExitCode,
   });

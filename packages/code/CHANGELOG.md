@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+### Added
+
+- **No-card Worker Pilot**: signed-in users can evaluate unattended automation for 14 days with no task-count limit, starting only after worker startup validation succeeds. Trial activation and expiry are server-authoritative; interactive CLI use and paid `LICENSE_KEY` flows remain login-free. Long-running workers revalidate hourly, pause sources after access expires while allowing in-flight work to finish, and resume automatically after a license is added
+
 ## [2.15.0] - 2026-09-26
 
 Team-aware relay routing release: instant tracker events now carry the workspace team, so several boards of the same tracker can each hold their own relay registration and dispatch only to that exact team, and the shared workspace `.env` can namespace credentials per team.

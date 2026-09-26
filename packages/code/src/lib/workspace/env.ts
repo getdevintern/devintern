@@ -266,6 +266,21 @@ export function buildErrorMonitorEnv(
   return result;
 }
 
+/**
+ * Compose the environment for a workspace-context run that has no repository
+ * (automations, estimations): the current process env with the worker runtime
+ * paths pinned, so the child resolves auth and license state in the workspace.
+ *
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildWorkspaceContextEnv(
+  workspaceDir: string = resolveWorkspaceDir(),
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env };
+  pinWorkerRuntimeEnv(env, workspaceDir);
+  return env;
+}
+
 /** Keep worker-owned paths and the subprocess marker above credential layers. */
 function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceDir: string): void {
   env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);

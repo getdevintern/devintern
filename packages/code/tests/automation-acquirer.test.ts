@@ -291,6 +291,57 @@ describe("AutomationAcquirer", () => {
     await acquirer.stop();
   });
 
+  test("pauses new runs while an active run finishes, then resumes", async () => {
+    const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 0;
+    let runs = 0;
+    let terminations = 0;
+    let resolveFirst!: (ok: boolean) => void;
+    const acquirer = new AutomationAcquirer({
+      automations: [{ id: "pilot", enabled: true, prompt: "p", interval: "10ms", intervalMs: 10 }],
+      dbPath,
+      now: () => now,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => {
+        runs++;
+        return {
+          completion:
+            runs === 1
+              ? new Promise<boolean>((resolve) => (resolveFirst = resolve))
+              : Promise.resolve(true),
+          terminate: () => {
+            terminations++;
+          },
+        };
+      },
+    });
+
+    await acquirer.start();
+    now = 10;
+    await acquirer.tick();
+    expect(runs).toBe(1);
+    acquirer.pause();
+    expect(await acquirer.triggerManual("pilot")).toEqual({
+      ok: false,
+      reason: "automation access is paused; try again after it is restored",
+    });
+    now = 20;
+    await acquirer.tick();
+    expect(runs).toBe(1);
+    expect(terminations).toBe(0);
+
+    resolveFirst(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await acquirer.resume();
+    expect(runs).toBe(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await acquirer.stop();
+    expect(terminations).toBe(0);
+  });
+
   test("heartbeats a claim while context resolution exceeds the lease", async () => {
     const dbPath = join(tmpdir(), `acquirer-${Date.now()}-${Math.random()}.db`);
     dbPaths.push(dbPath);

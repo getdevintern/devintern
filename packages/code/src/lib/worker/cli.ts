@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
-import { checkLicense } from "@devintern/license-check";
+import { activateWorkerTrial, checkLicense, requireLicense } from "@devintern/license-check";
 import {
   VERSION,
   enforceLicenseOrExit,
@@ -172,6 +172,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         productKey: "devintern/code",
         supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
         requireAutomation: true,
+        allowTrial: true,
       });
       return license.valid ? null : license.message;
     },
@@ -273,18 +274,46 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
 
   // License check — the worker is unattended automation, so it always
   // requires an automation entitlement.
+  const supabaseConfig = loadSupabaseConfig(workspaceCodeStateDir(selectedWorkspaceDir));
   const licenseResult = await checkLicense({
     productKey: "devintern/code",
-    supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(selectedWorkspaceDir)),
+    supabaseConfig,
     requireAutomation: true,
+    allowTrial: true,
   });
   await enforceLicenseOrExit(licenseResult);
+  if (licenseResult.source === "trial") {
+    process.env.DEVINTERN_WORKER_TRIAL = "1";
+  }
 
   const { runWorkspaceWorker } = await import("../workspace/workspace-worker");
   await runWorkspaceWorker({
     workspacePath,
     verbose,
     cliVersion: VERSION,
+    beforeAcquirersStart: licenseResult.trialAvailable
+      ? async () => {
+          const activated = await activateWorkerTrial({
+            productKey: "devintern/code",
+            supabaseConfig,
+          });
+          requireLicense(activated);
+        }
+      : undefined,
+    accessCheck: async () => {
+      let access = await checkLicense({
+        productKey: "devintern/code",
+        supabaseConfig,
+        requireAutomation: true,
+        allowTrial: true,
+      });
+      if (access.trialAvailable) {
+        access = await activateWorkerTrial({ productKey: "devintern/code", supabaseConfig });
+      }
+      if (access.source === "trial") process.env.DEVINTERN_WORKER_TRIAL = "1";
+      else delete process.env.DEVINTERN_WORKER_TRIAL;
+      return access;
+    },
   });
 }
 

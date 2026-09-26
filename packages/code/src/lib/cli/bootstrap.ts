@@ -103,16 +103,20 @@ export function loadSupabaseConfig(configDir: string = resolveRuntimeStateDir())
 /**
  * Enforce a license result inside the CLI. `requireLicense` throws a
  * `LicenseCheckError` on failure (library code must never kill the host
- * process); the CLI converts that into its standard failed-check exit code 1
+ * process); the CLI converts that into the supplied exit code (1 by default,
+ * or `AUTOMATION_ACCESS_EXIT_CODE` when a parent worker should defer the task)
  * after the failure details were already printed to stderr. The exit flushes
- * pending analytics so events captured earlier in the run (e.g. `cli_run`)
- * are not dropped.
+ * pending analytics so events captured earlier in the run (e.g. `cli_run`) are
+ * not dropped.
  */
-export async function enforceLicenseOrExit(result: LicenseCheckResult): Promise<void> {
+export async function enforceLicenseOrExit(
+  result: LicenseCheckResult,
+  exitCode = 1,
+): Promise<void> {
   try {
     requireLicense(result);
   } catch (error) {
-    if (error instanceof LicenseCheckError) await flushAnalyticsAndExit(1);
+    if (error instanceof LicenseCheckError) await flushAnalyticsAndExit(exitCode);
     throw error;
   }
 }

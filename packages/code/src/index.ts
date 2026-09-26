@@ -40,6 +40,7 @@ import { isSubcommandCommand, createProgram } from "./lib/cli/program";
 import type { ProgramOptions } from "./lib/cli/program";
 import { validateEnvironment } from "./lib/config/validate-environment";
 import { isWorkerTaskProcess, runContext } from "./lib/cli/context";
+import { AUTOMATION_ACCESS_EXIT_CODE } from "./lib/worker/usage-limit-protocol";
 import { runEstimationBatch, resolveRunTargets, runTaskBatch } from "./lib/cli/run";
 import { processSingleTask } from "./lib/task/pipeline";
 import { reportProcessingFailure } from "./lib/task/processing-failure";
@@ -278,8 +279,13 @@ async function main(): Promise<void> {
         productKey: "devintern/code",
         supabaseConfig,
         requireAutomation: true,
+        allowTrial: process.env.DEVINTERN_WORKER_TRIAL === "1",
       });
-      await enforceLicenseOrExit(licenseResult);
+      if (licenseResult.trialAvailable) {
+        licenseResult.valid = false;
+        licenseResult.message = "Start `devintern worker` once to activate the free Worker Pilot.";
+      }
+      await enforceLicenseOrExit(licenseResult, AUTOMATION_ACCESS_EXIT_CODE);
     }
 
     // Pull latest changes from remote (unless git is disabled)

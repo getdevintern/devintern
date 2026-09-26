@@ -7,6 +7,8 @@
  * signal plus the parsed reset window.
  *
  * Exit 75 is EX_TEMPFAIL (sysexits): "temporary failure, try again later".
+ * Exit 77 is EX_NOPERM and tells the parent to defer a task until the worker's
+ * automation access is restored.
  */
 
 import { readFileSync, writeFileSync } from "fs";
@@ -15,6 +17,9 @@ import { resetHintToMs, UsageLimitError } from "@devintern/agent-harness";
 
 /** sysexits EX_TEMPFAIL — the worker retries on the next harness. */
 export const USAGE_LIMIT_EXIT_CODE = 75;
+
+/** sysexits EX_NOPERM — parent workers defer the task until access is restored. */
+export const AUTOMATION_ACCESS_EXIT_CODE = 77;
 
 /** Set to `"1"` on CLI subprocesses the worker will fail over for. */
 export const WORKER_CHILD_ENV = "DEVINTERN_WORKER_CHILD";
