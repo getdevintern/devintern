@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { execSync, spawn as nodeSpawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
@@ -179,6 +179,26 @@ describe("nono Landlock grant refinement", () => {
         `--read-file ${join(root, "starship.toml")}`,
       ].sort(),
     );
+  });
+
+  test("refineGrantsAgainstDenies grants symlinks according to their targets", () => {
+    const root = mkdtempSync(join(tmpdir(), "nono-symlinks-"));
+    const targetDir = join(root, "target-dir");
+    const targetFile = join(root, "target-file");
+    mkdirSync(targetDir);
+    mkdirSync(join(root, "denied"));
+    writeFileSync(targetFile, "test");
+    symlinkSync(targetDir, join(root, "directory-link"));
+    symlinkSync(targetFile, join(root, "file-link"));
+    symlinkSync(join(root, "missing"), join(root, "broken-link"));
+
+    const refined = refineGrantsAgainstDenies(
+      [{ flag: "--read", path: root }],
+      [join(root, "denied")],
+    );
+    expect(refined).toContainEqual({ flag: "--read", path: join(root, "directory-link") });
+    expect(refined).toContainEqual({ flag: "--read-file", path: join(root, "file-link") });
+    expect(refined.some((grant) => grant.path === join(root, "broken-link"))).toBe(false);
   });
 
   test("refineGrantsAgainstDenies leaves unrelated and non-directory grants unchanged", () => {
