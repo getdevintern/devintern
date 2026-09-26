@@ -421,9 +421,9 @@ async function attemptMerge(params: {
     await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
     return {
       kind: "aborted",
-      message: stillConflicted
-        ? "agent left unresolved conflicts; merge aborted"
-        : "agent run failed; merge aborted",
+      message: !agentResult.success
+        ? "agent run failed; merge aborted"
+        : "agent left unresolved conflicts; merge aborted",
     };
   }
 

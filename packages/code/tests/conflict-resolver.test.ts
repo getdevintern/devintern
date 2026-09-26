@@ -279,6 +279,7 @@ describe("resolveConflictsOnPr", () => {
       },
     });
     expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("agent run failed");
     expect(usedWorkDir).toBeDefined();
     expect(existsSync(usedWorkDir!)).toBe(false);
   });
