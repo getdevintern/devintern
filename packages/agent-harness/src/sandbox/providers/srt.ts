@@ -88,7 +88,7 @@ const HARNESS_STATE_PATHS: Record<string, string[]> = {
   gemini: [".gemini"],
   // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
   cursor: [".cursor", ".config/cursor"],
-  opencode: [".config/opencode", ".local/share/opencode"],
+  opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
 };
 
 function harnessStatePaths(harnessName: string | undefined): string[] {
