@@ -1,5 +1,15 @@
 # @devintern/code Changelog
 
+## [2.14.1] - 2026-09-26
+
+Reliability patch: agent worktrees now initialize submodules before dependency installation, sandbox grants classify symlinks by their targets so OpenCode state directories are allowed correctly, and registered repositories prefer their workspace credential layers over the checkout's local `.env`.
+
+### Fixed
+
+- **Agent worktrees initialize submodules**: Git does not populate submodules when it creates a linked worktree, so a dependency inside a submodule workspace (for example `vendor/devintern/packages/license-policy`) was missing during dependency discovery and installation. Worktree preparation now runs `git submodule update --init --recursive` when the checkout has a `.gitmodules`, before installing dependencies, and warns without failing the run when initialization fails. The conflict resolver also reports an agent failure rather than "unresolved conflicts" when the agent run itself failed
+- **Sandbox grants classify symlinks by their target**: the `nono` provider passed a symlink as a file grant even when its target is a directory, which nono rejects; grants are now chosen from the resolved target type, and a dangling or inaccessible link is skipped instead of granted. The `opencode` harness state paths now also include `.local/state/opencode` for both `nono` and `srt`, so the sandbox can write OpenCode's state locks
+- **Registered repositories prefer workspace credentials**: the workspace worker uses the shared workspace `.env` even when started inside a repository and no longer loads that repository's `.devintern-code/.env` (use the repo's `env_file` / `[repos.env]` layers to differ by repository). Worker task subprocesses use their composed workspace and repo layers instead of reading the checkout's local `.env`, and manual `devintern resolve-conflicts <pr-url>` / `devintern address-review <pr-url>` use the workspace and repo credential layers and the workspace login session when the current checkout origin and the PR/MR URL both match a registered workspace repository. Other checkouts keep their project-local configuration
+
 ## [2.14.0] - 2026-09-24
 
 Self-updating worker release: an idle worker keeps itself current from the npm registry, task polling fills free concurrency slots instead of stalling after the first batch, and worker-generated PRs no longer include DevIntern runtime files.
