@@ -1,6 +1,8 @@
 # @devintern/code Changelog
 
-## Unreleased
+## [2.16.0] - 2026-09-26
+
+Worker Pilot release: a signed-in user can evaluate unattended automation for 14 days with no card and no task cap, with server-authoritative activation and expiry, while worker auth and license state resolve under the workspace.
 
 ### Added
 
