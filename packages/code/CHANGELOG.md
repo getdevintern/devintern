@@ -1,5 +1,14 @@
 # @devintern/code Changelog
 
+## [2.15.0] - 2026-09-26
+
+Team-aware relay routing release: instant tracker events now carry the workspace team, so several boards of the same tracker can each hold their own relay registration and dispatch only to that exact team, and the shared workspace `.env` can namespace credentials per team.
+
+### Added
+
+- **Team-scoped tracker relay registrations (DEV-114)**: `devintern worker connect <tracker> --team <name>` registers a board under its stable team name, and each tracker/team pair gets its own idempotent ingest URL. Relayed `task.changed` envelopes now carry the team and dispatch only to that exact workspace team, so two boards with overlapping task keys never collide. When several teams share a tracker, `--team` selects one (auto-selected when only that team uses the tracker); unknown or removed teams are logged, skipped, and acknowledged so they cannot stall the stream, while legacy team-less buffered envelopes keep the source-only path when the tracker maps to one unambiguous source. Team-aware routing requires the matching relay control plane: a new CLI against an old relay fails team-scoped registration with an actionable upgrade message, and old team-less registrations remain supported
+- **Per-team credentials in the shared workspace `.env`**: variables can be namespaced as `<TRACKER>_<TEAM>_<SETTING>` (for example `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, `JIRA_PLATFORM_API_TOKEN`), projected onto the tracker's normal variable names only for that team; `JIRA_<TEAM>_URL` also maps to `JIRA_BASE_URL`. Team names are uppercased with punctuation replaced by `_`, and a team's `env_file` and inline `[teams.env]` still take precedence
+
 ## [2.14.1] - 2026-09-26
 
 Reliability patch: agent worktrees now initialize submodules before dependency installation, sandbox grants classify symlinks by their targets so OpenCode state directories are allowed correctly, and registered repositories prefer their workspace credential layers over the checkout's local `.env`.
