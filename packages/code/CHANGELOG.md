@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## Unreleased
+
+### Added
+
+- **No-card Worker Pilot**: signed-in users can evaluate unattended automation for 14 days with no task-count limit, starting only after worker startup validation succeeds. Trial activation and expiry are server-authoritative; interactive CLI use and paid `LICENSE_KEY` flows remain login-free. Long-running workers revalidate hourly, pause sources after access expires while allowing in-flight work to finish, and resume automatically after a license is added
+
 ## [2.15.0] - 2026-09-26
 
 Team-aware relay routing release: instant tracker events now carry the workspace team, so several boards of the same tracker can each hold their own relay registration and dispatch only to that exact team, and the shared workspace `.env` can namespace credentials per team.
@@ -87,7 +93,6 @@ Worker convenience release: `worker init` can install and start the background s
 
 ### Added
 
-- **No-card Worker Pilot**: signed-in users can evaluate unattended automation for 14 days with no task-count limit, starting only after worker startup validation succeeds. Trial activation and expiry are server-authoritative; interactive CLI use and paid `LICENSE_KEY` flows remain login-free. Long-running workers revalidate hourly, pause sources after access expires while allowing in-flight work to finish, and resume automatically after a license is added
 - **Guided worker operating policy**: `worker init` now asks when new tasks may be picked up, whether failing CI should be repaired automatically, and whether pull-request conflicts should be handled immediately, on a schedule, or manually. Existing values become the prompt defaults when the wizard is rerun
 - **Guided Sentry setup for workers**: `worker init` can now validate and add an optional repo-bound Sentry auto-fix project, while `worker connect sentry` adds projects to existing workspaces. Both store the API token in a source-specific owner-only env file and avoid persisting an enabled monitor when validation fails. Sentry remains an addition to the normal tracker/query setup
 - **One-step worker service install (DEV-115)**: `worker init` now offers to install and start the background service automatically — a user-level systemd unit on Linux or a launchd agent on macOS — so setup finishes with the worker already running and auto-restarting. The unit uses the user manager's `default.target`, records the current executable `PATH`, invokes Bun directly, and enables user lingering so it starts after reboot without waiting for login; macOS health is only reported when launchd shows a running process. Declining keeps it manual (definition plus exact install commands written into the workspace home), `--no-service` skips service setup entirely, re-running detects an existing DevIntern-managed service and offers an in-place update, and a hand-written definition is never overwritten. Any failed step restores the previous state and prints the manual install commands so nothing is left half-installed

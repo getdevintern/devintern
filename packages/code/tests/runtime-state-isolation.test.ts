@@ -18,7 +18,7 @@ import {
 } from "../src/lib/config/config-dir";
 import { loadSupabaseConfig } from "../src/lib/cli/bootstrap";
 import { excludeWorkerRuntimeFiles } from "../src/lib/utils/git-exclude";
-import { buildRepoEnv } from "../src/lib/workspace/env";
+import { buildRepoEnv, buildWorkspaceContextEnv } from "../src/lib/workspace/env";
 import { ensureWorkspaceCodeState } from "../src/lib/workspace/paths";
 
 function git(cwd: string, args: string[]): string {
@@ -55,6 +55,26 @@ describe("fleet config-dir isolation (DEV-126)", () => {
     );
     expect(env.DEVINTERN_WORKSPACE_DIR).toBe(workspaceDir);
     expect(env[WORKER_SUBPROCESS_ENV]).toBe("1");
+  });
+
+  test("workspace-context runs pin the workspace so auth resolves there", () => {
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "workspace.toml"), "");
+
+    // A daemon started with a non-default `--workspace` has no ambient
+    // DEVINTERN_WORKSPACE_DIR; only the composed child env carries it.
+    delete process.env.DEVINTERN_WORKSPACE_DIR;
+    delete process.env[WORKER_SUBPROCESS_ENV];
+    const env = buildWorkspaceContextEnv(workspace);
+    expect(env.DEVINTERN_WORKSPACE_DIR).toBe(workspace);
+    expect(env[WORKER_SUBPROCESS_ENV]).toBe("1");
+
+    process.env.DEVINTERN_WORKSPACE_DIR = workspace;
+    process.env[WORKER_SUBPROCESS_ENV] = "1";
+    expect(loadSupabaseConfig().sessionFilePath).toBe(
+      join(workspace, "state", "code", ".auth-session.json"),
+    );
   });
 
   test("worker subprocesses use workspace state while normal runs stay project scoped", () => {

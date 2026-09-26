@@ -13,9 +13,6 @@ import { flushAnalytics } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { hasWorkspace, resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
 
-/** Pin the auth session file for a worker daemon and the CLI subprocesses it spawns. */
-export const AUTH_SESSION_FILE_ENV = "DEVINTERN_AUTH_SESSION_FILE";
-
 // Version is injected at build time via --define flag, or read from package.json in dev
 declare const __VERSION__: string;
 export const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
@@ -102,14 +99,11 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
 /**
  * Build auth config, preferring the persistent worker workspace when configured.
  *
- * A pinned `AUTH_SESSION_FILE_ENV` (set by the worker daemon) wins so spawned
- * task subprocesses read the workspace session. An explicit `configDir` still
- * overrides the workspace heuristic; otherwise a configured workspace keeps its
- * own session and license cache, falling back to the project config directory.
+ * An explicit `configDir` wins. Otherwise a configured workspace keeps its own
+ * session and license cache — worker subprocesses inherit `DEVINTERN_WORKSPACE_DIR`
+ * so they resolve to the same place — falling back to the project config directory.
  */
 export function loadSupabaseConfig(configDir?: string) {
-  const override = process.env[AUTH_SESSION_FILE_ENV]?.trim();
-  if (override) return createDefaultSupabaseAuthConfig(override);
   if (configDir) return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
   const workspaceDir = resolveWorkspaceDir();
   if (hasWorkspace(workspaceDir)) {

@@ -2,7 +2,6 @@ import { existsSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { activateWorkerTrial, checkLicense, requireLicense } from "@devintern/license-check";
 import {
-  AUTH_SESSION_FILE_ENV,
   VERSION,
   enforceLicenseOrExit,
   loadEnvironment,
@@ -276,7 +275,6 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   // License check — the worker is unattended automation, so it always
   // requires an automation entitlement.
   const supabaseConfig = loadSupabaseConfig(workspaceCodeStateDir(selectedWorkspaceDir));
-  process.env[AUTH_SESSION_FILE_ENV] = supabaseConfig.sessionFilePath;
   const licenseResult = await checkLicense({
     productKey: "devintern/code",
     supabaseConfig,
