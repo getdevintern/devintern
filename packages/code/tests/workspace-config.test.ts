@@ -6,6 +6,8 @@ import { tmpdir } from "os";
 import {
   DEFAULT_DASHBOARD,
   DEFAULT_CI_FAILURE_FIX,
+  DEFAULT_MAX_CONCURRENCY,
+  DEFAULT_MAX_CONCURRENCY_PER_REPO,
   DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
   findRepo,
@@ -64,6 +66,11 @@ describe("parseWorkspaceConfig", () => {
     expect(config.workspace.dashboard).toBe(true);
     expect(config.workspace.dashboardPort).toBeUndefined();
     expect(config.workspace.ciFailureFix).toBe(DEFAULT_CI_FAILURE_FIX);
+    expect(config.workspace.execution).toEqual({
+      isolation: undefined,
+      maxConcurrency: DEFAULT_MAX_CONCURRENCY,
+      maxConcurrencyPerRepo: DEFAULT_MAX_CONCURRENCY_PER_REPO,
+    });
     expect(config.defaults.tracker).toBe("jira");
     expect(config.defaults.taskQuery).toBe("labels = devintern");
     expect(config.defaults.workerTaskArgs).toBe("--create-pr");
@@ -120,6 +127,61 @@ poll_interval = 15
     expect(config.workspace.dashboardPort).toBe(4410);
     expect(config.workspace.ciFailureFix).toBe(true);
     expect(config.defaults.pollIntervalSeconds).toBe(15);
+  });
+
+  test("parses an explicit best-effort host concurrency opt-in", () => {
+    const config = parseWorkspaceConfig(`
+[workspace.execution]
+isolation = "best_effort_host"
+max_concurrency = 4
+max_concurrency_per_repo = 2
+
+[defaults]
+tracker = "markdown"
+`);
+
+    expect(config.workspace.execution).toEqual({
+      isolation: "best_effort_host",
+      maxConcurrency: 4,
+      maxConcurrencyPerRepo: 2,
+    });
+  });
+
+  test("requires an explicit host-isolation acknowledgement above concurrency one", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace.execution]
+max_concurrency = 2
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/isolation = "best_effort_host" is required/);
+  });
+
+  test("validates execution limits and isolation mode", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace.execution]
+isolation = "required"
+max_concurrency = 2
+max_concurrency_per_repo = 3
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/isolation must be "best_effort_host"/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace.execution]
+isolation = "best_effort_host"
+max_concurrency = 2
+max_concurrency_per_repo = 3
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/max_concurrency_per_repo cannot exceed/);
   });
 
   test("rejects invalid dashboard and poll interval values", () => {
@@ -862,6 +924,59 @@ timezone = "Nowhere/Land"
     expect(message).toMatch(/\[worker\.schedule\]\.active/);
     expect(message).toMatch(/is not a valid IANA timezone/);
     expect(message).toMatch(/tracker is required/);
+  });
+});
+
+describe("parseWorkspaceConfig [worker] auto_update (idle self-update)", () => {
+  test("defaults to enabled without the key", () => {
+    const config = parseWorkspaceConfig(VALID_CONFIG);
+    expect(config.worker.autoUpdate).toBe(true);
+  });
+
+  test("parses auto_update = false as the opt-out", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = false
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.autoUpdate).toBe(false);
+  });
+
+  test("parses auto_update = true explicitly", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = true
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`);
+    expect(config.worker.autoUpdate).toBe(true);
+  });
+
+  test("rejects non-boolean auto_update values", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[worker]
+auto_update = "no"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/a.git"
+`),
+    ).toThrow(/\[worker\]\.auto_update must be a boolean/);
   });
 });
 

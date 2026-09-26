@@ -11,8 +11,8 @@ import {
   SERVICE_MANAGED_MARKER,
   SYSTEMD_UNIT_NAME,
   systemdUnitPath,
-} from "../src/lib/worker-service";
-import type { RunCommandFn, WorkerServiceDeps } from "../src/lib/worker-service";
+} from "../src/lib/worker/service";
+import type { RunCommandFn, WorkerServiceDeps } from "../src/lib/worker/service";
 
 /** In-memory fs + command recorder so rollback behavior is directly assertable. */
 function fakeServiceDeps(options: {
@@ -500,5 +500,9 @@ describe("renderers keep self-capture semantics", () => {
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<key>KeepAlive</key>");
     expect(plist).not.toContain("StandardOutPath");
+    // launchd exports no identifying variables; the definition must opt the
+    // worker into service-manager restarts explicitly.
+    expect(plist).toContain("<key>DEVINTERN_SERVICE</key>");
+    expect(plist).toContain("<string>1</string>");
   });
 });

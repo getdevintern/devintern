@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { GitHubReviewsClient } from "../src/lib/github-reviews";
+import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
 
 /**
  * userHasPushAccess gates mention-triggered automation: only users who can

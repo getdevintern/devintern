@@ -8,7 +8,7 @@ import {
   manualHookFixCommitArgs,
   MANUAL_HOOK_FIX_COMMIT_MESSAGE,
   verifyPushHookFix,
-} from "../src/lib/git-hook-fixer";
+} from "../src/lib/agent/git-hook-fixer";
 import { Utils } from "../src/lib/utils";
 
 describe("git-hook-fixer", () => {

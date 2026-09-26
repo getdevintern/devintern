@@ -10,15 +10,18 @@
  * gating of its own.
  */
 
-import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../review-polling-acquirer";
-import { runCiFixViaCli } from "../ci-failure-watcher-acquirer";
-import type { AutomaticResolveResult } from "../review-polling-acquirer";
-import type { TaskExecutionResult } from "../task-polling-acquirer";
+import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../acquirers/review-polling";
+import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
+import { randomUUID } from "crypto";
+import type { CiFixResult } from "../acquirers/ci-failure-watcher";
+import type { AutomaticResolveResult } from "../acquirers/review-polling";
+import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./workspace-worker";
-import type { RunCoordinator } from "../run-coordinator";
+import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
+import { JobNotStartedError } from "../worker/supervisor";
+import type { TaskSupervisor } from "../worker/supervisor";
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -33,6 +36,7 @@ export interface FleetEventDeps {
     opts: {
       cwd: string;
       env: Record<string, string | undefined>;
+      signal?: AbortSignal;
     },
   ) => Promise<TaskExecutionResult>;
   /** CI-fix runner (injected for tests; defaults to the CLI subprocess). */
@@ -40,13 +44,18 @@ export interface FleetEventDeps {
     repo: string,
     prNumber: number,
     feedbackPath: string,
-    opts: { cwd: string; env: Record<string, string | undefined> },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      expectedHeadSha?: string;
+      signal?: AbortSignal;
+    },
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   verbose?: boolean;
-  /** Process-level agent-run gate; only set when scheduled estimation exists. */
-  coordinator?: RunCoordinator;
+  /** Shared workspace admission supervisor. */
+  supervisor?: TaskSupervisor;
 }
 
 type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult>;
@@ -142,15 +151,33 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       );
       return false;
     }
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const base = await repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runReview(slug, prNumber, {
+    const invoke = async (signal?: AbortSignal) => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      return runReview(slug, prNumber, {
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir),
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:feedback",
+          repo: repo.name,
+          kind: "review",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) return "deferred";
+      throw error;
+    }
   };
 }
 
@@ -169,40 +196,84 @@ export function createFleetResolveConflicts(
     if (!repo) {
       return { outcome: "skipped", message: "repository is not configured in this workspace" };
     }
-    await repoManager.ensureBareClone(repo);
-    await repoManager.fetch(repo.name);
-    const base = await repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runResolve(slug, prNumber, {
+    const invoke = async (signal?: AbortSignal) => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      return runResolve(slug, prNumber, {
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir),
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:conflict",
+          repo: repo.name,
+          kind: "conflict",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) {
+        return { outcome: "deferred", message: error.message };
+      }
+      throw error;
+    }
   };
 }
 
 /** Build the fleet CI-fix runner using the repo checkout and shared run gate. */
 export function createFleetCiFix(
   deps: FleetEventDeps,
-): (slug: string, prNumber: number, feedbackPath: string) => Promise<boolean> {
+): (
+  slug: string,
+  prNumber: number,
+  feedbackPath: string,
+  expectedHeadSha?: string,
+) => Promise<CiFixResult> {
   const runCiFix = deps.runCiFix ?? runCiFixViaCli;
-  return async (slug, prNumber, feedbackPath) => {
+  return async (slug, prNumber, feedbackPath, expectedHeadSha) => {
     const repo = repoBySlug(deps.config, slug);
     if (!repo) {
       console.warn(`⚠️  [fleet] CI failure for ${slug}#${prNumber} has no workspace repo.`);
       return false;
     }
-    await deps.repoManager.ensureBareClone(repo);
-    await deps.repoManager.fetch(repo.name);
-    const base = await deps.repoManager.ensureBaseWorktree(repo);
-    const invoke = () =>
-      runCiFix(slug, prNumber, feedbackPath, {
+    const invoke = async (signal?: AbortSignal) => {
+      await deps.repoManager.ensureBareClone(repo);
+      await deps.repoManager.fetch(repo.name);
+      const base = await deps.repoManager.ensureBaseWorktree(repo);
+      return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
         env: buildRepoEnv(repo, deps.workspaceDir),
+        ...(expectedHeadSha ? { expectedHeadSha } : {}),
+        signal,
       });
-    return deps.coordinator ? deps.coordinator.run(invoke) : invoke();
+    };
+    if (deps.supervisor) {
+      try {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:ci",
+          repo: repo.name,
+          kind: "ci_fix",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      } catch (error) {
+        if (error instanceof JobNotStartedError) return "deferred";
+        throw error;
+      }
+    }
+    return invoke();
   };
 }
 
@@ -252,6 +323,13 @@ export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
   execute: ReturnType<typeof createFleetTaskExecutor>;
+  /**
+   * Actioned gate mirroring the polling acquirer: `true` when a task already
+   * produced a PR and has not changed since. A relayed `task.changed` can be
+   * the worker's own post-PR transition, so without this check the ticket
+   * would be re-implemented and could get a duplicate PR.
+   */
+  isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
   verbose?: boolean;
 }): (taskKey: string) => Promise<boolean> {
   return async (taskKey) => {
@@ -270,6 +348,13 @@ export function createFleetTaskEvaluator(options: {
         console.log(`   [fleet] task ${taskKey} changed but does not match the fleet query.`);
       }
       return false;
+    }
+    if (
+      options.isTaskActionedUnchanged &&
+      (await options.isTaskActionedUnchanged(taskKey, task.updated))
+    ) {
+      console.log(`⏭️  [fleet] relay task ${taskKey} is already actioned; not re-implementing.`);
+      return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
     await options.execute(
@@ -294,22 +379,35 @@ export interface FleetRelayTaskSource {
 }
 
 /**
- * Dispatch a relayed `task.changed` across every configured tracker source:
- * The relay currently identifies tracker type, not an individual team
- * registration. A tracker type mapped to exactly one workspace source is
- * safe to dispatch. Multiple teams using that same tracker remain polling-
- * only for instant events, avoiding first-match routing when task keys
- * overlap across boards or tracker accounts.
+ * Dispatch a relayed `task.changed` to its exact team when one is present.
+ * Legacy team-less envelopes retain source-only routing, but only when that
+ * tracker maps unambiguously to one configured source.
  */
 export function createFleetRelayTaskDispatcher(options: {
   sources: FleetRelayTaskSource[];
   verbose?: boolean;
-}): (taskKey: string, tracker?: string) => Promise<void> {
-  return async (taskKey, tracker) => {
+}): (taskKey: string, tracker?: string, team?: string) => Promise<void> {
+  return async (taskKey, tracker, team) => {
     const normalized = tracker?.trim().toLowerCase();
-    const candidates = normalized
+    let candidates = normalized
       ? options.sources.filter((source) => source.tracker.toLowerCase() === normalized)
       : options.sources;
+    if (team !== undefined) {
+      candidates = candidates.filter((source) => source.label === team);
+      const source = candidates[0];
+      if (candidates.length === 1 && source) {
+        if (await source.evaluate(taskKey)) return;
+        if (options.verbose) {
+          console.log(`   [fleet] relay task ${taskKey} does not match team '${team}'; ignoring.`);
+        }
+        return;
+      }
+      console.warn(
+        `⚠️  [fleet] relay task ${taskKey} targets unknown or removed team '${team}'` +
+          `${tracker ? ` for ${tracker}` : ""}; ignoring the envelope.`,
+      );
+      return;
+    }
     if (candidates.length > 1) {
       console.warn(
         `⚠️  [fleet] relay task ${taskKey} from ${tracker ?? "an unknown tracker"} maps to ` +

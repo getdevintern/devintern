@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/workspace/config";
 import {
+  applyWorkspaceProcessEnv,
   buildErrorMonitorEnv,
   buildRepoEnv,
+  buildTeamEnv,
+  buildTeamTaskEnv,
   gitHubSlugFromRemote,
   parseEnvFile,
 } from "../src/lib/workspace/env";
@@ -66,10 +69,21 @@ describe("buildRepoEnv", () => {
     expect(env.INLINE_ONLY).toBe("inline");
   });
 
+  test("workspace process credentials override values inherited from a local checkout", () => {
+    process.env.WS_ENV_PROCESS_MARKER = "from-local-checkout";
+    writeFileSync(join(workspaceDir, ".env"), "WS_ENV_PROCESS_MARKER=from-workspace\n");
+
+    applyWorkspaceProcessEnv(workspaceDir);
+
+    expect(process.env.WS_ENV_PROCESS_MARKER).toBe("from-workspace");
+  });
+
   test("pins durable state and analytics identity to the workspace", () => {
     const env = buildRepoEnv(repo(), workspaceDir);
     expect(env.WEBHOOK_QUEUE_DB).toBe(join(workspaceDir, "state", "queue.db"));
     expect(env.DEVINTERN_ANALYTICS_CONFIG_DIR).toBe(workspaceDir);
+    expect(env.DEVINTERN_WORKSPACE_DIR).toBe(workspaceDir);
+    expect(env.DEVINTERN_WORKER_SUBPROCESS).toBe("1");
   });
 
   test("injects GITHUB_REPO from a GitHub remote unless overridden", () => {
@@ -131,10 +145,75 @@ describe("buildRepoEnv", () => {
     expect(env.DEVINTERN_WORKSPACE_TEAM).toBe("platform");
   });
 
+  test("team and error-monitor layers cannot override worker runtime paths", () => {
+    const poisoned = {
+      DEVINTERN_WORKSPACE_DIR: "/tmp/not-the-workspace",
+      DEVINTERN_WORKER_SUBPROCESS: "0",
+      WEBHOOK_QUEUE_DB: "/tmp/queue.db",
+      DEVINTERN_ANALYTICS_CONFIG_DIR: "/tmp/analytics",
+    };
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "jira",
+      taskQuery: "project = PLAT",
+      env: poisoned,
+    };
+    const source: ErrorMonitorConfig = {
+      id: "api-production",
+      provider: "sentry",
+      enabled: true,
+      repo: "backend",
+      organization: "acme",
+      project: "api",
+      intervalSeconds: 60,
+      minOccurrences: 5,
+      maxIssuesPerTick: 3,
+      commentOnAction: false,
+      env: poisoned,
+    };
+    const expected = {
+      DEVINTERN_WORKSPACE_DIR: workspaceDir,
+      DEVINTERN_WORKER_SUBPROCESS: "1",
+      WEBHOOK_QUEUE_DB: join(workspaceDir, "state", "queue.db"),
+      DEVINTERN_ANALYTICS_CONFIG_DIR: workspaceDir,
+    };
+    expect(buildTeamTaskEnv(repo(), team, workspaceDir)).toMatchObject(expected);
+    expect(buildErrorMonitorEnv(source, repo(), team, workspaceDir)).toMatchObject(expected);
+    expect(buildErrorMonitorEnv(source, repo(), undefined, workspaceDir)).toMatchObject(expected);
+  });
+
   test("parseEnvFile ignores comments, blanks, and strips quotes", () => {
     const path = join(workspaceDir, "sample.env");
     writeFileSync(path, "# comment\n\nA=1\nB='two'\nC=a=b\nBROKEN\n");
     expect(parseEnvFile(path)).toEqual({ A: "1", B: "two", C: "a=b" });
     expect(parseEnvFile(join(workspaceDir, "missing.env"))).toEqual({});
+  });
+});
+
+describe("buildTeamEnv", () => {
+  test("projects tracker/team-namespaced workspace credentials", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "ws-team-env-"));
+    try {
+      writeFileSync(
+        join(workspaceDir, ".env"),
+        "JIRA_PLATFORM_URL=https://platform.atlassian.net\n" +
+          "JIRA_PLATFORM_EMAIL=platform@example.com\n" +
+          "JIRA_PLATFORM_API_TOKEN=platform-token\n" +
+          "JIRA_GROWTH_URL=https://growth.atlassian.net\n",
+      );
+      const team: TeamConfig = {
+        name: "platform",
+        tracker: "jira",
+        taskQuery: "project = PLAT",
+        env: {},
+      };
+
+      const env = buildTeamEnv(team, workspaceDir);
+      expect(env.JIRA_BASE_URL).toBe("https://platform.atlassian.net");
+      expect(env.JIRA_EMAIL).toBe("platform@example.com");
+      expect(env.JIRA_API_TOKEN).toBe("platform-token");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });

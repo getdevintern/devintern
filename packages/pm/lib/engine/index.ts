@@ -241,12 +241,104 @@ export async function createEngine(
     return result;
   }
 
+  /** Link a newly created task to its epic when the backend supports it. */
+  async function linkEpic(
+    taskKey: string,
+    taskOptions: TrustedCreateTaskOptions,
+  ): Promise<{ epicLinked: boolean; epicLinkError?: string }> {
+    if (!taskOptions.epicKey || !backend.supportsEpicLinking || !backend.linkToEpic) {
+      return { epicLinked: false };
+    }
+    try {
+      await backend.linkToEpic(taskKey, taskOptions.epicKey);
+      return { epicLinked: true };
+    } catch (error) {
+      return {
+        epicLinked: false,
+        epicLinkError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Apply labels to a newly created task, validating against the catalog first. */
+  async function applyTaskLabels(
+    taskKey: string,
+    taskOptions: TrustedCreateTaskOptions,
+    labels: string[],
+  ): Promise<{ labelsApplied: boolean; labelsApplyError?: string }> {
+    if (labels.length === 0 || !backend.supportsLabels || !backend.applyLabels) {
+      return { labelsApplied: false };
+    }
+    try {
+      // Name-keyed trackers (GitHub/Jira) auto-create unknown labels — never
+      // apply without a catalog API to allowlist against (unless freeform).
+      if (!backend.supportsFreeformLabels && !backend.getLabels) {
+        throw new Error(
+          "Cannot apply labels: tracker supports labels but does not expose a label catalog",
+        );
+      }
+      if (!taskOptions.labelsPrevalidated && !backend.supportsFreeformLabels) {
+        const cacheKey = taskOptions.projectKey ?? "";
+        let catalog = labelsByProject.get(cacheKey);
+        if (!catalog) {
+          catalog = await loadLabels(taskOptions.projectKey);
+        }
+        let known = new Set(catalog.labels.map((label) => label.id));
+        let unknown = labels.filter((id) => !known.has(id));
+        // Soft-capped catalogs can miss real labels — exhaust before rejecting.
+        if (unknown.length > 0 && catalog.truncated) {
+          catalog = await loadLabels(taskOptions.projectKey, {
+            maxLabels: Number.POSITIVE_INFINITY,
+          });
+          known = new Set(catalog.labels.map((label) => label.id));
+          unknown = labels.filter((id) => !known.has(id));
+        }
+        if (unknown.length > 0) {
+          throw new Error(`Unknown label(s): ${unknown.join(", ")}`);
+        }
+      }
+      await backend.applyLabels(taskKey, labels);
+      return { labelsApplied: true };
+    } catch (error) {
+      return {
+        labelsApplied: false,
+        labelsApplyError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Upload attachments after create (best-effort; same partial-success model). */
+  async function uploadAttachments(
+    taskKey: string,
+    taskOptions: TrustedCreateTaskOptions,
+  ): Promise<{ attachmentsUploaded: number; attachmentErrors?: string[] }> {
+    const attachList = taskOptions.attachments ?? [];
+    if (attachList.length === 0 || !backend.supportsAttachments || !backend.uploadAttachment) {
+      return { attachmentsUploaded: 0 };
+    }
+    const errors: string[] = [];
+    let uploaded = 0;
+    for (const attachment of attachList) {
+      const name = attachment.name || attachment.path;
+      try {
+        await backend.uploadAttachment(taskKey, attachment.path, { filename: attachment.name });
+        uploaded += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(`${name}: ${message}`);
+      }
+    }
+    return {
+      attachmentsUploaded: uploaded,
+      ...(errors.length > 0 ? { attachmentErrors: errors } : {}),
+    };
+  }
+
   async function runAndParse<T>(
     label: string,
     prompt: string,
     validate: (value: unknown) => value is T,
-    failureMessage: string,
-    invalidMessage: string,
+    messages: { failure: string; invalid: string },
     events?: EngineCallEvents,
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
@@ -278,7 +370,7 @@ export async function createEngine(
           stage: "agent",
           error: new EngineError(
             "agent-failed",
-            failureMessage,
+            messages.failure,
             result.stderr.trim() || "Unknown agent error",
             dumpFile ?? undefined,
           ),
@@ -286,7 +378,7 @@ export async function createEngine(
       }
 
       try {
-        return { ok: true, payload: extractJsonPayload(result.stdout, validate, invalidMessage) };
+        return { ok: true, payload: extractJsonPayload(result.stdout, validate, messages.invalid) };
       } catch (error) {
         if (!(error instanceof EngineError)) throw error;
         return { ok: false, stage: "parse", error, rawResult: result };
@@ -397,8 +489,10 @@ export async function createEngine(
           "story-generation",
           prompt,
           isStoryPayload,
-          "Failed to generate story from source",
-          "Missing required fields: summary and description",
+          {
+            failure: "Failed to generate story from source",
+            invalid: "Missing required fields: summary and description",
+          },
           events,
           agentFiles,
         );
@@ -429,8 +523,7 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         "story-edit",
         prompt,
         isStoryPayload,
-        "Failed to update story",
-        "Missing required fields in update",
+        { failure: "Failed to update story", invalid: "Missing required fields in update" },
         events,
       );
     },
@@ -451,8 +544,7 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         "decomposition",
         prompt,
         isDecompositionPayload,
-        "Failed to decompose story",
-        "Expected subtasks array in response",
+        { failure: "Failed to decompose story", invalid: "Expected subtasks array in response" },
         events,
       );
       return payload.subtasks;
@@ -470,16 +562,7 @@ Return only valid JSON (no other text). Use markdown inside the description stri
       // Link to epic if requested and the tracker can persist a real link.
       // Trackers without epic support skip this silently so we never create
       // a misleading attachment/text reference.
-      let epicLinked = false;
-      let epicLinkError: string | undefined;
-      if (taskOptions.epicKey && backend.supportsEpicLinking && backend.linkToEpic) {
-        try {
-          await backend.linkToEpic(task.key, taskOptions.epicKey);
-          epicLinked = true;
-        } catch (error) {
-          epicLinkError = error instanceof Error ? error.message : String(error);
-        }
-      }
+      const { epicLinked, epicLinkError } = await linkEpic(task.key, taskOptions);
 
       // Apply labels after create so a labeling failure does not block the
       // ticket itself (same partial-success model as epic linking).
@@ -487,67 +570,18 @@ Return only valid JSON (no other text). Use markdown inside the description stri
       // GitHub) cannot invent labels that the picker never offered. Prefer the
       // session listLabels cache (or labelsPrevalidated) over a full refetch.
       // Freeform backends (markdown) skip the allowlist — any name is writable.
-      let labelsApplied = false;
-      let labelsApplyError: string | undefined;
       const labels = taskOptions.labels?.filter((id) => id.trim().length > 0) ?? [];
-      if (labels.length > 0 && backend.supportsLabels && backend.applyLabels) {
-        try {
-          // Name-keyed trackers (GitHub/Jira) auto-create unknown labels — never
-          // apply without a catalog API to allowlist against (unless freeform).
-          if (!backend.supportsFreeformLabels && !backend.getLabels) {
-            throw new Error(
-              "Cannot apply labels: tracker supports labels but does not expose a label catalog",
-            );
-          }
-          if (!taskOptions.labelsPrevalidated && !backend.supportsFreeformLabels) {
-            const cacheKey = taskOptions.projectKey ?? "";
-            let catalog = labelsByProject.get(cacheKey);
-            if (!catalog) {
-              catalog = await loadLabels(taskOptions.projectKey);
-            }
-            let known = new Set(catalog.labels.map((label) => label.id));
-            let unknown = labels.filter((id) => !known.has(id));
-            // Soft-capped catalogs can miss real labels — exhaust before rejecting.
-            if (unknown.length > 0 && catalog.truncated) {
-              catalog = await loadLabels(taskOptions.projectKey, {
-                maxLabels: Number.POSITIVE_INFINITY,
-              });
-              known = new Set(catalog.labels.map((label) => label.id));
-              unknown = labels.filter((id) => !known.has(id));
-            }
-            if (unknown.length > 0) {
-              throw new Error(`Unknown label(s): ${unknown.join(", ")}`);
-            }
-          }
-          await backend.applyLabels(task.key, labels);
-          labelsApplied = true;
-        } catch (error) {
-          labelsApplyError = error instanceof Error ? error.message : String(error);
-        }
-      }
+      const { labelsApplied, labelsApplyError } = await applyTaskLabels(
+        task.key,
+        taskOptions,
+        labels,
+      );
 
       // Upload attachments after create (best-effort; same partial-success model).
-      let attachmentsUploaded = 0;
-      let attachmentErrors: string[] | undefined;
-      const attachList = taskOptions.attachments ?? [];
-      if (attachList.length > 0 && backend.supportsAttachments && backend.uploadAttachment) {
-        const errors: string[] = [];
-        for (const attachment of attachList) {
-          const name = attachment.name || attachment.path;
-          try {
-            await backend.uploadAttachment(task.key, attachment.path, {
-              filename: attachment.name,
-            });
-            attachmentsUploaded += 1;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            errors.push(`${name}: ${message}`);
-          }
-        }
-        if (errors.length > 0) {
-          attachmentErrors = errors;
-        }
-      }
+      const { attachmentsUploaded, attachmentErrors } = await uploadAttachments(
+        task.key,
+        taskOptions,
+      );
 
       return {
         task,

@@ -21,7 +21,7 @@ import {
   parseEffortValue,
   validateHarnessName,
 } from "./lib/parse-args";
-import type { CLIArgs } from "./lib/parse-args";
+import type { CLIArgs, ParsedArgs } from "./lib/parse-args";
 import { runConnect } from "./lib/chat/connect";
 import { runServe } from "./lib/chat/serve";
 import {
@@ -166,69 +166,13 @@ async function main() {
     autoUpdateEnv: "DEVPM_AUTO_UPDATE",
   });
 
-  // Handle init command: guided wizard in interactive terminals, template
-  // scaffold with `--yes` / `--no-interactive` / piped stdin.
-  if (parsedArgs === "init") {
-    if (isInteractive(process.argv, process.stdin)) {
-      await runPmInitWizard();
-    } else {
-      await initializeProject();
-    }
+  if (await handleUtilityCommand(args, parsedArgs)) {
     return;
   }
 
-  if (parsedArgs === "serve") {
-    const platformFlag = args[args.indexOf("--platform") + 1];
-    const modelFlag = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
-    let effortFlag: AgentEffort | undefined;
-    const effortIndex = args.indexOf("--effort");
-    if (effortIndex !== -1) {
-      effortFlag = parseEffortValue(args, effortIndex);
-    }
-    await runServe({
-      platforms:
-        args.includes("--platform") && (platformFlag === "slack" || platformFlag === "telegram")
-          ? [platformFlag]
-          : undefined,
-      model: modelFlag,
-      effort: effortFlag,
-    });
-    return;
-  }
-
-  if (typeof parsedArgs === "object" && parsedArgs !== null && "connect" in parsedArgs) {
-    await runConnect(parsedArgs.connect);
-    return;
-  }
-
-  if (parsedArgs === "login") {
-    try {
-      const supabaseConfig = await loadSupabaseConfig();
-      const resolved = await resolveLogin(process.argv);
-      const user = await login(supabaseConfig, resolved);
-      console.log(`✅ Signed in as ${user.email || user.id}`);
-    } catch (error) {
-      console.error(`❌ ${(error as Error).message}`);
-      process.exit(1);
-    }
-    return;
-  }
-
-  if (parsedArgs === "logout") {
-    const supabaseConfig = await loadSupabaseConfig();
-    await logout(supabaseConfig);
-    console.log("✅ Signed out");
-    return;
-  }
-
-  if (parsedArgs === "whoami") {
-    const supabaseConfig = await loadSupabaseConfig();
-    const user = await getAuthenticatedUser(supabaseConfig);
-    console.log(
-      user ? `Signed in as ${user.email || user.id}` : "Not signed in. Run `devpm login`.",
-    );
-    return;
-  }
+  // handleUtilityCommand consumed every command sentinel; what remains is a
+  // one-shot CLI run or interactive mode.
+  const taskArgs = parsedArgs as CLIArgs | null;
 
   // Validate the harness name (if any) only for modes that actually use it.
   validateHarnessName(harnessFlags.harness);
@@ -242,7 +186,6 @@ async function main() {
   let model: string | undefined;
   let issueType: string;
   let projectKey: string | undefined;
-  let interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null = null;
   let configForInteractive: Awaited<ReturnType<typeof loadConfig>> | undefined;
 
   try {
@@ -256,166 +199,17 @@ async function main() {
       // loadConfig() has already loaded .devintern-pm/.env into process.env,
       // so AGENT_MODEL / AGENT_EFFORT from the project config are visible
       // here. The --model / --effort flags win over the environment.
-      model: parsedArgs?.model ?? process.env.AGENT_MODEL,
-      effort: parsedArgs?.effort ?? resolveEnvEffort(),
+      model: taskArgs?.model ?? process.env.AGENT_MODEL,
+      effort: taskArgs?.effort ?? resolveEnvEffort(),
     });
 
-    if (parsedArgs === null) {
-      // Interactive mode with preview - setup once
-      console.clear();
-
-      // Fetch projects user has access to
-      let projectsData: Array<{ key: string; name: string }> | undefined;
-      try {
-        projectsData = await engine.listProjects();
-      } catch {
-        console.error(`⚠️  Warning: Could not fetch projects from ${engine.backendName}`);
-      }
-
-      // Determine which project to use for fetching issue types.
-      // Prefer the configured default key, but if projectsData is available and the key isn't in
-      // it (e.g. misconfigured or no access), fall back to the first accessible project.
-      const configuredKey = engine.defaultProjectKey;
-      const firstProjectKey =
-        projectsData && projectsData.length > 0 ? projectsData[0]?.key : undefined;
-      const projectKeyForIssueTypes =
-        configuredKey && (!projectsData || projectsData.some((p) => p.key === configuredKey))
-          ? configuredKey
-          : (firstProjectKey ?? configuredKey);
-
-      // Fetch issue types from backend for the default project (initial load).
-      // Only fetch if the backend actually supports issue type selection.
-      let issueTypeNames: string[] | undefined;
-      if (engine.supportsIssueTypes) {
-        try {
-          issueTypeNames = await engine.listIssueTypes(projectKeyForIssueTypes);
-        } catch (err) {
-          // Fetch failed — fall back to defaults so undefined unambiguously means "not supported"
-          const reason = err instanceof Error ? err.message : String(err);
-          const hint =
-            projectsData !== undefined && projectsData.length === 0
-              ? " — your API user has no project access; add them to the project in your tracker's settings"
-              : "";
-          console.error(
-            `⚠️  Warning: Could not fetch issue types from ${engine.backendName}, using defaults (${reason}${hint})`,
-          );
-          issueTypeNames = [...DEFAULT_ISSUE_TYPES];
-        }
-      }
-
-      try {
-        const currentHarness = configForInteractive.agent.harness;
-        const installedHarnesses = listInstalledHarnesses({
-          currentHarnessName: currentHarness.name,
-        });
-        // loadConfig() already validated the active harness; keep it in the
-        // picker even if detection via PATH alone would miss a custom path.
-        const harnessesForPicker = installedHarnesses.some((h) => h.name === currentHarness.name)
-          ? installedHarnesses
-          : [currentHarness, ...installedHarnesses];
-        const harnesses = harnessesForPicker.map((h) => ({
-          name: h.name,
-          displayName: h.displayName,
-        }));
-        interactiveHandle = await runInteractiveMode({
-          projects: projectsData,
-          defaultProjectKey: engine.defaultProjectKey,
-          issueTypes: issueTypeNames,
-          fetchIssueTypes: engine.supportsIssueTypes
-            ? (projectKey: string) => engine.listIssueTypes(projectKey)
-            : undefined,
-          backendName: engine.backendName,
-          harnesses,
-          currentHarnessName: configForInteractive.agent.harness.name,
-          supportsEpicLinking: engine.supportsEpicLinking,
-        });
-      } catch (error) {
-        if (isInteractiveCancelled(error)) {
-          console.log("\nBye!");
-          process.exit(0);
-        }
-        console.error(
-          "\n❌ Interactive mode failed:",
-          error instanceof Error ? error.message : error,
-        );
-        process.exit(1);
-      }
-
-      // Create-another loop: reuse the same Ink session. Remounting via main()
-      // previously left a blank screen (old instance not cleaned up + console.clear).
-      const config = configForInteractive;
-
-      while (true) {
-        let interactiveConfig;
-        try {
-          interactiveConfig = await interactiveHandle.waitForCompletion();
-        } catch (error) {
-          if (isInteractiveCancelled(error)) {
-            interactiveHandle.cleanup();
-            console.log("\nBye!");
-            process.exit(0);
-          }
-          throw error;
-        }
-
-        if (!interactiveConfig.sourceType || !interactiveConfig.sourceContent) {
-          console.error("❌ Interactive mode was cancelled or incomplete");
-          interactiveHandle.cleanup();
-          process.exit(1);
-        }
-
-        source = {
-          type: interactiveConfig.sourceType,
-          content: interactiveConfig.sourceContent,
-        };
-        epicKey = interactiveConfig.epicKey;
-        extraInstructions = interactiveConfig.customInstructions;
-        promptStyle = interactiveConfig.promptStyle;
-        decompose = interactiveConfig.decompose;
-        confirm = false; // Interactive mode handles confirmation differently
-        model = undefined;
-        issueType = interactiveConfig.issueType;
-        projectKey = interactiveConfig.projectKey;
-
-        // Re-resolve harness if user selected a different one in interactive mode.
-        // Engine reads config.agent at call time, so mutating config is enough.
-        if (
-          interactiveConfig.harnessName &&
-          interactiveConfig.harnessName !== config.agent.harness.name
-        ) {
-          validateHarnessName(interactiveConfig.harnessName);
-          const resolved = resolveHarness({
-            harnessName: interactiveConfig.harnessName,
-          });
-          resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
-          config.agent = resolved;
-        }
-
-        const shouldContinue = await runCreateFlow({
-          source,
-          epicKey,
-          extraInstructions,
-          promptStyle,
-          decompose,
-          confirm,
-          model,
-          issueType,
-          projectKey,
-          interactiveHandle,
-          config,
-          engine,
-        });
-
-        if (!shouldContinue) {
-          interactiveHandle.cleanup();
-          return;
-        }
-        // handle.restart() already ran inside runCreateFlow; loop for next task
-      }
+    if (taskArgs === null) {
+      await runInteractiveSession(engine, configForInteractive);
+      return;
     }
 
     // CLI mode (one-shot)
-    const cliArgs: CLIArgs = parsedArgs;
+    const cliArgs: CLIArgs = taskArgs;
     source = cliArgs.source;
     epicKey = cliArgs.epicKey;
     extraInstructions = cliArgs.extraInstructions;
@@ -447,7 +241,6 @@ async function main() {
     });
   } catch (error) {
     if (isInteractiveCancelled(error)) {
-      interactiveHandle?.cleanup();
       console.log("\nBye!");
       process.exit(0);
     }
@@ -455,6 +248,224 @@ async function main() {
     console.error("\n❌ Error:", error instanceof Error ? error.message : error);
     await flushErrorTracking();
     process.exit(1);
+  }
+}
+
+/** Handle the non-task subcommands; returns true when one ran. */
+async function handleUtilityCommand(args: string[], parsedArgs: ParsedArgs): Promise<boolean> {
+  // Handle init command: guided wizard in interactive terminals, template
+  // scaffold with `--yes` / `--no-interactive` / piped stdin.
+  if (parsedArgs === "init") {
+    if (isInteractive(process.argv, process.stdin)) {
+      await runPmInitWizard();
+    } else {
+      await initializeProject();
+    }
+    return true;
+  }
+
+  if (parsedArgs === "serve") {
+    const platformFlag = args[args.indexOf("--platform") + 1];
+    const modelFlag = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
+    let effortFlag: AgentEffort | undefined;
+    const effortIndex = args.indexOf("--effort");
+    if (effortIndex !== -1) {
+      effortFlag = parseEffortValue(args, effortIndex);
+    }
+    await runServe({
+      platforms:
+        args.includes("--platform") && (platformFlag === "slack" || platformFlag === "telegram")
+          ? [platformFlag]
+          : undefined,
+      model: modelFlag,
+      effort: effortFlag,
+    });
+    return true;
+  }
+
+  if (typeof parsedArgs === "object" && parsedArgs !== null && "connect" in parsedArgs) {
+    await runConnect(parsedArgs.connect);
+    return true;
+  }
+
+  if (parsedArgs === "login") {
+    await runLoginCommand();
+    return true;
+  }
+
+  if (parsedArgs === "logout") {
+    const supabaseConfig = await loadSupabaseConfig();
+    await logout(supabaseConfig);
+    console.log("✅ Signed out");
+    return true;
+  }
+
+  if (parsedArgs === "whoami") {
+    const supabaseConfig = await loadSupabaseConfig();
+    const user = await getAuthenticatedUser(supabaseConfig);
+    console.log(
+      user ? `Signed in as ${user.email || user.id}` : "Not signed in. Run `devpm login`.",
+    );
+    return true;
+  }
+
+  return false;
+}
+
+/** Sign in and exit non-zero on failure. */
+async function runLoginCommand(): Promise<void> {
+  try {
+    const supabaseConfig = await loadSupabaseConfig();
+    const resolved = await resolveLogin(process.argv);
+    const user = await login(supabaseConfig, resolved);
+    console.log(`✅ Signed in as ${user.email || user.id}`);
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
+}
+
+type InteractiveHandle = Awaited<ReturnType<typeof runInteractiveMode>>;
+type LoadedConfig = Awaited<ReturnType<typeof loadConfig>>;
+
+/**
+ * Run the interactive wizard, reusing one Ink session across create-another
+ * cycles. Resolves when the user finishes; exits the process on cancel.
+ */
+async function runInteractiveSession(engine: PmEngine, config: LoadedConfig): Promise<void> {
+  console.clear();
+
+  // Fetch projects user has access to
+  let projectsData: Array<{ key: string; name: string }> | undefined;
+  try {
+    projectsData = await engine.listProjects();
+  } catch {
+    console.error(`⚠️  Warning: Could not fetch projects from ${engine.backendName}`);
+  }
+
+  // Determine which project to use for fetching issue types.
+  // Prefer the configured default key, but if projectsData is available and the key isn't in
+  // it (e.g. misconfigured or no access), fall back to the first accessible project.
+  const configuredKey = engine.defaultProjectKey;
+  const firstProjectKey =
+    projectsData && projectsData.length > 0 ? projectsData[0]?.key : undefined;
+  const projectKeyForIssueTypes =
+    configuredKey && (!projectsData || projectsData.some((p) => p.key === configuredKey))
+      ? configuredKey
+      : (firstProjectKey ?? configuredKey);
+
+  // Fetch issue types from backend for the default project (initial load).
+  // Only fetch if the backend actually supports issue type selection.
+  let issueTypeNames: string[] | undefined;
+  if (engine.supportsIssueTypes) {
+    try {
+      issueTypeNames = await engine.listIssueTypes(projectKeyForIssueTypes);
+    } catch (err) {
+      // Fetch failed — fall back to defaults so undefined unambiguously means "not supported"
+      const reason = err instanceof Error ? err.message : String(err);
+      const hint =
+        projectsData !== undefined && projectsData.length === 0
+          ? " — your API user has no project access; add them to the project in your tracker's settings"
+          : "";
+      console.error(
+        `⚠️  Warning: Could not fetch issue types from ${engine.backendName}, using defaults (${reason}${hint})`,
+      );
+      issueTypeNames = [...DEFAULT_ISSUE_TYPES];
+    }
+  }
+
+  let interactiveHandle: InteractiveHandle;
+  try {
+    const currentHarness = config.agent.harness;
+    const installedHarnesses = listInstalledHarnesses({
+      currentHarnessName: currentHarness.name,
+    });
+    // loadConfig() already validated the active harness; keep it in the
+    // picker even if detection via PATH alone would miss a custom path.
+    const harnessesForPicker = installedHarnesses.some((h) => h.name === currentHarness.name)
+      ? installedHarnesses
+      : [currentHarness, ...installedHarnesses];
+    const harnesses = harnessesForPicker.map((h) => ({
+      name: h.name,
+      displayName: h.displayName,
+    }));
+    interactiveHandle = await runInteractiveMode({
+      projects: projectsData,
+      defaultProjectKey: engine.defaultProjectKey,
+      issueTypes: issueTypeNames,
+      fetchIssueTypes: engine.supportsIssueTypes
+        ? (projectKey: string) => engine.listIssueTypes(projectKey)
+        : undefined,
+      backendName: engine.backendName,
+      harnesses,
+      currentHarnessName: config.agent.harness.name,
+      supportsEpicLinking: engine.supportsEpicLinking,
+    });
+  } catch (error) {
+    if (isInteractiveCancelled(error)) {
+      console.log("\nBye!");
+      process.exit(0);
+    }
+    console.error("\n❌ Interactive mode failed:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+
+  // Create-another loop: reuse the same Ink session. Remounting via main()
+  // previously left a blank screen (old instance not cleaned up + console.clear).
+  while (true) {
+    let interactiveConfig;
+    try {
+      interactiveConfig = await interactiveHandle.waitForCompletion();
+    } catch (error) {
+      if (isInteractiveCancelled(error)) {
+        interactiveHandle.cleanup();
+        console.log("\nBye!");
+        process.exit(0);
+      }
+      throw error;
+    }
+
+    if (!interactiveConfig.sourceType || !interactiveConfig.sourceContent) {
+      console.error("❌ Interactive mode was cancelled or incomplete");
+      interactiveHandle.cleanup();
+      process.exit(1);
+    }
+
+    // Re-resolve harness if user selected a different one in interactive mode.
+    // Engine reads config.agent at call time, so mutating config is enough.
+    if (
+      interactiveConfig.harnessName &&
+      interactiveConfig.harnessName !== config.agent.harness.name
+    ) {
+      validateHarnessName(interactiveConfig.harnessName);
+      const resolved = resolveHarness({ harnessName: interactiveConfig.harnessName });
+      resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
+      config.agent = resolved;
+    }
+
+    const shouldContinue = await runCreateFlow({
+      source: {
+        type: interactiveConfig.sourceType,
+        content: interactiveConfig.sourceContent,
+      },
+      epicKey: interactiveConfig.epicKey,
+      extraInstructions: interactiveConfig.customInstructions,
+      promptStyle: interactiveConfig.promptStyle,
+      decompose: interactiveConfig.decompose,
+      confirm: false, // Interactive mode handles confirmation differently
+      model: undefined,
+      issueType: interactiveConfig.issueType,
+      projectKey: interactiveConfig.projectKey,
+      interactiveHandle,
+      config,
+      engine,
+    });
+
+    if (!shouldContinue) {
+      interactiveHandle.cleanup();
+      return;
+    }
+    // handle.restart() already ran inside runCreateFlow; loop for next task
   }
 }
 
@@ -472,6 +483,369 @@ interface CreateFlowParams {
   interactiveHandle: Awaited<ReturnType<typeof runInteractiveMode>> | null;
   config: Awaited<ReturnType<typeof loadConfig>>;
   engine: PmEngine;
+}
+
+/** Human-readable label for the source type. */
+function describeSourceType(type: SourceInput["type"]): string {
+  if (type === "figma") return "Figma design";
+  if (type === "log") return "error log";
+  return "free-form prompt";
+}
+
+/** Print the CLI-mode plan banner for the source about to be analyzed. */
+function printCreateFlowPlan(params: {
+  engine: PmEngine;
+  source: SourceInput;
+  promptStyle: "technical" | "pm";
+  issueType: string;
+  sourceTypeLabel: string;
+  model?: string;
+  epicKey?: string;
+  extraInstructions?: string;
+  attachments?: Array<{ path: string; name?: string }>;
+}): void {
+  const {
+    engine,
+    source,
+    promptStyle,
+    issueType,
+    sourceTypeLabel,
+    model,
+    epicKey,
+    extraInstructions,
+    attachments,
+  } = params;
+  console.log(`Step 1: Creating ${engine.backendName} story from ${sourceTypeLabel}\n`);
+  console.log(`Source type: ${source.type}`);
+  if (source.type === "figma") {
+    console.log(`Figma URL: ${source.content}`);
+  } else {
+    // Show first 100 chars of content
+    const preview =
+      source.content.length > 100 ? source.content.substring(0, 100) + "..." : source.content;
+    const label = source.type === "log" ? "Log preview" : "Prompt preview";
+    console.log(`${label}: ${preview}`);
+  }
+  console.log(`Prompt style: ${promptStyle}`);
+  console.log(`Issue type: ${issueType}`);
+  if (model) {
+    console.log(`Model: ${model}`);
+  }
+  if (epicKey) {
+    console.log(`Epic: ${epicKey}`);
+  }
+  if (extraInstructions) {
+    console.log(`Custom instructions: ${extraInstructions}`);
+  }
+  if (attachments?.length) {
+    console.log(`Attachments: ${attachments.map((a) => a.path).join(", ")}`);
+  }
+}
+
+/**
+ * Generate the story draft, handling the two engine error shapes.
+ *
+ * @returns The draft, or `"continue"` when interactive mode should restart.
+ */
+async function generateStoryDraft(
+  engine: PmEngine,
+  interactiveUi: InteractiveHandle | null,
+  input: {
+    source: SourceInput;
+    promptStyle: "technical" | "pm";
+    epicKey?: string;
+    extraInstructions?: string;
+    attachments?: Array<{ path: string; name?: string }>;
+  },
+  sourceTypeLabel: string,
+): Promise<StoryDraft | "continue"> {
+  try {
+    return await engine.generateStory(input, {
+      onAgentChunk: interactiveUi
+        ? (chunk, stream) => {
+            if (stream !== "stderr") return;
+            const line = lastStderrLine(chunk);
+            if (line) {
+              interactiveUi.setStatusMessage(line);
+            }
+          }
+        : undefined,
+    });
+  } catch (error) {
+    if (error instanceof EngineError && error.code === "agent-failed") {
+      const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+      if (interactiveUi) {
+        await showInteractiveMessageAndRestart(
+          interactiveUi,
+          `Error: Failed to analyze ${sourceTypeLabel}\n${error.detail}${dumpHint}`,
+        );
+        return "continue"; // continue create-another loop
+      }
+      console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
+      console.error(error.detail);
+      if (error.dumpFile) {
+        console.error(`Full agent output: ${error.dumpFile}`);
+      }
+      process.exit(1);
+    }
+    if (error instanceof EngineError && error.code === "parse-failed") {
+      const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
+      if (interactiveUi) {
+        await showInteractiveMessageAndRestart(
+          interactiveUi,
+          `Error: Failed to parse story from agent output\n${error.message}${dumpHint}`,
+        );
+        return "continue"; // continue create-another loop
+      }
+      console.error("\n❌ Failed to parse story requirements from Agent output");
+      console.error(error.message);
+      console.error("Output:", error.detail);
+      if (error.dumpFile) {
+        console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
+      }
+      process.exit(1);
+    }
+    throw error;
+  }
+}
+
+/** Show the story preview and let the user edit it until they confirm. */
+async function runPreviewEditLoop(
+  ui: InteractiveHandle,
+  engine: PmEngine,
+  initialStory: StoryDraft,
+  issueType: string,
+): Promise<StoryDraft> {
+  let storyData = initialStory;
+  ui.setPreviewData(storyData.summary, storyData.description);
+
+  // Edit loop - allow user to request edits multiple times
+  while (true) {
+    const editRequest = await Promise.race([
+      ui.waitForCompletion().then(() => null),
+      ui.waitForEdit(),
+    ]);
+
+    if (!editRequest) {
+      // User confirmed, break out of edit loop
+      break;
+    }
+
+    // User requested an edit
+    ui.setStatusMessage("Updating task description...");
+
+    try {
+      storyData = await engine.editStory(
+        {
+          current: {
+            summary: editRequest.currentSummary,
+            description: editRequest.currentDescription,
+          },
+          editPrompt: editRequest.editPrompt,
+          issueType,
+        },
+        {
+          onAgentChunk: (chunk, stream) => {
+            if (stream !== "stderr") return;
+            const line = lastStderrLine(chunk);
+            if (line) {
+              ui.setStatusMessage(line);
+            }
+          },
+        },
+      );
+
+      // Show updated preview
+      ui.setPreviewData(storyData.summary, storyData.description);
+    } catch (error) {
+      if (error instanceof EngineError && error.code === "agent-failed") {
+        ui.setStatusMessage(`Update failed: ${error.detail}`);
+        continue;
+      }
+      console.error("❌ Failed to parse updated task from Agent");
+      console.error("Error:", error instanceof Error ? error.message : error);
+      if (error instanceof EngineError && error.dumpFile) {
+        ui.setStatusMessage(`Update failed to parse — full agent output: ${error.dumpFile}`);
+      }
+      // Loop will retry
+    }
+  }
+  return storyData;
+}
+
+/** Print the post-create status, warnings, and attachment summary. */
+function reportCreateTaskResult(params: {
+  engine: PmEngine;
+  createResult: Awaited<ReturnType<PmEngine["createTask"]>>;
+  createdTask: Awaited<ReturnType<PmEngine["createTask"]>>["task"];
+  interactiveHandle: InteractiveHandle | null;
+  issueType: string;
+  epicKey?: string;
+}): void {
+  const { engine, createResult, createdTask, interactiveHandle, issueType, epicKey } = params;
+  if (!interactiveHandle) {
+    console.log(
+      `\n✅ ${engine.backendName} ${issueType.toLowerCase()} created: ${createdTask.url}`,
+    );
+  }
+
+  if (createResult.epicLinked && !interactiveHandle) {
+    console.log(`🔗 Linking story to epic ${epicKey}...`);
+    console.log(`✅ Story linked to epic ${epicKey}`);
+  }
+  if (createResult.epicLinkError) {
+    console.error(`⚠️  Warning: Failed to link to epic: ${createResult.epicLinkError}`);
+    if (!interactiveHandle) {
+      console.log("Continuing with task decomposition...");
+    }
+  }
+  if (createResult.labelsApplyError) {
+    console.error(`⚠️  Warning: Failed to apply labels: ${createResult.labelsApplyError}`);
+  }
+  if (createResult.attachmentsUploaded > 0 && !interactiveHandle) {
+    console.log(`📎 Uploaded ${createResult.attachmentsUploaded} attachment(s)`);
+  }
+  if (createResult.attachmentErrors?.length) {
+    for (const err of createResult.attachmentErrors) {
+      console.error(`⚠️  Warning: Failed to upload attachment: ${err}`);
+    }
+  }
+  if (!interactiveHandle) {
+    console.log();
+  }
+}
+
+/** Decompose the story, handling the two engine error shapes. */
+async function decomposeStoryWithHandling(
+  engine: PmEngine,
+  storyData: StoryDraft,
+  sourceType: SourceInput["type"],
+  promptStyle: "technical" | "pm",
+): Promise<Awaited<ReturnType<PmEngine["decomposeStory"]>>> {
+  try {
+    return await engine.decomposeStory({
+      story: storyData,
+      sourceType,
+      promptStyle,
+    });
+  } catch (error) {
+    if (error instanceof EngineError && error.code === "agent-failed") {
+      console.error("❌ Failed to decompose story");
+      console.error(error.detail);
+      if (error.dumpFile) {
+        console.error(`Full agent output: ${error.dumpFile}`);
+      }
+      process.exit(1);
+    }
+    if (error instanceof EngineError && error.code === "parse-failed") {
+      console.error("\n❌ Failed to parse subtasks from Agent output");
+      console.error(error.message);
+      console.error("Output:", error.detail);
+      if (error.dumpFile) {
+        console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
+      }
+      process.exit(1);
+    }
+    throw error;
+  }
+}
+
+type SubtaskDraft = Awaited<ReturnType<PmEngine["decomposeStory"]>>[number];
+type CreatedSubtask = Awaited<ReturnType<PmEngine["createSubtask"]>>;
+
+interface SubtaskCreationResult {
+  created: CreatedSubtask[];
+  skipped: string[];
+}
+
+/** Create each decomposed subtask, optionally confirming each first. */
+async function createSubtasks(
+  engine: PmEngine,
+  createdTask: Awaited<ReturnType<PmEngine["createTask"]>>["task"],
+  subtasks: SubtaskDraft[],
+  projectKey: string | undefined,
+  confirm: boolean,
+): Promise<SubtaskCreationResult> {
+  const created: CreatedSubtask[] = [];
+  const skipped: string[] = [];
+
+  for (let i = 0; i < subtasks.length; i++) {
+    const subtask = subtasks[i];
+    if (!subtask) continue;
+
+    // If confirmation mode is enabled, ask user
+    if (confirm) {
+      // Visual separator between tasks
+      console.log("\n" + "─".repeat(80));
+      console.log(`\n📋 Task ${i + 1}/${subtasks.length}`);
+      console.log(`   ${subtask.summary}\n`);
+
+      if (subtask.description) {
+        // Show first 300 characters of description with better formatting
+        const descPreview = subtask.description.substring(0, 300);
+        // Split into lines and indent each line
+        const lines = descPreview.split("\n");
+        for (const line of lines) {
+          if (line.trim()) {
+            console.log(`   ${line}`);
+          }
+        }
+        if (subtask.description.length > 300) {
+          console.log("   ...");
+        }
+        console.log(""); // Extra blank line
+      }
+
+      const shouldCreate = await askConfirm(`Create this subtask?`);
+      if (!shouldCreate) {
+        skipped.push(subtask.summary);
+        console.log(`⏭️  Skipped\n`);
+        continue;
+      }
+    }
+
+    try {
+      const createdSubtask = await engine.createSubtask(createdTask.key, subtask, projectKey);
+      created.push(createdSubtask);
+      if (confirm) {
+        console.log(`✅ Created: ${createdSubtask.key}\n`);
+      } else {
+        console.log(`   ✅ ${createdSubtask.key}: ${subtask.summary}`);
+      }
+    } catch (error) {
+      if (confirm) {
+        console.error(`⚠️  Failed to create subtask: ${subtask.summary}`);
+        console.error(`   Error: ${error instanceof Error ? error.message : error}\n`);
+      } else {
+        console.error(`   ⚠️  Failed to create subtask: ${subtask.summary}`);
+        console.error(`      Error: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+
+  return { created, skipped };
+}
+
+/** Print the decomposition summary. */
+function printDecomposeSummary(params: {
+  issueType: string;
+  createdTask: Awaited<ReturnType<PmEngine["createTask"]>>["task"];
+  createdSubtasks: CreatedSubtask[];
+  skippedSubtasks: string[];
+  epicKey?: string;
+}): void {
+  const { issueType, createdTask, createdSubtasks, skippedSubtasks, epicKey } = params;
+  console.log(`\n✅ ${issueType} decomposed into tasks successfully!\n`);
+  console.log("Summary:");
+  console.log(`  ${issueType}: ${createdTask.url}`);
+  console.log(`  Created: ${createdSubtasks.length} subtasks`);
+  if (skippedSubtasks.length > 0) {
+    console.log(`  Skipped: ${skippedSubtasks.length} subtasks`);
+  }
+  if (epicKey) {
+    console.log(`  Epic: ${epicKey}`);
+  }
+  console.log("\n🎉 Done!");
 }
 
 /**
@@ -498,38 +872,19 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
 
   try {
     // Step 1: Run Agent to create story from source
-    const sourceTypeLabel =
-      source.type === "figma"
-        ? "Figma design"
-        : source.type === "log"
-          ? "error log"
-          : "free-form prompt";
+    const sourceTypeLabel = describeSourceType(source.type);
     if (!interactiveHandle) {
-      console.log(`Step 1: Creating ${engine.backendName} story from ${sourceTypeLabel}\n`);
-      console.log(`Source type: ${source.type}`);
-      if (source.type === "figma") {
-        console.log(`Figma URL: ${source.content}`);
-      } else {
-        // Show first 100 chars of content
-        const preview =
-          source.content.length > 100 ? source.content.substring(0, 100) + "..." : source.content;
-        const label = source.type === "log" ? "Log preview" : "Prompt preview";
-        console.log(`${label}: ${preview}`);
-      }
-      console.log(`Prompt style: ${promptStyle}`);
-      console.log(`Issue type: ${issueType}`);
-      if (model) {
-        console.log(`Model: ${model}`);
-      }
-      if (epicKey) {
-        console.log(`Epic: ${epicKey}`);
-      }
-      if (extraInstructions) {
-        console.log(`Custom instructions: ${extraInstructions}`);
-      }
-      if (attachments?.length) {
-        console.log(`Attachments: ${attachments.map((a) => a.path).join(", ")}`);
-      }
+      printCreateFlowPlan({
+        engine,
+        source,
+        promptStyle,
+        issueType,
+        sourceTypeLabel,
+        model,
+        epicKey,
+        extraInstructions,
+        attachments,
+      });
     }
 
     // In interactive mode, show generating state
@@ -540,115 +895,20 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
     }
 
-    let storyData: StoryDraft;
-    try {
-      storyData = await engine.generateStory(
-        { source, promptStyle, epicKey, extraInstructions, attachments },
-        {
-          onAgentChunk: interactiveUi
-            ? (chunk, stream) => {
-                if (stream !== "stderr") return;
-                const line = lastStderrLine(chunk);
-                if (line) {
-                  interactiveUi.setStatusMessage(line);
-                }
-              }
-            : undefined,
-        },
-      );
-    } catch (error) {
-      if (error instanceof EngineError && error.code === "agent-failed") {
-        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
-        if (interactiveHandle) {
-          await showInteractiveMessageAndRestart(
-            interactiveHandle,
-            `Error: Failed to analyze ${sourceTypeLabel}\n${error.detail}${dumpHint}`,
-          );
-          return true; // continue create-another loop
-        }
-        console.error(`❌ Failed to analyze ${sourceTypeLabel}`);
-        console.error(error.detail);
-        if (error.dumpFile) {
-          console.error(`Full agent output: ${error.dumpFile}`);
-        }
-        process.exit(1);
-      }
-      if (error instanceof EngineError && error.code === "parse-failed") {
-        const dumpHint = error.dumpFile ? `\nFull agent output: ${error.dumpFile}` : "";
-        if (interactiveHandle) {
-          await showInteractiveMessageAndRestart(
-            interactiveHandle,
-            `Error: Failed to parse story from agent output\n${error.message}${dumpHint}`,
-          );
-          return true; // continue create-another loop
-        }
-        console.error("\n❌ Failed to parse story requirements from Agent output");
-        console.error(error.message);
-        console.error("Output:", error.detail);
-        if (error.dumpFile) {
-          console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
-        }
-        process.exit(1);
-      }
-      throw error;
+    const storyResult = await generateStoryDraft(
+      engine,
+      interactiveUi,
+      { source, promptStyle, epicKey, extraInstructions, attachments },
+      sourceTypeLabel,
+    );
+    if (storyResult === "continue") {
+      return true; // continue create-another loop
     }
+    let storyData = storyResult;
 
     // In interactive mode, show preview and wait for confirmation or edits
     if (interactiveHandle) {
-      const ui = interactiveHandle;
-      ui.setPreviewData(storyData.summary, storyData.description);
-
-      // Edit loop - allow user to request edits multiple times
-      while (true) {
-        const editRequest = await Promise.race([
-          ui.waitForCompletion().then(() => null),
-          ui.waitForEdit(),
-        ]);
-
-        if (!editRequest) {
-          // User confirmed, break out of edit loop
-          break;
-        }
-
-        // User requested an edit
-        ui.setStatusMessage("Updating task description...");
-
-        try {
-          storyData = await engine.editStory(
-            {
-              current: {
-                summary: editRequest.currentSummary,
-                description: editRequest.currentDescription,
-              },
-              editPrompt: editRequest.editPrompt,
-              issueType,
-            },
-            {
-              onAgentChunk: (chunk, stream) => {
-                if (stream !== "stderr") return;
-                const line = lastStderrLine(chunk);
-                if (line) {
-                  ui.setStatusMessage(line);
-                }
-              },
-            },
-          );
-
-          // Show updated preview
-          ui.setPreviewData(storyData.summary, storyData.description);
-        } catch (error) {
-          if (error instanceof EngineError && error.code === "agent-failed") {
-            ui.setStatusMessage(`Update failed: ${error.detail}`);
-            continue;
-          }
-          console.error("❌ Failed to parse updated task from Agent");
-          console.error("Error:", error instanceof Error ? error.message : error);
-          if (error instanceof EngineError && error.dumpFile) {
-            ui.setStatusMessage(`Update failed to parse — full agent output: ${error.dumpFile}`);
-          }
-          // Loop will retry
-        }
-      }
+      storyData = await runPreviewEditLoop(interactiveHandle, engine, storyData, issueType);
     }
 
     if (!interactiveHandle) {
@@ -666,37 +926,14 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
       attachments,
     });
     const createdTask = createResult.task;
-
-    if (!interactiveHandle) {
-      console.log(
-        `\n✅ ${engine.backendName} ${issueType.toLowerCase()} created: ${createdTask.url}`,
-      );
-    }
-
-    if (createResult.epicLinked && !interactiveHandle) {
-      console.log(`🔗 Linking story to epic ${epicKey}...`);
-      console.log(`✅ Story linked to epic ${epicKey}`);
-    }
-    if (createResult.epicLinkError) {
-      console.error(`⚠️  Warning: Failed to link to epic: ${createResult.epicLinkError}`);
-      if (!interactiveHandle) {
-        console.log("Continuing with task decomposition...");
-      }
-    }
-    if (createResult.labelsApplyError) {
-      console.error(`⚠️  Warning: Failed to apply labels: ${createResult.labelsApplyError}`);
-    }
-    if (createResult.attachmentsUploaded > 0 && !interactiveHandle) {
-      console.log(`📎 Uploaded ${createResult.attachmentsUploaded} attachment(s)`);
-    }
-    if (createResult.attachmentErrors?.length) {
-      for (const err of createResult.attachmentErrors) {
-        console.error(`⚠️  Warning: Failed to upload attachment: ${err}`);
-      }
-    }
-    if (!interactiveHandle) {
-      console.log();
-    }
+    reportCreateTaskResult({
+      engine,
+      createResult,
+      createdTask,
+      interactiveHandle,
+      issueType,
+      epicKey,
+    });
 
     // Check if we should decompose into subtasks
     if (!decompose) {
@@ -725,33 +962,7 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     console.log("Step 2: Decomposing story into tasks\n");
     console.log(`\n🤖 Running ${config.agent.harness.displayName}...\n`);
 
-    let subtasks: Awaited<ReturnType<PmEngine["decomposeStory"]>>;
-    try {
-      subtasks = await engine.decomposeStory({
-        story: storyData,
-        sourceType: source.type,
-        promptStyle,
-      });
-    } catch (error) {
-      if (error instanceof EngineError && error.code === "agent-failed") {
-        console.error("❌ Failed to decompose story");
-        console.error(error.detail);
-        if (error.dumpFile) {
-          console.error(`Full agent output: ${error.dumpFile}`);
-        }
-        process.exit(1);
-      }
-      if (error instanceof EngineError && error.code === "parse-failed") {
-        console.error("\n❌ Failed to parse subtasks from Agent output");
-        console.error(error.message);
-        console.error("Output:", error.detail);
-        if (error.dumpFile) {
-          console.error(`Full agent output (incl. stderr): ${error.dumpFile}`);
-        }
-        process.exit(1);
-      }
-      throw error;
-    }
+    const subtasks = await decomposeStoryWithHandling(engine, storyData, source.type, promptStyle);
 
     console.log(`\n✅ Agent suggested ${subtasks.length} subtasks\n`);
 
@@ -762,74 +973,15 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     }
 
     // Create each subtask via API
-    const createdSubtasks = [];
-    const skippedSubtasks = [];
+    const { created: createdSubtasks, skipped: skippedSubtasks } = await createSubtasks(
+      engine,
+      createdTask,
+      subtasks,
+      projectKey,
+      confirm,
+    );
 
-    for (let i = 0; i < subtasks.length; i++) {
-      const subtask = subtasks[i];
-      if (!subtask) continue;
-
-      // If confirmation mode is enabled, ask user
-      if (confirm) {
-        // Visual separator between tasks
-        console.log("\n" + "─".repeat(80));
-        console.log(`\n📋 Task ${i + 1}/${subtasks.length}`);
-        console.log(`   ${subtask.summary}\n`);
-
-        if (subtask.description) {
-          // Show first 300 characters of description with better formatting
-          const descPreview = subtask.description.substring(0, 300);
-          // Split into lines and indent each line
-          const lines = descPreview.split("\n");
-          for (const line of lines) {
-            if (line.trim()) {
-              console.log(`   ${line}`);
-            }
-          }
-          if (subtask.description.length > 300) {
-            console.log("   ...");
-          }
-          console.log(""); // Extra blank line
-        }
-
-        const shouldCreate = await askConfirm(`Create this subtask?`);
-        if (!shouldCreate) {
-          skippedSubtasks.push(subtask.summary);
-          console.log(`⏭️  Skipped\n`);
-          continue;
-        }
-      }
-
-      try {
-        const created = await engine.createSubtask(createdTask.key, subtask, projectKey);
-        createdSubtasks.push(created);
-        if (confirm) {
-          console.log(`✅ Created: ${created.key}\n`);
-        } else {
-          console.log(`   ✅ ${created.key}: ${subtask.summary}`);
-        }
-      } catch (error) {
-        if (confirm) {
-          console.error(`⚠️  Failed to create subtask: ${subtask.summary}`);
-          console.error(`   Error: ${error instanceof Error ? error.message : error}\n`);
-        } else {
-          console.error(`   ⚠️  Failed to create subtask: ${subtask.summary}`);
-          console.error(`      Error: ${error instanceof Error ? error.message : error}`);
-        }
-      }
-    }
-
-    console.log(`\n✅ ${issueType} decomposed into tasks successfully!\n`);
-    console.log("Summary:");
-    console.log(`  ${issueType}: ${createdTask.url}`);
-    console.log(`  Created: ${createdSubtasks.length} subtasks`);
-    if (skippedSubtasks.length > 0) {
-      console.log(`  Skipped: ${skippedSubtasks.length} subtasks`);
-    }
-    if (epicKey) {
-      console.log(`  Epic: ${epicKey}`);
-    }
-    console.log("\n🎉 Done!");
+    printDecomposeSummary({ issueType, createdTask, createdSubtasks, skippedSubtasks, epicKey });
 
     // In interactive mode, show success and wait for user to start another task
     if (interactiveHandle) {

@@ -12,9 +12,10 @@
 
 import { flushErrorTracking } from "@devintern/utils";
 import { LockManager } from "./lib/lock-manager";
-import { initSentryOnce } from "./lib/sentry-init";
-import { startWorkerCapture } from "./lib/worker-capture";
-import type { WorkerCaptureHandle } from "./lib/worker-capture";
+import { acknowledgeWorkerHandover } from "./lib/worker/handover";
+import { initSentryOnce } from "./lib/observability/sentry-init";
+import { startWorkerCapture } from "./lib/observability/worker-capture";
+import type { WorkerCaptureHandle } from "./lib/observability/worker-capture";
 
 export interface WorkerOptions {
   /** Single-instance lock override (workspace mode locks the workspace home
@@ -34,6 +35,12 @@ export interface WorkerOptions {
   /** Automation access recheck cadence (defaults to one hour). */
   accessCheckIntervalMs?: number;
   /**
+   * Starts mode-specific shutdown work before acquirers stop. The returned
+   * promise is awaited after they stop, allowing admission drains and
+   * acquirer cleanup to unblock each other.
+   */
+  beginShutdown?: () => Promise<void> | void;
+  /**
    * Mode-specific cleanup awaited after acquirers stop and before the worker
    * lock is released. A future execution supervisor uses this to settle jobs,
    * destroy sandboxes, and close its durable stores.
@@ -41,6 +48,14 @@ export interface WorkerOptions {
   onShutdown?: () => Promise<void> | void;
   /** Maximum time allowed for `onShutdown` before the worker exits. */
   shutdownTimeoutMs?: number;
+  /**
+   * Invoked once after cleanup completed (lock released, capture stopped,
+   * error tracking flushed), immediately before the process exits. A returned
+   * number overrides the exit code — the idle self-update path uses this to
+   * exit non-zero so a service manager restarts the worker on the freshly
+   * installed version.
+   */
+  finalExitCode?: () => number | Promise<number | undefined> | undefined;
 }
 
 /** Default bound for mode-specific graceful shutdown work. */
@@ -130,8 +145,10 @@ export interface WorkerShutdownDependencies {
   acquirers: Array<Pick<Acquirer, "name" | "stop">>;
   lock: Pick<LockManager, "release">;
   capture?: Pick<WorkerCaptureHandle, "stop"> | null;
+  beginShutdown?: () => Promise<void> | void;
   onShutdown?: () => Promise<void> | void;
   shutdownTimeoutMs?: number;
+  finalExitCode?: () => number | Promise<number | undefined> | undefined;
   flush?: () => Promise<void>;
   exit?: (code: number) => void;
 }
@@ -185,6 +202,22 @@ export function createWorkerShutdownHandler(
     shuttingDown = true;
     console.log(`\n🛑 Received ${signal}, shutting down worker...`);
 
+    // Start admission shutdown before stopping acquirers. Do not await it
+    // yet: an admitted automation holds its supervisor slot until its
+    // acquirer terminates the child and releases the run context.
+    let beginningShutdown: Promise<void> | null = null;
+    if (dependencies.beginShutdown) {
+      try {
+        beginningShutdown = Promise.resolve(dependencies.beginShutdown());
+      } catch (error) {
+        beginningShutdown = Promise.reject(error);
+      }
+      // Attach a handler immediately so a synchronous failure cannot become
+      // unhandled while an acquirer is still stopping. The original promise
+      // remains rejected and is reported by the bounded hook below.
+      void beginningShutdown.catch(() => undefined);
+    }
+
     for (const acquirer of dependencies.acquirers) {
       try {
         await acquirer.stop();
@@ -193,10 +226,13 @@ export function createWorkerShutdownHandler(
       }
     }
 
-    if (dependencies.onShutdown) {
+    if (beginningShutdown || dependencies.onShutdown) {
       const timeoutMs = dependencies.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
       try {
-        await runShutdownHook(dependencies.onShutdown, timeoutMs);
+        await runShutdownHook(async () => {
+          await beginningShutdown;
+          await dependencies.onShutdown?.();
+        }, timeoutMs);
       } catch (error) {
         console.warn(`⚠️  Shutdown hook failed: ${(error as Error).message}`);
       }
@@ -222,7 +258,18 @@ export function createWorkerShutdownHandler(
     }
     console.log("👋 Worker stopped");
     if (!forceExitRequested) {
-      exit(0);
+      let code = 0;
+      if (dependencies.finalExitCode) {
+        try {
+          const override = await dependencies.finalExitCode();
+          if (typeof override === "number") {
+            code = override;
+          }
+        } catch (error) {
+          console.warn(`⚠️  Final exit hook failed: ${(error as Error).message}`);
+        }
+      }
+      exit(code);
     }
   };
 }
@@ -316,13 +363,16 @@ export async function startWorker(
     acquirers,
     lock,
     capture,
+    beginShutdown: options.beginShutdown,
     onShutdown: async () => {
       accessMonitor?.stop();
       await options.onShutdown?.();
     },
     shutdownTimeoutMs: options.shutdownTimeoutMs,
+    finalExitCode: options.finalExitCode,
   });
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  acknowledgeWorkerHandover();
 }

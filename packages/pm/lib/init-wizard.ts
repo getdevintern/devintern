@@ -236,7 +236,13 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
     if (trackerId === "markdown") {
       log("\nℹ️  No credentials needed for the markdown tracker.");
     } else {
-      await validateConnection(trackerId, values, steps, prompt, probe, log, ".devintern-pm/.env");
+      await validateConnection(
+        trackerId,
+        values,
+        steps,
+        { prompt, probe, log },
+        ".devintern-pm/.env",
+      );
     }
 
     await writePmProjectConfig({

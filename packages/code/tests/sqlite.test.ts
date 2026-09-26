@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { configureSqliteConnection, SQLITE_BUSY_TIMEOUT_MS } from "../src/lib/sqlite";
+import { configureSqliteConnection, SQLITE_BUSY_TIMEOUT_MS } from "../src/lib/state/sqlite";
 
 describe("configureSqliteConnection", () => {
   const tempDirs: string[] = [];

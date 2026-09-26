@@ -4,7 +4,7 @@ import {
   cgroupIndicatesSystemdService,
   getRuntimeMode,
   isAutomatedEnvironment,
-} from "../src/lib/env-detector";
+} from "../src/lib/config/env-detector";
 
 const desktopScopeCgroup =
   "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.chromium.Chromium-2784442.scope\n";

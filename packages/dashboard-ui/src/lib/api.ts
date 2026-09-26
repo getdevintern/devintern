@@ -132,6 +132,8 @@ export interface AutomationSchedule {
   repo?: string;
   /** The prompt executed per occurrence. */
   prompt: string;
+  /** Whether occurrences open a pull request (opt-in; default off). */
+  openPr?: boolean;
   /** Next scheduled occurrence (epoch ms). */
   nextDueAt?: number;
   /** Most recent run of this automation (any origin). */

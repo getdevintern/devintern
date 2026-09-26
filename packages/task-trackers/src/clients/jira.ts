@@ -19,6 +19,14 @@ import { fetchWithRetry } from "@devintern/utils";
 import { sanitizeDomain } from "../config/load-tracker-config.ts";
 import { textToADF } from "./jira-adf.ts";
 import { mimeTypeFromFilename } from "./mime.ts";
+import {
+  discoverStoryPointsField,
+  findEstimationComment,
+  postEstimationComment,
+  updateEstimationComment,
+  updateStoryPoints,
+} from "./jira-estimation.ts";
+import type { JiraEstimationResult } from "./jira-estimation.ts";
 
 /**
  * Fields requested on enhanced JQL search (`GET /rest/api/3/search/jql`).
@@ -118,10 +126,9 @@ export class JiraClient {
   private email!: string;
   private apiToken!: string;
   private defaultProjectKey?: string;
-  private verbose!: boolean;
+  verbose!: boolean;
   private issueTypesCacheByProject = new Map<string, JiraIssueType[]>();
   private projectsCache: JiraProject[] | null = null;
-  private storyPointsCandidates: Array<{ id: string; name: string }> | null = null;
 
   /**
    * Create a Jira Cloud REST API v3 client.
@@ -807,67 +814,7 @@ export class JiraClient {
   async findEstimationComment(
     issueKey: string,
   ): Promise<{ commentId: string; created: string } | null> {
-    try {
-      const response = await this.jiraApiCall(
-        "GET",
-        `/rest/api/3/issue/${issueKey}/comment?expand=renderedBody`,
-      );
-
-      if (!response || typeof response !== "object") {
-        return null;
-      }
-
-      const allComments = response.comments || [];
-      for (const comment of allComments) {
-        let commentText = "";
-        if (comment.renderedBody) {
-          commentText = comment.renderedBody;
-        } else if (typeof comment.body === "string" && comment.body.length > 0) {
-          commentText = comment.body;
-        } else if (comment.body && typeof comment.body === "object" && "content" in comment.body) {
-          commentText = JSON.stringify(comment.body);
-        }
-        if (commentText.includes("Automated Story Points Estimation")) {
-          return { commentId: comment.id, created: comment.created };
-        }
-      }
-      return null;
-    } catch (error) {
-      if (this.verbose) {
-        console.warn(`⚠️  Failed to check for estimation comment on ${issueKey}: ${error}`);
-      }
-      return null;
-    }
-  }
-
-  /**
-   * Discover candidate custom fields that may store story points.
-   *
-   * @returns Cached list of `{ id, name }` field descriptors
-   */
-  private async discoverStoryPointsCandidates(): Promise<Array<{ id: string; name: string }>> {
-    if (this.storyPointsCandidates) {
-      return this.storyPointsCandidates;
-    }
-
-    const fields = await this.jiraApiCall("GET", "/rest/api/3/field");
-    const storyPointsNames = [
-      "story point", // "Story Points", "Story Point Estimate", "Story point estimate"
-      "story_point", // "story_points", "story_point_estimate"
-      "estimation", // "Estimation" (JIRA Software board estimation field)
-      "effort point", // "Effort Points"
-      "sp (fibonacci", // "SP (Fibonacci)" — common custom naming
-    ];
-
-    const candidates = fields
-      .filter((field: any) => {
-        const fieldName = (field.name || "").toLowerCase();
-        return storyPointsNames.some((name) => fieldName.includes(name));
-      })
-      .map((field: any) => ({ id: field.id, name: field.name }));
-
-    this.storyPointsCandidates = candidates;
-    return candidates;
+    return findEstimationComment(this, issueKey);
   }
 
   /**
@@ -877,58 +824,7 @@ export class JiraClient {
    * @returns Custom field id, or `null` when none found
    */
   async discoverStoryPointsField(issueKey?: string): Promise<string | null> {
-    try {
-      if (this.verbose) {
-        console.log("🔍 Discovering story points field...");
-      }
-      const candidates = await this.discoverStoryPointsCandidates();
-
-      if (candidates.length === 0) {
-        if (this.verbose) {
-          console.warn("⚠️  Could not find any story points field in JIRA");
-        }
-        return null;
-      }
-
-      // If we have an issue key, check editmeta to find which field is actually editable
-      if (issueKey) {
-        try {
-          const editMeta = await this.jiraApiCall("GET", `/rest/api/3/issue/${issueKey}/editmeta`);
-          const editableFieldIds = new Set(Object.keys(editMeta.fields || {}));
-
-          for (const candidate of candidates) {
-            if (editableFieldIds.has(candidate.id)) {
-              if (this.verbose) {
-                console.log(
-                  `✅ Found editable story points field: "${candidate.name}" (${candidate.id})`,
-                );
-              }
-              return candidate.id;
-            }
-          }
-          if (this.verbose) {
-            console.log("   No story points field on edit screen, will try all candidates");
-          }
-        } catch {
-          // editmeta failed, fall through to returning first candidate
-        }
-      }
-
-      // Fallback: return first candidate
-      const firstCandidate = candidates[0];
-      if (!firstCandidate) {
-        return null;
-      }
-      if (this.verbose) {
-        console.log(`✅ Found story points field: "${firstCandidate.name}" (${firstCandidate.id})`);
-      }
-      return firstCandidate.id;
-    } catch (error) {
-      if (this.verbose) {
-        console.warn(`⚠️  Failed to discover story points field: ${error}`);
-      }
-      return null;
-    }
+    return discoverStoryPointsField(this, issueKey);
   }
 
   /**
@@ -940,210 +836,7 @@ export class JiraClient {
    * @throws When no candidate field is editable for the issue
    */
   async updateStoryPoints(issueKey: string, fieldId: string, points: number): Promise<void> {
-    if (this.verbose) {
-      console.log(`📊 Setting story points for ${issueKey} to ${points} (field: ${fieldId})...`);
-    }
-
-    // Try the provided field first
-    try {
-      await this.jiraApiCall("PUT", `/rest/api/3/issue/${issueKey}`, {
-        fields: { [fieldId]: points },
-      });
-      if (this.verbose) {
-        console.log(`✅ Successfully set story points for ${issueKey} to ${points}`);
-      }
-      return;
-    } catch (error) {
-      const errorMsg = String(error);
-      if (
-        !errorMsg.includes("not on the appropriate screen") &&
-        !errorMsg.includes("cannot be set")
-      ) {
-        throw error;
-      }
-      if (this.verbose) {
-        console.log(`   Field ${fieldId} not editable, trying other candidates...`);
-      }
-    }
-
-    // Try remaining candidate fields
-    const candidates = await this.discoverStoryPointsCandidates();
-    for (const candidate of candidates) {
-      if (candidate.id === fieldId) continue;
-      try {
-        await this.jiraApiCall("PUT", `/rest/api/3/issue/${issueKey}`, {
-          fields: { [candidate.id]: points },
-        });
-        if (this.verbose) {
-          console.log(
-            `✅ Successfully set story points for ${issueKey} to ${points} (field: "${candidate.name}" / ${candidate.id})`,
-          );
-        }
-        return;
-      } catch {
-        // try next candidate
-      }
-    }
-
-    throw new Error(
-      `Could not set story points for ${issueKey} — none of the story points fields are editable for this issue type`,
-    );
-  }
-
-  /** Build ADF block nodes for a story-points estimation comment body. */
-  private buildEstimationCommentADF(result: {
-    storyPoints: number;
-    confidence: "high" | "medium" | "low";
-    implementationConfidence?: number;
-    reasoning: string;
-    risks: string[];
-    unclearAreas: string[];
-    summary: string;
-  }): any[] {
-    const confidenceEmoji =
-      result.confidence === "high" ? "🟢" : result.confidence === "medium" ? "🟡" : "🔴";
-
-    const content: any[] = [
-      {
-        type: "heading",
-        attrs: { level: 3 },
-        content: [
-          {
-            type: "text",
-            text: "🤖 Automated Story Points Estimation",
-            marks: [{ type: "strong" }],
-          },
-        ],
-      },
-      {
-        type: "paragraph",
-        content: [
-          {
-            type: "text",
-            text: "Story Points: ",
-            marks: [{ type: "strong" }],
-          },
-          { type: "text", text: `${result.storyPoints}` },
-          { type: "text", text: "  |  " },
-          {
-            type: "text",
-            text: "Confidence: ",
-            marks: [{ type: "strong" }],
-          },
-          {
-            type: "text",
-            text: `${confidenceEmoji} ${result.confidence}`,
-          },
-        ],
-      },
-    ];
-
-    if (typeof result.implementationConfidence === "number") {
-      const score = result.implementationConfidence;
-      const filled = "🟩".repeat(score);
-      const empty = "⬜".repeat(10 - score);
-      const label =
-        score >= 9
-          ? "Almost certain"
-          : score >= 7
-            ? "High chance"
-            : score >= 5
-              ? "May need guidance"
-              : score >= 3
-                ? "Significant ambiguity"
-                : "Needs human judgment";
-      content.push({
-        type: "paragraph",
-        content: [
-          {
-            type: "text",
-            text: "AI Implementation Confidence: ",
-            marks: [{ type: "strong" }],
-          },
-          {
-            type: "text",
-            text: `${filled}${empty} ${score}/10 — ${label}`,
-          },
-        ],
-      });
-    }
-
-    content.push(
-      {
-        type: "heading",
-        attrs: { level: 4 },
-        content: [{ type: "text", text: "Reasoning" }],
-      },
-      {
-        type: "paragraph",
-        content: [{ type: "text", text: result.reasoning }],
-      },
-    );
-
-    if (result.risks.length > 0) {
-      content.push({
-        type: "heading",
-        attrs: { level: 4 },
-        content: [{ type: "text", text: "Risks" }],
-      });
-      content.push({
-        type: "bulletList",
-        content: result.risks.map((risk) => ({
-          type: "listItem",
-          content: [
-            {
-              type: "paragraph",
-              content: [{ type: "text", text: risk }],
-            },
-          ],
-        })),
-      });
-    }
-
-    if (result.unclearAreas.length > 0) {
-      content.push({
-        type: "heading",
-        attrs: { level: 4 },
-        content: [{ type: "text", text: "Unclear Areas" }],
-      });
-      content.push({
-        type: "bulletList",
-        content: result.unclearAreas.map((area) => ({
-          type: "listItem",
-          content: [
-            {
-              type: "paragraph",
-              content: [{ type: "text", text: area }],
-            },
-          ],
-        })),
-      });
-    }
-
-    if (result.confidence === "low") {
-      content.push({
-        type: "panel",
-        attrs: { panelType: "warning" },
-        content: [
-          {
-            type: "paragraph",
-            content: [
-              {
-                type: "text",
-                text: "⚠️ Low confidence estimate — ",
-                marks: [{ type: "strong" }],
-              },
-              {
-                type: "text",
-                text: "Please provide more details on the task scope and requirements for a more accurate estimate.",
-              },
-            ],
-          },
-        ],
-      });
-    }
-
-    return content;
+    return updateStoryPoints(this, issueKey, fieldId, points);
   }
 
   /**
@@ -1153,41 +846,8 @@ export class JiraClient {
    * @param result - Estimation payload from the agent
    * @throws When the API request fails
    */
-  async postEstimationComment(
-    issueKey: string,
-    result: {
-      storyPoints: number;
-      confidence: "high" | "medium" | "low";
-      implementationConfidence?: number;
-      reasoning: string;
-      risks: string[];
-      unclearAreas: string[];
-      summary: string;
-    },
-  ): Promise<void> {
-    try {
-      if (this.verbose) {
-        console.log(`💬 Posting estimation comment to ${issueKey}...`);
-      }
-
-      const commentBody = {
-        body: {
-          type: "doc",
-          version: 1,
-          content: this.buildEstimationCommentADF(result),
-        },
-      };
-
-      await this.jiraApiCall("POST", `/rest/api/3/issue/${issueKey}/comment`, commentBody);
-      if (this.verbose) {
-        console.log(`✅ Successfully posted estimation comment to ${issueKey}`);
-      }
-    } catch (error) {
-      if (this.verbose) {
-        console.warn(`⚠️  Failed to post estimation comment to ${issueKey}: ${error}`);
-      }
-      throw error;
-    }
+  async postEstimationComment(issueKey: string, result: JiraEstimationResult): Promise<void> {
+    return postEstimationComment(this, issueKey, result);
   }
 
   /**
@@ -1201,43 +861,9 @@ export class JiraClient {
   async updateEstimationComment(
     issueKey: string,
     commentId: string,
-    result: {
-      storyPoints: number;
-      confidence: "high" | "medium" | "low";
-      implementationConfidence?: number;
-      reasoning: string;
-      risks: string[];
-      unclearAreas: string[];
-      summary: string;
-    },
+    result: JiraEstimationResult,
   ): Promise<void> {
-    try {
-      if (this.verbose) {
-        console.log(`💬 Updating estimation comment ${commentId} on ${issueKey}...`);
-      }
-
-      const commentBody = {
-        body: {
-          type: "doc",
-          version: 1,
-          content: this.buildEstimationCommentADF(result),
-        },
-      };
-
-      await this.jiraApiCall(
-        "PUT",
-        `/rest/api/3/issue/${issueKey}/comment/${commentId}`,
-        commentBody,
-      );
-      if (this.verbose) {
-        console.log(`✅ Successfully updated estimation comment on ${issueKey}`);
-      }
-    } catch (error) {
-      if (this.verbose) {
-        console.warn(`⚠️  Failed to update estimation comment on ${issueKey}: ${error}`);
-      }
-      throw error;
-    }
+    return updateEstimationComment(this, issueKey, commentId, result);
   }
 
   /**

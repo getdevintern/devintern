@@ -263,7 +263,7 @@ function makeTestDir(): string {
 function cleanupDir(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
-  } catch (e) {
+  } catch {
     // Ignore cleanup errors
   }
 }

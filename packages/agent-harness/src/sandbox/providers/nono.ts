@@ -42,7 +42,8 @@
  */
 
 import { spawnSync } from "child_process";
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "fs";
+import type { Dirent } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
@@ -58,7 +59,7 @@ const HARNESS_STATE_PATHS: Record<string, string[]> = {
   gemini: [".gemini"],
   // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
   cursor: [".cursor", ".config/cursor"],
-  opencode: [".config/opencode", ".local/share/opencode"],
+  opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
 };
 
 /**
@@ -104,6 +105,25 @@ export interface NonoGrant {
 
 const DIR_TO_FILE_FLAG = { "--allow": "--allow-file", "--read": "--read-file" } as const;
 
+/** Classify symlinks by their targets; nono rejects a directory passed as a file grant. */
+function grantForEntry(
+  entry: Dirent,
+  path: string,
+  flag: "--allow" | "--read",
+): NonoGrant | undefined {
+  if (entry.isDirectory()) return { flag, path };
+  if (entry.isFile()) return { flag: DIR_TO_FILE_FLAG[flag], path };
+  if (!entry.isSymbolicLink()) return undefined;
+  try {
+    const target = statSync(path);
+    if (target.isDirectory()) return { flag, path };
+    if (target.isFile()) return { flag: DIR_TO_FILE_FLAG[flag], path };
+  } catch {
+    // A dangling or inaccessible link cannot be granted safely.
+  }
+  return undefined;
+}
+
 /** How deep a conflicting directory grant is expanded before giving up. */
 const MAX_EXPAND_DEPTH = 3;
 /** nono reports at most 5 conflicts per refusal, so refinement iterates. */
@@ -137,11 +157,13 @@ function expandDirGrant(
   for (const entry of entries) {
     const p = join(dirPath, entry.name);
     if (denies.includes(p)) continue;
+    const grant = grantForEntry(entry, p, flag);
+    if (!grant) continue;
     if (denies.some((d) => isInside(d, p))) {
-      if (entry.isDirectory()) out.push(...expandDirGrant(flag, p, denies, depth + 1));
+      if (grant.flag === flag) out.push(...expandDirGrant(flag, p, denies, depth + 1));
       continue;
     }
-    out.push(entry.isDirectory() ? { flag, path: p } : { flag: DIR_TO_FILE_FLAG[flag], path: p });
+    out.push(grant);
   }
   return out;
 }
@@ -311,21 +333,16 @@ export class NonoSandboxProvider implements SandboxProvider {
     // v1 policy keeps reads open. nono rejects any grant overlapping its
     // state root (~/.local/state/nono), so grant $HOME per top-level entry,
     // skip .local, and re-grant the safe subtrees beneath it.
-    let entries: string[] = [];
+    let entries: Dirent[] = [];
     try {
-      entries = readdirSync(home, { withFileTypes: true }).map((e) =>
-        e.isDirectory() ? `${e.name}/` : e.name,
-      );
+      entries = readdirSync(home, { withFileTypes: true });
     } catch {
       entries = [];
     }
     for (const entry of entries) {
-      const name = entry.endsWith("/") ? entry.slice(0, -1) : entry;
-      if (name === ".local") continue;
-      grants.push({
-        flag: entry.endsWith("/") ? "--read" : "--read-file",
-        path: join(home, name),
-      });
+      if (entry.name === ".local") continue;
+      const grant = grantForEntry(entry, join(home, entry.name), "--read");
+      if (grant) grants.push(grant);
     }
     for (const rel of [".local/share", ".local/bin"]) {
       const p = join(home, rel);

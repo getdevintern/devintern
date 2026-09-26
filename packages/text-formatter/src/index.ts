@@ -268,6 +268,54 @@ export function parseMarkdownTable(tableLines: string[]): ADFNode | null {
   };
 }
 
+/** Build an ADF heading node from a `#`-prefixed markdown line. */
+function parseHeadingNode(trimmedLine: string): ADFNode {
+  const level = Math.min(6, (trimmedLine.match(/^#+/) || [""])[0].length);
+  const headerText = trimmedLine.replace(/^#+\s*/, "");
+  return {
+    type: "heading",
+    attrs: { level },
+    content: [{ type: "text", text: headerText }],
+  };
+}
+
+/** Consume consecutive list lines starting at `start`, returning the node and the next index. */
+function parseListBlock(
+  lines: string[],
+  start: number,
+  marker: RegExp,
+  type: "bulletList" | "orderedList",
+): { node: ADFNode; nextIndex: number } {
+  const listItems: ADFNode[] = [];
+  let index = start;
+  while (index < lines.length && marker.test((lines[index] ?? "").trim())) {
+    const itemText = (lines[index] ?? "").trim().replace(marker, "");
+    listItems.push({
+      type: "listItem",
+      content: [{ type: "paragraph", content: parseTextWithFormatting(itemText) }],
+    });
+    index++;
+  }
+  return { node: { type, content: listItems }, nextIndex: index };
+}
+
+/** Consume consecutive pipe rows starting at `start`, returning the table node (if any) and next index. */
+function parseTableBlock(
+  lines: string[],
+  start: number,
+): { node: ADFNode | null; nextIndex: number } {
+  const tableLines: string[] = [];
+  let index = start;
+  while (index < lines.length && (lines[index] ?? "").trim().includes("|")) {
+    const tableLine = (lines[index] ?? "").trim();
+    if (!tableLine.match(/^\|[\s\-:|]+\|$/)) {
+      tableLines.push(tableLine);
+    }
+    index++;
+  }
+  return { node: tableLines.length > 0 ? parseMarkdownTable(tableLines) : null, nextIndex: index };
+}
+
 /**
  * Convert markdown-ish text into Jira ADF content nodes.
  *
@@ -346,93 +394,31 @@ export function markdownToADFContent(text: string, options?: MarkdownToAdfOption
 
     if (trimmedLine.startsWith("#")) {
       flushParagraph();
-      const level = Math.min(6, (trimmedLine.match(/^#+/) || [""])[0].length);
-      const headerText = trimmedLine.replace(/^#+\s*/, "");
-      content.push({
-        type: "heading",
-        attrs: { level },
-        content: [{ type: "text", text: headerText }],
-      });
+      content.push(parseHeadingNode(trimmedLine));
       continue;
     }
 
     if (trimmedLine.match(/^[-*+]\s/)) {
       flushParagraph();
-      const listItems: ADFNode[] = [];
-      let j = i;
-
-      while (j < lines.length && (lines[j] ?? "").trim().match(/^[-*+]\s/)) {
-        const itemText = (lines[j] ?? "").trim().replace(/^[-*+]\s/, "");
-        listItems.push({
-          type: "listItem",
-          content: [
-            {
-              type: "paragraph",
-              content: parseTextWithFormatting(itemText),
-            },
-          ],
-        });
-        j++;
-      }
-
-      content.push({
-        type: "bulletList",
-        content: listItems,
-      });
-
-      i = j - 1;
+      const { node, nextIndex } = parseListBlock(lines, i, /^[-*+]\s/, "bulletList");
+      content.push(node);
+      i = nextIndex - 1;
       continue;
     }
 
     if (trimmedLine.match(/^\d+\.\s/)) {
       flushParagraph();
-      const listItems: ADFNode[] = [];
-      let j = i;
-
-      while (j < lines.length && (lines[j] ?? "").trim().match(/^\d+\.\s/)) {
-        const itemText = (lines[j] ?? "").trim().replace(/^\d+\.\s/, "");
-        listItems.push({
-          type: "listItem",
-          content: [
-            {
-              type: "paragraph",
-              content: parseTextWithFormatting(itemText),
-            },
-          ],
-        });
-        j++;
-      }
-
-      content.push({
-        type: "orderedList",
-        content: listItems,
-      });
-
-      i = j - 1;
+      const { node, nextIndex } = parseListBlock(lines, i, /^\d+\.\s/, "orderedList");
+      content.push(node);
+      i = nextIndex - 1;
       continue;
     }
 
     if (includeTables && trimmedLine.includes("|")) {
       flushParagraph();
-      const tableLines: string[] = [];
-      let j = i;
-
-      while (j < lines.length && (lines[j] ?? "").trim().includes("|")) {
-        const tableLine = (lines[j] ?? "").trim();
-        if (!tableLine.match(/^\|[\s\-:|]+\|$/)) {
-          tableLines.push(tableLine);
-        }
-        j++;
-      }
-
-      if (tableLines.length > 0) {
-        const table = parseMarkdownTable(tableLines);
-        if (table) {
-          content.push(table);
-        }
-      }
-
-      i = j - 1;
+      const { node, nextIndex } = parseTableBlock(lines, i);
+      if (node) content.push(node);
+      i = nextIndex - 1;
       continue;
     }
 
@@ -599,6 +585,82 @@ function joinHtmlBlocks(blocks: AsanaHtmlBlock[], options?: { wrapInlineInDiv?: 
   return result;
 }
 
+/** Build an Asana heading block from a `#`-prefixed markdown line. */
+function htmlHeadingBlock(trimmedLine: string): AsanaHtmlBlock | null {
+  const level = Math.min(6, (trimmedLine.match(/^#+/) || [""])[0].length);
+  const headerText = trimmedLine.replace(/^#+\s*/, "").trim();
+  if (!headerText) return null;
+  const tag = level <= 1 ? "h1" : "h2";
+  return { kind: "block", html: `<${tag}>${formatInlineMarkdownToHtml(headerText)}</${tag}>` };
+}
+
+/** Consume consecutive bullet (optionally task) lines, returning the list block and next index. */
+function parseHtmlBulletList(
+  lines: string[],
+  start: number,
+): { block: AsanaHtmlBlock | null; nextIndex: number } {
+  const listItems: string[] = [];
+  let index = start;
+  while (index < lines.length) {
+    const itemLine = (lines[index] ?? "").trim();
+    const bulletMatch = itemLine.match(/^[-*+]\s(?:\[[ xX]\]\s)?(.*)$/);
+    if (!bulletMatch) break;
+    const itemHtml = formatInlineMarkdownToHtml((bulletMatch[1] ?? "").trim());
+    if (itemHtml) {
+      listItems.push(`<li>${itemHtml}</li>`);
+    }
+    index++;
+  }
+  return {
+    block: listItems.length > 0 ? { kind: "block", html: `<ul>${listItems.join("")}</ul>` } : null,
+    nextIndex: index,
+  };
+}
+
+/** Consume consecutive ordered-list lines, returning the list block and next index. */
+function parseHtmlOrderedList(
+  lines: string[],
+  start: number,
+): { block: AsanaHtmlBlock | null; nextIndex: number } {
+  const listItems: string[] = [];
+  let index = start;
+  while (index < lines.length && (lines[index] ?? "").trim().match(/^\d+\.\s/)) {
+    const itemText = (lines[index] ?? "").trim().replace(/^\d+\.\s/, "");
+    const itemHtml = formatInlineMarkdownToHtml(itemText);
+    if (itemHtml) {
+      listItems.push(`<li>${itemHtml}</li>`);
+    }
+    index++;
+  }
+  return {
+    block: listItems.length > 0 ? { kind: "block", html: `<ol>${listItems.join("")}</ol>` } : null,
+    nextIndex: index,
+  };
+}
+
+/** Consume consecutive pipe rows, returning the escaped table block and next index. */
+function parseHtmlTableBlock(
+  lines: string[],
+  start: number,
+): { block: AsanaHtmlBlock | null; nextIndex: number } {
+  const tableLines: string[] = [];
+  let index = start;
+  while (index < lines.length && (lines[index] ?? "").trim().includes("|")) {
+    const tableLine = (lines[index] ?? "").trim();
+    if (!tableLine.match(/^\|[\s\-:|]+\|$/)) {
+      tableLines.push(tableLine);
+    }
+    index++;
+  }
+  return {
+    block:
+      tableLines.length > 0
+        ? { kind: "block", html: `<pre>${escapeHtml(tableLines.join("\n"))}</pre>` }
+        : null,
+    nextIndex: index,
+  };
+}
+
 /**
  * Converts markdown-ish text into Asana/Azure-compatible HTML blocks before joining.
  *
@@ -657,65 +719,24 @@ function buildMarkdownHtmlBlocks(text: string): AsanaHtmlBlock[] {
 
     if (trimmedLine.startsWith("#")) {
       flushParagraph();
-      const level = Math.min(6, (trimmedLine.match(/^#+/) || [""])[0].length);
-      const headerText = trimmedLine.replace(/^#+\s*/, "").trim();
-      if (headerText) {
-        const tag = level <= 1 ? "h1" : "h2";
-        blocks.push({
-          kind: "block",
-          html: `<${tag}>${formatInlineMarkdownToHtml(headerText)}</${tag}>`,
-        });
-      }
+      const heading = htmlHeadingBlock(trimmedLine);
+      if (heading) blocks.push(heading);
       continue;
     }
 
     if (trimmedLine.match(/^[-*+]\s/) || trimmedLine.match(/^[-*+]\s\[[ xX]\]\s/)) {
       flushParagraph();
-      const listItems: string[] = [];
-      let j = i;
-
-      while (j < lines.length) {
-        const itemLine = (lines[j] ?? "").trim();
-        const bulletMatch = itemLine.match(/^[-*+]\s(?:\[[ xX]\]\s)?(.*)$/);
-        if (!bulletMatch) break;
-        const itemHtml = formatInlineMarkdownToHtml((bulletMatch[1] ?? "").trim());
-        if (itemHtml) {
-          listItems.push(`<li>${itemHtml}</li>`);
-        }
-        j++;
-      }
-
-      if (listItems.length > 0) {
-        blocks.push({
-          kind: "block",
-          html: `<ul>${listItems.join("")}</ul>`,
-        });
-      }
-      i = j - 1;
+      const { block, nextIndex } = parseHtmlBulletList(lines, i);
+      if (block) blocks.push(block);
+      i = nextIndex - 1;
       continue;
     }
 
     if (trimmedLine.match(/^\d+\.\s/)) {
       flushParagraph();
-      const listItems: string[] = [];
-      let j = i;
-
-      while (j < lines.length && (lines[j] ?? "").trim().match(/^\d+\.\s/)) {
-        const itemText = (lines[j] ?? "").trim().replace(/^\d+\.\s/, "");
-        const itemHtml = formatInlineMarkdownToHtml(itemText);
-        if (itemHtml) {
-          listItems.push(`<li>${itemHtml}</li>`);
-        }
-        j++;
-      }
-
-      if (listItems.length > 0) {
-        blocks.push({
-          kind: "block",
-          html: `<ol>${listItems.join("")}</ol>`,
-        });
-      }
-      i = j - 1;
+      const { block, nextIndex } = parseHtmlOrderedList(lines, i);
+      if (block) blocks.push(block);
+      i = nextIndex - 1;
       continue;
     }
 
@@ -727,25 +748,9 @@ function buildMarkdownHtmlBlocks(text: string): AsanaHtmlBlock[] {
 
     if (trimmedLine.includes("|")) {
       flushParagraph();
-      const tableLines: string[] = [];
-      let j = i;
-
-      while (j < lines.length && (lines[j] ?? "").trim().includes("|")) {
-        const tableLine = (lines[j] ?? "").trim();
-        if (!tableLine.match(/^\|[\s\-:|]+\|$/)) {
-          tableLines.push(tableLine);
-        }
-        j++;
-      }
-
-      if (tableLines.length > 0) {
-        blocks.push({
-          kind: "block",
-          html: `<pre>${escapeHtml(tableLines.join("\n"))}</pre>`,
-        });
-      }
-
-      i = j - 1;
+      const { block, nextIndex } = parseHtmlTableBlock(lines, i);
+      if (block) blocks.push(block);
+      i = nextIndex - 1;
       continue;
     }
 

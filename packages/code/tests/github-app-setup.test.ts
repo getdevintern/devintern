@@ -8,7 +8,7 @@ import {
   loadGitHubAppRecord,
   loadGitHubAppRecords,
   saveGitHubAppRecord,
-} from "../src/lib/github-app-setup";
+} from "../src/lib/code-host/github/app-setup";
 
 describe("github-app-setup", () => {
   let tempDir: string;

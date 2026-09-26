@@ -91,7 +91,7 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
       if (existsSync(testDir)) {
         rmSync(testDir, { recursive: true, force: true });
       }
-    } catch (e) {
+    } catch {
       // Ignore cleanup errors
     }
   });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { GitHubReviewsClient, isGitHubAuthError } from "../src/lib/github-reviews";
+import { GitHubReviewsClient, isGitHubAuthError } from "../src/lib/code-host/github/reviews";
 
 const originalFetch = globalThis.fetch;
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { execSync, spawn as nodeSpawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
@@ -131,6 +131,22 @@ describe("NonoSandboxProvider.wrapCommand", () => {
     expect(allows).toContain(cursorConfig);
   });
 
+  test("grants OpenCode write access to its state locks without granting nono state", () => {
+    const home = process.env.HOME ?? "";
+    const stateDir = join(home, ".local/state/opencode");
+    if (!existsSync(stateDir)) return;
+    const wrapped = new NonoSandboxProvider().wrapCommand(
+      "/usr/bin/opencode",
+      ["run", "test"],
+      policy({ harnessName: "opencode" }),
+    );
+    const grants = wrapped.args.flatMap((arg, index) =>
+      arg === "--allow" ? [wrapped.args[index + 1]] : [],
+    );
+    expect(grants).toContain(stateDir);
+    expect(grants).not.toContain(join(home, ".local/state"));
+  });
+
   test("grants /dev/ptmx so lefthook can allocate a PTY", () => {
     if (!existsSync("/dev/ptmx")) return; // absent on some constrained hosts
     const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
@@ -181,6 +197,26 @@ describe("nono Landlock grant refinement", () => {
     );
   });
 
+  test("refineGrantsAgainstDenies grants symlinks according to their targets", () => {
+    const root = mkdtempSync(join(tmpdir(), "nono-symlinks-"));
+    const targetDir = join(root, "target-dir");
+    const targetFile = join(root, "target-file");
+    mkdirSync(targetDir);
+    mkdirSync(join(root, "denied"));
+    writeFileSync(targetFile, "test");
+    symlinkSync(targetDir, join(root, "directory-link"));
+    symlinkSync(targetFile, join(root, "file-link"));
+    symlinkSync(join(root, "missing"), join(root, "broken-link"));
+
+    const refined = refineGrantsAgainstDenies(
+      [{ flag: "--read", path: root }],
+      [join(root, "denied")],
+    );
+    expect(refined).toContainEqual({ flag: "--read", path: join(root, "directory-link") });
+    expect(refined).toContainEqual({ flag: "--read-file", path: join(root, "file-link") });
+    expect(refined.some((grant) => grant.path === join(root, "broken-link"))).toBe(false);
+  });
+
   test("refineGrantsAgainstDenies leaves unrelated and non-directory grants unchanged", () => {
     const grants = [
       { flag: "--allow", path: "/work/repo" },
@@ -191,6 +227,18 @@ describe("nono Landlock grant refinement", () => {
 });
 
 describe("SrtSandboxProvider.wrapCommand", () => {
+  test("grants OpenCode write access to its state locks", () => {
+    const stateDir = join(process.env.HOME ?? "", ".local/state/opencode");
+    if (!existsSync(stateDir)) return;
+    const wrapped = new SrtSandboxProvider().wrapCommand(
+      "/usr/bin/opencode",
+      ["run", "test"],
+      policy({ harnessName: "opencode" }),
+    );
+    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
+    expect(settings.filesystem.allowWrite).toContain(stateDir);
+  });
+
   test("writes a settings file and passes the agent as argv", () => {
     const wrapped = new SrtSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
     expect(wrapped.path).toBe("srt");

@@ -3,10 +3,9 @@
  *
  * A workspace has one shared `.env`; each repo can layer an `env_file` and
  * inline `[repos.env]` overrides on top. The composed environment also pins
- * `WEBHOOK_QUEUE_DB` to the central workspace database, so the task
- * subprocess (which runs in a throwaway worktree) writes its queue state,
- * cursors, agent PRs, and run records to the shared fleet DB instead of a
- * per-worktree `.devintern-code/queue.db`.
+ * `WEBHOOK_QUEUE_DB` to the central workspace database and passes workspace
+ * context to each task subprocess. The subprocess resolves auth and license
+ * state in the workspace rather than its throwaway checkout.
  */
 
 import { existsSync, readFileSync } from "fs";
@@ -14,10 +13,22 @@ import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
-import { ANALYTICS_CONFIG_DIR_ENV } from "../analytics";
+import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
+import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
+
+/**
+ * Explicit actioned-ticket source key pinned into a task subprocess.
+ *
+ * The workspace gate is built from `[defaults].tracker`/team identity, while
+ * the subprocess records with `TASK_TRACKER`/`DEVINTERN_WORKSPACE_TEAM`. Those
+ * can disagree when a stale `.env` carries a different tracker (or a shell
+ * `DEVINTERN_WORKSPACE_TEAM` leaks into a single-source workspace), which
+ * silently disables suppression. Pinning the derived key removes the guesswork.
+ */
+export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
 
 /**
  * Parse a dotenv-style file into a record (same semantics as the tracker
@@ -50,6 +61,28 @@ export function parseEnvFile(path: string): Record<string, string> {
   return env;
 }
 
+/** Apply shared workspace values to the worker process before its license gate. */
+export function applyWorkspaceProcessEnv(workspaceDir: string): void {
+  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
+    process.env[key] = value;
+  }
+}
+
+/** Workspace and per-repo values without worker-only runtime path markers. */
+export function buildRepoCredentialEnv(
+  repo: RepoConfig,
+  workspaceDir: string,
+): Record<string, string> {
+  const repoFileEnv = repo.envFile
+    ? parseEnvFile(isAbsolute(repo.envFile) ? repo.envFile : join(workspaceDir, repo.envFile))
+    : {};
+  return {
+    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+    ...repoFileEnv,
+    ...repo.env,
+  };
+}
+
 /**
  * Extract the `owner/repo` slug from a GitHub remote URL.
  *
@@ -67,17 +100,20 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
- * (`WEBHOOK_QUEUE_DB`, stable analytics config directory, `GITHUB_REPO`
- * for GitHub remotes unless the repo layers already set it, and `PR_LABELS`
- * from the repo's `pr_labels` config).
+ * (`WEBHOOK_QUEUE_DB`, workspace context, stable analytics config
+ * directory, `GITHUB_REPO` for GitHub remotes unless the repo layers already
+ * set it, and `PR_LABELS` from the repo's `pr_labels` config).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.actionedSource - Actioned-ticket source key to pin (see
+ *                                 {@link ACTIONED_SOURCE_ENV}).
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { actionedSource?: string } = {},
 ): Record<string, string | undefined> {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -91,9 +127,15 @@ export function buildRepoEnv(
     ...repo.env,
   };
 
-  env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
-  env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
+  // The subprocess runs in a throwaway worktree; keep runtime paths out of it.
+  pinWorkerRuntimeEnv(env, workspaceDir);
   env[WORKSPACE_REPO_ENV] = repo.name;
+  // `buildTeamTaskEnv` sets the team after layering; a non-team repo env must
+  // never inherit a team name leaked from the shell.
+  delete env[WORKSPACE_TEAM_ENV];
+  if (options.actionedSource) {
+    env[ACTIONED_SOURCE_ENV] = options.actionedSource;
+  }
 
   if (!repoFileEnv.GITHUB_REPO && !repo.env.GITHUB_REPO) {
     const slug = gitHubSlugFromRemote(repo.remote);
@@ -119,6 +161,33 @@ function teamLayerEnv(team: TeamConfig, workspaceDir: string): Record<string, st
   return { ...teamFileEnv, ...team.env };
 }
 
+/** Convert a team name to the uppercase env namespace used in workspace `.env`. */
+function teamEnvNamespace(teamName: string): string {
+  return teamName.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+}
+
+/**
+ * Project tracker/team-namespaced workspace variables onto the normal tracker
+ * variable names. For example, `JIRA_PLATFORM_API_TOKEN` becomes
+ * `JIRA_API_TOKEN` for team `platform`. `JIRA_PLATFORM_URL` is also accepted
+ * as the concise alias for the existing `JIRA_BASE_URL` setting.
+ */
+function namespacedTeamEnv(
+  workspaceEnv: Record<string, string>,
+  team: TeamConfig,
+): Record<string, string> {
+  const trackerPrefix = team.tracker.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+  const namespace = `${trackerPrefix}_${teamEnvNamespace(team.name)}_`;
+  const projected: Record<string, string> = {};
+  for (const [key, value] of Object.entries(workspaceEnv)) {
+    if (!key.startsWith(namespace)) continue;
+    const suffix = key.slice(namespace.length);
+    projected[`${trackerPrefix}_${suffix}`] = value;
+    if (trackerPrefix === "JIRA" && suffix === "URL") projected.JIRA_BASE_URL = value;
+  }
+  return projected;
+}
+
 /**
  * Compose a team's own credential environment: workspace `.env`, then the
  * team's `env_file`, then inline team overrides.
@@ -133,8 +202,10 @@ export function buildTeamEnv(
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
 ): Record<string, string> {
+  const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   return {
-    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+    ...workspaceEnv,
+    ...namespacedTeamEnv(workspaceEnv, team),
     ...teamLayerEnv(team, workspaceDir),
   };
 }
@@ -146,7 +217,7 @@ export function buildTeamEnv(
  * credentials between the repo layers and the final pin:
  *
  * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
- * team `env_file` < team inline < `TASK_TRACKER` pin.
+ * team `env_file` < team inline < worker runtime paths and `TASK_TRACKER` pin.
  *
  * The team wins ties because its credentials describe the tracker that
  * acquired the task (status transitions must hit that board, even if a stale
@@ -156,14 +227,18 @@ export function buildTeamEnv(
  * @param repo - Workspace repo the task routed to.
  * @param team - Team that acquired the task.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.actionedSource - Actioned-ticket source key to pin (see
+ *                                 {@link ACTIONED_SOURCE_ENV}).
  */
 export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { actionedSource?: string } = {},
 ): Record<string, string | undefined> {
-  const env = buildRepoEnv(repo, workspaceDir);
+  const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
+  pinWorkerRuntimeEnv(env, workspaceDir);
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
@@ -186,5 +261,15 @@ export function buildErrorMonitorEnv(
   const sourceFileEnv = source.envFile
     ? parseEnvFile(isAbsolute(source.envFile) ? source.envFile : join(workspaceDir, source.envFile))
     : {};
-  return { ...env, ...sourceFileEnv, ...source.env };
+  const result = { ...env, ...sourceFileEnv, ...source.env };
+  pinWorkerRuntimeEnv(result, workspaceDir);
+  return result;
+}
+
+/** Keep worker-owned paths and the subprocess marker above credential layers. */
+function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceDir: string): void {
+  env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
+  env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
+  env[WORKER_SUBPROCESS_ENV] = "1";
 }

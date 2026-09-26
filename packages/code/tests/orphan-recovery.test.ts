@@ -10,10 +10,10 @@ import {
   loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
-} from "../src/lib/orphan-recovery";
-import { RunStore } from "../src/lib/run-recorder";
-import { RetryStateStore, hashDescription } from "../src/lib/retry-state";
-import type { TaskTrackerClient } from "../src/lib/task-tracker-client";
+} from "../src/lib/worker/orphan-recovery";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
 
 describe("recoverOrphanedTaskRuns", () => {

@@ -79,6 +79,10 @@ This workflow:
 5. Moves the task to the `prStatus` section after PR creation
 6. Posts implementation or assessment comments on the task
 
+### Actioned tasks (worker)
+
+When the worker creates a PR it moves the task to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned task by editing its description, moving it back to a ready section, or changing fields — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+
 ## Batch processing with --query
 
 Asana has no query language, so @devintern/code provides a small filter syntax:

@@ -42,6 +42,14 @@ ci_failure_fix = false
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"
 
+# Optional bounded host concurrency. This is throughput, not VM isolation:
+# concurrent jobs share ports, processes, Docker, caches, and linked Git data.
+# Uncomment all three lines to opt in.
+# [workspace.execution]
+# isolation = "best_effort_host"
+# max_concurrency = 4
+# max_concurrency_per_repo = 1
+
 [defaults]
 # Tracker the fleet query runs against: jira, linear, github, gitlab,
 # azure-devops, asana, trello, or markdown.
@@ -110,7 +118,9 @@ poll_interval = 60
 
 # Recurring work is hot-reloaded: edits apply to the running worker without a
 # restart. Each occurrence runs the prompt through the normal task pipeline as
-# a local markdown task.
+# a local markdown task. Pull requests are opt-in per automation: set
+# open_pr = true for repo-maintenance jobs that should open a reviewable PR —
+# without it, occurrences do not create a branch, PR, or labels.
 # Cron uses the worker host timezone; interval values support m, h, and d.
 # ----
 # [[automations]]
@@ -118,6 +128,7 @@ poll_interval = 60
 # enabled = true
 # cron = "0 9 * * 1-5"       # exactly one of cron / interval
 # prompt = "Inspect dependency health and fix one safe issue."
+# open_pr = true              # default false: occurrences open no pull request
 # repo = "backend"            # required in a multi-repo workspace
 `;
 

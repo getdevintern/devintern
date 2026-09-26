@@ -7,10 +7,10 @@ import {
   SENTRY_ACTION_FAILED_COMMENT,
   SENTRY_ACTION_SUCCEEDED_COMMENT,
   SentryClient,
-} from "../src/lib/sentry-client";
-import type { SentryIssue } from "../src/lib/sentry-client";
-import { ErrorMonitorAcquirer } from "../src/lib/error-monitor";
-import { WebhookQueue } from "../src/lib/webhook-queue";
+} from "../src/lib/observability/sentry-client";
+import type { SentryIssue } from "../src/lib/observability/sentry-client";
+import { ErrorMonitorAcquirer } from "../src/lib/acquirers/error-monitor";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 
 function issue(overrides: Partial<SentryIssue> = {}): SentryIssue {
   return {

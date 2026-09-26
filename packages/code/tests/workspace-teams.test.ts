@@ -10,9 +10,9 @@ import {
   createWorkspaceTaskAcquirer,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
-import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
+import { openWorkspaceState } from "../src/lib/workspace/state";
 import type { WorkspaceState } from "../src/lib/workspace/state";
-import type { ChangeDetector } from "../src/lib/change-detector";
+import type { ChangeDetector } from "../src/lib/acquirers/change-detector";
 import {
   createFleetRelayTaskDispatcher,
   createFleetTaskEvaluator,
@@ -163,7 +163,6 @@ describe("multi-team polling", () => {
         options.executed.push({ taskKey, cwd: opts.cwd, env: opts.env });
         return options.result ?? true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
   beforeEach(() => {
@@ -347,7 +346,6 @@ remote = "git@github.com:acme/web.git"
         executed.push({ taskKey, cwd: opts.cwd, env: opts.env });
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
@@ -378,7 +376,6 @@ remote = "git@github.com:acme/web.git"
         void args;
         return true;
       },
-      repoLock: (name) => createRepoRunLock(name, workspaceDir),
     });
 
     await acquirer.tick();
@@ -422,7 +419,6 @@ describe("relay task evaluation across teams", () => {
           ran.push(`${team?.name ?? "defaults"}:${taskKey}`);
           return true;
         },
-        repoLock: (name) => createRepoRunLock(name, workspaceDir),
       }),
     });
   }
@@ -476,6 +472,44 @@ describe("relay task evaluation across teams", () => {
     });
 
     await dispatch("77", "jira");
+    expect(ran).toEqual([]);
+  });
+
+  test("team-tagged envelopes route overlapping keys only to the exact team", async () => {
+    const ran: string[] = [];
+    const overlapping: FleetTask[] = [{ key: "PROJ-123", updated: "u1", labels: ["docs"] }];
+    const dispatch = createFleetRelayTaskDispatcher({
+      sources: [
+        {
+          tracker: "jira",
+          label: "platform",
+          evaluate: evaluatorFor(findTeam(CONFIG, "platform"), overlapping, ran),
+        },
+        {
+          tracker: "jira",
+          label: "growth",
+          evaluate: evaluatorFor(findTeam(CONFIG, "growth"), overlapping, ran),
+        },
+      ],
+    });
+
+    await dispatch("PROJ-123", "jira", "growth");
+    expect(ran).toEqual(["growth:PROJ-123"]);
+  });
+
+  test("unknown or removed relay teams are skipped safely", async () => {
+    const ran: string[] = [];
+    const dispatch = createFleetRelayTaskDispatcher({
+      sources: [
+        {
+          tracker: "jira",
+          label: "platform",
+          evaluate: evaluatorFor(findTeam(CONFIG, "platform"), [], ran),
+        },
+      ],
+    });
+
+    await dispatch("PROJ-123", "jira", "removed");
     expect(ran).toEqual([]);
   });
 

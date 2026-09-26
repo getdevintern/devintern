@@ -3,8 +3,8 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { AutomationStateStore } from "../src/lib/automation-state";
-import type { AutomationConfig } from "../src/lib/automation-config";
+import { AutomationStateStore } from "../src/lib/automation/state";
+import type { AutomationConfig } from "../src/lib/automation/config";
 
 const AUTOMATION: AutomationConfig = {
   id: "cleanup",

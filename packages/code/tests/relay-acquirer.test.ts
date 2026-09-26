@@ -3,17 +3,18 @@ import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { RelayAcquirer } from "../src/lib/relay-acquirer";
-import type { RelayEnvelope } from "../src/lib/relay-acquirer";
-import { WebhookQueue } from "../src/lib/webhook-queue";
-import { WorkerState } from "../src/lib/worker-state";
+import { RelayAcquirer } from "../src/lib/relay/acquirer";
+import type { RelayEnvelope } from "../src/lib/relay/acquirer";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
 
 const RELAY_URL = "http://relay.test";
 
 interface HandlerLog {
   addressed: [string, number][];
   comments: [string, number, number][];
-  tasks: Array<[string, string]>;
+  tasks: Array<[string, string, string?]>;
+  codeHosts: RelayEnvelope[];
 }
 
 function envelope(overrides: Partial<RelayEnvelope>): RelayEnvelope {
@@ -42,7 +43,7 @@ describe("RelayAcquirer", () => {
     dbPath = join(dir, "queue.db");
     workerState = new WorkerState(dbPath);
     queue = new WebhookQueue({ dbPath });
-    log = { addressed: [], comments: [], tasks: [] };
+    log = { addressed: [], comments: [], tasks: [], codeHosts: [] };
   });
 
   afterEach(() => {
@@ -100,8 +101,11 @@ describe("RelayAcquirer", () => {
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
         },
-        evaluateTask: async (taskKey, trackerSource) => {
-          log.tasks.push([taskKey, trackerSource]);
+        evaluateTask: async (taskKey, trackerSource, team) => {
+          log.tasks.push([taskKey, trackerSource, team]);
+        },
+        reconcileCodeHost: async (event) => {
+          log.codeHosts.push(event);
         },
       },
     });
@@ -131,6 +135,7 @@ describe("RelayAcquirer", () => {
         seq: 3,
         eventType: "task.changed",
         source: "jira",
+        team: "platform",
         repo: undefined,
         ref: { task: "PROJ-7" },
         deliveryId: "c",
@@ -149,7 +154,8 @@ describe("RelayAcquirer", () => {
 
     expect(log.addressed).toEqual([["acme/webapp", 5]]);
     expect(log.comments).toEqual([["acme/webapp", 6, 99]]);
-    expect(log.tasks).toEqual([["PROJ-7", "jira"]]);
+    expect(log.tasks).toEqual([["PROJ-7", "jira", "platform"]]);
+    expect(queue.hasProcessed("relay", "jira:platform:c")).toBe(true);
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("3");
     expect(requests[0]).toContain("cursor=0");
     expect(authHeaders[0]).toBe("Bearer drt_test_token");
@@ -170,6 +176,70 @@ describe("RelayAcquirer", () => {
     // Not an agent PR → never addressed; second delivery deduped either way.
     expect(log.addressed.length).toBe(0);
     expect(queue.hasProcessed("relay", "github:dup")).toBe(true);
+  });
+
+  test("dispatches valid provider-neutral v2 code-host hints", async () => {
+    const event = envelope({
+      version: 2,
+      seq: 1,
+      source: "gitlab",
+      eventType: "change.feedback",
+      repo: undefined,
+      codeHost: {
+        provider: "gitlab",
+        instanceUrl: "https://gitlab.example.com",
+        projectId: "42",
+        projectPath: "platform/widgets",
+      },
+      ref: { change: 17, branch: "feature/a", headSha: "abc123" },
+      deliveryId: "webhook-id:delivery-1",
+    });
+    const { acquirer } = makeAcquirer([{ events: [event], cursor: 1 }, { events: [] }]);
+
+    acquirer.start();
+    await waitFor(() => log.codeHosts.length === 1);
+    await acquirer.stop();
+
+    expect(log.codeHosts[0]).toEqual(event);
+  });
+
+  test("ignores malformed or provider-mismatched v2 code-host hints", async () => {
+    const identity = {
+      provider: "gitlab" as const,
+      instanceUrl: "https://gitlab.example.com",
+      projectId: "42",
+      projectPath: "platform/widgets",
+    };
+    const events = [
+      envelope({
+        seq: 1,
+        source: "gitlab",
+        eventType: "change.changed",
+        codeHost: identity,
+        ref: { change: 17 },
+      }),
+      envelope({
+        version: 2,
+        seq: 2,
+        source: "github",
+        eventType: "change.changed",
+        codeHost: identity,
+        ref: { change: 17 },
+      }),
+      envelope({
+        version: 2,
+        seq: 3,
+        source: "gitlab",
+        eventType: "ci.changed",
+        codeHost: identity,
+        ref: {},
+      }),
+    ];
+    const { acquirer } = makeAcquirer([{ events, cursor: 3 }, { events: [] }]);
+    acquirer.start();
+    await waitFor(() => (workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0") === "3");
+    await acquirer.stop();
+    expect(log.codeHosts).toEqual([]);
   });
 
   test("resumes from the persisted cursor", async () => {

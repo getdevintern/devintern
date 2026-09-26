@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { GitHubPRClient, isTransientPrFailure, parsePrLabels } from "../src/lib/pr-client";
-import type { PRInfo } from "../src/lib/pr-client";
+import { GitHubPRClient, isTransientPrFailure, parsePrLabels } from "../src/lib/code-host";
+import type { PRInfo } from "../src/lib/code-host";
 
 const originalFetch = globalThis.fetch;
 
