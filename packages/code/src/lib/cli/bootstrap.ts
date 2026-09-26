@@ -11,7 +11,6 @@ import { isWorkerSubprocess, resolveRuntimeStateDir } from "../config/config-dir
 import { isInteractive } from "../init/wizard";
 import { flushAnalytics } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
-import { hasWorkspace, resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
 
 // Version is injected at build time via --define flag, or read from package.json in dev
 declare const __VERSION__: string;
@@ -96,22 +95,9 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
   return null;
 }
 
-/**
- * Build auth config, preferring the persistent worker workspace when configured.
- *
- * An explicit `configDir` wins. Otherwise a configured workspace keeps its own
- * session and license cache — worker subprocesses inherit `DEVINTERN_WORKSPACE_DIR`
- * so they resolve to the same place — falling back to the project config directory.
- */
-export function loadSupabaseConfig(configDir?: string) {
-  if (configDir) return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
-  const workspaceDir = resolveWorkspaceDir();
-  if (hasWorkspace(workspaceDir)) {
-    return createDefaultSupabaseAuthConfig(
-      join(workspaceCodeStateDir(workspaceDir), ".auth-session.json"),
-    );
-  }
-  return createDefaultSupabaseAuthConfig(join(resolveRuntimeStateDir(), ".auth-session.json"));
+/** Build Supabase auth config pointing at the project session file. */
+export function loadSupabaseConfig(configDir: string = resolveRuntimeStateDir()) {
+  return createDefaultSupabaseAuthConfig(join(configDir, ".auth-session.json"));
 }
 
 /**
