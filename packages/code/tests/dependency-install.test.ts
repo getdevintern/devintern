@@ -139,6 +139,47 @@ describe("Dependency Installation", () => {
     expect(hooksPathDuringInstall).toBe(join(gitDir, "hooks"));
   });
 
+  test("prepareWorktreeForAgent initializes submodules before installing dependencies", async () => {
+    const submoduleSource = join(testDir, "license-policy-source");
+    mkdirSync(submoduleSource);
+    execSync("git init", { cwd: submoduleSource });
+    execSync("git config user.email 'test@test.com'", { cwd: submoduleSource });
+    execSync("git config user.name 'Test User'", { cwd: submoduleSource });
+    writeFileSync(
+      join(submoduleSource, "package.json"),
+      '{"name":"@getdevintern/license-policy"}\n',
+    );
+    execSync("git add . && git commit -m 'Add policy workspace'", { cwd: submoduleSource });
+
+    execSync(
+      `git -c protocol.file.allow=always submodule add ${submoduleSource} vendor/devintern`,
+      { cwd: repoDir },
+    );
+    execSync("git commit -am 'Add public source submodule'", { cwd: repoDir });
+
+    const worktree = join(testDir, "linked-worktree");
+    execSync(`git worktree add --detach ${worktree} HEAD`, { cwd: repoDir });
+    const policyManifest = join(worktree, "vendor/devintern/package.json");
+    expect(existsSync(policyManifest)).toBe(false);
+
+    const originalProtocol = process.env.GIT_ALLOW_PROTOCOL;
+    process.env.GIT_ALLOW_PROTOCOL = "file";
+    const installSpy = spyOn(Utils, "installDependencies").mockImplementation(async () => {
+      expect(existsSync(policyManifest)).toBe(true);
+      return { success: true, packageManager: "test" };
+    });
+    try {
+      expect(await Utils.prepareWorktreeForAgent(worktree)).toEqual({
+        success: true,
+        packageManager: "test",
+      });
+    } finally {
+      installSpy.mockRestore();
+      if (originalProtocol === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+      else process.env.GIT_ALLOW_PROTOCOL = originalProtocol;
+    }
+  });
+
   test("prepareWorktreeForAgent warns but does not throw when install fails", async () => {
     const installSpy = spyOn(Utils, "installDependencies").mockResolvedValue({
       success: false,

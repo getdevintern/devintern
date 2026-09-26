@@ -147,8 +147,8 @@ export async function enableWorktreeConfig(
 }
 
 /**
- * Prepare a worktree for an agent run: isolate git hooks, then install
- * dependencies.
+ * Prepare a worktree for an agent run: isolate git hooks, initialize
+ * submodules, then install dependencies.
  *
  * Shared by the review path (`prepareReviewWorktree`) and the fleet path
  * (`RepoManager.addWorktree`) so the two cannot drift: hook isolation must
@@ -174,6 +174,25 @@ export async function prepareWorktreeForAgent(
     // worktree, before `bun install` gets a chance to touch the shared
     // `.git/hooks`.
     await Utils.isolateWorktreeHooks(worktreePath, { verbose });
+
+    // Git does not populate submodules when it creates a linked worktree.
+    // A package manager may need a workspace inside one of them (for example,
+    // vendor/devintern/packages/license-policy), so initialize them before
+    // dependency discovery and installation.
+    if (existsSync(join(worktreePath, ".gitmodules"))) {
+      const submodules = await Utils.executeGitCommand(
+        ["submodule", "update", "--init", "--recursive"],
+        {
+          cwd: worktreePath,
+          verbose,
+        },
+      );
+      if (!submodules.success) {
+        console.warn(
+          `⚠️  Failed to initialize submodules: ${submodules.error || submodules.output}`,
+        );
+      }
+    }
 
     if (verbose) {
       console.log(`📦 Installing dependencies...`);
