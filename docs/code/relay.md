@@ -94,6 +94,8 @@ The worker detects the workspace pairing and starts the relay connection automat
 
 For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in the workspace `.env` or a team's `env_file` / inline `[teams.env]`, then run the matching connect command below. Jira needs no extra Jira env for registration: connect prints a private ingest URL for one-time admin webhook setup.
 
+For multi-team tracker routing, deploy the team-aware relay control plane before upgrading the CLI. The new CLI detects an older relay and fails team-scoped registration with an actionable error; team-less registration remains compatible in either deployment order.
+
 ## Commands
 
 | Command                                          | Description                                                               |
@@ -110,11 +112,11 @@ For Linear, Asana, Trello, or Azure DevOps, set that tracker's credentials in th
 | `devintern worker connect sentry`                | Add a directly polled Sentry auto-fix project to the workspace            |
 | `devintern worker connect status`                | Show relay status and workspace repositories still awaiting verification |
 
-In a multi-team workspace, `devintern worker connect linear --team growth` selects that team's credential layers. If exactly one team uses the requested tracker, `--team` is optional and the CLI selects it automatically. The flag is invalid for GitHub, GitLab, and status because those targets are workspace-wide.
+In a multi-team workspace, `devintern worker connect linear --team growth` selects that team's credential layers and registers the source under that stable team name. If exactly one team uses the requested tracker, `--team` is optional and the CLI selects it automatically. When several teams use the tracker, `--team` is required and each team receives a distinct, idempotent ingest URL. The flag is invalid for GitHub, GitLab, and status because those targets are workspace-wide.
 
-Current tracker envelopes identify their tracker type but not an individual team registration. When more than one team uses the same tracker type—for example, two separate Jira sites—`worker connect jira` refuses registration and those teams continue using their isolated polling loops. The worker also ignores an ambiguous same-tracker task envelope rather than assigning it to the first matching team. GitHub repository events and teams using distinct tracker types are unaffected.
+Team-aware `task.changed` envelopes route only to the exact tracker and team pair, even when two boards contain the same task key. Events for unknown or removed teams are logged, skipped, and acknowledged so they cannot stall the stream. Older buffered envelopes have no team tag and retain the legacy source-only path: they run only when the tracker maps to one unambiguous workspace source. GitHub PR envelopes are unchanged.
 
-Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret, and re-run connect to rotate it.
+Linear deliveries are verified with a signing secret generated on your machine. Asana deliveries are verified with the hook secret from Asana's registration handshake. Trello, Azure DevOps, and Jira deliveries carry no usable signature, so their authentication is the unguessable ingest URL itself: keep it secret. Re-registering the same tracker/team keeps its URL; registering another team creates a separate URL.
 
 `worker connect` stores the shared pairing under the workspace home in owner-only `.devintern-code/relay.json`. It skips repositories whose immutable GitHub repository IDs are already verified and continues when one GitHub or GitLab project fails. GitLab signing values are one-time setup material and are never written to this state file. Tracker connect uses the selected team's credential layers when applicable; otherwise it reads the workspace `.env` with explicit shell variables taking precedence.
 
@@ -130,7 +132,7 @@ Linear deliveries are verified with a signing secret generated on your machine. 
 
 ### Per `worker connect` target
 
-Set code-host credentials in the workspace or per-repository environment. Tracker targets use the workspace `.env`, or `--team <name>` to compose that team's `env_file` and inline env. GitHub connect uses every unpaired GitHub repository in `workspace.toml`. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
+Set code-host credentials in the workspace or per-repository environment. Tracker targets use the same credentials you already use for that tracker: set them in the workspace `.env`, or use `--team <name>` to compose that team's `env_file` and inline env. Shared `.env` files may namespace credentials as `<TRACKER>_<TEAM>_<SETTING>`; for example, `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, and `JIRA_PLATFORM_API_TOKEN` become the normal Jira settings for team `platform`. Team names are uppercased and non-alphanumeric characters become `_`. A team's `env_file` and inline env still take precedence. GitHub connect uses every unpaired GitHub repository in `workspace.toml`. Jira connect mints the ingest URL and prints admin setup steps without calling the Jira API.
 
 | Target         | Required env vars                                               | Notes                                                           |
 | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
@@ -148,7 +150,7 @@ Running the worker against those trackers still needs the usual `TASK_TRACKER=�
 
 - Reviews submitted on the agent's own PRs are addressed automatically, same as polling mode.
 - New PR comments are checked for a `@devintern-ai` mention; the same permission gate applies (only users with push access can direct the agent).
-- Tracker task events re-run your configured `[defaults].task_query` before acting, so "ready" still means whatever your query says.
+- Tracker task events re-run the exact team's configured query (or `[defaults].task_query` for a team-less workspace) before acting, so "ready" still means whatever your query says.
 - GitLab discussion, MR, pipeline, and failed-job events are hints only. The worker matches an exact registered project/MR and re-fetches authoritative state with its local token before acting.
 - Every envelope is deduplicated against the worker's local database, so relay delivery and fallback polling never double-run work.
 
