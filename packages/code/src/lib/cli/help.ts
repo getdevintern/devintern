@@ -68,4 +68,10 @@ Subcommands:
   doctor               Readiness check: runtime, git, agent CLI, tracker
                         credentials, sign-in, license (exit 1 if anything fails)
 
+Licensing:
+  Interactive runs are free forever and need no sign-in. Unattended runs
+  (worker, CI, cron) require an automation license; a signed-in user can start
+  the no-card Worker Pilot first: run 'devintern login' to sign in, then
+  'devintern worker'. The pilot runs 14 days with no task limit.
+
 Run 'devintern <subcommand> --help' for subcommand-specific options.`;
