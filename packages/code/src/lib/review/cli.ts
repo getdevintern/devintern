@@ -1,12 +1,25 @@
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { loadEnvironment } from "../cli/bootstrap";
+import { setManualWorkspaceStateDir } from "../config/config-dir";
 import { endRun } from "../state/run-recorder";
 import { exitIfWorkerUsageLimit } from "../worker/usage-limit-protocol";
+import { workspaceCredentialsForChange } from "../workspace/manual-credentials";
+import { ensureWorkspaceCodeState, resolveWorkspaceDir } from "../workspace/paths";
+
+/** Use a registered repo's workspace layers for manual PR commands. */
+async function loadReviewEnvironment(changeUrl: string): Promise<void> {
+  const credentials = await workspaceCredentialsForChange(changeUrl);
+  if (credentials) {
+    const workspaceDir = resolveWorkspaceDir();
+    ensureWorkspaceCodeState(workspaceDir);
+    setManualWorkspaceStateDir(workspaceDir);
+    Object.assign(process.env, credentials);
+  }
+  loadEnvironment(undefined, { skipProjectEnv: Boolean(credentials) });
+}
 
 /** `devintern address-review <pr-url>` — manually address PR/MR review feedback. */
 export async function runAddressReviewCommand(args: string[]): Promise<void> {
-  loadEnvironment();
-
   let prUrl: string | undefined;
   let noPush = false;
   let noReply = false;
@@ -73,8 +86,9 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const { addressReview } = await import("./address");
   try {
+    await loadReviewEnvironment(prUrl);
+    const { addressReview } = await import("./address");
     await addressReview(prUrl, {
       noPush,
       noReply,
@@ -105,8 +119,6 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
  * worker for its own PRs.
  */
 export async function runResolveConflictsCommand(args: string[]): Promise<void> {
-  loadEnvironment();
-
   let prUrl: string | undefined;
   let noPush = false;
   let verbose = false;
@@ -148,8 +160,9 @@ export async function runResolveConflictsCommand(args: string[]): Promise<void> 
     process.exit(1);
   }
 
-  const { resolveConflictsOnPr } = await import("./conflict-resolver");
   try {
+    await loadReviewEnvironment(prUrl);
+    const { resolveConflictsOnPr } = await import("./conflict-resolver");
     const result = await resolveConflictsOnPr(prUrl, {
       noPush,
       verbose,

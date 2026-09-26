@@ -27,12 +27,11 @@ import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildErrorMonitorEnv, buildRepoEnv, buildTeamEnv, parseEnvFile } from "./env";
+import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildRepoEnv, buildTeamEnv } from "./env";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
   workspaceDbPath,
-  workspaceEnvPath,
   worktreesDir,
   workspaceRunNowPath,
 } from "./paths";
@@ -967,9 +966,7 @@ function applyWorkspaceEnv(
 ): { multiTeam: boolean; initialQuery: string | undefined; intervalSeconds: number } {
   // Shared workspace values serve GitHub/review consumers and the legacy
   // single-defaults tracker. Team clients use explicit composed env maps.
-  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
-    process.env[key] = value;
-  }
+  applyWorkspaceProcessEnv(workspaceDir);
   const multiTeam = config.teams.length > 0;
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.

@@ -8,7 +8,9 @@ import {
   loadSupabaseConfig,
 } from "../cli/bootstrap";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
+import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
+import { applyWorkspaceProcessEnv } from "../workspace/env";
 import {
   ensureWorkspaceCodeState,
   resolveWorkspaceDir,
@@ -252,10 +254,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     }
   }
 
-  loadEnvironment();
-
-  const { hasWorkspace, resolveWorkspaceDir, workspaceEnvPath } =
-    await import("../workspace/paths");
+  const { hasWorkspace, resolveWorkspaceDir } = await import("../workspace/paths");
   const workspaceMode = Boolean(workspacePath) || hasWorkspace();
   if (!workspaceMode) {
     console.error("❌ No workspace configured. Run `devintern worker init` first.");
@@ -265,14 +264,12 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   // Workspace credentials must be available before the license gate. This
   // matters for native services, whose working directory is the workspace
   // home rather than a source checkout.
-  const { parseEnvFile } = await import("../workspace/env");
   const selectedWorkspaceDir = workspacePath
     ? dirname(resolve(workspacePath))
     : resolveWorkspaceDir();
   ensureWorkspaceCodeState(selectedWorkspaceDir);
-  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(selectedWorkspaceDir)))) {
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
+  applyWorkspaceProcessEnv(selectedWorkspaceDir);
+  initSentryOnce(`code@${VERSION}`);
 
   // License check — the worker is unattended automation, so it always
   // requires an automation entitlement.
