@@ -7,7 +7,7 @@ import { LicenseCheckError, requireLicense } from "@devintern/license-check";
 import type { LicenseCheckResult } from "@devintern/license-check";
 import { findEnvFile, maybeOfferCliUpdate } from "@devintern/utils";
 import { isAutomatedEnvironment } from "../config/env-detector";
-import { resolveRuntimeStateDir } from "../config/config-dir";
+import { isWorkerSubprocess, resolveRuntimeStateDir } from "../config/config-dir";
 import { isInteractive } from "../init/wizard";
 import { flushAnalytics } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
@@ -43,15 +43,18 @@ export function getLoadedEnvPath(): string | null {
  * @param envFile - Optional explicit `.env` path (exits on missing file)
  * @returns Path to the loaded .env file, or `null` if none was found
  */
-export function loadEnvironment(envFile?: string): string | null {
-  loadedEnvPath = loadEnvironmentInner(envFile);
+export function loadEnvironment(
+  envFile?: string,
+  options: { skipProjectEnv?: boolean } = {},
+): string | null {
+  loadedEnvPath = loadEnvironmentInner(envFile, options.skipProjectEnv ?? false);
   // Sentry reads SENTRY_DISABLED from process.env, so initialize only after .env
   // loading has had its chance to populate it.
   initSentryOnce(`code@${VERSION}`);
   return loadedEnvPath;
 }
 
-function loadEnvironmentInner(envFile?: string): string | null {
+function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boolean): string | null {
   // If user specified a custom env file, use that first
   if (envFile) {
     const customEnvPath = resolve(envFile);
@@ -63,6 +66,10 @@ function loadEnvironmentInner(envFile?: string): string | null {
     console.error(`❌ Specified .env file not found: ${customEnvPath}`);
     process.exit(1);
   }
+
+  // A workspace task already receives its composed credentials from the
+  // worker. Do not fill missing keys from the checkout's local config.
+  if (isWorkerSubprocess() || skipProjectEnv) return null;
 
   // Otherwise, search upward from cwd for the nearest .env file
   const envPath = findEnvFile({ configDirName: ".devintern-code" });

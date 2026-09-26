@@ -61,6 +61,28 @@ export function parseEnvFile(path: string): Record<string, string> {
   return env;
 }
 
+/** Apply shared workspace values to the worker process before its license gate. */
+export function applyWorkspaceProcessEnv(workspaceDir: string): void {
+  for (const [key, value] of Object.entries(parseEnvFile(workspaceEnvPath(workspaceDir)))) {
+    process.env[key] = value;
+  }
+}
+
+/** Workspace and per-repo values without worker-only runtime path markers. */
+export function buildRepoCredentialEnv(
+  repo: RepoConfig,
+  workspaceDir: string,
+): Record<string, string> {
+  const repoFileEnv = repo.envFile
+    ? parseEnvFile(isAbsolute(repo.envFile) ? repo.envFile : join(workspaceDir, repo.envFile))
+    : {};
+  return {
+    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+    ...repoFileEnv,
+    ...repo.env,
+  };
+}
+
 /**
  * Extract the `owner/repo` slug from a GitHub remote URL.
  *

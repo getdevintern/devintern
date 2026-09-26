@@ -13,6 +13,7 @@ import { join } from "path";
 import {
   resolveProjectConfigDir,
   resolveRuntimeStateDir,
+  setManualWorkspaceStateDir,
   WORKER_SUBPROCESS_ENV,
 } from "../src/lib/config/config-dir";
 import { loadSupabaseConfig } from "../src/lib/cli/bootstrap";
@@ -38,6 +39,7 @@ describe("fleet config-dir isolation (DEV-126)", () => {
   });
 
   afterEach(() => {
+    setManualWorkspaceStateDir(null);
     if (priorWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
     else process.env.DEVINTERN_WORKSPACE_DIR = priorWorkspace;
     if (priorMarker === undefined) delete process.env[WORKER_SUBPROCESS_ENV];
@@ -68,6 +70,51 @@ describe("fleet config-dir isolation (DEV-126)", () => {
     process.env[WORKER_SUBPROCESS_ENV] = "1";
     expect(resolveRuntimeStateDir(worktree)).toBe(join(workspace, "state", "code"));
     expect(resolveProjectConfigDir(worktree)).toBe(join(worktree, ".devintern-code"));
+  });
+
+  test("manual commands for registered repos use the workspace session", () => {
+    const checkout = join(root, "checkout");
+    const workspace = join(root, "workspace");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    delete process.env[WORKER_SUBPROCESS_ENV];
+
+    setManualWorkspaceStateDir(workspace);
+    expect(resolveRuntimeStateDir(checkout)).toBe(join(workspace, "state", "code"));
+    expect(resolveProjectConfigDir(checkout)).toBe(join(checkout, ".devintern-code"));
+
+    setManualWorkspaceStateDir(null);
+    expect(resolveRuntimeStateDir(checkout)).toBe(join(checkout, ".devintern-code"));
+  });
+
+  test("worker subprocesses do not load a checkout's local credentials", () => {
+    const checkout = join(root, "checkout");
+    mkdirSync(join(checkout, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(checkout, ".devintern-code", ".env"),
+      "DEVINTERN_LOCAL_CREDENTIAL_TEST=from-local-checkout\n",
+    );
+    const bootstrapPath = join(__dirname, "..", "src", "lib", "cli", "bootstrap.ts");
+    const script = `import { loadEnvironment } from ${JSON.stringify(bootstrapPath)}; console.log(JSON.stringify({ path: loadEnvironment(), credential: process.env.DEVINTERN_LOCAL_CREDENTIAL_TEST ?? null }));`;
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      [WORKER_SUBPROCESS_ENV]: "1",
+      SENTRY_DISABLED: "1",
+    };
+    delete env.DEVINTERN_LOCAL_CREDENTIAL_TEST;
+
+    const result = spawnSync("bun", ["-e", script], { cwd: checkout, env, encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{"path":null,"credential":null}');
+
+    delete env[WORKER_SUBPROCESS_ENV];
+    const manualScript = `import { loadEnvironment } from ${JSON.stringify(bootstrapPath)}; console.log(JSON.stringify({ path: loadEnvironment(undefined, { skipProjectEnv: true }), credential: process.env.DEVINTERN_LOCAL_CREDENTIAL_TEST ?? null }));`;
+    const manual = spawnSync("bun", ["-e", manualScript], {
+      cwd: checkout,
+      env,
+      encoding: "utf8",
+    });
+    expect(manual.status).toBe(0);
+    expect(manual.stdout.trim()).toBe('{"path":null,"credential":null}');
   });
 });
 

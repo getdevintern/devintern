@@ -249,6 +249,8 @@ devintern worker connect sentry # add a Sentry auto-fix project
 
 Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Worker setup and repository imports enforce mode `0600`. Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
 
+The workspace worker uses this shared `.env` even when started inside a repository. It does not load that repository's `.devintern-code/.env`; use the repo layers below for credentials that should differ by repository. Worker task subprocesses also use their composed workspace and repo layers instead of reading the checkout's local `.env`. Manual `devintern resolve-conflicts <pr-url>` and `devintern address-review <pr-url>` use the workspace and repo credential layers and the workspace login session when the current checkout and PR URL both match a registered repo. Other checkouts keep their project-local configuration.
+
 1. Shared workspace `.env`
 2. The repo's `env_file` (if set)
 3. Inline `[repos.env]` values (highest precedence)

@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "../src/lib/workspace/config";
 import {
+  applyWorkspaceProcessEnv,
   buildErrorMonitorEnv,
   buildRepoEnv,
   buildTeamTaskEnv,
@@ -65,6 +66,15 @@ describe("buildRepoEnv", () => {
     expect(env.FILE_ONLY).toBe("file");
     expect(env.SHARED).toBe("inline"); // inline wins over env_file and .env
     expect(env.INLINE_ONLY).toBe("inline");
+  });
+
+  test("workspace process credentials override values inherited from a local checkout", () => {
+    process.env.WS_ENV_PROCESS_MARKER = "from-local-checkout";
+    writeFileSync(join(workspaceDir, ".env"), "WS_ENV_PROCESS_MARKER=from-workspace\n");
+
+    applyWorkspaceProcessEnv(workspaceDir);
+
+    expect(process.env.WS_ENV_PROCESS_MARKER).toBe("from-workspace");
   });
 
   test("pins durable state and analytics identity to the workspace", () => {
