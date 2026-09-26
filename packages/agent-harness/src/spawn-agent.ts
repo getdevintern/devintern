@@ -9,8 +9,9 @@
  */
 
 import type { ChildProcess, SpawnOptions } from "child_process";
+import { spawnSync } from "child_process";
 import { homedir, tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { spawnReapable } from "./process-reaper.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
@@ -37,10 +38,24 @@ export interface SpawnedAgent {
   cleanup: () => Promise<void>;
 }
 
+/** Git worktrees keep their index and shared objects outside the checkout. */
+function gitMetadataWritablePaths(workingDir: string): string[] {
+  const git = spawnSync("git", ["rev-parse", "--absolute-git-dir", "--git-common-dir"], {
+    cwd: workingDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 2_000,
+  });
+  if (git.status !== 0) return [];
+  const [gitDir, commonDir] = git.stdout.trim().split(/\r?\n/);
+  if (!gitDir || !commonDir) return [];
+  return [...new Set([gitDir, commonDir].map((path) => resolve(workingDir, path)))];
+}
+
 /**
  * Build the default sandbox policy for an agent run.
  *
- * Write access covers the working directory, the task output dir, the OS
+ * Write access covers the working directory, its Git metadata, the task output dir, the OS
  * tmpdir (review worktrees, Chromium profile scratch, ssh-agent sockets),
  * and the Playwright/Puppeteer browser caches so agents that launch a
  * browser for testing or research keep working under filesystem confinement.
@@ -80,6 +95,7 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
   return {
     writablePaths: [
       workingDir,
+      ...gitMetadataWritablePaths(workingDir),
       process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks",
       tempScope,
       ...browserCaches,

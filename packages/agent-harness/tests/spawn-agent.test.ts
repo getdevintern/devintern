@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import { buildDefaultSandboxPolicy, spawnAgent } from "../src/spawn-agent.js";
 import type {
   ResolvedSandbox,
@@ -27,6 +29,28 @@ function waitForExit(child: { on: (event: string, cb: (code: number) => void) =>
 }
 
 describe("buildDefaultSandboxPolicy", () => {
+  test("grants linked worktree index and common Git metadata outside the checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "sandbox-worktree-"));
+    const source = join(root, "source");
+    const worktree = join(root, "review-worktree");
+    mkdirSync(source);
+    const git = (cwd: string, args: string[]) => {
+      const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(result.stderr);
+    };
+    try {
+      git(source, ["init", "-q"]);
+      git(source, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--allow-empty", "-m", "Initial"]);
+      git(source, ["worktree", "add", "-q", "-b", "review", worktree]);
+
+      const policy = buildDefaultSandboxPolicy(worktree);
+      expect(policy.writablePaths).toContain(join(source, ".git"));
+      expect(policy.writablePaths).toContain(join(source, ".git", "worktrees", "review-worktree"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("includes working dir, output dir, tmpdir, and browser caches", () => {
     const policy = buildDefaultSandboxPolicy("/work/repo");
     expect(policy.workingDir).toBe("/work/repo");
