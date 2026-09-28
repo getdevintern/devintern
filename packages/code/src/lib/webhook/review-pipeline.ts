@@ -2,6 +2,7 @@ import { unlinkSync, writeFileSync } from "fs";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
+import { beginRun, endRun } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
 import { Utils } from "../utils";
@@ -320,6 +321,9 @@ async function processReviewAsync(
 
   console.log(`\n📋 Processing review for ${owner}/${repo}#${prNumber}`);
 
+  let runStatus: "succeeded" | "failed" | "deferred" = "succeeded";
+  let runReason: string | undefined;
+
   try {
     // Initialize GitHub client (App-first so the bot identity resolves)
     const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
@@ -387,6 +391,19 @@ async function processReviewAsync(
     }
     debugLog(config, `Permission gate passed for @${actor}`);
 
+    // Attribute every harness execution this review performs to a durable run so
+    // its transcript surfaces on the dashboard. Without an active run the sink
+    // writes an unattributable `norun__nokey` log that `listRunHarnessLogs`
+    // can never match.
+    beginRun({
+      origin: "pr_mention",
+      repo: `${owner}/${repo}`,
+      prNumber,
+      prUrl: event.pull_request.html_url,
+      branch,
+      harness: resolveActiveHarness().harness.name,
+    });
+
     // Process unaddressed comments for feedback
     const processedComments = rawComments.map(processReviewComment);
 
@@ -399,6 +416,8 @@ async function processReviewAsync(
 
     if (!worktreePath) {
       console.error("❌ Failed to prepare repository");
+      runStatus = "failed";
+      runReason = "Failed to prepare repository";
       return;
     }
 
@@ -455,6 +474,8 @@ async function processReviewAsync(
 
     if (!agentResult.success) {
       console.error(`❌ Agent failed: ${agentResult.message}`);
+      runStatus = "failed";
+      runReason = agentResult.message;
       return;
     }
 
@@ -483,6 +504,8 @@ async function processReviewAsync(
 
     // Verify Agent didn't switch branches during execution (e.g., checking out main for comparison)
     if (!(await restoreReviewBranch(ctx))) {
+      runStatus = "failed";
+      runReason = "Agent left the review branch";
       return;
     }
 
@@ -499,6 +522,8 @@ async function processReviewAsync(
       // Agent left uncommitted changes - try to commit with hook retry logic
       console.log("\n📝 Agent left changes uncommitted, committing now...");
       if (!(await commitUncommittedReviewChanges(ctx))) {
+        runStatus = "failed";
+        runReason = "Failed to commit review changes";
         return;
       }
     }
@@ -510,6 +535,8 @@ async function processReviewAsync(
       console.warn("⚠️  No new commits to push - Agent may not have made any changes");
       // Still continue to mark comments as addressed
     } else if (!(await publishReviewChanges(ctx, finalCommitsAhead))) {
+      runStatus = "failed";
+      runReason = "Failed to publish review changes";
       return;
     }
 
@@ -522,8 +549,12 @@ async function processReviewAsync(
       // Account-global usage limit: propagate to the persistence wrapper so
       // it can fail over to the next harness (or pause + re-queue until the
       // window resets) without burning the event as a failure.
+      runStatus = "deferred";
+      runReason = (error as Error).message;
       throw error;
     }
+    runStatus = "failed";
+    runReason = (error as Error).message;
     console.error(`❌ Error processing review: ${(error as Error).message}`);
     if (config.debug) {
       console.error((error as Error).stack);
@@ -537,6 +568,9 @@ async function processReviewAsync(
         pr: `${owner}/${repo}#${prNumber}`,
       });
     }
+  } finally {
+    // No-op when no run was started (or it already failed to open).
+    endRun(runStatus, runReason);
   }
   // Note: We don't cleanup this branch's worktree here - it's reused across
   // reviews of the same PR for efficiency (deps stay cached). Worktrees from

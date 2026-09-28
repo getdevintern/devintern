@@ -699,9 +699,10 @@ export interface ActiveRunContext {
 }
 
 /**
- * The run currently being processed, or null when no run is active (e.g.
- * estimation sweeps before `beginRun`, or standalone review commands). Task
- * processing is strictly sequential, so there is at most one active run.
+ * The run currently being processed, or null when no run is active (e.g. a
+ * spawn from a code path that does not record runs, or between the end of one
+ * run and the start of the next). Task processing is strictly sequential, so
+ * there is at most one active run.
  */
 export function getActiveRunContext(): ActiveRunContext | null {
   if (currentRunId === null || currentRunMeta === null) {

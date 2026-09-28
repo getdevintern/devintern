@@ -1036,6 +1036,21 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
 }
 
 /**
+ * `GET /api/runs/:id/harness-logs` — the harness log list for a run, newest
+ * first. Same data the run-detail response embeds in its `harnessLogs` field.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Raw run id path segment
+ */
+export function handleRunHarnessLogs(data: DashboardData, idParam: string): ApiResponse {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+  return { status: 200, body: { harnessLogs: data.listRunHarnessLogs(id) } };
+}
+
+/**
  * `GET /api/runs/:id/harness-logs/:name` — the redacted tail of one harness
  * execution log, scoped to the run it belongs to.
  *

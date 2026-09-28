@@ -46,6 +46,21 @@ describe("spawnAgent output sink", () => {
     expect(outcome.signal).toBeNull();
   });
 
+  test("reassembles a multi-byte character split across data chunks", async () => {
+    const recorder = recordingSink();
+    // The euro sign (E2 82 AC) is written as two separate chunks split after
+    // its first two bytes, so a naive per-chunk decode would emit U+FFFD.
+    await spawnAgent({
+      resolvedPath: "/bin/sh",
+      args: ["-c", "printf '\\342\\202'; sleep 0.3; printf '\\254'; printf '\\n'"],
+      spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+      sink: recorder.sink,
+    });
+    await recorder.done;
+    expect(recorder.stdout()).toBe("€\n");
+    expect(recorder.stdout()).not.toContain("\uFFFD");
+  });
+
   test("reports spawn failures instead of leaving the sink open", async () => {
     const recorder = recordingSink();
     await spawnAgent({

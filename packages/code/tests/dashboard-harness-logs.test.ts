@@ -7,6 +7,7 @@ import {
   DashboardData,
   handleRunDetail,
   handleRunHarnessLog,
+  handleRunHarnessLogs,
 } from "../src/lib/observability/dashboard-api";
 import { harnessLogFileName, harnessLogsDir } from "../src/lib/observability/harness-logs";
 import { RunStore } from "../src/lib/state/run-recorder";
@@ -60,6 +61,15 @@ describe("dashboard harness logs", () => {
     const response = handleRunDetail(data, String(runId));
     expect(response.status).toBe(200);
     const body = response.body as { harnessLogs: { name: string; label?: string }[] };
+    expect(body.harnessLogs.length).toBe(1);
+    expect(body.harnessLogs[0]?.label).toBe("implementation");
+  });
+
+  test("lists harness logs as JSON for a run", () => {
+    const { runId } = seedRunWithLog();
+    const response = handleRunHarnessLogs(data, String(runId));
+    expect(response.status).toBe(200);
+    const body = response.body as { harnessLogs: { label?: string }[] };
     expect(body.harnessLogs.length).toBe(1);
     expect(body.harnessLogs[0]?.label).toBe("implementation");
   });

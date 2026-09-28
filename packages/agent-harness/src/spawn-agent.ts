@@ -11,6 +11,7 @@
 import type { ChildProcess, SpawnOptions } from "child_process";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
+import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
@@ -228,8 +229,22 @@ function attachOutputSink(child: ChildProcess, sink: AgentOutputSink | undefined
   if (!sink) {
     return;
   }
-  child.stdout?.on("data", (data: Buffer) => sink.stdout(data.toString()));
-  child.stderr?.on("data", (data: Buffer) => sink.stderr(data.toString()));
+  // Decode incrementally so a multi-byte UTF-8 character split across chunk
+  // boundaries is reassembled instead of persisting as U+FFFD.
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+  child.stdout?.on("data", (data: Buffer) => {
+    const text = stdoutDecoder.write(data);
+    if (text) {
+      sink.stdout(text);
+    }
+  });
+  child.stderr?.on("data", (data: Buffer) => {
+    const text = stderrDecoder.write(data);
+    if (text) {
+      sink.stderr(text);
+    }
+  });
 
   let closed = false;
   const finish = (outcome: AgentRunOutcome): void => {
@@ -237,6 +252,15 @@ function attachOutputSink(child: ChildProcess, sink: AgentOutputSink | undefined
       return;
     }
     closed = true;
+    // Flush any trailing bytes held by the decoders before the sink closes.
+    const stdoutRest = stdoutDecoder.end();
+    if (stdoutRest) {
+      sink.stdout(stdoutRest);
+    }
+    const stderrRest = stderrDecoder.end();
+    if (stderrRest) {
+      sink.stderr(stderrRest);
+    }
     sink.close(outcome);
   };
   child.once("error", (error: Error) => {

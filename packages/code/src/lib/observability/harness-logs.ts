@@ -10,11 +10,20 @@
  *
  * Files live under `logs/harness/` in the workspace home (`~/.devintern` by
  * default, or `DEVINTERN_WORKSPACE_DIR`). Each execution gets its own file, so
- * no cross-run rotation is needed; retention pruning bounds the directory.
+ * no cross-run rotation is needed; retention pruning bounds the directory by
+ * age, file count, and total bytes. A single file is additionally truncated at
+ * `DEVINTERN_HARNESS_LOG_MAX_FILE_MB` to bound one runaway transcript.
  * Logging is on by default and can be disabled with `DEVINTERN_HARNESS_LOGS=0`.
  *
  * Raw output is written unredacted so the transcript is complete; secrets are
  * masked when the dashboard serves a log (see {@link readHarnessLogContent}).
+ * Redaction is best-effort pattern matching, not a guarantee: it covers
+ * `KEY=value` / `KEY: value` / `"key": "value"` assignments whose key name
+ * smells like a credential, well-known token shapes, and PEM private-key
+ * blocks. It does not catch novel secret formats, arbitrary multi-line or
+ * standalone base64 secrets, or secrets embedded in prose. Treat harness logs
+ * as sensitive and disable persistence with `DEVINTERN_HARNESS_LOGS=0` where
+ * transcripts may carry material secrets.
  */
 
 import {
@@ -49,8 +58,21 @@ export const HARNESS_LOG_RETENTION_DAYS = 30;
 /** Default cap on retained files, oldest pruned first. */
 export const HARNESS_LOG_MAX_FILES = 500;
 
+/**
+ * Default per-file size cap. Agent transcripts are unbounded, so a single
+ * verbose run can otherwise fill the disk; the body is truncated once it
+ * reaches this many bytes (the footer is always written).
+ */
+export const HARNESS_LOG_MAX_FILE_MB = 10;
+
+/** Default total-bytes budget for the log directory, oldest pruned first. */
+export const HARNESS_LOG_MAX_TOTAL_MB = 256;
+
 /** Tail window when the dashboard reads a log; older bytes stay on disk. */
 export const HARNESS_LOG_READ_BYTES = 512 * 1024;
+
+/** One mebibyte, used to convert the MB retention knobs to bytes. */
+const MEBIBYTE = 1024 * 1024;
 
 /** Cap on the command line echoed into the header. */
 const MAX_COMMAND_CHARS = 4000;
@@ -113,13 +135,20 @@ export function isHarnessLoggingEnabled(): boolean {
   return !["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
 }
 
-/** Make a filename segment safe and free of the `__` separator. */
+/**
+ * Make a filename segment safe and free of the `__` separator.
+ *
+ * Collapsing runs of `_` is not enough on its own: a segment ending in `_`
+ * would abut the `__` separator and form `___`, and `parseHarnessLogName`
+ * splits on `__`, shifting every following field. So strip leading/trailing
+ * `_` as well (after the length cap, in case the cap itself lands on one).
+ */
 function sanitizeSegment(value: string): string {
   return value
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/_{2,}/g, "_")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
+    .slice(0, 60)
+    .replace(/^[_-]+|[_-]+$/g, "");
 }
 
 /** ISO timestamp reduced to a filesystem-safe, lexically sortable token. */
@@ -195,25 +224,63 @@ export function parseHarnessLogName(
   };
 }
 
-/** Append a chunk to an open fd, prefixed per line with its stream tag. */
-function appendChunk(fd: number, tag: "out" | "err", chunk: string): void {
-  const lines = chunk.split("\n");
-  let text = "";
-  for (let index = 0; index < lines.length; index++) {
-    if (index === lines.length - 1 && lines[index] === "") {
-      continue;
-    }
-    text += `[${tag}] ${lines[index]}\n`;
-  }
-  if (text) {
-    safeWrite(fd, text);
-  }
+/**
+ * Stateful writer that prefixes each real line with its stream tag. It tracks
+ * whether the write head sits at a line start, so a line delivered across
+ * several chunks gets exactly one prefix (at its start) instead of one per
+ * chunk. Bytes are never buffered: each chunk is written as it arrives.
+ */
+interface StreamWriter {
+  push(chunk: string): void;
+  /** Terminate a trailing unterminated line at close. */
+  flush(): void;
+}
+
+function createStreamWriter(write: (text: string) => void, tag: "out" | "err"): StreamWriter {
+  let atLineStart = true;
+  return {
+    push(chunk: string): void {
+      const lines = chunk.split("\n");
+      let text = "";
+      for (let index = 0; index < lines.length; index++) {
+        const isLast = index === lines.length - 1;
+        const line = lines[index] ?? "";
+        // The empty segment after a trailing newline is the next line start;
+        // defer its prefix until content actually arrives.
+        if (isLast && line === "") {
+          if (chunk.endsWith("\n")) {
+            atLineStart = true;
+          }
+          break;
+        }
+        if (atLineStart) {
+          text += `[${tag}] `;
+          atLineStart = false;
+        }
+        text += line;
+        if (!isLast) {
+          text += "\n";
+          atLineStart = true;
+        }
+      }
+      if (text) {
+        write(text);
+      }
+    },
+    flush(): void {
+      if (!atLineStart) {
+        write("\n");
+        atLineStart = true;
+      }
+    },
+  };
 }
 
 /** Best-effort write; a failed write must never break the run. */
-function safeWrite(fd: number, text: string): void {
+function safeWrite(fd: number, text: string | Uint8Array): void {
   try {
-    writeSync(fd, text);
+    const buffer = typeof text === "string" ? Buffer.from(text, "utf8") : Buffer.from(text);
+    writeSync(fd, buffer);
   } catch {
     // Disk full / rotated away: terminal streaming already got the output.
   }
@@ -229,16 +296,19 @@ function envPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-/** Prune harness logs older than the retention window or beyond the file cap. */
+/** Prune harness logs older than the retention window, beyond the file cap, or over budget. */
 export function pruneHarnessLogs(
   dir: string = harnessLogsDir(),
-  options: { retentionDays?: number; maxFiles?: number; now?: number } = {},
+  options: { retentionDays?: number; maxFiles?: number; maxBytes?: number; now?: number } = {},
 ): void {
   const retentionDays =
     options.retentionDays ??
     envPositiveInt("DEVINTERN_HARNESS_LOG_RETENTION_DAYS", HARNESS_LOG_RETENTION_DAYS);
   const maxFiles =
     options.maxFiles ?? envPositiveInt("DEVINTERN_HARNESS_LOG_MAX_FILES", HARNESS_LOG_MAX_FILES);
+  const maxBytes =
+    options.maxBytes ??
+    envPositiveInt("DEVINTERN_HARNESS_LOG_MAX_TOTAL_MB", HARNESS_LOG_MAX_TOTAL_MB) * MEBIBYTE;
   const now = options.now ?? Date.now();
   const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
 
@@ -248,7 +318,8 @@ export function pruneHarnessLogs(
   } catch {
     return;
   }
-  const entries: { path: string; modifiedAt: number }[] = [];
+  const entries: { path: string; size: number; modifiedAt: number }[] = [];
+  let totalBytes = 0;
   for (const name of names) {
     const path = join(dir, name);
     try {
@@ -257,21 +328,51 @@ export function pruneHarnessLogs(
         unlinkSync(path);
         continue;
       }
-      entries.push({ path, modifiedAt: stat.mtimeMs });
+      entries.push({ path, size: stat.size, modifiedAt: stat.mtimeMs });
+      totalBytes += stat.size;
     } catch {
       // Vanished or unreadable; leave it alone.
     }
   }
-  if (entries.length > maxFiles) {
+  if (entries.length > maxFiles || totalBytes > maxBytes) {
     entries.sort((a, b) => a.modifiedAt - b.modifiedAt);
-    for (const entry of entries.slice(0, entries.length - maxFiles)) {
+    let remaining = entries.length;
+    for (const entry of entries) {
+      if (remaining <= maxFiles && totalBytes <= maxBytes) {
+        break;
+      }
       try {
         unlinkSync(entry.path);
+        totalBytes -= entry.size;
+        remaining -= 1;
       } catch {
         // Best-effort.
       }
     }
   }
+}
+
+/** Minimum interval between opportunistic prunes on the spawn hot path. */
+export const HARNESS_LOG_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+
+const lastPruneMsByDir = new Map<string, number>();
+
+/**
+ * Throttled {@link pruneHarnessLogs}. A long-lived worker spawns several agents
+ * per task (clarity, implementation, reviews, hook fixes); sweeping the whole
+ * directory with a `statSync` per entry on every spawn is wasted work. Prune a
+ * given directory at most once per {@link HARNESS_LOG_PRUNE_INTERVAL_MS}.
+ */
+export function maybePruneHarnessLogs(
+  dir: string = harnessLogsDir(),
+  now: number = Date.now(),
+): void {
+  const lastPruneMs = lastPruneMsByDir.get(dir) ?? 0;
+  if (now - lastPruneMs < HARNESS_LOG_PRUNE_INTERVAL_MS) {
+    return;
+  }
+  lastPruneMsByDir.set(dir, now);
+  pruneHarnessLogs(dir);
 }
 
 /**
@@ -289,7 +390,7 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
   } catch {
     return undefined;
   }
-  pruneHarnessLogs(dir);
+  maybePruneHarnessLogs(dir);
 
   const active = getActiveRunContext();
   const origin = ctx.origin ?? active?.origin ?? "task";
@@ -338,6 +439,36 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
   ].join("\n");
   safeWrite(fd, header);
 
+  const maxBodyBytes =
+    envPositiveInt("DEVINTERN_HARNESS_LOG_MAX_FILE_MB", HARNESS_LOG_MAX_FILE_MB) * MEBIBYTE;
+  let bodyBytes = 0;
+  let bodyTruncated = false;
+
+  /** Append transcript bytes, truncating once the per-file cap is reached. */
+  const writeBody = (text: string): void => {
+    if (bodyTruncated || text.length === 0) {
+      return;
+    }
+    const bytes = Buffer.byteLength(text);
+    if (bodyBytes + bytes <= maxBodyBytes) {
+      bodyBytes += bytes;
+      safeWrite(fd, text);
+      return;
+    }
+    const remaining = maxBodyBytes - bodyBytes;
+    if (remaining > 0) {
+      safeWrite(fd, Buffer.from(text).subarray(0, remaining));
+      bodyBytes = maxBodyBytes;
+    }
+    bodyTruncated = true;
+    safeWrite(
+      fd,
+      `\n[harness log truncated at ${maxBodyBytes} bytes; remaining output not recorded]\n`,
+    );
+  };
+
+  const stdoutWriter = createStreamWriter(writeBody, "out");
+  const stderrWriter = createStreamWriter(writeBody, "err");
   let stdoutTail = "";
   let stderrTail = "";
   let closed = false;
@@ -356,17 +487,20 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
   return {
     stdout(chunk: string): void {
       accumulate("stdout", chunk);
-      appendChunk(fd, "out", chunk);
+      stdoutWriter.push(chunk);
     },
     stderr(chunk: string): void {
       accumulate("stderr", chunk);
-      appendChunk(fd, "err", chunk);
+      stderrWriter.push(chunk);
     },
     close(outcome: AgentRunOutcome): void {
       if (closed) {
         return;
       }
       closed = true;
+      // Emit any buffered partial lines before the footer so none are lost.
+      stdoutWriter.flush();
+      stderrWriter.flush();
       const finishedAt = new Date();
       const maxTurnsReached = detectMaxTurnsReached(
         stdoutTail,
@@ -382,6 +516,7 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
         ["error", outcome.error],
         ["maxTurnsReached", maxTurnsReached],
         ["usageLimited", usage.limited],
+        ["truncated", bodyTruncated || undefined],
       ];
       const footer = [
         "",
@@ -416,6 +551,9 @@ export function listHarnessLogs(
   } catch {
     return [];
   }
+  // Filenames store the sanitized task key; compare against the sanitized
+  // filter so a key the namer rewrites (`DEV_` -> `DEV`) is still discoverable.
+  const filterKey = filter.taskKey ? sanitizeSegment(filter.taskKey) || undefined : undefined;
   const files: HarnessLogFile[] = [];
   for (const name of names) {
     const parsed = parseHarnessLogName(name);
@@ -423,8 +561,8 @@ export function listHarnessLogs(
       continue;
     }
     const matchesRun = filter.runId !== undefined && parsed.runId === filter.runId;
-    const matchesKey = Boolean(filter.taskKey) && parsed.taskKey === filter.taskKey;
-    if ((filter.runId !== undefined || filter.taskKey) && !matchesRun && !matchesKey) {
+    const matchesKey = filterKey !== undefined && parsed.taskKey === filterKey;
+    if ((filter.runId !== undefined || filterKey !== undefined) && !matchesRun && !matchesKey) {
       continue;
     }
     try {
@@ -473,10 +611,9 @@ export function readHarnessLogContent(
       filled += read;
     }
     const raw = buffer.subarray(0, filled).toString("utf8");
-    const content = raw
-      .split("\n")
-      .map((line) => redactSecrets(stripAnsi(line)))
-      .join("\n");
+    // Strip ANSI and redact over the whole tail rather than per line so
+    // multi-line secrets (PEM private-key blocks) are matched too.
+    const content = redactSecrets(stripAnsi(raw));
     return { name, content, truncated: start > 0, totalBytes: size };
   } catch {
     return null;
