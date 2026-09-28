@@ -19,6 +19,7 @@ import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToF
 import { createGitHelpers } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 
 export function finalizeAgentRun(ctx: FinalizeContext): void {
   const {
@@ -147,11 +148,22 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
             const retryResolvedPath = await resolveExecutablePathWithRetry(executablePath, {
               displayName: harness.displayName,
             });
+            const retrySpawnArgs = [
+              ...retryArgs,
+              ...buildPromptArgs(harness, implementationPrompt),
+            ];
             const { child: retryProcess, cleanup: retrySandboxCleanup } = await spawnAgent({
               resolvedPath: retryResolvedPath,
-              args: [...retryArgs, ...buildPromptArgs(harness, implementationPrompt)],
+              args: retrySpawnArgs,
               spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
               sandbox: await getSandbox(harness.name),
+              sink: createHarnessLogSink({
+                harness,
+                label: "plan-retry",
+                taskKey,
+                cwd: process.cwd(),
+                command: [retryResolvedPath, ...retrySpawnArgs],
+              }),
             });
 
             let retryStdoutOutput = "";

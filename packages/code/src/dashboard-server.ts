@@ -20,6 +20,7 @@ import {
   handleLogs,
   handleRetryRun,
   handleRunAutomation,
+  handleRunHarnessLog,
   handleRuns,
   handleRunDetail,
   handleStats,
@@ -141,6 +142,7 @@ export function startDashboardServer(
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
+  const runHarnessLogPattern = /^\/api\/runs\/([^/]+)\/harness-logs\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
@@ -172,6 +174,10 @@ export function startDashboardServer(
         }
         if (pathname === "/api/runs") {
           return json(handleRuns(data, url.searchParams));
+        }
+        const harnessLog = pathname.match(runHarnessLogPattern);
+        if (harnessLog) {
+          return json(handleRunHarnessLog(data, harnessLog[1], harnessLog[2]));
         }
         const runDetail = pathname.match(runDetailPattern);
         if (runDetail) {

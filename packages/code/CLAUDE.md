@@ -77,6 +77,8 @@ lib/
 - `PR_LABELS` - Optional comma-separated labels applied to created PRs (GitHub only). Set per repo in workspace.toml (`pr_labels`) for fleet mode
 - `WEBHOOK_SECRET` - GitHub webhook verification
 - `DEVINTERN_OUTPUT_DIR` - Output directory (default: `/tmp/devintern-tasks`)
+- `DEVINTERN_HARNESS_LOGS` - Per-execution agent transcripts under `<workspace>/logs/harness/` (on by default; `0` disables). Set by `lib/observability/harness-logs.ts`; every `spawnAgent` call attaches a sink
+- `DEVINTERN_HARNESS_LOG_RETENTION_DAYS` / `DEVINTERN_HARNESS_LOG_MAX_FILES` - Retention window (default 30 days) and file cap (default 500) for harness logs
 - `AGENT_SANDBOX` - OS-level sandbox for spawned agent processes: `none` (default), `auto`, `native`, `nono`, `srt`, `docker`, or `smolvm`; overridden per-run by the `--sandbox <name>` CLI flag. Run `devintern sandbox` for a doctor report (detected providers, setup steps, what `auto` would pick)
 - `AGENT_SANDBOX_WRITABLE_PATHS` - Extra paths (beyond the project workspace) the sandbox allows writes to
 - `AGENT_SANDBOX_ALLOWED_DOMAINS` - Extra network allowlist entries for sandbox providers that restrict egress (e.g. `srt`)

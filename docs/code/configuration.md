@@ -397,6 +397,24 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 └── attachments/                         # Jira attachments
 ```
 
+## Harness Run Logs
+
+Every agent harness execution writes a durable transcript under the workspace home (`~/.devintern`, or the `DEVINTERN_WORKSPACE_DIR` override):
+
+```
+~/.devintern/logs/harness/
+└── <started-at>__<origin>__<run42|norun>__<TASK-1|nokey>__<label|run>__<pid>__<rand>.log
+```
+
+Each file is self-describing: a header records the run origin (task type), task key, run id, harness, spawn label, working directory, command, and start time; the body is the interleaved stdout/stderr as it streamed; the footer records the end time, duration, exit code, signal, and whether a max-turns limit or usage limit was detected. Because persistence happens at the process boundary, a run that fails, times out, is killed, or exhausts its turn budget still leaves a usable log with whatever output was produced.
+
+This covers every agent execution, including task implementation, plan retries, feasibility/clarity checks, estimation, git-hook fixes, auto-review, PR/MR review addressing, conflict resolution, and webhook review runs.
+
+- Logging is **on by default**. Set `DEVINTERN_HARNESS_LOGS=0` to disable it.
+- Raw output is written unredacted so the transcript is complete; the dashboard masks obvious credentials when serving a log.
+- Files older than 30 days are pruned on write, and the directory is capped at 500 files (oldest first). Override with `DEVINTERN_HARNESS_LOG_RETENTION_DAYS` and `DEVINTERN_HARNESS_LOG_MAX_FILES`.
+- The local dashboard surfaces a run's harness logs on its detail page; the same data is available as JSON at `GET /api/runs/:id/harness-logs` and `GET /api/runs/:id/harness-logs/:name`.
+
 ## Agent Harness
 
 Configure which AI agent runs and how long it can work:

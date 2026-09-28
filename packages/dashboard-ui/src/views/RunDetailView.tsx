@@ -10,8 +10,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Markdown } from "@/lib/markdown";
 import { triggerRunRetry, usePoll } from "@/lib/api";
-import type { RetryAuditEntry, RunDetailResponse, RunStageRecord } from "@/lib/api";
-import { formatRunOrigin } from "@/lib/run-origin";
+import type {
+  HarnessLogContent,
+  HarnessLogFile,
+  RetryAuditEntry,
+  RunDetailResponse,
+  RunStageRecord,
+} from "@/lib/api";
+import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
 import { runWorkLink } from "@/lib/run-work";
 import { parseStageDetail } from "@/lib/stage-detail";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
@@ -200,6 +206,111 @@ function RetryAuditList({ entries }: { entries: RetryAuditEntry[] }) {
   );
 }
 
+/** Compact human-readable byte size for a log file. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** One harness transcript: a compact row that lazily loads its content. */
+function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }) {
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<HarnessLogContent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function toggle(): Promise<void> {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (content || loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `/api/runs/${runId}/harness-logs/${encodeURIComponent(file.name)}`,
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      setContent((await response.json()) as HarnessLogContent);
+      setError(null);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-md border">
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        aria-expanded={open}
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span className="font-medium">{file.label ?? file.origin}</span>
+        <span className="text-xs text-muted-foreground">{formatRunOriginLabel(file.origin)}</span>
+        {file.taskKey ? (
+          <span className="font-mono text-xs text-muted-foreground">{file.taskKey}</span>
+        ) : null}
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          {file.startedAt ? formatTime(file.startedAt) : "–"} · {formatBytes(file.size)}
+        </span>
+      </button>
+      {open ? (
+        <div className="border-t px-3 py-2">
+          {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+          {content ? (
+            <>
+              {content.truncated ? (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Showing the tail of {formatBytes(content.totalBytes)} on disk.
+                </p>
+              ) : null}
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
+                {content.content}
+              </pre>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Every harness execution recorded for a run (clarity, implementation, review…). */
+function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[] }) {
+  if (logs.length === 0) {
+    return null;
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          Harness logs ({logs.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {logs.map((file) => (
+          <HarnessLogItem key={file.name} runId={runId} file={file} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 /** One run: metadata card plus a stage-by-stage timeline. */
 export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => void }) {
   const { data, error, loading, refresh } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
@@ -349,6 +460,8 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
           )}
 
           <RetryAuditList entries={data.retry.audit} />
+
+          <HarnessLogsCard runId={data.run.id} logs={data.harnessLogs ?? []} />
 
           <div className="space-y-0">
             {data.stages.map((stage, index) => (

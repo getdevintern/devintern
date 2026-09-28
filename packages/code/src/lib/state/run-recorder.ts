@@ -685,6 +685,35 @@ export class RunStore {
 
 let currentStore: RunStore | null = null;
 let currentRunId: number | null = null;
+let currentRunMeta: RunMeta | null = null;
+
+/**
+ * Identity of the run currently being processed, for ambient consumers such
+ * as the harness-log sink that need to attribute an execution to a run.
+ */
+export interface ActiveRunContext {
+  id: number;
+  origin: RunOrigin;
+  taskKey?: string;
+  harness?: string;
+}
+
+/**
+ * The run currently being processed, or null when no run is active (e.g.
+ * estimation sweeps before `beginRun`, or standalone review commands). Task
+ * processing is strictly sequential, so there is at most one active run.
+ */
+export function getActiveRunContext(): ActiveRunContext | null {
+  if (currentRunId === null || currentRunMeta === null) {
+    return null;
+  }
+  return {
+    id: currentRunId,
+    origin: currentRunMeta.origin,
+    taskKey: currentRunMeta.taskKey,
+    harness: currentRunMeta.harness,
+  };
+}
 
 /** Log a recording failure without ever propagating it into the pipeline. */
 function warnOnce(action: string, error: unknown): void {
@@ -700,8 +729,10 @@ export function beginRun(meta: RunMeta): void {
   try {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
+    currentRunMeta = meta;
   } catch (error) {
     currentRunId = null;
+    currentRunMeta = null;
     warnOnce("begin", error);
   }
 }
@@ -800,5 +831,6 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
     warnOnce("end", error);
   } finally {
     currentRunId = null;
+    currentRunMeta = null;
   }
 }

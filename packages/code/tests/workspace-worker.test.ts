@@ -46,6 +46,32 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+/**
+ * Temporarily drop ambient GitHub credentials so a GitLab-only workspace does
+ * not also build the GitHub acquirers. Without this, an inherited
+ * `GITHUB_TOKEN` (or custom App credentials) makes `buildFleetEventAcquirers`
+ * add a GitHub `CiFailureWatcherAcquirer` first, and tests that locate the
+ * watcher by class silently tick the wrong provider.
+ */
+function withoutGitHubCredentials(): () => void {
+  const saved = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GITHUB_APP_ID: process.env.GITHUB_APP_ID,
+    GITHUB_APP_PRIVATE_KEY_PATH: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+    GITHUB_APP_PRIVATE_KEY_BASE64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
+  };
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_APP_ID;
+  delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+  delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+  return () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -773,6 +799,7 @@ GITLAB_CODE_HOST_PROXY = ""
   test.each(["closed", "repair"])(
     "GitLab CI keeps same-project MR identities separate: %s",
     async (scenario) => {
+      const restoreGitHubCredentials = withoutGitHubCredentials();
       const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
       mkdirSync(workspaceDir, { recursive: true });
       const state = openWorkspaceState(workspaceDir);
@@ -872,6 +899,7 @@ GITLAB_CODE_HOST_PROXY = ""
         getChange.mockRestore();
         getCi.mockRestore();
         getLogs.mockRestore();
+        restoreGitHubCredentials();
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
       }

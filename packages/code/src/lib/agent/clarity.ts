@@ -16,6 +16,7 @@ import { ReadonlyAnalysisError } from "./analysis-mode";
 import { parseAgentJsonObject } from "./json";
 import { getSandbox } from "./sandbox";
 import { resolveOutputDir } from "../config/output-dir";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import type { TaskTrackerClient } from "../trackers/client";
 
 export interface ClarityAssessment {
@@ -80,11 +81,19 @@ export async function runClarityCheck(
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process for clarity check
+      const spawnArgs = [...clarityArgs, ...buildPromptArgs(harness, clarityContent)];
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...clarityArgs, ...buildPromptArgs(harness, clarityContent)],
+        args: spawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "clarity",
+          taskKey,
+          cwd: process.cwd(),
+          command: [resolvedPath, ...spawnArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {
