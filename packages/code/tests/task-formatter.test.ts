@@ -41,9 +41,9 @@ describe("TaskFormatter untrusted-content framing", () => {
     const prompt = TaskFormatter.formatTaskForAgent(mockTaskDetails());
 
     expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
-    expect(prompt).toContain("<!-- END UNTRUSTED EXTERNAL CONTENT: task description -->");
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description");
+    expect(prompt).toContain("<!-- END UNTRUSTED EXTERNAL CONTENT: task description");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments");
     expect(prompt).toContain(INJECTION);
     // The injection must sit inside a framed block, after the notice.
     expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
@@ -53,8 +53,8 @@ describe("TaskFormatter untrusted-content framing", () => {
     const prompt = TaskFormatter.formatClarityAssessment(mockTaskDetails());
 
     expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments");
     expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
   });
 
@@ -62,8 +62,8 @@ describe("TaskFormatter untrusted-content framing", () => {
     const prompt = TaskFormatter.formatEstimationPrompt(mockTaskDetails());
 
     expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: comments");
     expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
   });
 
@@ -73,6 +73,6 @@ describe("TaskFormatter untrusted-content framing", () => {
     );
 
     expect(prompt).toContain("No description provided");
-    expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
+    expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description");
   });
 });

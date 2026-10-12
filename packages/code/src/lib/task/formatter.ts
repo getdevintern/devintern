@@ -143,7 +143,10 @@ This is attempt ${retryContext.attempt} at this task. A previous attempt was rep
         prompt += `
 Why the last attempt stopped:
 
-${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
+${untrustedContentBlock(
+  retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
+  "previous attempt failure summary",
+)}
 `;
       }
       prompt +=

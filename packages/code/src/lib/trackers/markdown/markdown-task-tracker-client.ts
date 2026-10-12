@@ -332,11 +332,22 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   writeAgentPrompt(outputPath: string, task: Task): void {
     const raw = task.raw as MarkdownTaskRaw;
     const content = raw.fullContent;
-    const instructionsMarker = "## Implementation Instructions";
-    const markerIndex = content.indexOf(instructionsMarker);
-    const taskBody = (markerIndex === -1 ? content : content.slice(0, markerIndex)).trimEnd();
-    const instructions =
-      markerIndex === -1 ? IMPLEMENTATION_INSTRUCTIONS : content.slice(markerIndex).trimEnd();
+
+    // Only treat our own generated instructions as trusted, and only when they
+    // form the trailing block. Any other content in the file — including a
+    // heading that happens to read like the sentinel — stays framed as
+    // untrusted data so a malicious task file cannot smuggle instructions past
+    // the boundary.
+    const generatedInstructions = IMPLEMENTATION_INSTRUCTIONS.trimEnd();
+    const trimmed = content.trimEnd();
+    const hasGeneratedInstructions = trimmed.endsWith(generatedInstructions);
+    const taskBody = hasGeneratedInstructions
+      ? trimmed.slice(0, trimmed.length - generatedInstructions.length).trimEnd()
+      : trimmed;
+    const instructions = hasGeneratedInstructions
+      ? generatedInstructions
+      : IMPLEMENTATION_INSTRUCTIONS;
+
     const prompt = `${untrustedContentBlock(taskBody, "local task file")}\n\n${instructions}\n`;
     writeFileSync(outputPath, prompt, "utf8");
   }

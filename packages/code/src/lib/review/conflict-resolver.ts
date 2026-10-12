@@ -25,7 +25,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
 import type { PullRequestInfo } from "../code-host/github/reviews";
-import { untrustedContentBlock } from "../prompt/untrusted-content";
+import { untrustedContentBlock, untrustedInline } from "../prompt/untrusted-content";
 import { Utils } from "../utils";
 
 export interface ResolveConflictsOptions {
@@ -82,7 +82,8 @@ export function buildConflictPrompt(options: {
 }): string {
   return `# Resolve Merge Conflicts
 
-A merge of \`origin/${options.baseRef}\` into \`${options.branch}\` is in progress in this
+A merge of origin/${untrustedInline(options.baseRef, "base branch")} into
+${untrustedInline(options.branch, "branch")} is in progress in this
 repository and stopped on conflicts. Your job is to finish the merge.
 
 Conflicted files:
@@ -121,8 +122,8 @@ export function buildHookFixPrompt(options: { branch: string; hookError: string 
       : rawError;
   return `# Fix Pre-Push Hook Failures
 
-A \`git push\` of \`${options.branch}\` was rejected by a pre-push hook. The branch
-carries a merge commit that has NOT been published yet.
+A \`git push\` of ${untrustedInline(options.branch, "branch")} was rejected by a pre-push
+hook. The branch carries a merge commit that has NOT been published yet.
 
 Hook error output (may be truncated):
 

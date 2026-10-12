@@ -5,7 +5,7 @@
  */
 
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../../types/github-webhooks";
-import { untrustedContentBlock } from "../prompt/untrusted-content";
+import { untrustedContentBlock, untrustedInline } from "../prompt/untrusted-content";
 
 /**
  * Format structured PR review feedback into an agent prompt.
@@ -23,10 +23,11 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
   // PR Information
   lines.push("## PR Information");
   lines.push("");
-  lines.push(`- **Repository:** ${feedback.repository}`);
-  lines.push(`- **PR #${feedback.prNumber}:** ${feedback.prTitle}`);
-  lines.push(`- **Branch:** \`${feedback.branch}\``);
-  lines.push(`- **Reviewer:** @${feedback.reviewer}`);
+  lines.push(`- **Repository:** ${untrustedInline(feedback.repository, "repository")}`);
+  lines.push(`- **PR #${feedback.prNumber}:**`);
+  lines.push(untrustedContentBlock(feedback.prTitle, "pull request title"));
+  lines.push(`- **Branch:** ${untrustedInline(feedback.branch, "branch")}`);
+  lines.push(`- **Reviewer:** @${untrustedInline(feedback.reviewer, "reviewer")}`);
   lines.push(`- **Review Status:** ${formatReviewState(feedback.reviewState)}`);
   lines.push("");
 
@@ -47,7 +48,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     const commentsByFile = groupCommentsByFile(feedback.comments);
 
     for (const [filePath, fileComments] of Object.entries(commentsByFile)) {
-      lines.push(`### \`${filePath}\``);
+      lines.push(`### ${untrustedInline(filePath, "file path")}`);
       lines.push("");
 
       for (const comment of fileComments) {
@@ -149,7 +150,7 @@ function formatSingleComment(comment: ProcessedReviewComment): string {
 
   // Line reference
   const lineRef = comment.line ? `Line ${comment.line}` : "General";
-  lines.push(`**${lineRef}** (by @${comment.reviewer}):`);
+  lines.push(`**${lineRef}** (by @${untrustedInline(comment.reviewer, "reviewer")}):`);
   lines.push("");
 
   const external: string[] = [];
@@ -298,9 +299,9 @@ export function formatSingleCommentPrompt(
 
   lines.push("# Address Single PR Review Comment");
   lines.push("");
-  lines.push(`**Repository:** ${repository}`);
-  lines.push(`**Branch:** \`${branch}\``);
-  lines.push(`**File:** \`${comment.path}\``);
+  lines.push(`**Repository:** ${untrustedInline(repository, "repository")}`);
+  lines.push(`**Branch:** ${untrustedInline(branch, "branch")}`);
+  lines.push(`**File:** ${untrustedInline(comment.path, "file path")}`);
   if (comment.line) {
     lines.push(`**Line:** ${comment.line}`);
   }
@@ -351,14 +352,20 @@ export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
     "",
     "## PR Information",
     "",
-    `- **Repository:** ${feedback.repository}`,
-    `- **PR #${feedback.prNumber}:** ${feedback.prTitle ?? ""}`.trimEnd(),
+    `- **Repository:** ${untrustedInline(feedback.repository, "repository")}`,
+    `- **PR #${feedback.prNumber}**`,
   ];
-  if (feedback.branch) lines.push(`- **Branch:** \`${feedback.branch}\``);
+  if (feedback.prTitle) {
+    lines.push(untrustedContentBlock(feedback.prTitle, "pull request title"));
+  }
+  if (feedback.branch) lines.push(`- **Branch:** ${untrustedInline(feedback.branch, "branch")}`);
   lines.push("", "## Failing Checks", "");
-  for (const failure of feedback.failures) {
+  const checkLines = feedback.failures.map((failure) => {
     const details = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
-    lines.push(`- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`);
+    return `- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`;
+  });
+  if (checkLines.length > 0) {
+    lines.push(untrustedContentBlock(checkLines.join("\n"), "failing ci checks"));
   }
   lines.push("");
   if (feedback.logs?.trim()) {

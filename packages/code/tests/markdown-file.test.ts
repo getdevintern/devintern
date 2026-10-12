@@ -232,7 +232,7 @@ Description.
     }
   }, 30000);
 
-  test("does not duplicate implementation instructions when already present", () => {
+  test("keeps a user-supplied implementation instructions section untrusted", () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "my-task.md");
@@ -247,8 +247,11 @@ Description.
       const taskDetailsDir = join(outputDir, "my-task");
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
-        const count = (taskDetails.match(/## Implementation Instructions/g) || []).length;
-        expect(count).toBe(1);
+        const endMarker = "<!-- END UNTRUSTED EXTERNAL CONTENT: local task file";
+        // The task file's own heading and content stay framed as untrusted data...
+        expect(taskDetails.indexOf("Already here.")).toBeLessThan(taskDetails.indexOf(endMarker));
+        // ...and our generated instructions are still appended as trusted text.
+        expect(taskDetails).toContain("Please analyze the above task description");
       }
     } finally {
       cleanup(testDir);
