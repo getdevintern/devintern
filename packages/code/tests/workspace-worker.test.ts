@@ -46,6 +46,28 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+const GITHUB_ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY_PATH",
+  "GITHUB_APP_PRIVATE_KEY_BASE64",
+  "DEVINTERN_GITHUB_AUTH_MODE",
+  "GITHUB_BOT_ALIASES",
+] as const;
+
+function snapshotEnv(keys: readonly string[]): Record<string, string | undefined> {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of keys) saved[key] = process.env[key];
+  return saved;
+}
+
+function restoreEnv(saved: Record<string, string | undefined>): void {
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -681,6 +703,16 @@ remote = "git@github.com:acme/backend.git"
 });
 
 describe("buildFleetEventAcquirers", () => {
+  let savedGithubEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedGithubEnv = snapshotEnv(GITHUB_ENV_KEYS);
+  });
+
+  afterEach(() => {
+    restoreEnv(savedGithubEnv);
+  });
+
   test.each(["review", "conflict"])(
     "GitLab %s does not prepare checkout before supervisor admission",
     async (kind) => {
@@ -778,10 +810,6 @@ GITLAB_CODE_HOST_PROXY = ""
       const state = openWorkspaceState(workspaceDir);
       // A GitLab-only workspace must not build the GitHub CI watcher; clear
       // any ambient credentials so `acquirers.find` selects the GitLab one.
-      const savedToken = process.env.GITHUB_TOKEN;
-      const savedAppId = process.env.GITHUB_APP_ID;
-      const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-      const savedAppKeyBase64 = process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       delete process.env.GITHUB_TOKEN;
       delete process.env.GITHUB_APP_ID;
       delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
@@ -882,14 +910,6 @@ GITLAB_CODE_HOST_PROXY = ""
         getChange.mockRestore();
         getCi.mockRestore();
         getLogs.mockRestore();
-        if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
-        else process.env.GITHUB_TOKEN = savedToken;
-        if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
-        else process.env.GITHUB_APP_ID = savedAppId;
-        if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
-        if (savedAppKeyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
-        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppKeyBase64;
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
       }
@@ -904,11 +924,6 @@ GITLAB_CODE_HOST_PROXY = ""
     mkdirSync(workspaceDir, { recursive: true });
     const state = openWorkspaceState(workspaceDir);
     const repoManager = new FakeRepoManager(workspaceDir);
-    const savedToken = process.env.GITHUB_TOKEN;
-    const savedAppId = process.env.GITHUB_APP_ID;
-    const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-    const savedAuthMode = process.env.DEVINTERN_GITHUB_AUTH_MODE;
-    const savedAliases = process.env.GITHUB_BOT_ALIASES;
     delete process.env.GITHUB_TOKEN;
     process.env.GITHUB_APP_ID = "123456";
     process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/tmp/custom-app.pem";
@@ -939,16 +954,6 @@ GITLAB_CODE_HOST_PROXY = ""
       expect(process.env.DEVINTERN_GITHUB_AUTH_MODE).toBe("token-only");
       expect(process.env.GITHUB_BOT_ALIASES?.split(",")).toContain("devintern-ai");
     } finally {
-      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
-      else process.env.GITHUB_TOKEN = savedToken;
-      if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
-      else process.env.GITHUB_APP_ID = savedAppId;
-      if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-      else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
-      if (savedAuthMode === undefined) delete process.env.DEVINTERN_GITHUB_AUTH_MODE;
-      else process.env.DEVINTERN_GITHUB_AUTH_MODE = savedAuthMode;
-      if (savedAliases === undefined) delete process.env.GITHUB_BOT_ALIASES;
-      else process.env.GITHUB_BOT_ALIASES = savedAliases;
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }
@@ -962,7 +967,6 @@ GITLAB_CODE_HOST_PROXY = ""
     mkdirSync(workspaceDir, { recursive: true });
     const state = openWorkspaceState(workspaceDir);
     const repoManager = new FakeRepoManager(workspaceDir);
-    const savedToken = process.env.GITHUB_TOKEN;
     process.env.GITHUB_TOKEN = "test-token";
 
     // No GitHub remotes yet: review poller idles, zero mention sweeps.
@@ -1022,8 +1026,6 @@ remote = "https://forgejo.example/acme/forgejo.git"
       expect(hooksOut.hooks?.mentionSweepRepos()).toEqual(["acme/frontend"]);
     } finally {
       globalThis.fetch = originalFetch;
-      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
-      else process.env.GITHUB_TOKEN = savedToken;
       state.close();
       rmSync(workspaceDir, { recursive: true, force: true });
     }
