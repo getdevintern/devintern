@@ -25,6 +25,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
+import { untrustedContentBlock } from "../../prompt/untrusted-content";
 import type { TaskTrackerClient } from "../client";
 
 export interface MarkdownTaskRaw {
@@ -324,14 +325,19 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   }
 
   /**
-   * Write the agent prompt file, preserving the source markdown and appending
-   * implementation instructions when they are not already present.
+   * Write the agent prompt file, framing the local task body as untrusted
+   * external content and appending implementation instructions when they are
+   * not already present.
    */
   writeAgentPrompt(outputPath: string, task: Task): void {
     const raw = task.raw as MarkdownTaskRaw;
     const content = raw.fullContent;
-    const hasInstructions = content.includes("## Implementation Instructions");
-    const prompt = hasInstructions ? content : `${content}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
+    const instructionsMarker = "## Implementation Instructions";
+    const markerIndex = content.indexOf(instructionsMarker);
+    const taskBody = (markerIndex === -1 ? content : content.slice(0, markerIndex)).trimEnd();
+    const instructions =
+      markerIndex === -1 ? IMPLEMENTATION_INSTRUCTIONS : content.slice(markerIndex).trimEnd();
+    const prompt = `${untrustedContentBlock(taskBody, "local task file")}\n\n${instructions}\n`;
     writeFileSync(outputPath, prompt, "utf8");
   }
 

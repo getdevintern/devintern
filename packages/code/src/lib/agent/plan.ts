@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { resolveOutputDir } from "../config/output-dir";
+import { untrustedContentBlock } from "../prompt/untrusted-content";
 
 /**
  * Append a git hook failure record to the per-task hook error log file.
@@ -139,9 +140,8 @@ Please implement the task NOW. Do not just plan or describe what needs to be don
 IMPORTANT: You MUST actually implement the changes, not just plan them. Create/modify files as needed. Do not exit until actual code changes have been made.
 
 For reference, here is the original task:
----
-${originalTaskContent}
----
+
+${untrustedContentBlock(originalTaskContent.trimEnd(), "original task prompt")}
 
 Now implement the solution. Write the actual code.`;
 }

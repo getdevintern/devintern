@@ -22,6 +22,7 @@ import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "../agent/json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
+import { untrustedContentBlock } from "../prompt/untrusted-content";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
 import type {
@@ -49,7 +50,7 @@ const PRIORITY_WEIGHTS: Record<ReviewPriority, number> = {
  * @param iteration - Current auto-review iteration (1-based)
  * @returns Prompt instructing the agent to return structured JSON feedback
  */
-function generateReviewPrompt(
+export function generateReviewPrompt(
   repository: string,
   prNumber: number,
   prDiff: string,
@@ -72,9 +73,8 @@ Analyze the following aspects:
 6. **Documentation**: Missing/unclear comments, outdated documentation
 
 ## PR Diff
-\`\`\`diff
-${prDiff}
-\`\`\`
+
+${untrustedContentBlock(`\`\`\`diff\n${prDiff}\n\`\`\``, "pull request diff")}
 
 ## Instructions
 1. Review the code changes thoroughly
@@ -118,7 +118,7 @@ ${prDiff}
  * @param iteration - Current iteration (controls commit vs amend instructions)
  * @returns Fix prompt for the agent harness
  */
-function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
+export function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
   const itemsList = feedbackItems
     .map(
       (item, idx) =>
@@ -144,7 +144,8 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
 ## Review Iteration ${iteration}
 
 ## Feedback to Address
-${itemsList}
+
+${untrustedContentBlock(itemsList, "agent review feedback")}
 
 ## Instructions
 1. Address each feedback item in order of priority (critical → high → medium)

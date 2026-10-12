@@ -5,6 +5,7 @@
  */
 
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../../types/github-webhooks";
+import { untrustedContentBlock } from "../prompt/untrusted-content";
 
 /**
  * Format structured PR review feedback into an agent prompt.
@@ -33,7 +34,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
   if (feedback.reviewBody && feedback.reviewBody.trim()) {
     lines.push("## Overall Review Comment");
     lines.push("");
-    lines.push(feedback.reviewBody);
+    lines.push(untrustedContentBlock(feedback.reviewBody.trim(), "overall review comment"));
     lines.push("");
   }
 
@@ -64,7 +65,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     lines.push("");
 
     for (const comment of feedback.conversationComments) {
-      lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+      lines.push(untrustedContentBlock(quoteBody(comment.body), "review conversation comment"));
       lines.push("");
     }
   }
@@ -151,19 +152,32 @@ function formatSingleComment(comment: ProcessedReviewComment): string {
   lines.push(`**${lineRef}** (by @${comment.reviewer}):`);
   lines.push("");
 
+  const external: string[] = [];
+
   // Diff context (code block)
   if (comment.diffHunk) {
     const language = detectLanguage(comment.path);
-    lines.push("```" + language);
-    lines.push(comment.diffHunk);
-    lines.push("```");
-    lines.push("");
+    external.push("```" + language);
+    external.push(comment.diffHunk);
+    external.push("```");
+    external.push("");
   }
 
   // The actual feedback
-  lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+  external.push(quoteBody(comment.body));
+
+  lines.push(untrustedContentBlock(external.join("\n"), "review comment"));
 
   return lines.join("\n");
+}
+
+/**
+ * Render multi-line text as a markdown blockquote.
+ *
+ * @param body - Raw text to quote
+ */
+function quoteBody(body: string): string {
+  return `> ${body.split("\n").join("\n> ")}`;
 }
 
 /**
@@ -296,15 +310,15 @@ export function formatSingleCommentPrompt(
 
   if (comment.diffHunk) {
     const language = detectLanguage(comment.path);
-    lines.push("```" + language);
-    lines.push(comment.diffHunk);
-    lines.push("```");
+    lines.push(
+      untrustedContentBlock(`\`\`\`${language}\n${comment.diffHunk}\n\`\`\``, "code under review"),
+    );
     lines.push("");
   }
 
   lines.push("## Reviewer Feedback");
   lines.push("");
-  lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+  lines.push(untrustedContentBlock(quoteBody(comment.body), "review comment"));
   lines.push("");
   lines.push("## Instructions");
   lines.push("");
@@ -348,7 +362,12 @@ export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
   }
   lines.push("");
   if (feedback.logs?.trim()) {
-    lines.push("## Failure Logs (excerpt)", "", "```", feedback.logs.trimEnd(), "```", "");
+    lines.push(
+      "## Failure Logs (excerpt)",
+      "",
+      untrustedContentBlock(`\`\`\`\n${feedback.logs.trimEnd()}\n\`\`\``, "ci logs"),
+      "",
+    );
   } else {
     lines.push(
       "## Failure Logs",

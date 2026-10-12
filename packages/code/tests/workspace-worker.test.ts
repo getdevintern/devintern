@@ -828,6 +828,17 @@ GITLAB_CODE_HOST_PROXY = ""
         "test failed",
       );
       const scheduled: string[] = [];
+      // Ambient GitHub credentials would build a second, GitHub-namespaced CI
+      // watcher first, and the `instanceof` lookup below would select it.
+      // This test exercises the GitLab watcher, so isolate from them.
+      const savedToken = process.env.GITHUB_TOKEN;
+      const savedAppId = process.env.GITHUB_APP_ID;
+      const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      const savedAppKeyBase64 = process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       try {
         const acquirers = await buildFleetEventAcquirers({
           config,
@@ -872,6 +883,14 @@ GITLAB_CODE_HOST_PROXY = ""
         getChange.mockRestore();
         getCi.mockRestore();
         getLogs.mockRestore();
+        if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = savedToken;
+        if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+        else process.env.GITHUB_APP_ID = savedAppId;
+        if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
+        if (savedAppKeyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppKeyBase64;
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
       }
