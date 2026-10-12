@@ -11,7 +11,7 @@ import type {
 
 function makeProvider(
   name: string,
-  overrides: Partial<Pick<SandboxProvider, "priority" | "supportsHarness">> & {
+  overrides: Partial<Pick<SandboxProvider, "priority" | "supportsHarness" | "canNestInSandbox">> & {
     available?: boolean;
     reason?: string;
   } = {},
@@ -21,11 +21,16 @@ function makeProvider(
     displayName: name,
     priority: overrides.priority ?? 10,
     supportsHarness: overrides.supportsHarness,
+    canNestInSandbox: overrides.canNestInSandbox,
     detect: async (): Promise<SandboxDetection> => ({
       available: overrides.available ?? true,
       reason: overrides.reason,
     }),
-    wrapCommand: (path: string, args: readonly string[], _policy: SandboxPolicy): WrappedCommand => ({
+    wrapCommand: (
+      path: string,
+      args: readonly string[],
+      _policy: SandboxPolicy,
+    ): WrappedCommand => ({
       path: name,
       args: [path, ...args],
     }),
@@ -33,7 +38,9 @@ function makeProvider(
 }
 
 function detectionsOf(...providers: SandboxProvider[]): Promise<DetectedSandboxProvider[]> {
-  return Promise.all(providers.map(async (provider) => ({ provider, detection: await provider.detect() })));
+  return Promise.all(
+    providers.map(async (provider) => ({ provider, detection: await provider.detect() })),
+  );
 }
 
 describe("resolveSandbox", () => {
@@ -42,6 +49,7 @@ describe("resolveSandbox", () => {
   beforeEach(() => {
     delete process.env.AGENT_SANDBOX;
     delete process.env.NONO_CAP_FILE;
+    delete process.env.SANDBOX_RUNTIME;
   });
 
   afterEach(() => {
@@ -74,6 +82,7 @@ describe("resolveSandbox", () => {
     const unavailable = makeProvider("fake-unavailable", { priority: 100, available: false });
     const resolved = await resolveSandbox({
       sandboxName: "auto",
+      trustedEnv: {},
       detections: await detectionsOf(low, high, unavailable),
     });
     expect(resolved?.provider.name).toBe("fake-high");
@@ -87,6 +96,7 @@ describe("resolveSandbox", () => {
     const universal = makeProvider("fake-universal", { priority: 5 });
     const resolved = await resolveSandbox({
       sandboxName: "auto",
+      trustedEnv: {},
       harnessName: "opencode",
       detections: await detectionsOf(picky, universal),
     });
@@ -98,6 +108,7 @@ describe("resolveSandbox", () => {
     const warnings: string[] = [];
     const resolved = await resolveSandbox({
       sandboxName: "auto",
+      trustedEnv: {},
       detections: await detectionsOf(explicitOnly),
       onWarning: (m) => warnings.push(m),
     });
@@ -109,6 +120,7 @@ describe("resolveSandbox", () => {
     const warnings: string[] = [];
     const resolved = await resolveSandbox({
       sandboxName: "auto",
+      trustedEnv: {},
       detections: [],
       onWarning: (m) => warnings.push(m),
     });
@@ -121,7 +133,11 @@ describe("resolveSandbox", () => {
     const broken = makeProvider("fake-broken", { available: false, reason: "binary missing" });
     registerSandboxProvider(broken);
     expect(
-      resolveSandbox({ sandboxName: "fake-broken", detections: await detectionsOf(broken) }),
+      resolveSandbox({
+        sandboxName: "fake-broken",
+        trustedEnv: {},
+        detections: await detectionsOf(broken),
+      }),
     ).rejects.toThrow("binary missing");
   });
 
@@ -133,6 +149,7 @@ describe("resolveSandbox", () => {
     expect(
       resolveSandbox({
         sandboxName: "fake-picky-explicit",
+        trustedEnv: {},
         harnessName: "opencode",
         detections: await detectionsOf(picky),
       }),
@@ -144,6 +161,7 @@ describe("resolveSandbox", () => {
     registerSandboxProvider(good);
     const resolved = await resolveSandbox({
       sandboxName: "fake-good",
+      trustedEnv: {},
       detections: await detectionsOf(good),
     });
     expect(resolved?.provider.name).toBe("fake-good");
@@ -154,22 +172,40 @@ describe("resolveSandbox", () => {
     const envPicked = makeProvider("fake-env-picked");
     registerSandboxProvider(envPicked);
     process.env.AGENT_SANDBOX = "fake-env-picked";
-    const resolved = await resolveSandbox({ detections: await detectionsOf(envPicked) });
+    const resolved = await resolveSandbox({
+      trustedEnv: {},
+      detections: await detectionsOf(envPicked),
+    });
     expect(resolved?.provider.name).toBe("fake-env-picked");
   });
 
   test("activeSandboxName reports the enclosing nono sandbox", () => {
     expect(activeSandboxName({})).toBeUndefined();
-    expect(activeSandboxName({ NONO_CAP_FILE: "/tmp/cap.json" })).toBe("nono");
+    expect(activeSandboxName({ NONO_CAP_FILE: process.execPath })).toBe("nono");
+  });
+
+  test("activeSandboxName reports the enclosing srt sandbox marker", () => {
+    expect(activeSandboxName({ SANDBOX_RUNTIME: "1" })).toBe("srt");
+    expect(activeSandboxName({ SANDBOX_RUNTIME: "0" })).toBeUndefined();
+  });
+
+  test("activeSandboxName ignores a NONO_CAP_FILE pointing at a missing path", () => {
+    expect(activeSandboxName({ NONO_CAP_FILE: "/nonexistent/cap.json" })).toBeUndefined();
+  });
+
+  test("activeSandboxName reports nono when both markers are present", () => {
+    expect(activeSandboxName({ NONO_CAP_FILE: process.execPath, SANDBOX_RUNTIME: "1" })).toBe(
+      "nono",
+    );
   });
 
   test("auto does not add a nested sandbox when already inside one", async () => {
-    process.env.NONO_CAP_FILE = "/tmp/cap.json";
     const nested = makeProvider("nono", { priority: 50 });
     const other = makeProvider("fake-other", { priority: 5 });
     const warnings: string[] = [];
     const resolved = await resolveSandbox({
       sandboxName: "auto",
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
       detections: await detectionsOf(nested, other),
       onWarning: (m) => warnings.push(m),
     });
@@ -178,12 +214,13 @@ describe("resolveSandbox", () => {
     expect(warnings[0]).toContain("Already running inside the nono sandbox");
   });
 
-  test("explicit provider is not nested when already inside a sandbox", async () => {
-    process.env.NONO_CAP_FILE = "/tmp/cap.json";
+  test("explicit same provider is not nested when already inside a sandbox", async () => {
+    const srt = makeProvider("srt");
     const warnings: string[] = [];
     const resolved = await resolveSandbox({
-      sandboxName: "nono",
-      detections: [],
+      sandboxName: "srt",
+      trustedEnv: { SANDBOX_RUNTIME: "1" },
+      detections: await detectionsOf(srt),
       onWarning: (m) => warnings.push(m),
     });
     expect(resolved).toBeNull();
@@ -191,10 +228,64 @@ describe("resolveSandbox", () => {
     expect(warnings[0]).toContain("not nesting another sandbox");
   });
 
+  test("explicit different non-nestable provider is not stacked on an active sandbox", async () => {
+    const other = makeProvider("fake-other");
+    registerSandboxProvider(other);
+    const warnings: string[] = [];
+    const resolved = await resolveSandbox({
+      sandboxName: "fake-other",
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+      detections: await detectionsOf(other),
+      onWarning: (m) => warnings.push(m),
+    });
+    expect(resolved).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("not adding a nested fake-other sandbox");
+  });
+
+  test("explicit nesting-capable provider still runs inside an active sandbox", async () => {
+    const vm = makeProvider("fake-vm", { canNestInSandbox: true });
+    registerSandboxProvider(vm);
+    const warnings: string[] = [];
+    const resolved = await resolveSandbox({
+      sandboxName: "fake-vm",
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+      detections: await detectionsOf(vm),
+      onWarning: (m) => warnings.push(m),
+    });
+    expect(resolved?.provider.name).toBe("fake-vm");
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("explicit provider is validated even when an active sandbox is present", async () => {
+    const broken = makeProvider("fake-broken-active", {
+      available: false,
+      reason: "binary missing",
+    });
+    registerSandboxProvider(broken);
+    expect(
+      resolveSandbox({
+        sandboxName: "fake-broken-active",
+        trustedEnv: { NONO_CAP_FILE: process.execPath },
+        detections: await detectionsOf(broken),
+      }),
+    ).rejects.toThrow("binary missing");
+  });
+
+  test("activeSandboxName ignores markers merged into process.env after module load", () => {
+    const before = activeSandboxName();
+    process.env.NONO_CAP_FILE = process.execPath;
+    process.env.SANDBOX_RUNTIME = "1";
+    expect(activeSandboxName()).toBe(before);
+  });
+
   test("an active sandbox still rejects an unknown explicit provider", async () => {
-    process.env.NONO_CAP_FILE = "/tmp/cap.json";
-    expect(resolveSandbox({ sandboxName: "bogus", detections: [] })).rejects.toThrow(
-      "Unknown sandbox provider",
-    );
+    expect(
+      resolveSandbox({
+        sandboxName: "bogus",
+        trustedEnv: { NONO_CAP_FILE: process.execPath },
+        detections: [],
+      }),
+    ).rejects.toThrow("Unknown sandbox provider");
   });
 });
