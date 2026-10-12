@@ -10,6 +10,7 @@ import {
 } from "../src/lib/observability/sentry-client";
 import type { SentryIssue } from "../src/lib/observability/sentry-client";
 import { ErrorMonitorAcquirer, SourceFetchError } from "../src/lib/acquirers/error-monitor";
+import type { SourceStatusInput } from "../src/lib/acquirers/source-fetch";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { AutomationStateStore } from "../src/lib/automation/state";
 
@@ -578,5 +579,37 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     } finally {
       store.close();
     }
+  });
+
+  test("a throwing status store never changes the read outcome", async () => {
+    const store = {
+      recordSourceStatus() {
+        throw new Error("SQLITE_BUSY");
+      },
+    };
+    const { acquirer } = makeAcquirer(
+      new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+      { statusStore: store, now: () => 1_000 },
+    );
+
+    const outcome = await acquirer.tick();
+
+    expect(outcome.status).toBe("rate-limited");
+    expect(outcome.retryAfterMs).toBe(30_000);
+  });
+
+  test("skips redundant ok-to-ok status writes", async () => {
+    const statuses: string[] = [];
+    const store = {
+      recordSourceStatus(status: SourceStatusInput) {
+        statuses.push(status.status);
+      },
+    };
+    const { acquirer } = makeAcquirer([issue()], { statusStore: store, now: () => 1_000 });
+
+    await acquirer.tick();
+    await acquirer.tick();
+
+    expect(statuses).toEqual(["ok"]);
   });
 });

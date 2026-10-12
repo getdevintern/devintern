@@ -16,6 +16,7 @@ import { SourceFetchError } from "./source-fetch";
 import type {
   SourceFetchFailureStatus,
   SourceFetchOutcome,
+  SourceStatusInput,
   SourceStatusSink,
 } from "./source-fetch";
 
@@ -112,6 +113,11 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   private busy = false;
   /** Most recent read outcome; returned while a tick is already in flight. */
   private lastOutcome: SourceFetchOutcome<TIssue> = { status: "ok", issues: [] };
+  /**
+   * Last status actually persisted to the sink. Used to skip redundant
+   * ok-to-ok writes on every poll; failures are always persisted.
+   */
+  private lastPersistedStatus: SourceFetchFailureStatus | "ok" | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -231,7 +237,7 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const status: SourceFetchFailureStatus = failure?.status ?? "unreadable";
     const message = failure?.message ?? (error as Error).message;
     const retryAfterMs = failure?.retryAfterMs;
-    this.options.statusStore?.recordSourceStatus({
+    this.persistSourceStatus({
       sourceId: this.options.sourceId,
       provider: this.options.provider.providerName,
       status,
@@ -252,12 +258,35 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
 
   /** Record a successful read so health counters reset and the cursor may advance. */
   private recordReadSuccess(): void {
-    this.options.statusStore?.recordSourceStatus({
+    // An ok source stays ok; skip the SQLite write (and WAL churn) on the
+    // steady-state ok-to-ok transition. This is only an in-process hint, so a
+    // source that failed and recovered is still persisted.
+    if (this.lastPersistedStatus === "ok") return;
+    this.persistSourceStatus({
       sourceId: this.options.sourceId,
       provider: this.options.provider.providerName,
       status: "ok",
       checkedAt: this.now(),
     });
+  }
+
+  /**
+   * Persist a source health update without letting storage failures alter the
+   * poll outcome. A throw here (SQLITE_BUSY after the busy timeout, disk full)
+   * must never be mistaken for a read failure, escape the inner catch, or mask
+   * a legitimately classified read.
+   */
+  private persistSourceStatus(status: SourceStatusInput): void {
+    const store = this.options.statusStore;
+    if (!store) return;
+    try {
+      store.recordSourceStatus(status);
+      this.lastPersistedStatus = status.status;
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not persist source status: ${(error as Error).message}`,
+      );
+    }
   }
 
   /** Make an unreadable source visible instead of silently treating it as empty. */
