@@ -776,6 +776,16 @@ GITLAB_CODE_HOST_PROXY = ""
       const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
       mkdirSync(workspaceDir, { recursive: true });
       const state = openWorkspaceState(workspaceDir);
+      // A GitLab-only workspace must not build the GitHub CI watcher; clear
+      // any ambient credentials so `acquirers.find` selects the GitLab one.
+      const savedToken = process.env.GITHUB_TOKEN;
+      const savedAppId = process.env.GITHUB_APP_ID;
+      const savedAppKey = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      const savedAppKeyBase64 = process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       const config = parseWorkspaceConfig(`
 [workspace]
 ci_failure_fix = true
@@ -872,6 +882,14 @@ GITLAB_CODE_HOST_PROXY = ""
         getChange.mockRestore();
         getCi.mockRestore();
         getLogs.mockRestore();
+        if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = savedToken;
+        if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+        else process.env.GITHUB_APP_ID = savedAppId;
+        if (savedAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKey;
+        if (savedAppKeyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppKeyBase64;
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
       }
