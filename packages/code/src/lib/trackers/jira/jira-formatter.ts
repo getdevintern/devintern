@@ -383,6 +383,36 @@ export class JiraFormatter {
       });
     }
 
+    // Add assumptions the assessment relied on, if any
+    if (assessment.assumptions && assessment.assumptions.length > 0) {
+      content.push({
+        type: "paragraph",
+        content: [
+          {
+            type: "text",
+            text: "Assumptions:",
+            marks: [{ type: "strong" }],
+          },
+        ],
+      });
+      content.push(JiraFormatter.buildTextBulletList(assessment.assumptions));
+    }
+
+    // Add work explicitly out of scope, if any
+    if (assessment.outOfScope && assessment.outOfScope.length > 0) {
+      content.push({
+        type: "paragraph",
+        content: [
+          {
+            type: "text",
+            text: "Out of Scope:",
+            marks: [{ type: "strong" }],
+          },
+        ],
+      });
+      content.push(JiraFormatter.buildTextBulletList(assessment.outOfScope));
+    }
+
     // Add success message for passing assessments
     if (assessment.isImplementable && assessment.clarityScore >= 7) {
       content.push({
@@ -787,5 +817,25 @@ export class JiraFormatter {
         ],
       },
     ];
+  }
+
+  /**
+   * Build a plain ADF bullet list from string items.
+   *
+   * @param items - Text lines, one per bullet
+   */
+  private static buildTextBulletList(items: string[]): any {
+    return {
+      type: "bulletList",
+      content: items.map((item) => ({
+        type: "listItem",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: item }],
+          },
+        ],
+      })),
+    };
   }
 }

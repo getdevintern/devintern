@@ -63,6 +63,40 @@ describe("markdown-comment-formatter - clarity assessment", () => {
     });
     expect(markdown).not.toContain(RETRY_PICKUP_BODY);
   });
+
+  test("renders assumptions and out-of-scope items", () => {
+    const markdown = formatClarityAssessmentMarkdown({
+      clarityScore: 7,
+      isImplementable: true,
+      summary: "Implementable with inferred details",
+      issues: [],
+      recommendations: [],
+      assumptions: ["Reuses the existing auth middleware", "No schema migration is required"],
+      outOfScope: ["Migrating existing sessions", "Admin UI changes"],
+    });
+
+    expect(markdown).toContain("**Assumptions:**");
+    expect(markdown).toContain("- Reuses the existing auth middleware");
+    expect(markdown).toContain("- No schema migration is required");
+    expect(markdown).toContain("**Out of Scope:**");
+    expect(markdown).toContain("- Migrating existing sessions");
+    expect(markdown).toContain("- Admin UI changes");
+  });
+
+  test("omits assumptions and out-of-scope sections when absent or empty", () => {
+    const markdown = formatClarityAssessmentMarkdown({
+      clarityScore: 8,
+      isImplementable: true,
+      summary: "Task is clear",
+      issues: [],
+      recommendations: [],
+      assumptions: [],
+      outOfScope: [],
+    });
+
+    expect(markdown).not.toContain("**Assumptions:**");
+    expect(markdown).not.toContain("**Out of Scope:**");
+  });
 });
 
 describe("markdown-comment-formatter - comment bodies", () => {

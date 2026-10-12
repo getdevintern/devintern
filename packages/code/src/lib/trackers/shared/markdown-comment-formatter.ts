@@ -42,6 +42,8 @@ export interface ClarityAssessmentLike {
     severity: "critical" | "major" | "minor" | string;
   }>;
   recommendations: string[];
+  assumptions?: string[];
+  outOfScope?: string[];
 }
 
 export interface EstimationResultLike {
@@ -105,6 +107,22 @@ export function formatClarityAssessmentMarkdown(assessment: ClarityAssessmentLik
     lines.push("**Recommendations:**", "");
     assessment.recommendations.forEach((rec, index) => {
       lines.push(`${index + 1}. ${rec}`);
+    });
+    lines.push("");
+  }
+
+  if (assessment.assumptions && assessment.assumptions.length > 0) {
+    lines.push("**Assumptions:**", "");
+    assessment.assumptions.forEach((assumption) => {
+      lines.push(`- ${assumption}`);
+    });
+    lines.push("");
+  }
+
+  if (assessment.outOfScope && assessment.outOfScope.length > 0) {
+    lines.push("**Out of Scope:**", "");
+    assessment.outOfScope.forEach((item) => {
+      lines.push(`- ${item}`);
     });
     lines.push("");
   }
