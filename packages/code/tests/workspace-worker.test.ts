@@ -782,10 +782,6 @@ GITLAB_CODE_HOST_PROXY = ""
         keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
         keyBase64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
       };
-      delete process.env.GITHUB_TOKEN;
-      delete process.env.GITHUB_APP_ID;
-      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
       mkdirSync(workspaceDir, { recursive: true });
       const state = openWorkspaceState(workspaceDir);
@@ -842,6 +838,10 @@ GITLAB_CODE_HOST_PROXY = ""
       );
       const scheduled: string[] = [];
       try {
+        delete process.env.GITHUB_TOKEN;
+        delete process.env.GITHUB_APP_ID;
+        delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
         const acquirers = await buildFleetEventAcquirers({
           config,
           workspaceDir,

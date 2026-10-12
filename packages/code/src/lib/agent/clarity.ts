@@ -389,9 +389,11 @@ export function parseClarityResponse(output: string): ClarityAssessment {
     return {
       ...(assessment as unknown as ClarityAssessment),
       assumptions: Array.isArray(assessment.assumptions)
-        ? (assessment.assumptions as string[])
+        ? assessment.assumptions.filter((value): value is string => typeof value === "string")
         : [],
-      outOfScope: Array.isArray(assessment.outOfScope) ? (assessment.outOfScope as string[]) : [],
+      outOfScope: Array.isArray(assessment.outOfScope)
+        ? assessment.outOfScope.filter((value): value is string => typeof value === "string")
+        : [],
     };
   } catch (error) {
     if (error instanceof SyntaxError) {

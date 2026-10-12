@@ -71,6 +71,22 @@ describe("parseClarityResponse", () => {
     expect(assessment.outOfScope).toEqual([]);
   });
 
+  test("drops non-string assumptions and out-of-scope entries", () => {
+    const output = `{
+  "isImplementable": true,
+  "clarityScore": 8,
+  "issues": [],
+  "recommendations": [],
+  "assumptions": ["Keep auth middleware", 42, {"nested": true}, null],
+  "outOfScope": [{"label": "Migrating sessions"}, "No API changes"],
+  "summary": "Implementable"
+}`;
+
+    const assessment = parseClarityResponse(output);
+    expect(assessment.assumptions).toEqual(["Keep auth middleware"]);
+    expect(assessment.outOfScope).toEqual(["No API changes"]);
+  });
+
   test("still rejects assessments missing core fields", () => {
     const output = `{"isImplementable": true, "recommendations": [], "summary": "x"}`;
     expect(() => parseClarityResponse(output)).toThrow("Invalid assessment structure");
