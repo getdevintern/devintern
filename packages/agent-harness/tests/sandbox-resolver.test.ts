@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "../src/sandbox/detect.js";
 import { registerSandboxProvider } from "../src/sandbox/registry.js";
-import { resolveSandbox } from "../src/sandbox/resolver.js";
+import { activeSandboxName, resolveSandbox } from "../src/sandbox/resolver.js";
 import type {
   SandboxDetection,
   SandboxPolicy,
@@ -41,6 +41,7 @@ describe("resolveSandbox", () => {
 
   beforeEach(() => {
     delete process.env.AGENT_SANDBOX;
+    delete process.env.NONO_CAP_FILE;
   });
 
   afterEach(() => {
@@ -155,5 +156,45 @@ describe("resolveSandbox", () => {
     process.env.AGENT_SANDBOX = "fake-env-picked";
     const resolved = await resolveSandbox({ detections: await detectionsOf(envPicked) });
     expect(resolved?.provider.name).toBe("fake-env-picked");
+  });
+
+  test("activeSandboxName reports the enclosing nono sandbox", () => {
+    expect(activeSandboxName({})).toBeUndefined();
+    expect(activeSandboxName({ NONO_CAP_FILE: "/tmp/cap.json" })).toBe("nono");
+  });
+
+  test("auto does not add a nested sandbox when already inside one", async () => {
+    process.env.NONO_CAP_FILE = "/tmp/cap.json";
+    const nested = makeProvider("nono", { priority: 50 });
+    const other = makeProvider("fake-other", { priority: 5 });
+    const warnings: string[] = [];
+    const resolved = await resolveSandbox({
+      sandboxName: "auto",
+      detections: await detectionsOf(nested, other),
+      onWarning: (m) => warnings.push(m),
+    });
+    expect(resolved).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Already running inside the nono sandbox");
+  });
+
+  test("explicit provider is not nested when already inside a sandbox", async () => {
+    process.env.NONO_CAP_FILE = "/tmp/cap.json";
+    const warnings: string[] = [];
+    const resolved = await resolveSandbox({
+      sandboxName: "nono",
+      detections: [],
+      onWarning: (m) => warnings.push(m),
+    });
+    expect(resolved).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("not nesting another sandbox");
+  });
+
+  test("an active sandbox still rejects an unknown explicit provider", async () => {
+    process.env.NONO_CAP_FILE = "/tmp/cap.json";
+    expect(resolveSandbox({ sandboxName: "bogus", detections: [] })).rejects.toThrow(
+      "Unknown sandbox provider",
+    );
   });
 });

@@ -535,6 +535,8 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 
 If you explicitly select a provider that is not installed or does not support your harness, the run fails with an actionable error rather than silently running unsandboxed.
 
+When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead, and `auto` logs this rather than picking another provider.
+
 ### What the sandbox allows
 
 The default policy confines filesystem writes to what a task run actually needs: your project working directory, the task output directory, the system temp directory, and the Playwright and Puppeteer browser caches (so agents that launch a browser for testing or research keep working). Network access stays open, since agents need to reach model APIs, push to git remotes, and install packages.

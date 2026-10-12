@@ -36,6 +36,33 @@ export interface SandboxResolutionOptions {
 }
 
 /**
+ * Environment markers that reveal an enclosing sandbox wrapper, mapped to the
+ * provider that installed it. nono exports `NONO_CAP_FILE` into every sandboxed
+ * process; seeing it means this process is already confined by nono.
+ */
+const ACTIVE_SANDBOX_ENV: Record<string, string> = {
+  NONO_CAP_FILE: "nono",
+};
+
+/**
+ * Name of the sandbox provider already wrapping this process, if any.
+ *
+ * Re-wrapping with the same provider would nest the sandbox, which nono cannot
+ * do (the inner instance cannot create its session state under the outer
+ * confinement and exits non-zero before the agent starts). Callers use this to
+ * avoid the redundant layer.
+ *
+ * @param env - Environment to inspect (defaults to `process.env`).
+ * @returns The provider name, or `undefined` when unsandboxed.
+ */
+export function activeSandboxName(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  for (const [marker, name] of Object.entries(ACTIVE_SANDBOX_ENV)) {
+    if (env[marker]) return name;
+  }
+  return undefined;
+}
+
+/**
  * Resolve the sandbox provider for a run.
  *
  * @param options - Optional overrides for provider name and harness filtering.
@@ -48,14 +75,29 @@ export async function resolveSandbox(
   const name = options?.sandboxName || process.env.AGENT_SANDBOX || "none";
   const harnessName = options?.harnessName;
   const warn = options?.onWarning ?? ((message: string) => console.warn(message));
+  const active = activeSandboxName();
 
   if (name === "none") {
     return null;
   }
 
-  const detections = options?.detections ?? (await detectSandboxProviders());
+  // Already inside a kernel sandbox (nono sets NONO_CAP_FILE for its children).
+  // Nesting another one is unsupported on Linux/macOS — the inner wrapper
+  // cannot set up its namespaces/state under the outer confinement and exits
+  // non-zero before the agent starts — so the existing confinement is the
+  // boundary. `auto` refuses to stack anything on top of it; an explicit name
+  // is skipped only when it names the sandbox that is already active.
+  const skipNesting = (activeName: string): null => {
+    warn(
+      `ℹ️  Already running inside the ${activeName} sandbox — not nesting another sandbox; ` +
+        "the agent inherits the existing confinement.",
+    );
+    return null;
+  };
 
   if (name === "auto") {
+    if (active) return skipNesting(active);
+    const detections = options?.detections ?? (await detectSandboxProviders());
     const candidates = detections
       .filter(({ provider, detection }) => {
         if (!detection.available || provider.priority <= 0) return false;
@@ -89,6 +131,10 @@ export async function resolveSandbox(
     );
   }
 
+  // Requesting the provider that already wraps this process would nest it.
+  if (active === name) return skipNesting(active);
+
+  const detections = options?.detections ?? (await detectSandboxProviders());
   const detected = detections.find((d) => d.provider.name === name);
   const detection = detected?.detection ?? (await provider.detect());
   if (!detection.available) {
