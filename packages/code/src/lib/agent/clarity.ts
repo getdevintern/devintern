@@ -27,6 +27,8 @@ export interface ClarityAssessment {
     severity: "critical" | "major" | "minor";
   }>;
   recommendations: string[];
+  assumptions: string[];
+  outOfScope: string[];
   summary: string;
 }
 
@@ -191,6 +193,22 @@ export async function runClarityCheck(
                 assessmentContent += `## Recommendations\n\n`;
                 assessment.recommendations.forEach((rec, index) => {
                   assessmentContent += `${index + 1}. ${rec}\n`;
+                });
+                assessmentContent += `\n`;
+              }
+
+              if (assessment.assumptions.length > 0) {
+                assessmentContent += `## Assumptions\n\n`;
+                assessment.assumptions.forEach((assumption) => {
+                  assessmentContent += `- ${assumption}\n`;
+                });
+                assessmentContent += `\n`;
+              }
+
+              if (assessment.outOfScope.length > 0) {
+                assessmentContent += `## Out of Scope\n\n`;
+                assessment.outOfScope.forEach((item) => {
+                  assessmentContent += `- ${item}\n`;
                 });
                 assessmentContent += `\n`;
               }
@@ -366,7 +384,15 @@ export function parseClarityResponse(output: string): ClarityAssessment {
       throw new Error("warn: Invalid assessment structure - missing required fields");
     }
 
-    return assessment as unknown as ClarityAssessment;
+    // `assumptions`/`outOfScope` were added later; tolerate agents (or cached
+    // responses) that omit them by normalizing to empty arrays.
+    return {
+      ...(assessment as unknown as ClarityAssessment),
+      assumptions: Array.isArray(assessment.assumptions)
+        ? (assessment.assumptions as string[])
+        : [],
+      outOfScope: Array.isArray(assessment.outOfScope) ? (assessment.outOfScope as string[]) : [],
+    };
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`warn: Malformed JSON in Agent response: ${error.message}`);

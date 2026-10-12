@@ -84,6 +84,36 @@ describe("JiraFormatter - @devintern/code Comment Markers", () => {
     expect(JSON.stringify(adf)).not.toContain("To retry this task");
   });
 
+  test("renders assumptions and out-of-scope items", () => {
+    const adf = JiraFormatter.createClarityAssessmentADF({
+      clarityScore: 7,
+      isImplementable: true,
+      summary: "Implementable with inferred details",
+      issues: [],
+      recommendations: [],
+      assumptions: ["Reuses the existing auth middleware"],
+      outOfScope: ["Migrating existing sessions"],
+    });
+    const adfString = JSON.stringify(adf);
+    expect(adfString).toContain("Assumptions:");
+    expect(adfString).toContain("Reuses the existing auth middleware");
+    expect(adfString).toContain("Out of Scope:");
+    expect(adfString).toContain("Migrating existing sessions");
+  });
+
+  test("omits assumptions and out-of-scope sections when absent", () => {
+    const adf = JiraFormatter.createClarityAssessmentADF({
+      clarityScore: 8,
+      isImplementable: true,
+      summary: "Task is clear",
+      issues: [],
+      recommendations: [],
+    });
+    const adfString = JSON.stringify(adf);
+    expect(adfString).not.toContain("Assumptions:");
+    expect(adfString).not.toContain("Out of Scope:");
+  });
+
   test("all @devintern/code comments should have unique identifiable markers", () => {
     const implementationADF = JiraFormatter.createImplementationCommentADF("test");
     const assessmentADF = JiraFormatter.createClarityAssessmentADF({

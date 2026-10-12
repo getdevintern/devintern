@@ -773,6 +773,19 @@ GITLAB_CODE_HOST_PROXY = ""
   test.each(["closed", "repair"])(
     "GitLab CI keeps same-project MR identities separate: %s",
     async (scenario) => {
+      // This test exercises GitLab-only event wiring. Clear any ambient GitHub
+      // credentials so buildFleetEventAcquirers does not also register a GitHub
+      // CI watcher that the `instanceof` lookup below could select instead.
+      const savedGithubEnv = {
+        token: process.env.GITHUB_TOKEN,
+        appId: process.env.GITHUB_APP_ID,
+        keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+        keyBase64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
+      };
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
       mkdirSync(workspaceDir, { recursive: true });
       const state = openWorkspaceState(workspaceDir);
@@ -874,6 +887,15 @@ GITLAB_CODE_HOST_PROXY = ""
         getLogs.mockRestore();
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
+        if (savedGithubEnv.token === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = savedGithubEnv.token;
+        if (savedGithubEnv.appId === undefined) delete process.env.GITHUB_APP_ID;
+        else process.env.GITHUB_APP_ID = savedGithubEnv.appId;
+        if (savedGithubEnv.keyPath === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedGithubEnv.keyPath;
+        if (savedGithubEnv.keyBase64 === undefined)
+          delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedGithubEnv.keyBase64;
       }
     },
   );
