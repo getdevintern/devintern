@@ -3,6 +3,7 @@ import TurndownService from "turndown";
 import path from "path";
 import { convertADFToMarkdown } from "@devintern/task-trackers";
 import { loadPrompt } from "../prompts/loader";
+import type { LoadPromptOptions } from "../prompts/loader";
 import {
   FormattedTaskDetails,
   DetailedRelatedIssue,
@@ -684,6 +685,7 @@ If you need clarification on any requirements or if the task description is uncl
     attachmentMap?: Map<string, string>,
     outputPath?: string,
     richContentConverter: RichContentConverter = convertADFToMarkdown,
+    promptOptions: LoadPromptOptions = {},
   ): string {
     const {
       key,
@@ -697,28 +699,32 @@ If you need clarification on any requirements or if the task description is uncl
       comments,
     } = taskDetails;
 
-    return loadPrompt("clarity", {
-      key,
-      summary,
-      metadata: this.renderMetadata(labels, components),
-      description: this.renderDescription(
-        renderedDescription,
-        description,
-        trackerBaseUrl,
-        attachmentMap,
-        outputPath,
-        richContentConverter,
-      ),
-      linkedResources: this.renderLinkedResources(linkedResources, true),
-      relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
-      comments: this.renderRecentComments(
-        comments,
-        trackerBaseUrl,
-        attachmentMap,
-        outputPath,
-        richContentConverter,
-      ),
-    });
+    return loadPrompt(
+      "clarity",
+      {
+        key,
+        summary,
+        metadata: this.renderMetadata(labels, components),
+        description: this.renderDescription(
+          renderedDescription,
+          description,
+          trackerBaseUrl,
+          attachmentMap,
+          outputPath,
+          richContentConverter,
+        ),
+        linkedResources: this.renderLinkedResources(linkedResources, true),
+        relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
+        comments: this.renderRecentComments(
+          comments,
+          trackerBaseUrl,
+          attachmentMap,
+          outputPath,
+          richContentConverter,
+        ),
+      },
+      promptOptions,
+    );
   }
 
   /**
@@ -734,12 +740,15 @@ If you need clarification on any requirements or if the task description is uncl
     outputPath: string,
     trackerBaseUrl?: string,
     attachmentMap?: Map<string, string>,
+    promptOptions: LoadPromptOptions = {},
   ): string {
     const formattedContent = this.formatClarityAssessment(
       taskDetails,
       trackerBaseUrl,
       attachmentMap,
       outputPath,
+      undefined,
+      promptOptions,
     );
     writeFileSync(outputPath, formattedContent, "utf8");
     return outputPath;
@@ -759,6 +768,7 @@ If you need clarification on any requirements or if the task description is uncl
     attachmentMap?: Map<string, string>,
     outputPath?: string,
     richContentConverter: RichContentConverter = convertADFToMarkdown,
+    promptOptions: LoadPromptOptions = {},
   ): string {
     const {
       key,
@@ -772,28 +782,32 @@ If you need clarification on any requirements or if the task description is uncl
       comments,
     } = taskDetails;
 
-    return loadPrompt("estimation", {
-      key,
-      summary,
-      metadata: this.renderMetadata(labels, components),
-      description: this.renderDescription(
-        renderedDescription,
-        description,
-        trackerBaseUrl,
-        attachmentMap,
-        outputPath,
-        richContentConverter,
-      ),
-      linkedResources: this.renderLinkedResources(linkedResources, false),
-      relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
-      comments: this.renderRecentComments(
-        comments,
-        trackerBaseUrl,
-        attachmentMap,
-        outputPath,
-        richContentConverter,
-      ),
-    });
+    return loadPrompt(
+      "estimation",
+      {
+        key,
+        summary,
+        metadata: this.renderMetadata(labels, components),
+        description: this.renderDescription(
+          renderedDescription,
+          description,
+          trackerBaseUrl,
+          attachmentMap,
+          outputPath,
+          richContentConverter,
+        ),
+        linkedResources: this.renderLinkedResources(linkedResources, false),
+        relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
+        comments: this.renderRecentComments(
+          comments,
+          trackerBaseUrl,
+          attachmentMap,
+          outputPath,
+          richContentConverter,
+        ),
+      },
+      promptOptions,
+    );
   }
 
   /**
@@ -809,12 +823,15 @@ If you need clarification on any requirements or if the task description is uncl
     outputPath: string,
     trackerBaseUrl?: string,
     attachmentMap?: Map<string, string>,
+    promptOptions: LoadPromptOptions = {},
   ): string {
     const formattedContent = this.formatEstimationPrompt(
       taskDetails,
       trackerBaseUrl,
       attachmentMap,
       outputPath,
+      undefined,
+      promptOptions,
     );
     writeFileSync(outputPath, formattedContent, "utf8");
     return outputPath;

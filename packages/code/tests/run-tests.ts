@@ -27,10 +27,18 @@ process.on("exit", () => {
   }
 });
 
+// Ambient prompt overrides make prompt-rendering tests non-hermetic: a
+// developer's DEVINTERN_PROMPTS_DIR (or an ancestor `.devintern-code/prompts/`)
+// would silently change their results. Drop the variable from the child
+// environment so the bundled catalog is the default for the whole run; tests
+// that exercise overrides pass explicit `overrideDirs` instead.
+const childEnv = { ...process.env };
+delete childEnv.DEVINTERN_PROMPTS_DIR;
+
 const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
   cwd: import.meta.dir,
   env: {
-    ...process.env,
+    ...childEnv,
     GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
     WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
     SENTRY_DISABLED: "1",

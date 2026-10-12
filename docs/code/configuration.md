@@ -433,6 +433,8 @@ Override any prompt without editing TypeScript by placing a same-named file in `
 DEVINTERN_PROMPTS_DIR=./my-prompts
 ```
 
+**Trust boundary.** Overrides are honoured for the task-analysis prompts (`clarity.md`, `estimation.md`), which run against your own task data. The auto-review loop deliberately pins `review.md` and `fix.md` to the bundled catalog (`useAmbientOverrides: false`): those prompts run against a checkout of the pull request under review, so a `review.md` or `fix.md` committed on the PR branch must never be able to rewrite the reviewer's instructions (for example, to force `"approved": true`) or redirect the fixer. The self-approval guarantee of the auto-review loop depends on the reviewer's instructions coming from a trusted source, not the code being reviewed.
+
 ### Linting
 
 Run `bun run lint:prompts` (also part of `bun run lint`, and therefore CI) to validate the catalog. It fails on malformed frontmatter, missing required sections, undeclared placeholders, and declared-but-unused placeholders.

@@ -56,12 +56,20 @@ function generateReviewPrompt(
   prDiff: string,
   iteration: number,
 ): string {
-  return loadPrompt("review", {
-    repository,
-    prNumber: String(prNumber),
-    iteration: String(iteration),
-    prDiff,
-  });
+  // Trust boundary: the review/fix prompts run inside a checkout of the PR
+  // under review, so repository-controlled overrides must never be able to
+  // rewrite them (a checked-out `.devintern-code/prompts/review.md` could
+  // otherwise force `"approved": true`). Pin lookups to the bundled catalog.
+  return loadPrompt(
+    "review",
+    {
+      repository,
+      prNumber: String(prNumber),
+      iteration: String(iteration),
+      prDiff,
+    },
+    { useAmbientOverrides: false },
+  );
 }
 
 /**
@@ -92,11 +100,17 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
    - Extend the existing commit message by appending a new line describing iteration ${iteration} fixes
    - DO NOT push - this will be done automatically`;
 
-  return loadPrompt("fix", {
-    iteration: String(iteration),
-    itemsList,
-    commitInstruction,
-  });
+  // Same trust boundary as the review prompt: a repository-controlled `fix.md`
+  // must not be able to redirect the fixer running against the PR checkout.
+  return loadPrompt(
+    "fix",
+    {
+      iteration: String(iteration),
+      itemsList,
+      commitInstruction,
+    },
+    { useAmbientOverrides: false },
+  );
 }
 
 /**

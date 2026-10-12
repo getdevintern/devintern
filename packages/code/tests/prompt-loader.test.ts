@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { parseFrontmatter } from "../src/lib/prompts/frontmatter";
 import {
   defaultPromptsDir,
@@ -13,6 +14,7 @@ import {
 import { formatLintIssues, lintPrompts } from "../src/lib/prompts/lint";
 
 const tempDirs: string[] = [];
+const originalPromptsDir = process.env.DEVINTERN_PROMPTS_DIR;
 
 function makeTempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "prompt-test-"));
@@ -20,7 +22,18 @@ function makeTempDir(): string {
   return dir;
 }
 
+beforeEach(() => {
+  // Ambient overrides would otherwise let a developer's DEVINTERN_PROMPTS_DIR or
+  // a stray `.devintern-code/prompts/` in an ancestor change these results.
+  delete process.env.DEVINTERN_PROMPTS_DIR;
+});
+
 afterEach(() => {
+  if (originalPromptsDir === undefined) {
+    delete process.env.DEVINTERN_PROMPTS_DIR;
+  } else {
+    process.env.DEVINTERN_PROMPTS_DIR = originalPromptsDir;
+  }
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     try {
@@ -30,6 +43,11 @@ afterEach(() => {
     }
   }
 });
+
+/** Pin lookups to the bundled catalog, ignoring environment/project overrides. */
+function bundledOptions(): { promptsDir: string; useAmbientOverrides: false } {
+  return { promptsDir: defaultPromptsDir(), useAmbientOverrides: false };
+}
 
 /** Replacements needed by the clarity and estimation templates. */
 function taskReplacements(overrides: Record<string, string> = {}): Record<string, string> {
@@ -104,8 +122,16 @@ describe("loadPrompt - bundled catalog", () => {
     expect(lintPrompts(defaultPromptsDir())).toEqual([]);
   });
 
+  test("defaultPromptsDir resolves the bundled layout for a dist entry module", () => {
+    const metaUrl = "file:///app/dist/index.js";
+    const expected = join(dirname(fileURLToPath(metaUrl)), "prompts");
+
+    expect(defaultPromptsDir(metaUrl)).toBe(expected);
+    expect(defaultPromptsDir(metaUrl).endsWith(join("dist", "prompts"))).toBe(true);
+  });
+
   test("clarity prompt includes role, task and assessment instructions", () => {
-    const prompt = loadPrompt("clarity", taskReplacements());
+    const prompt = loadPrompt("clarity", taskReplacements(), bundledOptions());
 
     expect(prompt).toContain("Task Clarity Assessment");
     expect(prompt).toContain("TEST-123");
@@ -118,7 +144,7 @@ describe("loadPrompt - bundled catalog", () => {
   });
 
   test("estimation prompt includes the Fibonacci rubric and JSON shape", () => {
-    const prompt = loadPrompt("estimation", taskReplacements());
+    const prompt = loadPrompt("estimation", taskReplacements(), bundledOptions());
 
     expect(prompt).toContain("Story Points Estimation");
     expect(prompt).toContain("Fibonacci");
@@ -129,12 +155,16 @@ describe("loadPrompt - bundled catalog", () => {
   });
 
   test("review prompt includes PR metadata and the diff", () => {
-    const prompt = loadPrompt("review", {
-      repository: "acme/widgets",
-      prNumber: "42",
-      iteration: "1",
-      prDiff: "--- a/x.ts\n+++ b/x.ts\n@@\n-old\n+new",
-    });
+    const prompt = loadPrompt(
+      "review",
+      {
+        repository: "acme/widgets",
+        prNumber: "42",
+        iteration: "1",
+        prDiff: "--- a/x.ts\n+++ b/x.ts\n@@\n-old\n+new",
+      },
+      bundledOptions(),
+    );
 
     expect(prompt).toContain("acme/widgets");
     expect(prompt).toContain("#42");
@@ -145,11 +175,15 @@ describe("loadPrompt - bundled catalog", () => {
   });
 
   test("fix prompt includes feedback items and commit instructions", () => {
-    const prompt = loadPrompt("fix", {
-      iteration: "2",
-      itemsList: "1. **[HIGH] bug** in `x.ts`\n   - Issue: bad\n   - Suggestion: fix",
-      commitInstruction: "4. After making changes, amend them into the previous commit:",
-    });
+    const prompt = loadPrompt(
+      "fix",
+      {
+        iteration: "2",
+        itemsList: "1. **[HIGH] bug** in `x.ts`\n   - Issue: bad\n   - Suggestion: fix",
+        commitInstruction: "4. After making changes, amend them into the previous commit:",
+      },
+      bundledOptions(),
+    );
 
     expect(prompt).toContain("Review Iteration 2");
     expect(prompt).toContain("[HIGH] bug");
@@ -179,17 +213,26 @@ describe("loadPrompt - overrides", () => {
       ].join("\n"),
     );
 
-    const prompt = loadPrompt("clarity", { key: "OVR-1" }, { overrideDirs: [dir] });
+    const prompt = loadPrompt(
+      "clarity",
+      { key: "OVR-1" },
+      { overrideDirs: [dir], useAmbientOverrides: false },
+    );
 
     expect(prompt).toBe("## Override\nCustom instructions for OVR-1");
-    expect(resolvePromptPath("clarity", { overrideDirs: [dir] })).toBe(join(dir, "clarity.md"));
+    expect(resolvePromptPath("clarity", { overrideDirs: [dir], useAmbientOverrides: false })).toBe(
+      join(dir, "clarity.md"),
+    );
   });
 
   test("falls back to the bundled prompt when the override is absent", () => {
     const dir = makeTempDir();
     mkdirSync(dir, { recursive: true });
 
-    const prompt = loadPrompt("clarity", taskReplacements(), { overrideDirs: [dir] });
+    const prompt = loadPrompt("clarity", taskReplacements(), {
+      overrideDirs: [dir],
+      useAmbientOverrides: false,
+    });
 
     expect(prompt).toContain("Task Clarity Assessment");
   });

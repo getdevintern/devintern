@@ -54,6 +54,13 @@ export interface LoadPromptOptions {
   promptsDir?: string;
   /** Explicit override directories, checked before environment/project dirs. */
   overrideDirs?: string[];
+  /**
+   * Whether to also search ambient override locations (`DEVINTERN_PROMPTS_DIR`
+   * and `<project config dir>/prompts`). Defaults to `true`. Set to `false` for
+   * hermetic lookups that must resolve only bundled prompts plus explicit
+   * `overrideDirs` (used by bundled-catalog tests and deterministic lints).
+   */
+  useAmbientOverrides?: boolean;
 }
 
 /**
@@ -76,6 +83,9 @@ function overrideDirs(options: LoadPromptOptions): string[] {
   const dirs: string[] = [];
   if (options.overrideDirs) {
     dirs.push(...options.overrideDirs);
+  }
+  if (options.useAmbientOverrides === false) {
+    return dirs;
   }
   const envDir = process.env.DEVINTERN_PROMPTS_DIR;
   if (envDir) {

@@ -96,6 +96,22 @@ function createMockTaskDetails(
   };
 }
 
+// Pin prompt rendering to the bundled catalog so a developer's
+// DEVINTERN_PROMPTS_DIR or an ancestor `.devintern-code/prompts/` cannot change
+// the expected prompt content (see prompt-loader.test.ts).
+const BUNDLED_PROMPT_OPTIONS = { useAmbientOverrides: false } as const;
+
+function formatEstimationPrompt(details: FormattedTaskDetails): string {
+  return TaskFormatter.formatEstimationPrompt(
+    details,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    BUNDLED_PROMPT_OPTIONS,
+  );
+}
+
 // ---- parseEstimationResponse tests ----
 // We import the function indirectly by loading the module. Since it's not exported,
 // we test it through the CLI or replicate the logic here for unit testing.
@@ -312,7 +328,7 @@ That's my assessment.`;
 describe("TaskFormatter - Estimation Prompt", () => {
   test("should include task key and summary", () => {
     const details = createMockTaskDetails();
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("TEST-123");
     expect(prompt).toContain("Add user authentication");
@@ -320,7 +336,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
 
   test("should include Fibonacci scale reference", () => {
     const details = createMockTaskDetails();
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("1");
     expect(prompt).toContain("2");
@@ -334,7 +350,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
 
   test("should include JSON response format instructions", () => {
     const details = createMockTaskDetails();
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain('"storyPoints"');
     expect(prompt).toContain('"confidence"');
@@ -346,7 +362,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
 
   test("should include implementationConfidence in JSON format", () => {
     const details = createMockTaskDetails();
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain('"implementationConfidence"');
     expect(prompt).toContain("0–10");
@@ -357,7 +373,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
       labels: ["backend", "auth"],
       components: ["API", "Database"],
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("backend");
     expect(prompt).toContain("auth");
@@ -369,7 +385,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
     const details = createMockTaskDetails({
       renderedDescription: "<p>Implement OAuth2 login flow</p>",
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("Implement OAuth2 login flow");
   });
@@ -379,7 +395,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
       description: null as any,
       renderedDescription: null as any,
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("No description provided");
   });
@@ -394,7 +410,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
         },
       ],
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("Linked Resources");
     expect(prompt).toContain("Design spec");
@@ -420,7 +436,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
         },
       ],
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     expect(prompt).toContain("Related Work Items");
     expect(prompt).toContain("TEST-100");
@@ -460,7 +476,7 @@ describe("TaskFormatter - Estimation Prompt", () => {
         },
       ],
     });
-    const prompt = TaskFormatter.formatEstimationPrompt(details);
+    const prompt = formatEstimationPrompt(details);
 
     // Should include the last 3 comments only
     expect(prompt).toContain("Bob");
@@ -474,7 +490,13 @@ describe("TaskFormatter - Estimation Prompt", () => {
     const tempPath = join(tmpdir(), `est-prompt-test-${Date.now()}.md`);
 
     try {
-      const result = TaskFormatter.saveEstimationPrompt(details, tempPath);
+      const result = TaskFormatter.saveEstimationPrompt(
+        details,
+        tempPath,
+        undefined,
+        undefined,
+        BUNDLED_PROMPT_OPTIONS,
+      );
       expect(result).toBe(tempPath);
 
       const content = require("fs").readFileSync(tempPath, "utf8");
