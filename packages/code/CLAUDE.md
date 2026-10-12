@@ -125,6 +125,7 @@ Everything under the output directory is a write-only debug artifact. Durable st
   - Branch scoping is also a safety property: the base path `/tmp/devintern-review-worktree` is what project test suites target, so a PR whose own tests call `prepareReviewWorktree` (e.g. devintern reviewing its own PRs) can never delete the worktree the review is running in
   - Automatically cleans up stale worktree registrations from old paths (e.g., `.devintern-code/review-worktree/`)
 - **Dependency installation**: Auto-detects package managers (bun/pnpm/npm/poetry/etc.) when preparing worktrees
+- **Prompt catalog**: Role prompts (clarity, estimation, review, fix) live in `prompts/<stage>.md` with lightweight frontmatter, loaded by `src/lib/prompts/loader.ts`. Override per repo via `.devintern-code/prompts/` or `DEVINTERN_PROMPTS_DIR`; lint with `bun run lint:prompts` (part of `bun run lint`)
 
 ## Testing: state database isolation
 

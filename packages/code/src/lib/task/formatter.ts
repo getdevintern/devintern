@@ -2,7 +2,13 @@ import { writeFileSync } from "fs";
 import TurndownService from "turndown";
 import path from "path";
 import { convertADFToMarkdown } from "@devintern/task-trackers";
-import { FormattedTaskDetails, DetailedRelatedIssue } from "../../types/task-tracker";
+import { loadPrompt } from "../prompts/loader";
+import {
+  FormattedTaskDetails,
+  DetailedRelatedIssue,
+  LinkedResource,
+  Comment,
+} from "../../types/task-tracker";
 
 /** Converts tracker-native rich content (e.g. Jira ADF) to markdown for agent prompts. */
 export type RichContentConverter = (content: unknown) => string;
@@ -528,6 +534,143 @@ If you need clarification on any requirements or if the task description is uncl
   }
 
   /**
+   * Render the optional labels/components lines that follow the task summary.
+   *
+   * Returns a leading newline so the value can sit inline with the summary
+   * placeholder in the prompt template without leaving a blank line when empty.
+   *
+   * @param labels - Task labels
+   * @param components - Task components
+   */
+  private static renderMetadata(labels: string[], components: string[]): string {
+    const lines: string[] = [];
+    if (labels.length > 0) {
+      lines.push(`- **Labels**: ${labels.join(", ")}`);
+    }
+    if (components.length > 0) {
+      lines.push(`- **Components**: ${components.join(", ")}`);
+    }
+    return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+  }
+
+  /**
+   * Reduce a task description to markdown for the prompt body.
+   *
+   * @param renderedDescription - Tracker-rendered HTML, when available
+   * @param description - Raw description (string or tracker-native rich content)
+   * @param trackerBaseUrl - Site URL for resolving relative links
+   * @param attachmentMap - Map of remote attachment URLs to local paths
+   * @param outputPath - Output file path for relative image links
+   * @param richContentConverter - Converter for tracker-native rich content
+   */
+  private static renderDescription(
+    renderedDescription: string | undefined,
+    description: unknown,
+    trackerBaseUrl: string | undefined,
+    attachmentMap: Map<string, string> | undefined,
+    outputPath: string | undefined,
+    richContentConverter: RichContentConverter,
+  ): string {
+    if (renderedDescription) {
+      return this.convertHtmlToMarkdown(
+        renderedDescription,
+        trackerBaseUrl,
+        attachmentMap,
+        outputPath,
+      );
+    }
+    if (description) {
+      return richContentConverter(description);
+    }
+    return "*No description provided*";
+  }
+
+  /**
+   * Render the "Linked Resources" prompt section.
+   *
+   * @param resources - Linked resources extracted from the task
+   * @param includeFieldDetail - Include the custom-field origin sub-line
+   */
+  private static renderLinkedResources(
+    resources: LinkedResource[],
+    includeFieldDetail: boolean,
+  ): string {
+    if (resources.length === 0) return "";
+
+    let section = "## Linked Resources\n\n";
+    resources.forEach((resource) => {
+      switch (resource.type) {
+        case "custom_field_link":
+        case "description_link":
+        case "rich_text_link":
+          section += `- **${resource.description}**: ${resource.url}\n`;
+          if (includeFieldDetail && resource.field && resource.type === "custom_field_link") {
+            section += `  (from field: ${resource.field})\n`;
+          }
+          break;
+        case "issue_link":
+          section += `- **${resource.linkType}**: ${resource.issueKey} - ${resource.summary}\n`;
+          break;
+      }
+    });
+    return section.trimEnd();
+  }
+
+  /**
+   * Render the abbreviated "Related Work Items" prompt section.
+   *
+   * @param relatedIssues - Related issues with link metadata
+   */
+  private static renderRelatedIssuesSummary(
+    relatedIssues: DetailedRelatedIssue[] | undefined,
+  ): string {
+    if (!relatedIssues || relatedIssues.length === 0) return "";
+
+    let section = "## Related Work Items\n\n";
+    relatedIssues.forEach((issue) => {
+      section += `- **${issue.linkType}**: ${issue.key} - ${issue.summary} (${issue.status})\n`;
+    });
+    return section.trimEnd();
+  }
+
+  /**
+   * Render the most recent three comments as a prompt section.
+   *
+   * @param comments - All task comments (newest appended last)
+   * @param trackerBaseUrl - Site URL for resolving relative links
+   * @param attachmentMap - Map of remote attachment URLs to local paths
+   * @param outputPath - Output file path for relative image links
+   * @param richContentConverter - Converter for tracker-native rich content
+   */
+  private static renderRecentComments(
+    comments: Comment[],
+    trackerBaseUrl: string | undefined,
+    attachmentMap: Map<string, string> | undefined,
+    outputPath: string | undefined,
+    richContentConverter: RichContentConverter,
+  ): string {
+    if (comments.length === 0) return "";
+
+    let section = "## Recent Comments\n\n";
+    // Show only the most recent 3 comments to avoid overwhelming the analysis.
+    comments.slice(-3).forEach((comment) => {
+      section += `**${comment.author}**: `;
+      if (comment.renderedBody) {
+        section += this.convertHtmlToMarkdown(
+          comment.renderedBody,
+          trackerBaseUrl,
+          attachmentMap,
+          outputPath,
+        );
+      } else if (comment.body) {
+        section += richContentConverter(comment.body);
+      }
+      section += "\n\n";
+    });
+    return section.trimEnd();
+  }
+
+  /**
    * Build an agent prompt asking for a JSON clarity/feasibility assessment.
    *
    * @param taskDetails - Normalized task details
@@ -554,135 +697,28 @@ If you need clarification on any requirements or if the task description is uncl
       comments,
     } = taskDetails;
 
-    let prompt = `# Task Clarity Assessment
-
-## Your Role
-You are a senior software engineer reviewing a task before implementation. Your job is to assess whether the task description provides sufficient clarity for implementation.
-
-## Task to Review
-- **Key**: ${key}
-- **Summary**: ${summary}
-`;
-
-    // Add labels and components if they exist
-    if (labels.length > 0) {
-      prompt += `- **Labels**: ${labels.join(", ")}\n`;
-    }
-    if (components.length > 0) {
-      prompt += `- **Components**: ${components.join(", ")}\n`;
-    }
-
-    prompt += "\n## Task Description\n";
-
-    // Use rendered description if available, otherwise fall back to raw description
-    if (renderedDescription) {
-      prompt +=
-        this.convertHtmlToMarkdown(renderedDescription, trackerBaseUrl, attachmentMap, outputPath) +
-        "\n\n";
-    } else if (description) {
-      prompt += richContentConverter(description) + "\n\n";
-    } else {
-      prompt += "*No description provided*\n\n";
-    }
-
-    // Add linked resources
-    if (linkedResources.length > 0) {
-      prompt += "## Linked Resources\n\n";
-      linkedResources.forEach((resource) => {
-        switch (resource.type) {
-          case "custom_field_link":
-          case "description_link":
-          case "rich_text_link":
-            prompt += `- **${resource.description}**: ${resource.url}\n`;
-            if (resource.field && resource.type === "custom_field_link") {
-              prompt += `  (from field: ${resource.field})\n`;
-            }
-            break;
-          case "issue_link":
-            prompt += `- **${resource.linkType}**: ${resource.issueKey} - ${resource.summary}\n`;
-            break;
-        }
-      });
-      prompt += "\n";
-    }
-
-    // Add related work items (abbreviated for clarity check)
-    if (relatedIssues && relatedIssues.length > 0) {
-      prompt += "## Related Work Items\n\n";
-      relatedIssues.forEach((issue) => {
-        prompt += `- **${issue.linkType}**: ${issue.key} - ${issue.summary} (${issue.status})\n`;
-      });
-      prompt += "\n";
-    }
-
-    // Add recent comments for context
-    if (comments.length > 0) {
-      prompt += "## Recent Comments\n\n";
-      // Show only the most recent 3 comments to avoid overwhelming the clarity check
-      const recentComments = comments.slice(-3);
-      recentComments.forEach((comment) => {
-        prompt += `**${comment.author}**: `;
-        if (comment.renderedBody) {
-          prompt += this.convertHtmlToMarkdown(
-            comment.renderedBody,
-            trackerBaseUrl,
-            attachmentMap,
-            outputPath,
-          );
-        } else if (comment.body) {
-          prompt += richContentConverter(comment.body);
-        }
-        prompt += "\n\n";
-      });
-    }
-
-    prompt += `## Assessment Instructions
-
-Please assess this task for basic implementation feasibility. Return only one valid JSON object with this shape (no Markdown fences or explanatory text):
-
-{
-  "isImplementable": true,
-  "clarityScore": 8,
-  "issues": [],
-  "recommendations": [],
-  "summary": "Brief summary of the assessment"
-}
-
-Each issue must contain:
-- "category": one of "missing_requirements", "unclear_scope", "missing_context", "ambiguous_description", or "critical_gaps"
-- "description": a specific issue description
-- "severity": one of "critical", "major", or "minor"
-
-## Evaluation Criteria (Relaxed for Real-World Development)
-
-**Focus on CRITICAL blockers only:**
-
-1. **Basic Requirement**: Is there a clear business need or user story?
-2. **Scope Boundary**: Is it reasonably clear what should be changed/built?
-3. **Context Clues**: Are there enough hints (URLs, related tasks, examples) to understand the domain?
-
-**Assume developers will figure out:**
-- Technical implementation details from existing codebase
-- UI/UX patterns from existing similar features
-- Specific styling and placement from context
-- Database schemas and API patterns from codebase exploration
-
-**Only flag as critical issues:**
-- Completely missing business requirement
-- Zero context about what needs to be done
-- Contradictory or impossible requirements
-- Missing essential business rules or data
-
-## Decision Threshold (Relaxed)
-- **isImplementable: true** - Basic requirement is clear, developer can start work (score ≥ 4)
-- **isImplementable: false** - Fundamental requirement is unclear or missing (score < 4)
-
-**Philosophy**: Trust that experienced developers can infer technical details from existing code. Focus only on whether there's enough business context to begin meaningful work.
-
-**Task Key for Reference**: ${key}
-`;
-
-    return prompt;
+    return loadPrompt("clarity", {
+      key,
+      summary,
+      metadata: this.renderMetadata(labels, components),
+      description: this.renderDescription(
+        renderedDescription,
+        description,
+        trackerBaseUrl,
+        attachmentMap,
+        outputPath,
+        richContentConverter,
+      ),
+      linkedResources: this.renderLinkedResources(linkedResources, true),
+      relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
+      comments: this.renderRecentComments(
+        comments,
+        trackerBaseUrl,
+        attachmentMap,
+        outputPath,
+        richContentConverter,
+      ),
+    });
   }
 
   /**
@@ -736,130 +772,28 @@ Each issue must contain:
       comments,
     } = taskDetails;
 
-    let prompt = `# Story Points Estimation
-
-## Your Role
-You are a senior software engineer estimating the effort for a task using the Fibonacci scale for story points.
-
-## Task to Estimate
-- **Key**: ${key}
-- **Summary**: ${summary}
-`;
-
-    if (labels.length > 0) {
-      prompt += `- **Labels**: ${labels.join(", ")}\n`;
-    }
-    if (components.length > 0) {
-      prompt += `- **Components**: ${components.join(", ")}\n`;
-    }
-
-    prompt += "\n## Task Description\n";
-
-    if (renderedDescription) {
-      prompt +=
-        this.convertHtmlToMarkdown(renderedDescription, trackerBaseUrl, attachmentMap, outputPath) +
-        "\n\n";
-    } else if (description) {
-      prompt += richContentConverter(description) + "\n\n";
-    } else {
-      prompt += "*No description provided*\n\n";
-    }
-
-    // Add linked resources
-    if (linkedResources.length > 0) {
-      prompt += "## Linked Resources\n\n";
-      linkedResources.forEach((resource) => {
-        switch (resource.type) {
-          case "custom_field_link":
-          case "description_link":
-          case "rich_text_link":
-            prompt += `- **${resource.description}**: ${resource.url}\n`;
-            break;
-          case "issue_link":
-            prompt += `- **${resource.linkType}**: ${resource.issueKey} - ${resource.summary}\n`;
-            break;
-        }
-      });
-      prompt += "\n";
-    }
-
-    // Add related work items (abbreviated)
-    if (relatedIssues && relatedIssues.length > 0) {
-      prompt += "## Related Work Items\n\n";
-      relatedIssues.forEach((issue) => {
-        prompt += `- **${issue.linkType}**: ${issue.key} - ${issue.summary} (${issue.status})\n`;
-      });
-      prompt += "\n";
-    }
-
-    // Add recent comments for context
-    if (comments.length > 0) {
-      prompt += "## Recent Comments\n\n";
-      const recentComments = comments.slice(-3);
-      recentComments.forEach((comment) => {
-        prompt += `**${comment.author}**: `;
-        if (comment.renderedBody) {
-          prompt += this.convertHtmlToMarkdown(
-            comment.renderedBody,
-            trackerBaseUrl,
-            attachmentMap,
-            outputPath,
-          );
-        } else if (comment.body) {
-          prompt += richContentConverter(comment.body);
-        }
-        prompt += "\n\n";
-      });
-    }
-
-    prompt += `## Estimation Instructions
-
-Analyze this task and estimate the story points. Respond with ONLY a JSON object (no markdown code fences, no additional text):
-
-{
-  "storyPoints": <number>,
-  "confidence": "<high|medium|low>",
-  "implementationConfidence": <number>,
-  "reasoning": "<string>",
-  "risks": ["<string>", ...],
-  "unclearAreas": ["<string>", ...],
-  "summary": "<string>"
-}
-
-## Story Points Scale (Fibonacci)
-
-- **1** — Trivial change, config tweak, typo fix
-- **2** — Small, well-defined task, single file change
-- **3** — Moderate task, a few files, clear requirements
-- **5** — Significant feature, multiple files, some complexity
-- **8** — Large feature, cross-cutting concerns, integration work
-- **13** — Very large, multiple subsystems, high complexity
-- **21** — Epic-sized, major architectural change, high uncertainty
-
-## Implementation Confidence (0–10)
-
-Rate how likely an AI coding agent can successfully implement this task autonomously:
-- **9–10** — Trivial/mechanical change, almost certain success
-- **7–8** — Clear requirements, standard patterns, high chance of success
-- **5–6** — Moderate complexity, may need some human guidance
-- **3–4** — Significant ambiguity, external dependencies, or domain knowledge needed
-- **0–2** — Requires human judgment, creative decisions, or access to systems the AI cannot reach
-
-Consider: clarity of requirements, availability of context in the codebase, need for external resources (designs, APIs, credentials), and whether the task involves subjective decisions.
-
-## Guidelines
-
-- Base your estimate on the scope described, not on unknowns
-- Consider: code changes, testing, documentation, review effort
-- If the description is vague, lean toward higher estimates and set confidence to "low"
-- List specific risks that could increase effort
-- List areas where the scope is unclear
-- Keep reasoning concise (2-3 sentences)
-
-**Task Key for Reference**: ${key}
-`;
-
-    return prompt;
+    return loadPrompt("estimation", {
+      key,
+      summary,
+      metadata: this.renderMetadata(labels, components),
+      description: this.renderDescription(
+        renderedDescription,
+        description,
+        trackerBaseUrl,
+        attachmentMap,
+        outputPath,
+        richContentConverter,
+      ),
+      linkedResources: this.renderLinkedResources(linkedResources, false),
+      relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
+      comments: this.renderRecentComments(
+        comments,
+        trackerBaseUrl,
+        attachmentMap,
+        outputPath,
+        richContentConverter,
+      ),
+    });
   }
 
   /**

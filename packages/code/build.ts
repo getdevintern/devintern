@@ -46,4 +46,9 @@ if (!existsSync(join(uiDist, "index.html"))) {
 rmSync("dist/dashboard-ui", { recursive: true, force: true });
 cpSync(uiDist, "dist/dashboard-ui", { recursive: true });
 
+// Ship the versioned prompt catalog next to the bundle so `loadPrompt` can
+// resolve it relative to dist/index.js in published artifacts.
+rmSync("dist/prompts", { recursive: true, force: true });
+cpSync("prompts", "dist/prompts", { recursive: true });
+
 console.log(`Built devintern v${pkg.version} (with dashboard UI)`);

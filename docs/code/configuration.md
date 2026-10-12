@@ -397,6 +397,46 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 └── attachments/                         # Jira attachments
 ```
 
+## Prompt Catalog
+
+The role prompts DevIntern sends to the agent are versioned Markdown files rather than inline TypeScript, so they can be reviewed, diffed, and overridden. The bundled catalog ships with the CLI:
+
+| Prompt       | Stage                                              |
+| ------------ | -------------------------------------------------- |
+| `clarity.md` | Pre-implementation feasibility / clarity check     |
+| `estimation.md` | Fibonacci story-point estimation                |
+| `review.md`  | Adversarial pull-request review (auto-review loop) |
+| `fix.md`     | Addressing structured review feedback              |
+
+Each file starts with lightweight frontmatter that declares its `name`, `description`, `placeholders`, and `requiredSections`:
+
+```markdown
+---
+name: clarity
+description: Pre-implementation clarity and feasibility assessment for a task.
+placeholders:
+  - key
+  - summary
+requiredSections:
+  - "## Your Role"
+---
+```
+
+`{{placeholder}}` tokens are substituted at load time. A missing value fails loudly rather than shipping an unresolved token to the agent.
+
+### Per-repo overrides
+
+Override any prompt without editing TypeScript by placing a same-named file in `.devintern-code/prompts/` (searched from your project root upward). Lookup order is: an explicit override directory, then `DEVINTERN_PROMPTS_DIR`, then `.devintern-code/prompts/`, and finally the bundled defaults.
+
+```bash
+# Optional: point at a directory of prompt overrides
+DEVINTERN_PROMPTS_DIR=./my-prompts
+```
+
+### Linting
+
+Run `bun run lint:prompts` (also part of `bun run lint`, and therefore CI) to validate the catalog. It fails on malformed frontmatter, missing required sections, undeclared placeholders, and declared-but-unused placeholders.
+
 ## Agent Harness
 
 Configure which AI agent runs and how long it can work:
