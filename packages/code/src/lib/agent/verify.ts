@@ -10,6 +10,7 @@ import {
 } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
+import { validateReviewFeedback } from "../review/feedback";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -80,20 +81,6 @@ function saveVerification(state: DeliveryState, prompt: string, feedback: Review
   }
 }
 
-function validateFeedback(feedback: ReviewFeedback): void {
-  if (!Array.isArray(feedback.items)) throw new Error("Verification verdict has no items array");
-  for (const item of feedback.items) {
-    if (
-      !item ||
-      !PRIORITIES.includes(item.priority) ||
-      typeof item.issue !== "string" ||
-      typeof item.suggestion !== "string"
-    ) {
-      throw new Error("Verification verdict contains an invalid finding");
-    }
-  }
-}
-
 /** Verify the committed diff before auto-review and publishing. */
 export async function verifyImplementation(
   state: DeliveryState,
@@ -130,7 +117,7 @@ export async function verifyImplementation(
         state.context.executablePath,
       );
       feedback = deps.parseFeedback(output);
-      validateFeedback(feedback);
+      validateReviewFeedback(feedback);
       break;
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;

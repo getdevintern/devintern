@@ -101,6 +101,18 @@ describe("verifyImplementation", () => {
     expect(attempts).toBe(2);
   });
 
+  test("halts after repeated verdicts that approve unresolved blocking findings", async () => {
+    const injected = deps({ ...feedback, approved: true });
+    let attempts = 0;
+    injected.runAgent = async () => {
+      attempts++;
+      return "verdict";
+    };
+    const result = await verifyImplementation(state({}), injected);
+    expect(result?.kind).toBe("halt");
+    expect(attempts).toBe(2);
+  });
+
   test("propagates usage limits without retrying", async () => {
     const injected = deps();
     let attempts = 0;
