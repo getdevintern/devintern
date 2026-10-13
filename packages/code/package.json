@@ -8,9 +8,10 @@
     "start": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
     "build": "bun run build.ts",
-    "format": "oxfmt \"src/**/*.ts\" \"tests/**/*.ts\" \"build.ts\"",
-    "format:check": "oxfmt --check \"src/**/*.ts\" \"tests/**/*.ts\" \"build.ts\"",
-    "lint": "oxlint .",
+    "format": "oxfmt \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\" \"build.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\" \"build.ts\"",
+    "lint": "oxlint . && bun run scripts/lint-prompts.ts",
+    "lint:prompts": "bun run scripts/lint-prompts.ts",
     "typecheck": "bun run tsc --noEmit",
     "clean": "rm -rf dist",
     "test": "bun run tests/run-tests.ts",
@@ -90,6 +91,7 @@
   },
   "files": [
     "dist/**/*",
+    "prompts/**/*",
     "README.md",
     "LICENSE.md",
     ".env.example"
