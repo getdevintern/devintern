@@ -12,6 +12,22 @@ import type { WebhookQueue } from "../state/webhook-queue";
 import type { Acquirer } from "../../worker";
 import type { ErrorMonitorConfig } from "../workspace/config";
 import { SentryClient } from "../observability/sentry-client";
+import { SourceFetchError } from "./source-fetch";
+import type {
+  SourceFetchFailureStatus,
+  SourceFetchOutcome,
+  SourceStatusInput,
+  SourceStatusSink,
+} from "./source-fetch";
+
+export { SourceFetchError };
+export type {
+  SourceFetchFailureStatus,
+  SourceFetchOutcome,
+  SourceFetchStatus,
+  SourceStatusRecord,
+  SourceStatusSink,
+} from "./source-fetch";
 
 /** Minimum normalized issue data needed by the shared acquirer. */
 export interface ErrorMonitorIssue {
@@ -50,6 +66,14 @@ export interface ErrorMonitorAcquirerOptions<TIssue extends ErrorMonitorIssue> {
   maxIssuesPerTick?: number;
   commentOnAction?: boolean;
   verbose?: boolean;
+  /**
+   * Durable per-source health sink (for example {@link AutomationStateStore}).
+   * When omitted, read outcomes are only logged; the acquirer never owns the
+   * sink's lifecycle.
+   */
+  statusStore?: SourceStatusSink;
+  /** Clock override for deterministic status timestamps. */
+  now?: () => number;
 }
 
 /** Build the configured vendor adapter without leaking vendor logic into the worker. */
@@ -87,6 +111,13 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   };
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  /** Most recent read outcome; returned while a tick is already in flight. */
+  private lastOutcome: SourceFetchOutcome<TIssue> = { status: "ok", issues: [] };
+  /**
+   * Last status actually persisted to the sink. Used to skip redundant
+   * ok-to-ok writes on every poll; failures are always persisted.
+   */
+  private lastPersistedStatus: SourceFetchFailureStatus | "ok" | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -115,14 +146,30 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     }
   }
 
-  async tick(): Promise<void> {
-    if (this.busy) return;
+  /**
+   * Poll the provider once. Returns the read outcome so callers (worker,
+   * dashboard, tests) can tell a quiet source from an unreadable one. A
+   * failed read never marks issues processed, so the dedupe cursor cannot
+   * advance past data that was not actually seen.
+   */
+  async tick(): Promise<SourceFetchOutcome<TIssue>> {
+    if (this.busy) return this.lastOutcome;
     this.busy = true;
 
     const { queue, provider, minOccurrences, maxIssuesPerTick, verbose } = this.options;
     const dedupeSource = this.name;
     try {
-      const issues = await provider.fetchIssues();
+      let issues: TIssue[];
+      try {
+        issues = await provider.fetchIssues();
+      } catch (error) {
+        return this.recordReadFailure(error);
+      }
+      // Only a successful read may advance health/cursor state.
+      this.recordReadSuccess();
+      const outcome: SourceFetchOutcome<TIssue> = { status: "ok", issues };
+      this.lastOutcome = outcome;
+
       let handled = 0;
       for (const issue of issues) {
         if (handled >= maxIssuesPerTick) break;
@@ -168,11 +215,111 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
             : `⚠️  [${this.name}] fix for ${issue.displayId} did not complete cleanly`,
         );
       }
+      return outcome;
     } catch (error) {
+      // A processing failure is not a read failure: the source was readable,
+      // so the read outcome stands and only this dispatch is logged.
       console.warn(`⚠️  [${this.name}] polling tick failed: ${(error as Error).message}`);
+      return this.lastOutcome;
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * Classify a failed read, persist the per-source status, and return the
+   * outcome. Callers must not mark any issue processed on this path: a source
+   * that could not be read was not read, so its cursor stays put and the next
+   * tick retries.
+   */
+  private recordReadFailure(error: unknown): SourceFetchOutcome<TIssue> {
+    const failure = error instanceof SourceFetchError ? error : undefined;
+    const status: SourceFetchFailureStatus = failure?.status ?? "unreadable";
+    const message = failure?.message ?? (error as Error).message;
+    const retryAfterMs = failure?.retryAfterMs;
+    this.persistSourceStatus({
+      sourceId: this.options.sourceId,
+      provider: this.options.provider.providerName,
+      status,
+      checkedAt: this.now(),
+      message,
+      retryAfterMs,
+    });
+    const outcome: SourceFetchOutcome<TIssue> = {
+      status,
+      issues: [],
+      error: message,
+      retryAfterMs,
+    };
+    this.lastOutcome = outcome;
+    this.logReadFailure(status, message, retryAfterMs);
+    return outcome;
+  }
+
+  /** Record a successful read so health counters reset and the cursor may advance. */
+  private recordReadSuccess(): void {
+    // An ok source stays ok; skip the SQLite write (and WAL churn) on the
+    // steady-state ok-to-ok transition. This is only an in-process hint, so a
+    // source that failed and recovered is still persisted.
+    if (this.lastPersistedStatus === "ok") return;
+    this.persistSourceStatus({
+      sourceId: this.options.sourceId,
+      provider: this.options.provider.providerName,
+      status: "ok",
+      checkedAt: this.now(),
+    });
+  }
+
+  /**
+   * Persist a source health update without letting storage failures alter the
+   * poll outcome. A throw here (SQLITE_BUSY after the busy timeout, disk full)
+   * must never be mistaken for a read failure, escape the inner catch, or mask
+   * a legitimately classified read.
+   */
+  private persistSourceStatus(status: SourceStatusInput): void {
+    const store = this.options.statusStore;
+    if (!store) return;
+    try {
+      store.recordSourceStatus(status);
+      this.lastPersistedStatus = status.status;
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not persist source status: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /** Make an unreadable source visible instead of silently treating it as empty. */
+  private logReadFailure(
+    status: SourceFetchFailureStatus,
+    message: string,
+    retryAfterMs?: number,
+  ): void {
+    const retry =
+      retryAfterMs !== undefined ? ` (retry in ${Math.ceil(retryAfterMs / 1000)}s)` : "";
+    switch (status) {
+      case "auth-failed":
+        console.error(
+          `🔒 [${this.name}] source is unreadable: authentication failed — ${message}. ` +
+            "No issues were read; the cursor was left unchanged.",
+        );
+        break;
+      case "rate-limited":
+        console.warn(
+          `⏳ [${this.name}] source is unreadable: rate-limited${retry} — ${message}. ` +
+            "No issues were read; the cursor was left unchanged and the next tick will retry.",
+        );
+        break;
+      default:
+        console.warn(
+          `⚠️  [${this.name}] source is unreadable: ${message}. ` +
+            "No issues were read; the cursor was left unchanged and the next tick will retry.",
+        );
+    }
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   private async reportAction(issue: TIssue, succeeded: boolean): Promise<void> {

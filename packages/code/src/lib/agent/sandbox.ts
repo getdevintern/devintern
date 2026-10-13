@@ -88,6 +88,11 @@ export interface SandboxDoctorReport {
  * @param configuredSource - Where the value came from, for the header line.
  * @param harnessName - The configured harness, for compatibility filtering.
  * @param platform - `process.platform`; injected for tests.
+ * @param activeSandbox - Name of the sandbox already wrapping this process, if
+ *   any. When set and the configured provider cannot nest
+ *   ({@link SandboxProvider.canNestInSandbox} is falsy), the resolver skips
+ *   adding another provider, so the report must describe the inherited
+ *   confinement instead of the configured pick.
  */
 export function buildSandboxDoctorReport(
   detections: DetectedSandboxProvider[],
@@ -95,6 +100,7 @@ export function buildSandboxDoctorReport(
   configuredSource: string,
   harnessName: string,
   platform: string = process.platform,
+  activeSandbox?: string,
 ): SandboxDoctorReport {
   const lines: string[] = [];
   const linux = platform === "linux";
@@ -118,9 +124,11 @@ export function buildSandboxDoctorReport(
     }
   } else if (configured === "auto") {
     lines.push(
-      autoPick
-        ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
-        : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
+      activeSandbox
+        ? `Next run:   already inside the ${activeSandbox} sandbox — no additional sandbox will be added`
+        : autoPick
+          ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
+          : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
     );
   } else {
     const chosen = detections.find((d) => d.provider.name === configured);
@@ -142,6 +150,11 @@ export function buildSandboxDoctorReport(
       lines.push(
         `Next run:   ❌ fails — ${configured} does not support the configured ` +
           `"${harnessName}" harness. Use nono or srt (any harness), or switch AGENT_HARNESS.`,
+      );
+    } else if (activeSandbox && !chosen.provider.canNestInSandbox) {
+      lines.push(
+        `Next run:   already inside the ${activeSandbox} sandbox — no additional sandbox ` +
+          "will be added; the agent inherits the existing confinement",
       );
     } else {
       lines.push(`Next run:   agent wrapped with ${chosen.provider.displayName}`);

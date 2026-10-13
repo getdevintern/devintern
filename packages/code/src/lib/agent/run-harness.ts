@@ -21,11 +21,13 @@ import {
 } from "../config/project-settings";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { finalizeAgentRun } from "./run-harness-finalize";
+import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
+import type { VerifyConfig } from "./verify";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -47,14 +49,22 @@ interface RunAgentHarnessOptions {
   isPlanRetry?: boolean;
   prTargetBranchExplicit?: boolean;
   requestedPrTargetBranch?: string;
+  verify?: VerifyConfig;
 }
+
+export type AgentSessionResult =
+  | { kind: "halted" }
+  | { kind: "complete"; context: Omit<FinalizeContext, "resolve" | "reject"> };
 
 /**
  * Run the main agent harness implementation session for a formatted task.
  *
  * @param input - Implementation run inputs
  */
-export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+export async function runAgentSession(
+  input: RunAgentHarnessOptions,
+  promptOverride?: string,
+): Promise<AgentSessionResult> {
   const {
     taskFile,
     harness,
@@ -82,7 +92,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
     displayName: harness.displayName,
   });
 
-  return new Promise((resolve, reject) => {
+  return new Promise<AgentSessionResult>((resolve, reject) => {
     (async () => {
       // Check if task file exists
       if (!existsSync(taskFile)) {
@@ -123,7 +133,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
       // Spawn agent process with enhanced permissions and max turns
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...agentArgs, ...buildPromptArgs(harness, taskContent)],
+        args: [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)],
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
@@ -293,7 +303,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
           console.log("\n⏭️  Skipping commit and moving to next task (if any)...");
 
           // Resolve instead of reject to allow batch processing to continue
-          resolve();
+          resolve({ kind: "halted" });
           return;
         }
 
@@ -373,7 +383,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
 
             // Don't commit or continue processing when implementation is incomplete
             // Just resolve to allow batch processing to continue
-            resolve();
+            resolve({ kind: "halted" });
             return;
           } else {
             console.log("✅ Agent execution completed successfully");
@@ -402,29 +412,30 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
             }
 
             console.log("\n⏭️  Skipping commit and PR until the questions are answered...");
-            resolve();
+            resolve({ kind: "halted" });
             return;
           }
 
-          finalizeAgentRun({
-            ...input,
-            maxTurns,
-            enableGit,
-            createPr,
-            prTargetBranch,
-            skipComments,
-            hookRetries,
-            gitAuthor,
-            autoReview,
-            autoReviewIterations,
-            isPlanRetry,
-            prTargetBranchExplicit,
-            requestedPrTargetBranch,
-            taskContent,
-            stdoutOutput,
-            projectSettings,
-            resolve,
-            reject,
+          resolve({
+            kind: "complete",
+            context: {
+              ...input,
+              maxTurns,
+              enableGit,
+              createPr,
+              prTargetBranch,
+              skipComments,
+              hookRetries,
+              gitAuthor,
+              autoReview,
+              autoReviewIterations,
+              isPlanRetry,
+              prTargetBranchExplicit,
+              requestedPrTargetBranch,
+              taskContent,
+              stdoutOutput,
+              projectSettings,
+            },
           });
         } else {
           console.log(`❌ Agent exited with non-zero code ${code}`);
@@ -433,5 +444,24 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
         }
       });
     })().catch(reject);
+  });
+}
+
+/** Run implementation and deliver it when the agent completed meaningful work. */
+export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+  const session = await runAgentSession(input);
+  if (session.kind === "halted") return;
+  await new Promise<void>((resolve, reject) => {
+    finalizeAgentRun({
+      ...session.context,
+      runRepair: async (prompt) => {
+        const repair = await runAgentSession(input, prompt);
+        return repair.kind === "complete"
+          ? { kind: "complete", stdout: repair.context.stdoutOutput }
+          : { kind: "halted" };
+      },
+      resolve,
+      reject,
+    });
   });
 }

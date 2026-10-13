@@ -1,6 +1,11 @@
 import { Database } from "bun:sqlite";
 
 import type { AutomationConfig } from "./config";
+import type {
+  SourceFetchStatus,
+  SourceStatusInput,
+  SourceStatusRecord,
+} from "../acquirers/source-fetch";
 import { configureSqliteConnection } from "../state/sqlite";
 import { prepareQueueDbDirectory } from "../state/webhook-queue";
 
@@ -30,6 +35,19 @@ export class AutomationStateStore {
         lease_owner TEXT,
         lease_expires_at INTEGER,
         heartbeat_at INTEGER
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS source_status (
+        provider TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        checked_at INTEGER NOT NULL,
+        last_success_at INTEGER,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        message TEXT,
+        retry_after_at INTEGER,
+        PRIMARY KEY (provider, source_id)
       )
     `);
   }
@@ -141,7 +159,85 @@ export class AutomationStateStore {
     );
   }
 
+  /**
+   * Record the outcome of one source read and persist it beside the schedules.
+   *
+   * Counters are derived here so they survive restarts: a failure increments
+   * `consecutive_failures`, an `ok` read resets it and advances
+   * `last_success_at`, and a rate-limited read stores the earliest retry time.
+   * A source that was never read keeps its prior row untouched.
+   */
+  recordSourceStatus(status: SourceStatusInput): void {
+    const previous = this.db
+      .query(
+        `SELECT consecutive_failures, last_success_at FROM source_status
+         WHERE provider = ? AND source_id = ?`,
+      )
+      .get(status.provider, status.sourceId) as {
+      consecutive_failures: number;
+      last_success_at: number | null;
+    } | null;
+    const ok = status.status === "ok";
+    const consecutiveFailures = ok ? 0 : (previous?.consecutive_failures ?? 0) + 1;
+    const lastSuccessAt = ok ? status.checkedAt : (previous?.last_success_at ?? null);
+    const retryAfterAt =
+      status.status === "rate-limited" && status.retryAfterMs !== undefined
+        ? status.checkedAt + status.retryAfterMs
+        : null;
+    this.db.run(
+      `INSERT INTO source_status
+         (provider, source_id, status, checked_at, last_success_at,
+          consecutive_failures, message, retry_after_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(provider, source_id) DO UPDATE SET
+         status = excluded.status,
+         checked_at = excluded.checked_at,
+         last_success_at = excluded.last_success_at,
+         consecutive_failures = excluded.consecutive_failures,
+         message = excluded.message,
+         retry_after_at = excluded.retry_after_at`,
+      [
+        status.provider,
+        status.sourceId,
+        status.status,
+        status.checkedAt,
+        lastSuccessAt,
+        consecutiveFailures,
+        status.message ?? null,
+        retryAfterAt,
+      ],
+    );
+  }
+
+  getSourceStatus(provider: string, sourceId: string): SourceStatusRecord | null {
+    const row = this.db
+      .query("SELECT * FROM source_status WHERE provider = ? AND source_id = ?")
+      .get(provider, sourceId) as Record<string, unknown> | null;
+    return row ? mapSourceStatusRow(row) : null;
+  }
+
+  listSourceStatuses(): SourceStatusRecord[] {
+    const rows = this.db
+      .query("SELECT * FROM source_status ORDER BY provider, source_id")
+      .all() as Record<string, unknown>[];
+    return rows.map(mapSourceStatusRow);
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+/** Map one `source_status` row to its typed record. */
+function mapSourceStatusRow(row: Record<string, unknown>): SourceStatusRecord {
+  return {
+    sourceId: row.source_id as string,
+    provider: row.provider as string,
+    status: row.status as SourceFetchStatus,
+    checkedAt: row.checked_at as number,
+    lastSuccessAt: (row.last_success_at as number | null) ?? undefined,
+    consecutiveFailures: row.consecutive_failures as number,
+    message: (row.message as string | null) ?? undefined,
+    retryAfterAt: (row.retry_after_at as number | null) ?? undefined,
+  };
 }

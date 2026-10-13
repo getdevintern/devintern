@@ -10,6 +10,7 @@ function detected(
     version?: string;
     priority?: number;
     harnesses?: string[];
+    canNestInSandbox?: boolean;
   } = {},
 ): DetectedSandboxProvider {
   return {
@@ -20,6 +21,7 @@ function detected(
       docsUrl: `https://example.com/${name}`,
       detect: async () => ({ available: true }),
       ...(opts.harnesses ? { supportsHarness: (h: string) => opts.harnesses!.includes(h) } : {}),
+      ...(opts.canNestInSandbox !== undefined ? { canNestInSandbox: opts.canNestInSandbox } : {}),
       wrapCommand: () => ({ path: name, args: [] }),
     },
     detection: {
@@ -95,6 +97,93 @@ describe("buildSandboxDoctorReport", () => {
     );
     expect(report.nextRunFails).toBe(true);
     expect(report.lines.join("\n")).toContain('unknown provider "chroot"');
+  });
+
+  test("active enclosing sandbox: reports inherited confinement for an explicit provider", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 }), detected("srt", { priority: 20 })],
+      "srt",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+      "nono",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(false);
+    expect(text).toContain("already inside the nono sandbox");
+    expect(text).not.toContain("agent wrapped with");
+  });
+
+  test("active enclosing sandbox: auto reports inherited confinement", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "auto",
+      "default",
+      "claude-code",
+      "linux",
+      "nono",
+    );
+    expect(report.nextRunFails).toBe(false);
+    expect(report.lines.join("\n")).toContain("already inside the nono sandbox");
+  });
+
+  test("active enclosing sandbox still fails on an unknown provider", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "chroot",
+      "environment",
+      "claude-code",
+      "linux",
+      "nono",
+    );
+    expect(report.nextRunFails).toBe(true);
+    expect(report.lines.join("\n")).toContain('unknown provider "chroot"');
+  });
+
+  test("active enclosing sandbox: unavailable explicit provider still fails (matches resolver)", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("srt", { available: false, reason: "srt not found on PATH" })],
+      "srt",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+      "nono",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain("❌ fails");
+    expect(text).toContain("srt not found on PATH");
+    expect(text).not.toContain("already inside the nono sandbox");
+  });
+
+  test("active enclosing sandbox: harness-incompatible explicit provider still fails", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("smolvm", { harnesses: ["claude-code", "codex", "pi"] })],
+      "smolvm",
+      "environment",
+      "goose",
+      "linux",
+      "nono",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain('does not support the configured "goose" harness');
+    expect(text).not.toContain("already inside the nono sandbox");
+  });
+
+  test("active enclosing sandbox: nesting-capable provider is wrapped, not inherited", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("docker", { canNestInSandbox: true, priority: 0 })],
+      "docker",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+      "nono",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(false);
+    expect(text).toContain("agent wrapped with docker (test)");
+    expect(text).not.toContain("already inside the nono sandbox");
   });
 
   test("version hints after an em-dash separator move to their own warning line", () => {

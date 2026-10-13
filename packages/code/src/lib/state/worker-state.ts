@@ -23,6 +23,16 @@ import type { ChangeRequestIdentity, CodeHostProvider } from "../code-host/index
 import { configureSqliteConnection } from "./sqlite";
 import { buildTicketUrl } from "../task/ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
+import {
+  optionalEnum,
+  optionalNumber,
+  optionalString,
+  parseRowObject,
+  requireEnum,
+  requireNonNegativeInteger,
+  requireNumber,
+  requireString,
+} from "./row-parse";
 
 export interface Cursor {
   source: string;
@@ -32,6 +42,13 @@ export interface Cursor {
 }
 
 export type AgentPrState = "open" | "closed";
+
+const AGENT_PR_STATES = ["open", "closed"] as const satisfies readonly AgentPrState[];
+const CODE_HOST_PROVIDERS = [
+  "github",
+  "gitlab",
+  "bitbucket",
+] as const satisfies readonly CodeHostProvider[];
 
 /** `worker_meta` key holding the epoch ms of the last executed task drain. */
 export const TASK_POLL_LAST_DRAIN_KEY = "task-poll:last-drain-at";
@@ -110,6 +127,56 @@ export function parseGitHubPrUrl(url: string): { repo: string; prNumber: number 
     return null;
   }
   return { repo: match[1], prNumber: parseInt(match[2], 10) };
+}
+
+/** Read the column names of a table from `PRAGMA table_info`. */
+function readColumnNames(db: Database, table: string): string[] {
+  const context = `PRAGMA table_info(${table})`;
+  return db
+    .query(`PRAGMA table_info(${table})`)
+    .all()
+    .map((column) => requireString(parseRowObject(column, context), "name", context));
+}
+
+/** Parse one `cursors` row read from SQLite into a {@link Cursor}. */
+function parseCursorRow(row: unknown): Cursor {
+  const record = parseRowObject(row, "cursors row");
+  return {
+    source: requireString(record, "source", "cursors row"),
+    cursorValue: requireString(record, "cursor_value", "cursors row"),
+    etag: optionalString(record, "etag", "cursors row"),
+    updatedAt: requireNumber(record, "updated_at", "cursors row"),
+  };
+}
+
+/** Parse one `agent_prs` row, filling legacy columns the schema no longer writes. */
+function parseAgentPrRow(row: unknown): AgentPr {
+  const record = parseRowObject(row, "agent_prs row");
+  const repo = requireString(record, "repo", "agent_prs row");
+  const prNumber = requireNumber(record, "pr_number", "agent_prs row");
+  const provider =
+    optionalEnum(CODE_HOST_PROVIDERS, record.provider, "provider", "agent_prs row") ?? "github";
+  const instanceUrl =
+    optionalString(record, "instance_url", "agent_prs row") ??
+    (provider === "bitbucket" ? "https://bitbucket.org" : "https://github.com");
+  return {
+    provider,
+    instanceUrl,
+    projectId: optionalString(record, "project_id", "agent_prs row"),
+    projectPath: optionalString(record, "project_path", "agent_prs row") ?? repo,
+    changeNumber: optionalNumber(record, "change_number", "agent_prs row") ?? prNumber,
+    webUrl:
+      optionalString(record, "web_url", "agent_prs row") ??
+      `https://github.com/${repo}/pull/${prNumber}`,
+    repo,
+    prNumber,
+    branch: optionalString(record, "branch", "agent_prs row"),
+    taskKey: optionalString(record, "task_key", "agent_prs row"),
+    ticketUrl: optionalString(record, "ticket_url", "agent_prs row"),
+    state: requireEnum(AGENT_PR_STATES, record.state, "state", "agent_prs row"),
+    createdAt: requireNumber(record, "created_at", "agent_prs row"),
+    updatedAt: requireNumber(record, "updated_at", "agent_prs row"),
+  };
 }
 
 /**
@@ -205,15 +272,13 @@ export class WorkerState {
 
     // Databases created before `verified` recorded every marker from a
     // successful read, so backfilling 1 preserves their behavior.
-    const actionedColumns = this.db.query("PRAGMA table_info(actioned_tasks)").all() as Array<{
-      name: string;
-    }>;
-    if (!actionedColumns.some((column) => column.name === "verified")) {
+    const actionedColumns = readColumnNames(this.db, "actioned_tasks");
+    if (!actionedColumns.includes("verified")) {
       this.db.run("ALTER TABLE actioned_tasks ADD COLUMN verified INTEGER NOT NULL DEFAULT 1");
     }
     // Older rows have no persisted stamp; the gate simply reads once and
     // backfills it, so no data migration is needed.
-    if (!actionedColumns.some((column) => column.name === "updated_stamp")) {
+    if (!actionedColumns.includes("updated_stamp")) {
       this.db.run("ALTER TABLE actioned_tasks ADD COLUMN updated_stamp TEXT");
     }
     for (const [name, definition] of [
@@ -222,7 +287,7 @@ export class WorkerState {
       ["transitioned", "INTEGER NOT NULL DEFAULT 0"],
       ["transition_status", "TEXT"],
     ]) {
-      if (!actionedColumns.some((column) => column.name === name)) {
+      if (!actionedColumns.includes(name)) {
         this.db.run(`ALTER TABLE actioned_tasks ADD COLUMN ${name} ${definition}`);
       }
     }
@@ -232,19 +297,17 @@ export class WorkerState {
   private initializeAgentPrSchema(): void {
     const existing = this.db
       .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_prs'")
-      .get() as { name: string } | null;
+      .get();
 
     if (!existing) {
       this.createAgentPrTable();
       return;
     }
 
-    const columns = this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{
-      name: string;
-    }>;
-    if (columns.some((column) => column.name === "provider")) return;
+    const columns = readColumnNames(this.db, "agent_prs");
+    if (columns.includes("provider")) return;
 
-    const hasTicketUrl = columns.some((column) => column.name === "ticket_url");
+    const hasTicketUrl = columns.includes("ticket_url");
     this.db.transaction(() => {
       this.db.run("ALTER TABLE agent_prs RENAME TO agent_prs_legacy");
       this.createAgentPrTable();
@@ -290,22 +353,31 @@ export class WorkerState {
   /**
    * Read the persisted cursor for a polling source.
    *
+   * Loop-facing read, deliberately tolerant: a malformed `cursors` row is
+   * logged and treated as no cursor (`null`) instead of throwing, so one
+   * corrupted row cannot abort a recurring poll tick repeatedly. Returning
+   * `null` forces a full re-fetch, which self-heals by overwriting the row on
+   * the next successful {@link setCursor}. `listCursors` stays fail-fast as a
+   * diagnostic view.
+   *
    * @param source - Source key (e.g. `jira`, `github:reviews:owner/repo#42`)
    */
   getCursor(source: string): Cursor | null {
     const row = this.db
       .query(`SELECT source, cursor_value, etag, updated_at FROM cursors WHERE source = ?`)
-      .get(source) as Record<string, unknown> | null;
+      .get(source);
 
     if (!row) {
       return null;
     }
-    return {
-      source: row.source as string,
-      cursorValue: row.cursor_value as string,
-      etag: (row.etag as string | null) ?? undefined,
-      updatedAt: row.updated_at as number,
-    };
+    try {
+      return parseCursorRow(row);
+    } catch (error) {
+      console.warn(
+        `⚠️  [WorkerState] ignoring malformed cursor for "${source}": ${(error as Error).message}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -331,28 +403,40 @@ export class WorkerState {
     this.db.run(`DELETE FROM cursors WHERE source = ?`, [source]);
   }
 
-  /** List all persisted polling cursors (dashboard freshness view). */
+  /**
+   * List all persisted polling cursors (dashboard freshness view).
+   *
+   * Fail-fast: a malformed row throws {@link RowParseError} so a corruption is
+   * surfaced rather than silently hidden. This is a dashboard-only diagnostic
+   * read, not a recurring loop read; `getCursor` is the tolerant counterpart.
+   */
   listCursors(): Cursor[] {
     const rows = this.db
       .query(`SELECT source, cursor_value, etag, updated_at FROM cursors ORDER BY source ASC`)
-      .all() as Record<string, unknown>[];
-    return rows.map((row) => ({
-      source: row.source as string,
-      cursorValue: row.cursor_value as string,
-      etag: (row.etag as string | null) ?? undefined,
-      updatedAt: row.updated_at as number,
-    }));
+      .all();
+    return rows.map((row) => parseCursorRow(row));
   }
 
-  /** Count agent PRs by state (dashboard header view). */
+  /**
+   * Count agent PRs by state (dashboard header view).
+   *
+   * Aggregate/diagnostic read, deliberately tolerant (mirrors
+   * `WebhookQueue.getStats`): a row whose `state` is not a recognized string
+   * (e.g. a corrupted BLOB) is skipped instead of throwing, so one bad row
+   * cannot make `DashboardApi.read`'s catch-all zero out every healthy count.
+   */
   countAgentPrs(): { open: number; closed: number } {
     const rows = this.db
       .query(`SELECT state, COUNT(*) AS count FROM agent_prs GROUP BY state`)
-      .all() as { state: string; count: number }[];
+      .all();
     const result = { open: 0, closed: 0 };
     for (const row of rows) {
-      if (row.state === "open") result.open = row.count;
-      if (row.state === "closed") result.closed = row.count;
+      const record = parseRowObject(row, "agent_prs count row");
+      const state = record.state;
+      if (typeof state !== "string") continue;
+      if (state !== "open" && state !== "closed") continue;
+      const count = requireNumber(record, "count", "agent_prs count row");
+      result[state] = count;
     }
     return result;
   }
@@ -426,66 +510,67 @@ export class WorkerState {
   /**
    * List agent-created PRs that are still open (the review-polling watch list).
    *
+   * Loop-facing read, deliberately per-row tolerant (see
+   * {@link mapAgentPrRows}): one corrupted row is skipped rather than aborting
+   * the recurring review/CI poll tick it feeds.
+   *
    * @param repo - Optional repo slug filter
    */
   listOpenAgentPrs(repo?: string): AgentPr[] {
     // `SELECT *` (like the run store's reads) so a readonly dashboard can
     // still list PRs from a database that predates the ticket_url column.
-    const hasProvider = (
-      this.db.query("PRAGMA table_info(agent_prs)").all() as Array<{ name: string }>
-    ).some((column) => column.name === "provider");
+    const hasProvider = readColumnNames(this.db, "agent_prs").includes("provider");
     const providerFilter = hasProvider ? " AND provider = 'github'" : "";
-    const rows = (
-      repo
-        ? this.db
-            .query(
-              `SELECT * FROM agent_prs
+    const rows = repo
+      ? this.db
+          .query(
+            `SELECT * FROM agent_prs
                WHERE state = 'open'${providerFilter} AND repo = ? ORDER BY created_at ASC`,
-            )
-            .all(repo)
-        : this.db
-            .query(
-              `SELECT * FROM agent_prs
+          )
+          .all(repo)
+      : this.db
+          .query(
+            `SELECT * FROM agent_prs
                WHERE state = 'open'${providerFilter} ORDER BY created_at ASC`,
-            )
-            .all()
-    ) as Record<string, unknown>[];
+          )
+          .all();
 
-    return rows.map((row) => this.mapAgentPrRow(row));
+    return this.mapAgentPrRows(rows);
   }
 
-  /** List every open provider change request for dashboard and diagnostics. */
+  /**
+   * List every open provider change request for dashboard and diagnostics.
+   *
+   * Loop-facing read, deliberately per-row tolerant: one corrupted row is
+   * skipped rather than aborting the recurring GitLab review poll it feeds.
+   */
   listOpenAgentChangeRequests(): AgentPr[] {
     const rows = this.db
       .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
-      .all() as Record<string, unknown>[];
-    return rows.map((row) => this.mapAgentPrRow(row));
+      .all();
+    return this.mapAgentPrRows(rows);
   }
 
-  /** Map both legacy readonly schemas and the provider-aware schema. */
-  private mapAgentPrRow(row: Record<string, unknown>): AgentPr {
-    const repo = row.repo as string;
-    const prNumber = row.pr_number as number;
-    const provider = (row.provider as CodeHostProvider | null) ?? "github";
-    const instanceUrl =
-      (row.instance_url as string | null) ??
-      (provider === "bitbucket" ? "https://bitbucket.org" : "https://github.com");
-    return {
-      provider,
-      instanceUrl,
-      projectId: (row.project_id as string | null) ?? undefined,
-      projectPath: (row.project_path as string | null) ?? repo,
-      changeNumber: (row.change_number as number | null) ?? prNumber,
-      webUrl: (row.web_url as string | null) ?? `https://github.com/${repo}/pull/${prNumber}`,
-      repo,
-      prNumber,
-      branch: (row.branch as string | null) ?? undefined,
-      taskKey: (row.task_key as string | null) ?? undefined,
-      ticketUrl: (row.ticket_url as string | null) ?? undefined,
-      state: row.state as AgentPrState,
-      createdAt: row.created_at as number,
-      updatedAt: row.updated_at as number,
-    };
+  /**
+   * Map both legacy readonly schemas and the provider-aware schema.
+   *
+   * Deliberately per-row tolerant (mirrors `WebhookQueue.getAllRateLimits`): a
+   * malformed `agent_prs` row is skipped and logged rather than throwing, so a
+   * single corrupted row cannot stall the recurring loop that reads the watch
+   * list. Fail-fast schema validation lives in `parseAgentPrRow`.
+   */
+  private mapAgentPrRows(rows: unknown[]): AgentPr[] {
+    const result: AgentPr[] = [];
+    for (const row of rows) {
+      try {
+        result.push(parseAgentPrRow(row));
+      } catch (error) {
+        console.warn(
+          `⚠️  [WorkerState] skipping malformed agent_prs row: ${(error as Error).message}`,
+        );
+      }
+    }
+    return result;
   }
 
   /**
@@ -507,7 +592,14 @@ export class WorkerState {
         `SELECT repo, pr_number FROM agent_prs
          WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       )
-      .all(...allowed) as Array<{ repo: string; pr_number: number }>;
+      .all(...allowed)
+      .map((row) => {
+        const record = parseRowObject(row, "agent_prs foreign row");
+        return {
+          repo: requireString(record, "repo", "agent_prs foreign row"),
+          prNumber: requireNumber(record, "pr_number", "agent_prs foreign row"),
+        };
+      });
     if (foreign.length === 0) {
       return [];
     }
@@ -516,7 +608,7 @@ export class WorkerState {
        WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       [Date.now(), ...allowed],
     );
-    return foreign.map((row) => ({ repo: row.repo, prNumber: row.pr_number }));
+    return foreign;
   }
 
   /**
@@ -551,20 +643,31 @@ export class WorkerState {
     );
   }
 
-  /** Read CI autofix retry state, defaulting to a fresh budget. */
+  /**
+   * Read CI autofix retry state, defaulting to a fresh budget only when no row
+   * exists. A malformed row throws so corruption cannot reset the retry cap.
+   * The periodic watcher catches the error per PR and continues polling other
+   * PRs; a fully green CI result can repair the row safely.
+   */
   getCiFixState(repo: string, prNumber: number): CiFixState {
     const row = this.db
       .query(
         `SELECT consecutive_failures, escalated_sha FROM ci_fix_state
          WHERE repo = ? AND pr_number = ?`,
       )
-      .get(repo, prNumber) as Record<string, unknown> | null;
-    return row
-      ? {
-          consecutiveFailures: row.consecutive_failures as number,
-          escalatedSha: (row.escalated_sha as string | null) ?? undefined,
-        }
-      : { consecutiveFailures: 0 };
+      .get(repo, prNumber);
+    if (!row) {
+      return { consecutiveFailures: 0 };
+    }
+    const record = parseRowObject(row, "ci_fix_state row");
+    return {
+      consecutiveFailures: requireNonNegativeInteger(
+        record,
+        "consecutive_failures",
+        "ci_fix_state row",
+      ),
+      escalatedSha: optionalString(record, "escalated_sha", "ci_fix_state row"),
+    };
   }
 
   /** Persist CI autofix retry state. */
@@ -583,6 +686,12 @@ export class WorkerState {
   /**
    * Read the locally-recorded actioned state for a ticket.
    *
+   * Fail-fast: a malformed row throws {@link RowParseError}. Unlike the other
+   * loop-facing reads this has no safe blind default — treating a corrupt
+   * marker as "not actioned" would re-run the ticket and risk a duplicate PR —
+   * so the single caller (`createTaskActionedGate`) guards the call and fails
+   * safe by skipping the ticket.
+   *
    * @param source - Tracker source key (matches the poll cursor source)
    * @param taskKey - Tracker task key
    * @returns The record, or `null` when the ticket was never actioned here
@@ -594,18 +703,19 @@ export class WorkerState {
                 transitioned, transition_status, actioned_at
          FROM actioned_tasks WHERE source = ? AND task_key = ?`,
       )
-      .get(source, taskKey) as Record<string, unknown> | null;
+      .get(source, taskKey);
     if (!row) return null;
+    const record = parseRowObject(row, "actioned_tasks row");
     return {
-      taskKey: row.task_key as string,
-      signal: row.signal as string,
-      verified: (row.verified as number | null) !== 0,
-      updatedStamp: (row.updated_stamp as string | null) ?? null,
-      pending: row.pending === 1,
-      fallbackSnapshot: (row.fallback_snapshot as string | null) ?? null,
-      transitioned: row.transitioned === 1,
-      transitionStatus: (row.transition_status as string | null) ?? null,
-      actionedAt: row.actioned_at as number,
+      taskKey: requireString(record, "task_key", "actioned_tasks row"),
+      signal: requireString(record, "signal", "actioned_tasks row"),
+      verified: optionalNumber(record, "verified", "actioned_tasks row") !== 0,
+      updatedStamp: optionalString(record, "updated_stamp", "actioned_tasks row") ?? null,
+      pending: optionalNumber(record, "pending", "actioned_tasks row") === 1,
+      fallbackSnapshot: optionalString(record, "fallback_snapshot", "actioned_tasks row") ?? null,
+      transitioned: optionalNumber(record, "transitioned", "actioned_tasks row") === 1,
+      transitionStatus: optionalString(record, "transition_status", "actioned_tasks row") ?? null,
+      actionedAt: requireNumber(record, "actioned_at", "actioned_tasks row"),
     };
   }
 
@@ -674,12 +784,18 @@ export class WorkerState {
   /**
    * Read one metadata value (e.g. the last task-drain timestamp used by
    * working-window catch-up). Returns null when never written.
+   *
+   * Fail-fast: a malformed `worker_meta` row throws {@link RowParseError}. Its
+   * recurring callers guard the read (`readLastDrainAt` catches,
+   * `loadPendingRescans` wraps it in `scheduleGuard`), so a corrupt value
+   * degrades to "unset" there instead of stalling the poll tick.
    */
   getMeta(key: string): string | null {
-    const row = this.db.query(`SELECT value FROM worker_meta WHERE key = ?`).get(key) as {
-      value: string;
-    } | null;
-    return row?.value ?? null;
+    const row = this.db.query(`SELECT value FROM worker_meta WHERE key = ?`).get(key);
+    if (!row) {
+      return null;
+    }
+    return requireString(parseRowObject(row, "worker_meta row"), "value", "worker_meta row");
   }
 
   /** Upsert one metadata value. */

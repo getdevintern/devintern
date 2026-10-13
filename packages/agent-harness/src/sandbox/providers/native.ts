@@ -20,7 +20,10 @@
  * auto-approved, voiding the boundary (antigravity-cli#36, #45). The
  * policy contract cannot be honored; revisit if those issues land.
  *
- * Zero install and no nesting hazards, so it has the highest auto priority.
+ * Zero install, so it has the highest auto priority. It cannot nest inside an
+ * enclosing sandbox (same as the kernel wrappers): its boundary is the
+ * harness's own OS sandbox, which would have to set up its namespaces under
+ * the outer confinement and can exit before the agent starts.
  * The trade-off versus the external wrappers: the boundary is configured
  * and enforced inside the harness process rather than by the parent, and
  * (for claude-code) covers a narrower scope. Users who want the stronger
@@ -40,7 +43,7 @@ const NATIVE_CAPABLE = ["claude-code", "codex"];
 export class NativeSandboxProvider implements SandboxProvider {
   readonly name = "native";
   readonly displayName = "Harness native sandbox";
-  readonly priority = 40; // above the external wrappers: zero install, no nesting
+  readonly priority = 40; // above the external wrappers: zero install, nothing to set up
   readonly docsUrl =
     "https://devintern.com/docs/code/configuration#claude-code-native-sandbox-details";
 

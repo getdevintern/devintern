@@ -7,6 +7,7 @@ import { UsageLimitError } from "@devintern/agent-harness";
 
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
+  getWorkerFailover,
   resetWorkerFailover,
   runWithFailover,
   startWorkerFailover,
@@ -122,6 +123,75 @@ describe("worker startup with a stale persisted active harness", () => {
       );
     } finally {
       console.warn = originalWarn;
+      resetWorkerFailover();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("worker startup with corrupt persisted meta", () => {
+  test("starts on the primary harness instead of throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-corrupt-meta-"));
+    const dbPath = join(dir, "queue.db");
+    const seed = new WebhookQueue({ dbPath });
+    seed.close();
+
+    const { Database } = require("bun:sqlite");
+    const raw = new Database(dbPath);
+    raw.run(`INSERT INTO webhook_meta (key, value) VALUES ('failover:active_harness', x'00')`);
+    raw.close();
+
+    const queue = new WebhookQueue({ dbPath });
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    try {
+      console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+      expect(() =>
+        startWorkerFailover({
+          checkInstalled: false,
+          raw: "opencode,grok",
+          queue,
+          log: () => {},
+        }),
+      ).not.toThrow();
+    } finally {
+      console.warn = originalWarn;
+      queue.close();
+      resetWorkerFailover();
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    expect(
+      warnings.some((line) => line.includes("Could not restore persisted active harness")),
+    ).toBe(true);
+  });
+
+  test("keeps healthy persisted rate-limit windows when the active harness is corrupt", () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-corrupt-active-"));
+    const dbPath = join(dir, "queue.db");
+    const seed = new WebhookQueue({ dbPath });
+    seed.setRateLimit("grok", Date.now() + 60_000);
+    seed.close();
+
+    const { Database } = require("bun:sqlite");
+    const raw = new Database(dbPath);
+    raw.run(`INSERT INTO webhook_meta (key, value) VALUES ('failover:active_harness', x'00')`);
+    raw.close();
+
+    const queue = new WebhookQueue({ dbPath });
+    const originalWarn = console.warn;
+    try {
+      console.warn = () => {};
+      startWorkerFailover({
+        checkInstalled: false,
+        raw: "opencode,grok",
+        queue,
+        log: () => {},
+      });
+      expect(getWorkerFailover()?.manager.isLimited("grok")).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      queue.close();
       resetWorkerFailover();
       rmSync(dir, { recursive: true, force: true });
     }

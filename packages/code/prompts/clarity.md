@@ -42,6 +42,8 @@ Please assess this task for basic implementation feasibility. Return only one va
   "clarityScore": 8,
   "issues": [],
   "recommendations": [],
+  "assumptions": [],
+  "outOfScope": [],
   "summary": "Brief summary of the assessment"
 }
 
@@ -49,6 +51,8 @@ Each issue must contain:
 - "category": one of "missing_requirements", "unclear_scope", "missing_context", "ambiguous_description", or "critical_gaps"
 - "description": a specific issue description
 - "severity": one of "critical", "major", or "minor"
+
+For "assumptions", list the specific assumptions you are making to fill in gaps (e.g. "assumes the existing auth middleware is reused"). For "outOfScope", list work the task does not ask for and that an implementer should not do (e.g. "does not include migrating existing sessions"). Use empty arrays when there is nothing to note — do not invent work.
 
 ## Evaluation Criteria (Relaxed for Real-World Development)
 

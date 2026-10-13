@@ -306,7 +306,21 @@ export function createTaskActionedGate(deps: {
   source: string;
 }): (taskKey: string, updated?: string) => Promise<boolean> {
   return async (taskKey, updated) => {
-    const record = deps.workerState.getTaskActioned(deps.source, taskKey);
+    let record: ActionedTask | null;
+    try {
+      record = deps.workerState.getTaskActioned(deps.source, taskKey);
+    } catch (error) {
+      // The marker read is fail-fast (see WorkerState.getTaskActioned). A
+      // corrupt row must not abort the whole batch, and treating it as "not
+      // actioned" would re-run the ticket and risk a duplicate PR, so fail
+      // safe by keeping the ticket suppressed until the row is rewritten.
+      console.warn(
+        `⚠️  [actioned] could not read actioned state for ${taskKey}; skipping it to avoid a duplicate PR: ${
+          (error as Error).message
+        }`,
+      );
+      return true;
+    }
     if (!record) return false;
 
     // The post-PR transition may still be running. Do not turn its own label
