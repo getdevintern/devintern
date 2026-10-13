@@ -79,6 +79,18 @@ export function requireNumber(row: RowRecord, column: string, context: string): 
   return value;
 }
 
+/** Read a retry counter as a non-negative safe integer. */
+export function requireNonNegativeInteger(row: RowRecord, column: string, context: string): number {
+  const value = requireNumber(row, column, context);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RowParseError(
+      context,
+      `column "${column}" must be a non-negative integer, got ${describe(value)}`,
+    );
+  }
+  return value;
+}
+
 /** Read an optional numeric column as a finite number (SQL `NULL` becomes `undefined`). */
 export function optionalNumber(
   row: RowRecord,

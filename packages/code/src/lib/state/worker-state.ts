@@ -29,6 +29,7 @@ import {
   optionalString,
   parseRowObject,
   requireEnum,
+  requireNonNegativeInteger,
   requireNumber,
   requireString,
 } from "./row-parse";
@@ -643,12 +644,10 @@ export class WorkerState {
   }
 
   /**
-   * Read CI autofix retry state, defaulting to a fresh budget.
-   *
-   * Loop-facing read, deliberately tolerant: a malformed `ci_fix_state` row is
-   * logged and treated as a fresh budget rather than throwing, so one corrupted
-   * row cannot wedge CI fixing for a PR on every poll tick. The convergence
-   * path ({@link setCiFixState}) rewrites the row with a valid shape.
+   * Read CI autofix retry state, defaulting to a fresh budget only when no row
+   * exists. A malformed row throws so corruption cannot reset the retry cap.
+   * The periodic watcher catches the error per PR and continues polling other
+   * PRs; a fully green CI result can repair the row safely.
    */
   getCiFixState(repo: string, prNumber: number): CiFixState {
     const row = this.db
@@ -660,20 +659,15 @@ export class WorkerState {
     if (!row) {
       return { consecutiveFailures: 0 };
     }
-    try {
-      const record = parseRowObject(row, "ci_fix_state row");
-      return {
-        consecutiveFailures: requireNumber(record, "consecutive_failures", "ci_fix_state row"),
-        escalatedSha: optionalString(record, "escalated_sha", "ci_fix_state row"),
-      };
-    } catch (error) {
-      console.warn(
-        `⚠️  [WorkerState] ignoring malformed ci_fix_state for ${repo}#${prNumber}: ${
-          (error as Error).message
-        }`,
-      );
-      return { consecutiveFailures: 0 };
-    }
+    const record = parseRowObject(row, "ci_fix_state row");
+    return {
+      consecutiveFailures: requireNonNegativeInteger(
+        record,
+        "consecutive_failures",
+        "ci_fix_state row",
+      ),
+      escalatedSha: optionalString(record, "escalated_sha", "ci_fix_state row"),
+    };
   }
 
   /** Persist CI autofix retry state. */

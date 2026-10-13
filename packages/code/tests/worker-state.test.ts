@@ -352,13 +352,22 @@ describe("WorkerState", () => {
       expect(state.countAgentPrs()).toEqual({ open: 1, closed: 0 });
     });
 
-    test("getCiFixState tolerates a non-numeric failure count as a fresh budget", () => {
+    test("getCiFixState rejects a non-numeric failure count instead of resetting the budget", () => {
       insertRawRow(
         dbPath,
         `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, updated_at)
          VALUES ('acme/widgets', 1, 'many', 1)`,
       );
-      expect(state.getCiFixState("acme/widgets", 1)).toEqual({ consecutiveFailures: 0 });
+      expect(() => state.getCiFixState("acme/widgets", 1)).toThrow(RowParseError);
+    });
+
+    test("getCiFixState rejects a negative failure count", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, updated_at)
+         VALUES ('acme/widgets', 1, -1, 1)`,
+      );
+      expect(() => state.getCiFixState("acme/widgets", 1)).toThrow(RowParseError);
     });
 
     test("getTaskActioned rejects a non-numeric actioned_at", () => {

@@ -7,6 +7,7 @@ import {
   optionalString,
   parseRowObject,
   requireEnum,
+  requireNonNegativeInteger,
   requireNumber,
   requireString,
 } from "../src/lib/state/row-parse";
@@ -80,6 +81,13 @@ describe("requireNumber / optionalNumber", () => {
     expect(() => optionalNumber({ n: Infinity }, "n", "ctx")).toThrow(RowParseError);
     expect(() => optionalNumber({ n: "5" }, "n", "ctx")).toThrow(RowParseError);
   });
+});
+
+test("requireNonNegativeInteger rejects values that could bypass a retry cap", () => {
+  expect(requireNonNegativeInteger({ attempts: 0 }, "attempts", "ctx")).toBe(0);
+  for (const attempts of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() => requireNonNegativeInteger({ attempts }, "attempts", "ctx")).toThrow(RowParseError);
+  }
 });
 
 const STATUSES = ["pending", "completed", "failed"] as const;

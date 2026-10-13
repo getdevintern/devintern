@@ -189,13 +189,24 @@ describe("WebhookQueue", () => {
       expect(() => queue.getEvent("bad")).toThrow(RowParseError);
     });
 
-    test("getPendingEvents rejects a non-numeric attempts", () => {
+    test("getPendingEvents skips a malformed event and recovers healthy events", () => {
       insertRawRow(
         dbPath,
         `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
          VALUES ('bad', 'push', '{}', 'pending', 1, 1, 'lots')`,
       );
-      expect(() => queue.getPendingEvents()).toThrow(RowParseError);
+      const healthyId = queue.enqueue("push", {});
+      const warn = console.warn;
+      const warnings: string[] = [];
+      try {
+        console.warn = (message: string) => warnings.push(message);
+        expect(queue.getPendingEvents().map((event) => event.id)).toEqual([healthyId]);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings.some((message) => message.includes("Skipping malformed pending event"))).toBe(
+        true,
+      );
     });
 
     test("getBaseSyncEvent rejects a non-numeric pr_number", () => {

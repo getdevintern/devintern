@@ -14,9 +14,11 @@ import { findConfigDir } from "@devintern/utils";
 import { ensureGitInfoExcluded } from "../utils/git-exclude";
 import { configureSqliteConnection } from "./sqlite";
 import {
+  RowParseError,
   optionalString,
   parseRowObject,
   requireEnum,
+  requireNonNegativeInteger,
   requireNumber,
   requireString,
 } from "./row-parse";
@@ -725,7 +727,11 @@ export class WebhookQueue {
     return this.rowToEvent(row);
   }
 
-  /** Return pending and in-flight events ordered by creation time (for recovery). */
+  /**
+   * Return pending and in-flight events ordered by creation time for recovery.
+   * A malformed row is left in the database for inspection, but cannot prevent
+   * healthy events from being recovered when the server starts.
+   */
   getPendingEvents(): WebhookEvent[] {
     const rows = this.db
       .query(
@@ -736,7 +742,16 @@ export class WebhookQueue {
       )
       .all();
 
-    return rows.map((row) => this.rowToEvent(row));
+    const events: WebhookEvent[] = [];
+    for (const row of rows) {
+      try {
+        events.push(this.rowToEvent(row));
+      } catch (error) {
+        if (!(error instanceof RowParseError)) throw error;
+        console.warn(`[WebhookQueue] Skipping malformed pending event: ${error.message}`);
+      }
+    }
+    return events;
   }
 
   /** Return permanently failed events for inspection or manual retry. */
@@ -846,7 +861,7 @@ function parseWebhookEventRow(row: unknown): WebhookEvent {
     status: requireEnum(WEBHOOK_EVENT_STATUSES, record.status, "status", "webhook_events row"),
     createdAt: requireNumber(record, "created_at", "webhook_events row"),
     updatedAt: requireNumber(record, "updated_at", "webhook_events row"),
-    attempts: requireNumber(record, "attempts", "webhook_events row"),
+    attempts: requireNonNegativeInteger(record, "attempts", "webhook_events row"),
     lastError: optionalString(record, "last_error", "webhook_events row"),
   };
 }
@@ -861,7 +876,7 @@ function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
     baseSha: requireString(record, "base_sha", "base_sync_events row"),
     headSha: requireString(record, "head_sha", "base_sync_events row"),
     headObservedAt: requireNumber(record, "head_observed_at", "base_sync_events row"),
-    attempts: requireNumber(record, "attempts", "base_sync_events row"),
+    attempts: requireNonNegativeInteger(record, "attempts", "base_sync_events row"),
     status: requireEnum(BASE_SYNC_EVENT_STATUSES, record.status, "status", "base_sync_events row"),
     lastError: optionalString(record, "last_error", "base_sync_events row"),
     updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),

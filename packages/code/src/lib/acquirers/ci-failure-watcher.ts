@@ -34,7 +34,8 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { WorkerState } from "../state/worker-state";
+import type { CiFixState, WorkerState } from "../state/worker-state";
+import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { serializePrRun } from "./review-polling";
@@ -674,7 +675,19 @@ export class CiFailureWatcherAcquirer implements Acquirer {
 
   /** Zero the attempt counter because CI went green. */
   private resetRetryBudget(repo: string, prNumber: number, reason: string): void {
-    const state = this.options.workerState.getCiFixState(repo, prNumber);
+    let state: CiFixState;
+    try {
+      state = this.options.workerState.getCiFixState(repo, prNumber);
+    } catch (error) {
+      if (!(error instanceof RowParseError)) throw error;
+      // A fully green result is an explicit reset point, even if the previous
+      // retry count was corrupt. Failed CI must never take this path.
+      console.warn(
+        `⚠️  [${this.name}] ${this.describe(repo, prNumber)}: repairing malformed CI retry state after CI passed: ${error.message}`,
+      );
+      this.options.workerState.setCiFixState(repo, prNumber, { consecutiveFailures: 0 });
+      return;
+    }
     if (state.consecutiveFailures > 0 || state.escalatedSha) {
       console.log(
         `💚 [${this.name}] ${this.describe(repo, prNumber)}: ${reason}; resetting CI fix counter`,
