@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { resolveOutputDir } from "../config/output-dir";
-import { untrustedContentBlock } from "../prompts/untrusted-content";
 
 /**
  * Append a git hook failure record to the per-task hook error log file.
@@ -141,7 +140,7 @@ IMPORTANT: You MUST actually implement the changes, not just plan them. Create/m
 
 For reference, here is the original task:
 
-${untrustedContentBlock(originalTaskContent.trimEnd(), "original task prompt")}
+${originalTaskContent.trimEnd()}
 
 Now implement the solution. Write the actual code.`;
 }

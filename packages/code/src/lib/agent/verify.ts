@@ -9,7 +9,7 @@ import {
   runAgentPrompt,
 } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
-import { isUntrustedContentFramed, untrustedContentBlock } from "../prompts/untrusted-content";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -46,11 +46,12 @@ function instructionsFor(config: VerifyConfig, workingDir: string): string {
 }
 
 function buildVerifyPrompt(config: VerifyConfig, taskContent: string, diff: string, cwd: string) {
-  const framedTask = isUntrustedContentFramed(taskContent)
-    ? taskContent
-    : untrustedContentBlock(taskContent.trimEnd(), "task");
+  // `taskContent` is the already-formatted task prompt assembled by our own
+  // formatter: its untrusted sections are framed at the leaf. Wrap only the raw
+  // external diff here; re-framing the task would nest frames and neutralize the
+  // authentic inner boundary markers.
   const framedDiff = untrustedContentBlock(`\`\`\`diff\n${diff}\n\`\`\``, "implementation diff");
-  return `${instructionsFor(config, cwd)}\n\n## Task\n${framedTask}\n\n## Implementation diff\n${framedDiff}`;
+  return `${instructionsFor(config, cwd)}\n\n## Task\n${taskContent.trimEnd()}\n\n## Implementation diff\n${framedDiff}`;
 }
 
 /** Build a focused repair prompt for the next implementation run. */
@@ -61,10 +62,9 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
         `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}\n   Fix: ${item.suggestion}`,
     )
     .join("\n");
-  const framedTask = isUntrustedContentFramed(taskContent)
-    ? taskContent
-    : untrustedContentBlock(taskContent.trimEnd(), "task");
-  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${framedTask}\n\nDo not commit or push; the task runner handles delivery.`;
+  // `taskContent` is our own already-framed task prompt; only the raw findings
+  // from the verifier are external and need framing.
+  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${taskContent.trimEnd()}\n\nDo not commit or push; the task runner handles delivery.`;
 }
 
 function saveVerification(state: DeliveryState, prompt: string, feedback: ReviewFeedback): void {

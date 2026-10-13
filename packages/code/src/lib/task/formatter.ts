@@ -736,12 +736,15 @@ If you need clarification on any requirements or if the task description is uncl
       richContentConverter,
     );
 
+    // Tracker-controlled header fields (key, summary, labels/components) can
+    // carry injected instructions too, so frame them like every other external
+    // field rather than passing them through verbatim.
     return loadPrompt(
       "clarity",
       {
-        key,
-        summary,
-        metadata: this.renderMetadata(labels, components),
+        key: this.frameExternal(key, "task key"),
+        summary: this.frameExternal(summary, "task summary"),
+        metadata: this.frameExternal(this.renderMetadata(labels, components), "task metadata"),
         description: descriptionMarkdown.trim()
           ? untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description")
           : "*No description provided*",
@@ -832,12 +835,15 @@ If you need clarification on any requirements or if the task description is uncl
       richContentConverter,
     );
 
+    // Tracker-controlled header fields (key, summary, labels/components) can
+    // carry injected instructions too, so frame them like every other external
+    // field rather than passing them through verbatim.
     return loadPrompt(
       "estimation",
       {
-        key,
-        summary,
-        metadata: this.renderMetadata(labels, components),
+        key: this.frameExternal(key, "task key"),
+        summary: this.frameExternal(summary, "task summary"),
+        metadata: this.frameExternal(this.renderMetadata(labels, components), "task metadata"),
         description: descriptionMarkdown.trim()
           ? untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description")
           : "*No description provided*",

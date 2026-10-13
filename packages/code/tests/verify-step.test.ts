@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
-import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
+import {
+  UNTRUSTED_CONTENT_NOTICE,
+  untrustedContentBlock,
+} from "../src/lib/prompts/untrusted-content";
 import type { DeliveryState } from "../src/lib/agent/run-harness-finalize";
 import type { FinalizeContext } from "../src/lib/agent/run-harness-git";
 import type { ReviewFeedback } from "../src/types/auto-review";
@@ -116,7 +119,7 @@ describe("verifyImplementation", () => {
     );
   });
 
-  test("frames the task and diff passed to the verifying agent as untrusted", async () => {
+  test("frames the raw diff without re-framing the task prompt", async () => {
     let captured = "";
     const injected = deps({ ...feedback, approved: true, items: [] });
     injected.runAgent = async (prompt) => {
@@ -127,15 +130,37 @@ describe("verifyImplementation", () => {
     await verifyImplementation(state({}), injected);
 
     expect(captured).toContain(UNTRUSTED_CONTENT_NOTICE);
-    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
     expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: implementation diff -->");
+    expect(captured).toContain("Implement the feature");
+    expect(captured).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
   });
 
-  test("frames the original task in the repair prompt", () => {
-    const prompt = buildRepairPrompt("Implement the feature", feedback);
+  test("does not nest or neutralize an already-framed task prompt", async () => {
+    const framedTask = untrustedContentBlock("Implement the feature", "task description");
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    const run = state({});
+    run.context.taskContent = framedTask;
+    await verifyImplementation(run, injected);
+
+    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
+    expect(captured).not.toContain("[neutralized untrusted-content boundary marker]");
+    expect(captured).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+  });
+
+  test("frames findings and preserves the already-framed original task", () => {
+    const framedTask = untrustedContentBlock("Implement the feature", "task description");
+    const prompt = buildRepairPrompt(framedTask, feedback);
 
     expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
     expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: verification findings -->");
-    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
+    expect(prompt).not.toContain("[neutralized untrusted-content boundary marker]");
+    expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
   });
 });

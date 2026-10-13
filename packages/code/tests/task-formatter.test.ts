@@ -67,6 +67,31 @@ describe("TaskFormatter untrusted-content framing", () => {
     expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
   });
 
+  test("clarity assessment frames summary and labels as untrusted", () => {
+    const prompt = TaskFormatter.formatClarityAssessment(
+      mockTaskDetails({ summary: INJECTION, labels: [INJECTION] }),
+    );
+
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task summary -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task metadata -->");
+    // The earliest injection (in the summary) sits inside its framed block.
+    expect(prompt.indexOf("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task summary -->")).toBeLessThan(
+      prompt.indexOf(INJECTION),
+    );
+  });
+
+  test("estimation prompt frames summary and labels as untrusted", () => {
+    const prompt = TaskFormatter.formatEstimationPrompt(
+      mockTaskDetails({ summary: INJECTION, labels: [INJECTION] }),
+    );
+
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task summary -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task metadata -->");
+    expect(prompt.indexOf("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task summary -->")).toBeLessThan(
+      prompt.indexOf(INJECTION),
+    );
+  });
+
   test("does not emit an empty untrusted block when there is no description", () => {
     const prompt = TaskFormatter.formatClarityAssessment(
       mockTaskDetails({ description: null, comments: [] }),

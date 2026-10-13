@@ -8,6 +8,24 @@ import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../../type
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 
 /**
+ * Frame a single-line, attacker-influenced header field (PR title, branch name,
+ * file path, reviewer) as untrusted data.
+ *
+ * These fields embed into prompts too, so a PR author who controls a title,
+ * branch name, or path could otherwise inject instructions or forge boundary
+ * markers. Framing them through {@link untrustedContentBlock} keeps the whole
+ * formatter consistent; an empty value yields an empty string so callers never
+ * emit an empty block.
+ *
+ * @param value - Field text to frame
+ * @param source - Short human-readable origin for the boundary markers
+ */
+function frameField(value: string | undefined, source: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? untrustedContentBlock(trimmed, source) : "";
+}
+
+/**
  * Format structured PR review feedback into an agent prompt.
  *
  * @param feedback - Processed review metadata and comments
@@ -24,9 +42,9 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
   lines.push("## PR Information");
   lines.push("");
   lines.push(`- **Repository:** ${feedback.repository}`);
-  lines.push(`- **PR #${feedback.prNumber}:** ${feedback.prTitle}`);
-  lines.push(`- **Branch:** \`${feedback.branch}\``);
-  lines.push(`- **Reviewer:** @${feedback.reviewer}`);
+  lines.push(`- **PR #${feedback.prNumber}:** ${frameField(feedback.prTitle, "pr title")}`);
+  lines.push(`- **Branch:** ${frameField(`\`${feedback.branch}\``, "branch name")}`);
+  lines.push(`- **Reviewer:** ${frameField(`@${feedback.reviewer}`, "reviewer")}`);
   lines.push(`- **Review Status:** ${formatReviewState(feedback.reviewState)}`);
   lines.push("");
 
@@ -47,7 +65,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     const commentsByFile = groupCommentsByFile(feedback.comments);
 
     for (const [filePath, fileComments] of Object.entries(commentsByFile)) {
-      lines.push(`### \`${filePath}\``);
+      lines.push(`### ${frameField(`\`${filePath}\``, "file path")}`);
       lines.push("");
 
       for (const comment of fileComments) {
@@ -149,7 +167,7 @@ function formatSingleComment(comment: ProcessedReviewComment): string {
 
   // Line reference
   const lineRef = comment.line ? `Line ${comment.line}` : "General";
-  lines.push(`**${lineRef}** (by @${comment.reviewer}):`);
+  lines.push(`**${lineRef}** (by ${frameField(`@${comment.reviewer}`, "reviewer")}):`);
   lines.push("");
 
   const external: string[] = [];
@@ -299,8 +317,8 @@ export function formatSingleCommentPrompt(
   lines.push("# Address Single PR Review Comment");
   lines.push("");
   lines.push(`**Repository:** ${repository}`);
-  lines.push(`**Branch:** \`${branch}\``);
-  lines.push(`**File:** \`${comment.path}\``);
+  lines.push(`**Branch:** ${frameField(`\`${branch}\``, "branch name")}`);
+  lines.push(`**File:** ${frameField(`\`${comment.path}\``, "file path")}`);
   if (comment.line) {
     lines.push(`**Line:** ${comment.line}`);
   }
@@ -352,9 +370,11 @@ export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
     "## PR Information",
     "",
     `- **Repository:** ${feedback.repository}`,
-    `- **PR #${feedback.prNumber}:** ${feedback.prTitle ?? ""}`.trimEnd(),
+    `- **PR #${feedback.prNumber}:** ${frameField(feedback.prTitle, "pr title")}`.trimEnd(),
   ];
-  if (feedback.branch) lines.push(`- **Branch:** \`${feedback.branch}\``);
+  if (feedback.branch) {
+    lines.push(`- **Branch:** ${frameField(`\`${feedback.branch}\``, "branch name")}`);
+  }
   lines.push("", "## Failing Checks", "");
   for (const failure of feedback.failures) {
     const details = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
