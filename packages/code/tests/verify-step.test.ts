@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
+import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 import type { DeliveryState } from "../src/lib/agent/run-harness-finalize";
 import type { FinalizeContext } from "../src/lib/agent/run-harness-git";
 import type { ReviewFeedback } from "../src/types/auto-review";
@@ -113,5 +114,28 @@ describe("verifyImplementation", () => {
     await expect(verifyImplementation(state({ maxIterations: 0 }), deps())).rejects.toThrow(
       "positive integer",
     );
+  });
+
+  test("frames the task and diff passed to the verifying agent as untrusted", async () => {
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    await verifyImplementation(state({}), injected);
+
+    expect(captured).toContain(UNTRUSTED_CONTENT_NOTICE);
+    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: implementation diff -->");
+  });
+
+  test("frames the original task in the repair prompt", () => {
+    const prompt = buildRepairPrompt("Implement the feature", feedback);
+
+    expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: verification findings -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
   });
 });

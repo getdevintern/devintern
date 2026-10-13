@@ -9,6 +9,7 @@ import {
   runAgentPrompt,
 } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
+import { isUntrustedContentFramed, untrustedContentBlock } from "../prompts/untrusted-content";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -45,7 +46,11 @@ function instructionsFor(config: VerifyConfig, workingDir: string): string {
 }
 
 function buildVerifyPrompt(config: VerifyConfig, taskContent: string, diff: string, cwd: string) {
-  return `${instructionsFor(config, cwd)}\n\n## Task\n${taskContent}\n\n## Implementation diff\n\`\`\`diff\n${diff}\n\`\`\``;
+  const framedTask = isUntrustedContentFramed(taskContent)
+    ? taskContent
+    : untrustedContentBlock(taskContent.trimEnd(), "task");
+  const framedDiff = untrustedContentBlock(`\`\`\`diff\n${diff}\n\`\`\``, "implementation diff");
+  return `${instructionsFor(config, cwd)}\n\n## Task\n${framedTask}\n\n## Implementation diff\n${framedDiff}`;
 }
 
 /** Build a focused repair prompt for the next implementation run. */
@@ -56,7 +61,10 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
         `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}\n   Fix: ${item.suggestion}`,
     )
     .join("\n");
-  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${findings}\n\nOriginal task:\n${taskContent}\n\nDo not commit or push; the task runner handles delivery.`;
+  const framedTask = isUntrustedContentFramed(taskContent)
+    ? taskContent
+    : untrustedContentBlock(taskContent.trimEnd(), "task");
+  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${framedTask}\n\nDo not commit or push; the task runner handles delivery.`;
 }
 
 function saveVerification(state: DeliveryState, prompt: string, feedback: ReviewFeedback): void {

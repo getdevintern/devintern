@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 import type { MarkdownTaskRaw } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
+import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 
 function taskRaw(task: { raw: unknown }): MarkdownTaskRaw {
   return task.raw as MarkdownTaskRaw;
@@ -108,7 +109,8 @@ Refactor the auth middleware.
       client.writeAgentPrompt(outputFile, task);
 
       const prompt = readFileSync(outputFile, "utf8");
-      expect(prompt.startsWith(content.trim())).toBe(true);
+      expect(prompt).toContain(content.trim());
+      expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
       expect(prompt).toContain("## Implementation Instructions");
     } finally {
       cleanup(testDir);

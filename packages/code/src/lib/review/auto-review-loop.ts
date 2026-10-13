@@ -23,6 +23,7 @@ import { parseAgentJsonObject } from "../agent/json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
 import type {
@@ -50,7 +51,7 @@ const PRIORITY_WEIGHTS: Record<ReviewPriority, number> = {
  * @param iteration - Current auto-review iteration (1-based)
  * @returns Prompt instructing the agent to return structured JSON feedback
  */
-function generateReviewPrompt(
+export function generateReviewPrompt(
   repository: string,
   prNumber: number,
   prDiff: string,
@@ -66,7 +67,10 @@ function generateReviewPrompt(
       repository,
       prNumber: String(prNumber),
       iteration: String(iteration),
-      prDiff,
+      // The diff is attacker-controlled: frame it so embedded instructions are
+      // treated as data, and fence it here (not in the template) so the framing
+      // stays outside the code block.
+      prDiff: untrustedContentBlock(`\`\`\`diff\n${prDiff}\n\`\`\``, "pull request diff"),
     },
     { useAmbientOverrides: false },
   );
@@ -79,7 +83,7 @@ function generateReviewPrompt(
  * @param iteration - Current iteration (controls commit vs amend instructions)
  * @returns Fix prompt for the agent harness
  */
-function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
+export function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
   const itemsList = feedbackItems
     .map(
       (item, idx) =>
@@ -106,7 +110,9 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
     "fix",
     {
       iteration: String(iteration),
-      itemsList,
+      // Feedback items derive from the (attacker-influenced) PR diff, so frame
+      // them as untrusted data before the agent acts on them.
+      itemsList: untrustedContentBlock(itemsList, "agent review feedback"),
       commitInstruction,
     },
     { useAmbientOverrides: false },

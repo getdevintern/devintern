@@ -25,6 +25,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
 import type { PullRequestInfo } from "../code-host/github/reviews";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
 
 export interface ResolveConflictsOptions {
@@ -85,7 +86,8 @@ A merge of \`origin/${options.baseRef}\` into \`${options.branch}\` is in progre
 repository and stopped on conflicts. Your job is to finish the merge.
 
 Conflicted files:
-${options.conflictedFiles.map((f) => `- ${f}`).join("\n")}
+
+${untrustedContentBlock(options.conflictedFiles.map((f) => `- ${f}`).join("\n"), "conflicted files")}
 
 Instructions:
 1. Inspect each conflicted file (\`git status\`, \`git diff\`) and resolve the conflict
@@ -123,9 +125,11 @@ A \`git push\` of \`${options.branch}\` was rejected by a pre-push hook. The bra
 carries a merge commit that has NOT been published yet.
 
 Hook error output (may be truncated):
-\`\`\`
-${excerpt || "(no output captured — run the project's check scripts to reproduce)"}
-\`\`\`
+
+${untrustedContentBlock(
+  excerpt || "(no output captured — run the project's check scripts to reproduce)",
+  "pre-push hook output",
+)}
 
 Instructions:
 1. Reproduce the failing checks with the project's own scripts (lint, format,

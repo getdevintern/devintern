@@ -12,6 +12,7 @@ import type {
   IssueValidity,
 } from "../acquirers/error-monitor";
 import { SourceFetchError } from "../acquirers/source-fetch";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
 
 export const DEFAULT_SENTRY_BASE_URL = "https://sentry.io";
 export const SENTRY_ACTION_SUCCEEDED_COMMENT =
@@ -200,11 +201,7 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
 
   /** Render a Sentry issue as a local markdown task for the normal pipeline. */
   buildTaskMarkdown(issue: SentryIssue): string {
-    const lines = [
-      `# Fix Sentry error ${issue.shortId}`,
-      "",
-      "## Error",
-      "",
+    const errorLines = [
       `- **Title**: ${issue.title}`,
       `- **Sentry ID**: ${issue.shortId} (${issue.id})`,
       `- **Level**: ${issue.level ?? "error"}`,
@@ -213,11 +210,16 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       `- **Last seen**: ${issue.lastSeen}`,
       `- **Link**: ${issue.permalink}`,
     ];
-    if (issue.culprit) lines.push(`- **Culprit**: ${issue.culprit}`);
-    if (issue.metadata?.type) lines.push(`- **Exception type**: ${issue.metadata.type}`);
-    if (issue.metadata?.value) lines.push(`- **Exception message**: ${issue.metadata.value}`);
-    if (issue.metadata?.filename) lines.push(`- **File**: ${issue.metadata.filename}`);
-    lines.push(
+    if (issue.culprit) errorLines.push(`- **Culprit**: ${issue.culprit}`);
+    if (issue.metadata?.type) errorLines.push(`- **Exception type**: ${issue.metadata.type}`);
+    if (issue.metadata?.value) errorLines.push(`- **Exception message**: ${issue.metadata.value}`);
+    if (issue.metadata?.filename) errorLines.push(`- **File**: ${issue.metadata.filename}`);
+    return [
+      `# Fix Sentry error ${issue.shortId}`,
+      "",
+      "## Error",
+      "",
+      untrustedContentBlock(errorLines.join("\n"), "sentry issue"),
       "",
       "## Task",
       "",
@@ -225,8 +227,7 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       "minimal fix in this repository, and add or adjust tests covering the failure",
       "path. Do not change unrelated behavior.",
       "",
-    );
-    return lines.join("\n");
+    ].join("\n");
   }
 }
 

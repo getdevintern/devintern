@@ -4,6 +4,7 @@ import path from "path";
 import { convertADFToMarkdown } from "@devintern/task-trackers";
 import { loadPrompt } from "../prompts/loader";
 import type { LoadPromptOptions } from "../prompts/loader";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
 import {
   FormattedTaskDetails,
   DetailedRelatedIssue,
@@ -121,20 +122,22 @@ export class TaskFormatter {
       attachments,
     } = taskDetails;
 
+    const overviewLines = [`- **Key**: ${key}`, `- **Summary**: ${summary}`];
+    if (labels.length > 0) {
+      overviewLines.push(`- **Labels**: ${labels.join(", ")}`);
+    }
+    if (components.length > 0) {
+      overviewLines.push(`- **Components**: ${components.join(", ")}`);
+    }
+
+    // Task tracker fields are external content: frame them so embedded
+    // instructions are treated as data, not commands.
     let prompt = `# Task Implementation Request
 
 ## Task Overview
-- **Key**: ${key}
-- **Summary**: ${summary}
-`;
 
-    // Add labels and components if they exist
-    if (labels.length > 0) {
-      prompt += `- **Labels**: ${labels.join(", ")}\n`;
-    }
-    if (components.length > 0) {
-      prompt += `- **Components**: ${components.join(", ")}\n`;
-    }
+${untrustedContentBlock(overviewLines.join("\n"), "task overview")}
+`;
 
     // Retry attempts get the previous failure up front so the agent does not
     // repeat the same mistake.
@@ -154,71 +157,74 @@ ${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
         "\nRead the comments below for clarifications added since that attempt and prioritize them.\n";
     }
 
-    prompt += "\n## Task Description\n";
+    prompt += "\n## Task Description\n\n";
 
     // Use rendered description if available, otherwise fall back to raw description
-    if (renderedDescription) {
-      prompt +=
-        this.convertHtmlToMarkdown(renderedDescription, trackerBaseUrl, attachmentMap, outputPath) +
-        "\n\n";
-    } else if (description) {
-      prompt += richContentConverter(description) + "\n\n";
+    const descriptionMarkdown = renderedDescription
+      ? this.convertHtmlToMarkdown(renderedDescription, trackerBaseUrl, attachmentMap, outputPath)
+      : description
+        ? richContentConverter(description)
+        : "";
+    if (descriptionMarkdown.trim()) {
+      prompt += untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description") + "\n\n";
     }
 
     // Add linked resources
     if (linkedResources.length > 0) {
-      prompt += "## Linked Resources\n\n";
+      let body = "";
       linkedResources.forEach((resource) => {
         switch (resource.type) {
           case "custom_field_link":
           case "description_link":
           case "rich_text_link":
-            prompt += `- **${resource.description}**: ${resource.url}\n`;
+            body += `- **${resource.description}**: ${resource.url}\n`;
             if (resource.field && resource.type === "custom_field_link") {
-              prompt += `  (from field: ${resource.field})\n`;
+              body += `  (from field: ${resource.field})\n`;
             }
             break;
           case "issue_link":
-            prompt += `- **${resource.linkType}**: ${resource.issueKey} - ${resource.summary}\n`;
+            body += `- **${resource.linkType}**: ${resource.issueKey} - ${resource.summary}\n`;
             break;
         }
       });
-      prompt += "\n";
+      prompt +=
+        "## Linked Resources\n\n" +
+        untrustedContentBlock(body.trimEnd(), "linked resources") +
+        "\n\n";
     }
 
     // Add detailed related work items
     if (relatedIssues && relatedIssues.length > 0) {
-      prompt += "## Related Work Items\n\n";
-      prompt += "The following related issues provide important context for this task:\n\n";
+      let body = "The following related issues provide important context for this task:\n\n";
 
       // Group related issues by type for better organization
       const groupedIssues = this.groupRelatedIssues(relatedIssues);
 
       Object.entries(groupedIssues).forEach(([groupName, issues]) => {
         if (issues.length > 0) {
-          prompt += `### ${groupName}\n\n`;
+          body += `### ${groupName}\n\n`;
 
           issues.forEach((issue) => {
-            prompt += `#### ${issue.key}: ${issue.summary}\n`;
-            prompt += `- **Type**: ${issue.issueType}\n`;
-            prompt += `- **Status**: ${issue.status}\n`;
+            body += `#### ${issue.key}: ${issue.summary}\n`;
+            body += `- **Type**: ${issue.issueType}\n`;
+            body += `- **Status**: ${issue.status}\n`;
             if (issue.priority) {
-              prompt += `- **Priority**: ${issue.priority}\n`;
+              body += `- **Priority**: ${issue.priority}\n`;
             }
             if (issue.assignee) {
-              prompt += `- **Assignee**: ${issue.assignee}\n`;
+              body += `- **Assignee**: ${issue.assignee}\n`;
             }
             if (issue.labels.length > 0) {
-              prompt += `- **Labels**: ${issue.labels.join(", ")}\n`;
+              body += `- **Labels**: ${issue.labels.join(", ")}\n`;
             }
             if (issue.components.length > 0) {
-              prompt += `- **Components**: ${issue.components.join(", ")}\n`;
+              body += `- **Components**: ${issue.components.join(", ")}\n`;
             }
 
             // Add description if available
             if (issue.renderedDescription) {
-              prompt += "\n**Description:**\n";
-              prompt +=
+              body += "\n**Description:**\n";
+              body +=
                 this.convertHtmlToMarkdown(
                   issue.renderedDescription,
                   trackerBaseUrl,
@@ -226,19 +232,24 @@ ${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
                   outputPath,
                 ) + "\n";
             } else if (issue.description) {
-              prompt += "\n**Description:**\n";
-              prompt += richContentConverter(issue.description) + "\n";
+              body += "\n**Description:**\n";
+              body += richContentConverter(issue.description) + "\n";
             }
 
-            prompt += "\n---\n\n";
+            body += "\n---\n\n";
           });
         }
       });
+
+      prompt +=
+        "## Related Work Items\n\n" +
+        untrustedContentBlock(body.trimEnd(), "related work items") +
+        "\n\n";
     }
 
     // Add attachments
     if (attachments.length > 0) {
-      prompt += "## Attachments\n\n";
+      let body = "";
       attachments.forEach((att) => {
         let attachmentUrl: string;
 
@@ -266,19 +277,20 @@ ${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
         // For images, use markdown image syntax; for others, use link syntax
         const isImage = att.mimeType.startsWith("image/");
         if (isImage && attachmentMap && attachmentMap.has(att.content)) {
-          prompt += `- **${att.filename}**:\n  ![${att.filename}](${attachmentUrl})\n  (${att.mimeType}, ${this.formatFileSize(att.size)}) - uploaded by ${att.author}\n\n`;
+          body += `- **${att.filename}**:\n  ![${att.filename}](${attachmentUrl})\n  (${att.mimeType}, ${this.formatFileSize(att.size)}) - uploaded by ${att.author}\n\n`;
         } else {
-          prompt += `- **[${att.filename}](${attachmentUrl})** (${att.mimeType}, ${this.formatFileSize(att.size)}) - uploaded by ${att.author}\n`;
+          body += `- **[${att.filename}](${attachmentUrl})** (${att.mimeType}, ${this.formatFileSize(att.size)}) - uploaded by ${att.author}\n`;
         }
       });
-      prompt += "\n";
+      prompt +=
+        "## Attachments\n\n" + untrustedContentBlock(body.trimEnd(), "attachments") + "\n\n";
     }
 
     // Add comments if they exist
     if (comments.length > 0) {
-      prompt += "## Comments and Discussion\n\n";
+      let body = "";
       if (retryContext?.newSinceMs !== undefined) {
-        prompt +=
+        body +=
           "Comments marked *(new since last attempt)* were added after the previous " +
           "incomplete attempt — treat them as the latest guidance.\n\n";
       }
@@ -286,11 +298,11 @@ ${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
         const isNew =
           retryContext?.newSinceMs !== undefined &&
           Date.parse(comment.created) > retryContext.newSinceMs;
-        prompt += `### Comment ${index + 1} by ${comment.author}${isNew ? " (new since last attempt)" : ""}\n`;
-        prompt += `*Posted: ${new Date(comment.created).toLocaleString()}*\n\n`;
+        body += `### Comment ${index + 1} by ${comment.author}${isNew ? " (new since last attempt)" : ""}\n`;
+        body += `*Posted: ${new Date(comment.created).toLocaleString()}*\n\n`;
 
         if (comment.renderedBody) {
-          prompt +=
+          body +=
             this.convertHtmlToMarkdown(
               comment.renderedBody,
               trackerBaseUrl,
@@ -298,11 +310,15 @@ ${retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH)}
               outputPath,
             ) + "\n\n";
         } else if (comment.body) {
-          prompt += richContentConverter(comment.body) + "\n\n";
+          body += richContentConverter(comment.body) + "\n\n";
         }
 
-        prompt += "---\n\n";
+        body += "---\n\n";
       });
+      prompt +=
+        "## Comments and Discussion\n\n" +
+        untrustedContentBlock(body.trimEnd(), "comments") +
+        "\n\n";
     }
 
     // Add implementation instructions
@@ -583,7 +599,19 @@ If you need clarification on any requirements or if the task description is uncl
     if (description) {
       return richContentConverter(description);
     }
-    return "*No description provided*";
+    return "";
+  }
+
+  /**
+   * Frame rendered external content, returning an empty string when absent so
+   * callers never emit an empty untrusted block.
+   *
+   * @param value - Rendered external content
+   * @param source - Short human-readable origin for the framing markers
+   */
+  private static frameExternal(value: string, source: string): string {
+    const trimmed = value.trim();
+    return trimmed ? untrustedContentBlock(trimmed, source) : "";
   }
 
   /**
@@ -699,28 +727,41 @@ If you need clarification on any requirements or if the task description is uncl
       comments,
     } = taskDetails;
 
+    const descriptionMarkdown = this.renderDescription(
+      renderedDescription,
+      description,
+      trackerBaseUrl,
+      attachmentMap,
+      outputPath,
+      richContentConverter,
+    );
+
     return loadPrompt(
       "clarity",
       {
         key,
         summary,
         metadata: this.renderMetadata(labels, components),
-        description: this.renderDescription(
-          renderedDescription,
-          description,
-          trackerBaseUrl,
-          attachmentMap,
-          outputPath,
-          richContentConverter,
+        description: descriptionMarkdown.trim()
+          ? untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description")
+          : "*No description provided*",
+        linkedResources: this.frameExternal(
+          this.renderLinkedResources(linkedResources, true),
+          "linked resources",
         ),
-        linkedResources: this.renderLinkedResources(linkedResources, true),
-        relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
-        comments: this.renderRecentComments(
-          comments,
-          trackerBaseUrl,
-          attachmentMap,
-          outputPath,
-          richContentConverter,
+        relatedIssues: this.frameExternal(
+          this.renderRelatedIssuesSummary(relatedIssues),
+          "related work items",
+        ),
+        comments: this.frameExternal(
+          this.renderRecentComments(
+            comments,
+            trackerBaseUrl,
+            attachmentMap,
+            outputPath,
+            richContentConverter,
+          ),
+          "comments",
         ),
       },
       promptOptions,
@@ -782,28 +823,41 @@ If you need clarification on any requirements or if the task description is uncl
       comments,
     } = taskDetails;
 
+    const descriptionMarkdown = this.renderDescription(
+      renderedDescription,
+      description,
+      trackerBaseUrl,
+      attachmentMap,
+      outputPath,
+      richContentConverter,
+    );
+
     return loadPrompt(
       "estimation",
       {
         key,
         summary,
         metadata: this.renderMetadata(labels, components),
-        description: this.renderDescription(
-          renderedDescription,
-          description,
-          trackerBaseUrl,
-          attachmentMap,
-          outputPath,
-          richContentConverter,
+        description: descriptionMarkdown.trim()
+          ? untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description")
+          : "*No description provided*",
+        linkedResources: this.frameExternal(
+          this.renderLinkedResources(linkedResources, false),
+          "linked resources",
         ),
-        linkedResources: this.renderLinkedResources(linkedResources, false),
-        relatedIssues: this.renderRelatedIssuesSummary(relatedIssues),
-        comments: this.renderRecentComments(
-          comments,
-          trackerBaseUrl,
-          attachmentMap,
-          outputPath,
-          richContentConverter,
+        relatedIssues: this.frameExternal(
+          this.renderRelatedIssuesSummary(relatedIssues),
+          "related work items",
+        ),
+        comments: this.frameExternal(
+          this.renderRecentComments(
+            comments,
+            trackerBaseUrl,
+            attachmentMap,
+            outputPath,
+            richContentConverter,
+          ),
+          "comments",
         ),
       },
       promptOptions,

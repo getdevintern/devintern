@@ -30,9 +30,8 @@ Analyze the following aspects:
 6. **Documentation**: Missing/unclear comments, outdated documentation
 
 ## PR Diff
-```diff
+
 {{prDiff}}
-```
 
 ## Instructions
 1. Review the code changes thoroughly
