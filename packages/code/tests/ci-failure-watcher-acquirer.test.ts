@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -532,6 +533,44 @@ describe("CiFailureWatcherAcquirer", () => {
     const state = workerState.getCiFixState("acme/widgets", 42);
     expect(state.consecutiveFailures).toBe(0);
     expect(state.escalatedSha).toBeUndefined();
+  });
+
+  test("a corrupt retry counter blocks fixes for that PR while other PRs continue", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    const raw = new Database(dbPath);
+    try {
+      raw.run(
+        `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, updated_at)
+         VALUES ('acme/widgets', 42, -1, 1)`,
+      );
+    } finally {
+      raw.close();
+    }
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(803)],
+    };
+    const { acquirer, fixed } = makeAcquirer(gh);
+    const warn = console.warn;
+    const warnings: string[] = [];
+    try {
+      console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+      await acquirer.tick();
+    } finally {
+      console.warn = warn;
+    }
+
+    expect(fixed).toEqual(["acme/widgets#43"]);
+    expect(warnings.some((message) => message.includes("ci_fix_state row"))).toBe(true);
+
+    gh.workflowRuns = [{ id: 804, name: "build", status: "completed", conclusion: "success" }];
+    await acquirer.tick();
+    expect(workerState.getCiFixState("acme/widgets", 42)).toEqual({
+      consecutiveFailures: 0,
+      escalatedSha: undefined,
+    });
   });
 
   test("does not reset the retry budget while another workflow is still running", async () => {
