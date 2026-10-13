@@ -100,4 +100,19 @@ describe("TaskFormatter untrusted-content framing", () => {
     expect(prompt).toContain("No description provided");
     expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
   });
+
+  test("frames retry failure text and the repeated task key", () => {
+    const prompt = TaskFormatter.formatTaskForAgent(
+      mockTaskDetails({ key: INJECTION, comments: [] }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { attempt: 2, previousFailureSummary: INJECTION },
+    );
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: previous attempt failure -->");
+    expect(prompt).toContain(
+      "**Task Key for Reference**: <!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task key -->",
+    );
+  });
 });

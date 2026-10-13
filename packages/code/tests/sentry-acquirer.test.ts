@@ -187,7 +187,8 @@ describe("buildBugfixTaskMarkdown", () => {
   test("includes the error details and fix instructions", () => {
     const client = new SentryClient({ authToken: "t", organization: "acme" });
     const md = client.buildTaskMarkdown(issue());
-    expect(md).toContain("# Fix Sentry error APP-1");
+    expect(md).toContain("# Fix Sentry error");
+    expect(md).toContain("- **Sentry ID**: APP-1");
     expect(md).toContain("TypeError");
     expect(md).toContain("src/app.ts in handler");
     expect(md).toContain(issue().permalink);

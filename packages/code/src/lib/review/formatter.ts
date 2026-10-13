@@ -64,7 +64,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     // Group comments by file
     const commentsByFile = groupCommentsByFile(feedback.comments);
 
-    for (const [filePath, fileComments] of Object.entries(commentsByFile)) {
+    for (const [filePath, fileComments] of commentsByFile) {
       lines.push(`### ${frameField(`\`${filePath}\``, "file path")}`);
       lines.push("");
 
@@ -139,19 +139,18 @@ function formatReviewState(state: ProcessedReviewFeedback["reviewState"]): strin
  */
 function groupCommentsByFile(
   comments: ProcessedReviewComment[],
-): Record<string, ProcessedReviewComment[]> {
-  const grouped: Record<string, ProcessedReviewComment[]> = {};
+): Map<string, ProcessedReviewComment[]> {
+  const grouped = new Map<string, ProcessedReviewComment[]>();
 
   for (const comment of comments) {
-    if (!grouped[comment.path]) {
-      grouped[comment.path] = [];
-    }
-    grouped[comment.path].push(comment);
+    const fileComments = grouped.get(comment.path) ?? [];
+    fileComments.push(comment);
+    grouped.set(comment.path, fileComments);
   }
 
   // Sort comments within each file by line number
-  for (const filePath of Object.keys(grouped)) {
-    grouped[filePath].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+  for (const fileComments of grouped.values()) {
+    fileComments.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
   }
 
   return grouped;
@@ -378,7 +377,12 @@ export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
   lines.push("", "## Failing Checks", "");
   for (const failure of feedback.failures) {
     const details = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
-    lines.push(`- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`);
+    lines.push(
+      untrustedContentBlock(
+        `- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`,
+        "ci check metadata",
+      ),
+    );
   }
   lines.push("");
   if (feedback.logs?.trim()) {

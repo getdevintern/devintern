@@ -329,17 +329,14 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   /**
    * Write the agent prompt file. The local task file is entirely user-controlled,
    * so its whole contents are framed as untrusted external data. The
-   * instructions heading is only consulted to decide whether the tool's own
-   * generic instructions are already present; no part of the file is ever
-   * emitted as trusted instructions outside the untrusted frame.
+   * generic implementation instructions always follow the frame, regardless
+   * of headings in the task file.
    */
   writeAgentPrompt(outputPath: string, task: Task): void {
     const raw = task.raw as MarkdownTaskRaw;
     const content = raw.fullContent;
     const framed = untrustedContentBlock(content.trimEnd(), "local task file");
-    const prompt = content.includes(IMPLEMENTATION_INSTRUCTIONS_HEADING)
-      ? `${framed}\n`
-      : `${framed}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
+    const prompt = `${framed}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
     writeFileSync(outputPath, prompt, "utf8");
   }
 

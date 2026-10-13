@@ -215,7 +215,7 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
     if (issue.metadata?.value) errorLines.push(`- **Exception message**: ${issue.metadata.value}`);
     if (issue.metadata?.filename) errorLines.push(`- **File**: ${issue.metadata.filename}`);
     return [
-      `# Fix Sentry error ${issue.shortId}`,
+      "# Fix Sentry error",
       "",
       "## Error",
       "",
