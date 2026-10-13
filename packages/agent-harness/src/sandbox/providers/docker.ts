@@ -67,6 +67,9 @@ export class DockerSandboxProvider implements SandboxProvider {
   // failure is foreseeable at selection time. Opt in with
   // AGENT_SANDBOX=docker after completing the sbx setup.
   readonly priority = 0;
+  // The agent runs in a guest microVM, so an enclosing host sandbox does not
+  // prevent Docker Sandboxes from starting — it may nest.
+  readonly canNestInSandbox = true;
   readonly docsUrl = "https://docs.docker.com/ai/sandboxes/";
 
   async detect(): Promise<SandboxDetection> {
