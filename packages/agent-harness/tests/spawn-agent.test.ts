@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "child_process";
+import { mkdtempSync, rmSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname } from "path";
-import { buildDefaultSandboxPolicy, spawnAgent } from "../src/spawn-agent.js";
+import { dirname, join } from "path";
+import { buildDefaultSandboxPolicy, gitAdminPaths, spawnAgent } from "../src/spawn-agent.js";
 import type {
   ResolvedSandbox,
   SandboxPolicy,
@@ -53,6 +55,41 @@ describe("buildDefaultSandboxPolicy", () => {
       expect(policy.network).toEqual({ allowedDomains: ["github.com", "api.anthropic.com"] });
     } finally {
       process.env = { ...original };
+    }
+  });
+
+  test("grants the source repo's git dir for a linked worktree", () => {
+    const root = mkdtempSync(join(tmpdir(), "git-admin-"));
+    const repo = join(root, "repo");
+    const worktree = join(root, "wt");
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      git("init", "-q", "-b", "main", repo);
+      git(
+        "-C",
+        repo,
+        "-c",
+        "user.email=a@b",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+      );
+      git("-C", repo, "worktree", "add", "-q", worktree, "-b", "feature");
+
+      const commonDir = join(repo, ".git");
+      expect(gitAdminPaths(worktree)).toContain(commonDir);
+
+      const policy = buildDefaultSandboxPolicy(worktree);
+      expect(policy.writablePaths).toContain(commonDir);
+      // The index itself lives inside the common dir, so committing there is writable.
+      expect(policy.writablePaths).toContain(join(commonDir, "worktrees", "wt"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
