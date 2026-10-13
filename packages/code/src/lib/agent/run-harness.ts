@@ -27,6 +27,7 @@ import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
+import type { VerifyConfig } from "./verify";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -48,6 +49,7 @@ interface RunAgentHarnessOptions {
   isPlanRetry?: boolean;
   prTargetBranchExplicit?: boolean;
   requestedPrTargetBranch?: string;
+  verify?: VerifyConfig;
 }
 
 export type AgentSessionResult =
@@ -59,7 +61,10 @@ export type AgentSessionResult =
  *
  * @param input - Implementation run inputs
  */
-export async function runAgentSession(input: RunAgentHarnessOptions): Promise<AgentSessionResult> {
+export async function runAgentSession(
+  input: RunAgentHarnessOptions,
+  promptOverride?: string,
+): Promise<AgentSessionResult> {
   const {
     taskFile,
     harness,
@@ -128,7 +133,7 @@ export async function runAgentSession(input: RunAgentHarnessOptions): Promise<Ag
       // Spawn agent process with enhanced permissions and max turns
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...agentArgs, ...buildPromptArgs(harness, taskContent)],
+        args: [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)],
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
       });
@@ -447,6 +452,16 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
   await new Promise<void>((resolve, reject) => {
-    finalizeAgentRun({ ...session.context, resolve, reject });
+    finalizeAgentRun({
+      ...session.context,
+      runRepair: async (prompt) => {
+        const repair = await runAgentSession(input, prompt);
+        return repair.kind === "complete"
+          ? { kind: "complete", stdout: repair.context.stdoutOutput }
+          : { kind: "halted" };
+      },
+      resolve,
+      reject,
+    });
   });
 }
