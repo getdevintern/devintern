@@ -4,7 +4,19 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { RowParseError } from "../src/lib/state/row-parse";
 import { WorkerState, parseGitHubPrUrl, recordAgentPrFromUrl } from "../src/lib/state/worker-state";
+
+/** Insert a row directly, bypassing the store, to simulate corrupted state. */
+function insertRawRow(dbPath: string, sql: string): void {
+  const { Database } = require("bun:sqlite");
+  const raw = new Database(dbPath);
+  try {
+    raw.run(sql);
+  } finally {
+    raw.close();
+  }
+}
 
 describe("WorkerState", () => {
   let dbPath: string;
@@ -288,6 +300,91 @@ describe("WorkerState", () => {
       } finally {
         second.close();
       }
+    });
+  });
+
+  describe("malformed rows", () => {
+    test("getCursor tolerates a blob cursor_value and reads as no cursor", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO cursors (source, cursor_value, updated_at) VALUES ('bad', x'00', 1)`,
+      );
+      expect(state.getCursor("bad")).toBeNull();
+    });
+
+    test("listCursors rejects a non-numeric updated_at", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO cursors (source, cursor_value, updated_at) VALUES ('bad', 'ok', 'later')`,
+      );
+      expect(() => state.listCursors()).toThrow(RowParseError);
+    });
+
+    test("listOpenAgentPrs skips a row with a blob repo", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO agent_prs (
+           provider, instance_url, project_path, change_number, web_url,
+           repo, pr_number, state, created_at, updated_at
+         ) VALUES (
+           'github', 'https://github.com', 'acme/widgets', 1,
+           'https://github.com/acme/widgets/pull/1', x'00', 1, 'open', 1, 1
+         )`,
+      );
+      state.recordAgentPr({ repo: "acme/ok", prNumber: 2 });
+      const open = state.listOpenAgentPrs();
+      expect(open).toHaveLength(1);
+      expect(open[0]?.repo).toBe("acme/ok");
+    });
+
+    test("countAgentPrs skips an unrecognized state group", () => {
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+      insertRawRow(
+        dbPath,
+        `INSERT INTO agent_prs (
+           provider, instance_url, project_path, change_number, web_url,
+           repo, pr_number, state, created_at, updated_at
+         ) VALUES (
+           'github', 'https://github.com', 'acme/other', 2,
+           'https://github.com/acme/other/pull/2', x'00', 2, 'corrupt', 1, 1
+         )`,
+      );
+      expect(state.countAgentPrs()).toEqual({ open: 1, closed: 0 });
+    });
+
+    test("getCiFixState rejects a non-numeric failure count instead of resetting the budget", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, updated_at)
+         VALUES ('acme/widgets', 1, 'many', 1)`,
+      );
+      expect(() => state.getCiFixState("acme/widgets", 1)).toThrow(RowParseError);
+    });
+
+    test("getCiFixState rejects a negative failure count", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO ci_fix_state (repo, pr_number, consecutive_failures, updated_at)
+         VALUES ('acme/widgets', 1, -1, 1)`,
+      );
+      expect(() => state.getCiFixState("acme/widgets", 1)).toThrow(RowParseError);
+    });
+
+    test("getTaskActioned rejects a non-numeric actioned_at", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO actioned_tasks (source, task_key, signal, actioned_at)
+         VALUES ('jira', 'PROJ-1', 'sig', 'yesterday')`,
+      );
+      expect(() => state.getTaskActioned("jira", "PROJ-1")).toThrow(RowParseError);
+    });
+
+    test("getMeta rejects a blob value", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO worker_meta (key, value, updated_at) VALUES ('k', x'00', 1)`,
+      );
+      expect(() => state.getMeta("k")).toThrow(RowParseError);
     });
   });
 

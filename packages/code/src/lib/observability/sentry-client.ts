@@ -11,6 +11,7 @@ import type {
   ErrorMonitorProvider,
   IssueValidity,
 } from "../acquirers/error-monitor";
+import { SourceFetchError } from "../acquirers/source-fetch";
 
 export const DEFAULT_SENTRY_BASE_URL = "https://sentry.io";
 export const SENTRY_ACTION_SUCCEEDED_COMMENT =
@@ -87,21 +88,50 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       : `/api/0/organizations/${encodeURIComponent(this.organization)}/issues/`;
     const url = `${this.baseUrl}${path}?${params.toString()}`;
 
-    const response = await this.fetchImpl(url, {
-      headers: {
-        Authorization: `Bearer ${this.authToken}`,
-        "Content-Type": "application/json",
-      },
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        headers: {
+          Authorization: `Bearer ${this.authToken}`,
+          "Content-Type": "application/json",
+        },
+      });
+    } catch (error) {
+      throw new SourceFetchError(
+        "unreadable",
+        `Sentry request failed for ${url}: ${(error as Error).message}`,
+      );
+    }
 
     if (response.status === 401 || response.status === 403) {
-      throw new Error(`Sentry rejected the auth token (HTTP ${response.status})`);
+      throw new SourceFetchError(
+        "auth-failed",
+        `Sentry rejected the auth token (HTTP ${response.status})`,
+      );
+    }
+    if (response.status === 429) {
+      throw new SourceFetchError(
+        "rate-limited",
+        `Sentry rate-limited the request (HTTP 429) for ${url}`,
+        { retryAfterMs: parseRetryAfterMs(response) },
+      );
     }
     if (!response.ok) {
-      throw new Error(`Sentry API error (HTTP ${response.status}) for ${url}`);
+      throw new SourceFetchError(
+        "unreadable",
+        `Sentry API error (HTTP ${response.status}) for ${url}`,
+      );
     }
 
-    const body = (await response.json()) as Array<Record<string, unknown>>;
+    let body: Array<Record<string, unknown>>;
+    try {
+      body = (await response.json()) as Array<Record<string, unknown>>;
+    } catch (error) {
+      throw new SourceFetchError(
+        "unreadable",
+        `Sentry returned an unreadable response for ${url}: ${(error as Error).message}`,
+      );
+    }
     return body.map((raw) => {
       const id = String(raw.id);
       const shortId = String(raw.shortId ?? raw.id);
@@ -198,4 +228,15 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
     );
     return lines.join("\n");
   }
+}
+
+/** Interpret a `Retry-After` header as milliseconds, when the server sent one. */
+function parseRetryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const at = Date.parse(header);
+  if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  return undefined;
 }

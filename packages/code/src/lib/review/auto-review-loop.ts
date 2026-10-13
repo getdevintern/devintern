@@ -22,6 +22,7 @@ import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "../agent/json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
+import { loadPrompt } from "../prompts/loader";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
@@ -56,60 +57,20 @@ function generateReviewPrompt(
   prDiff: string,
   iteration: number,
 ): string {
-  return `You are reviewing a pull request. Your task is to analyze the code changes and provide structured feedback in JSON format.
-
-## PR Information
-- **Repository**: ${repository}
-- **PR Number**: #${prNumber}
-- **Review Iteration**: ${iteration}
-
-## Review Criteria
-Analyze the following aspects:
-1. **Code Quality & Best Practices**: Adherence to coding standards, maintainability, readability
-2. **Potential Bugs**: Logic errors, edge cases, error handling
-3. **Performance**: Inefficient algorithms, unnecessary operations, resource usage
-4. **Security**: Vulnerabilities, input validation, authentication/authorization
-5. **Test Coverage**: Missing tests, inadequate test cases
-6. **Documentation**: Missing/unclear comments, outdated documentation
-
-## PR Diff
-\`\`\`diff
-${prDiff}
-\`\`\`
-
-## Instructions
-1. Review the code changes thoroughly
-2. Identify issues across all criteria listed above
-3. Assign priority to each issue:
-   - **critical**: Security vulnerabilities, data loss risks, breaking changes
-   - **high**: Bugs that will likely cause failures, major performance issues
-   - **medium**: Code quality issues, minor bugs, missing tests
-   - **low**: Style inconsistencies, minor optimizations
-   - **info**: Suggestions, alternatives, educational feedback
-
-4. Provide your feedback as one JSON object in the following format:
-
-{
-  "summary": "Brief overall assessment of the PR (2-3 sentences)",
-  "items": [
+  // Trust boundary: the review/fix prompts run inside a checkout of the PR
+  // under review, so repository-controlled overrides must never be able to
+  // rewrite them (a checked-out `.devintern-code/prompts/review.md` could
+  // otherwise force `"approved": true`). Pin lookups to the bundled catalog.
+  return loadPrompt(
+    "review",
     {
-      "priority": "critical|high|medium|low|info",
-      "category": "code-quality|bug|performance|security|testing|documentation|style",
-      "file": "path/to/file.ts",
-      "line": "42-45",
-      "issue": "Clear description of the issue",
-      "suggestion": "Specific actionable fix or improvement"
-    }
-  ],
-  "approved": false
-}
-
-5. Set "approved": true ONLY if all issues are low priority or informational
-6. Be constructive and specific in your feedback
-7. Focus on actionable improvements
-
-**IMPORTANT**: Return only the valid JSON object. Do not include Markdown fences or explanatory text.
-`;
+      repository,
+      prNumber: String(prNumber),
+      iteration: String(iteration),
+      prDiff,
+    },
+    { useAmbientOverrides: false },
+  );
 }
 
 /**
@@ -140,24 +101,17 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
    - Extend the existing commit message by appending a new line describing iteration ${iteration} fixes
    - DO NOT push - this will be done automatically`;
 
-  return `You received the following feedback on your pull request implementation. Please address each item systematically.
-
-## Review Iteration ${iteration}
-
-## Feedback to Address
-${itemsList}
-
-## Instructions
-1. Address each feedback item in order of priority (critical → high → medium)
-2. Make minimal, focused changes to fix the issues
-3. Ensure you don't introduce new bugs while fixing existing ones
-${commitInstruction}
-
-**IMPORTANT**:
-- Focus on the specific issues mentioned
-- Don't make unrelated changes
-- Test your changes if possible
-`;
+  // Same trust boundary as the review prompt: a repository-controlled `fix.md`
+  // must not be able to redirect the fixer running against the PR checkout.
+  return loadPrompt(
+    "fix",
+    {
+      iteration: String(iteration),
+      itemsList,
+      commitInstruction,
+    },
+    { useAmbientOverrides: false },
+  );
 }
 
 /**
@@ -168,7 +122,7 @@ ${commitInstruction}
  * @returns Unified diff from merge-base to HEAD
  * @throws When the remote base branch cannot be resolved or diff generation fails
  */
-function getPRDiff(baseBranch: string, workingDir: string): string {
+export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Strip origin/ prefix if present for fetch command
   const branchName = baseBranch.replace(/^origin\//, "");
   const remoteBase = `origin/${branchName}`;
@@ -288,7 +242,7 @@ function getPRDiff(baseBranch: string, workingDir: string): string {
  * @returns Validated {@link ReviewFeedback} object
  * @throws When no JSON is found or the structure is invalid
  */
-function parseReviewFeedback(agentOutput: string): ReviewFeedback {
+export function parseReviewFeedback(agentOutput: string): ReviewFeedback {
   try {
     const feedback = parseAgentJsonObject(agentOutput, "approved");
 
@@ -317,7 +271,7 @@ function parseReviewFeedback(agentOutput: string): ReviewFeedback {
  * @returns Agent stdout on success
  * @throws When the agent times out or exits with a non-zero code
  */
-async function runAgentPrompt(
+export async function runAgentPrompt(
   prompt: string,
   workingDir: string,
   harness: AgentHarness,
@@ -426,7 +380,7 @@ async function runAgentPrompt(
  * @param minPriority - Minimum priority to include
  * @returns Items meeting the priority threshold
  */
-function filterByPriority(
+export function filterByPriority(
   items: ReviewFeedbackItem[],
   minPriority: ReviewPriority,
 ): ReviewFeedbackItem[] {

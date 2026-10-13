@@ -8,9 +8,11 @@
  * invocation is rewritten by the provider first.
  */
 
+import { spawnSync } from "child_process";
 import type { ChildProcess, SpawnOptions } from "child_process";
+import { existsSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
 import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
@@ -71,13 +73,45 @@ export interface SpawnedAgent {
 }
 
 /**
+ * Absolute git administrative directories for `workingDir`, when it is inside
+ * a repository. A linked worktree (the review worktrees under `/tmp`) keeps
+ * its index, refs, and objects under the source repo's `.git`, outside the
+ * worktree itself, so `git add`/`commit` there create `index.lock` outside
+ * the default writable set and fail under confinement. The resolved git dir
+ * and common dir are returned so callers can grant them write access.
+ *
+ * @param workingDir - The directory the agent operates in.
+ * @returns Existing absolute git dir paths (empty when `workingDir` is not a repo).
+ */
+export function gitAdminPaths(workingDir: string): string[] {
+  if (!existsSync(workingDir)) return [];
+  const rev = (flag: string): string | undefined => {
+    const result = spawnSync("git", ["-C", workingDir, "rev-parse", flag], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    if (result.error || result.status !== 0) return undefined;
+    const value = result.stdout.trim();
+    if (!value) return undefined;
+    const absolute = isAbsolute(value) ? value : resolve(workingDir, value);
+    return existsSync(absolute) ? absolute : undefined;
+  };
+  const dirs = [rev("--absolute-git-dir"), rev("--git-common-dir")].filter(
+    (p): p is string => p !== undefined,
+  );
+  return [...new Set(dirs)];
+}
+
+/**
  * Build the default sandbox policy for an agent run.
  *
  * Write access covers the working directory, the task output dir, the OS
  * tmpdir (review worktrees, Chromium profile scratch, ssh-agent sockets),
  * and the Playwright/Puppeteer browser caches so agents that launch a
  * browser for testing or research keep working under filesystem confinement.
- * Network stays open: agents need LLM APIs, git push, and package registries.
+ * The working dir's git administrative directories are included so `git
+ * add`/`commit` work in a linked worktree. Network stays open: agents need
+ * LLM APIs, git push, and package registries.
  *
  * Env tuning: `AGENT_SANDBOX_WRITABLE_PATHS` (colon-separated) adds writable
  * paths; `AGENT_SANDBOX_ALLOWED_DOMAINS` (comma-separated) switches the
@@ -117,6 +151,7 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
       tempScope,
       ...browserCaches,
       ...extraWritable,
+      ...gitAdminPaths(workingDir),
     ],
     network: allowedDomains.length > 0 ? { allowedDomains } : "open",
     workingDir,

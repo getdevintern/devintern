@@ -48,6 +48,9 @@ export class SmolvmSandboxProvider implements SandboxProvider {
   readonly name = "smolvm";
   readonly displayName = "SmolVM (microVM)";
   readonly priority = 0; // explicit-only: never picked by auto
+  // The agent runs in a guest microVM, so an enclosing host sandbox does not
+  // prevent SmolVM from starting — it may nest.
+  readonly canNestInSandbox = true;
   readonly docsUrl = "https://docs.celesto.ai/smolvm/introduction";
 
   async detect(): Promise<SandboxDetection> {

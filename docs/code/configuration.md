@@ -416,6 +416,48 @@ This covers every agent execution, including task implementation, plan retries, 
 - Files older than 30 days are pruned on write, the directory is capped at 500 files (oldest first) and a 256 MB total budget. Override with `DEVINTERN_HARNESS_LOG_RETENTION_DAYS`, `DEVINTERN_HARNESS_LOG_MAX_FILES`, and `DEVINTERN_HARNESS_LOG_MAX_TOTAL_MB`.
 - The local dashboard surfaces a run's harness logs on its detail page; the same data is available as JSON at `GET /api/runs/:id/harness-logs` and `GET /api/runs/:id/harness-logs/:name`.
 
+## Prompt Catalog
+
+The role prompts DevIntern sends to the agent are versioned Markdown files rather than inline TypeScript, so they can be reviewed, diffed, and overridden. The bundled catalog ships with the CLI:
+
+| Prompt       | Stage                                              |
+| ------------ | -------------------------------------------------- |
+| `clarity.md` | Pre-implementation feasibility / clarity check     |
+| `estimation.md` | Fibonacci story-point estimation                |
+| `review.md`  | Adversarial pull-request review (auto-review loop) |
+| `fix.md`     | Addressing structured review feedback              |
+
+Each file starts with lightweight frontmatter that declares its `name`, `description`, `placeholders`, and `requiredSections`:
+
+```markdown
+---
+name: clarity
+description: Pre-implementation clarity and feasibility assessment for a task.
+placeholders:
+  - key
+  - summary
+requiredSections:
+  - "## Your Role"
+---
+```
+
+`{{placeholder}}` tokens are substituted at load time. A missing value fails loudly rather than shipping an unresolved token to the agent.
+
+### Per-repo overrides
+
+Override any prompt without editing TypeScript by placing a same-named file in `.devintern-code/prompts/` (searched from your project root upward). Lookup order is: an explicit override directory, then `DEVINTERN_PROMPTS_DIR`, then `.devintern-code/prompts/`, and finally the bundled defaults.
+
+```bash
+# Optional: point at a directory of prompt overrides
+DEVINTERN_PROMPTS_DIR=./my-prompts
+```
+
+**Trust boundary.** Overrides are honoured for the task-analysis prompts (`clarity.md`, `estimation.md`), which run against your own task data. The auto-review loop deliberately pins `review.md` and `fix.md` to the bundled catalog (`useAmbientOverrides: false`): those prompts run against a checkout of the pull request under review, so a `review.md` or `fix.md` committed on the PR branch must never be able to rewrite the reviewer's instructions (for example, to force `"approved": true`) or redirect the fixer. The self-approval guarantee of the auto-review loop depends on the reviewer's instructions coming from a trusted source, not the code being reviewed.
+
+### Linting
+
+Run `bun run lint:prompts` (also part of `bun run lint`, and therefore CI) to validate the catalog. It fails on malformed frontmatter, missing required sections, undeclared placeholders, and declared-but-unused placeholders.
+
 ## Agent Harness
 
 Configure which AI agent runs and how long it can work:
@@ -553,6 +595,8 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 | `smolvm` | [SmolVM](https://docs.celesto.ai/smolvm/introduction) microVM with a dedicated in-VM browser sandbox; never picked by `auto`                                                                | `claude-code`, `codex`, `pi`                           |
 
 If you explicitly select a provider that is not installed or does not support your harness, the run fails with an actionable error rather than silently running unsandboxed.
+
+When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`, `srt`) — stacking a *different* one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`, `smolvm`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads the markers each wrapper exports (`NONO_CAP_FILE` for nono, `SANDBOX_RUNTIME=1` for srt) from the real process environment captured when the CLI starts, *before* `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
 
 ### What the sandbox allows
 

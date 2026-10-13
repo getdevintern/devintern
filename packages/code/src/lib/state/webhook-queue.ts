@@ -13,6 +13,15 @@ import { dirname, join } from "path";
 import { findConfigDir } from "@devintern/utils";
 import { ensureGitInfoExcluded } from "../utils/git-exclude";
 import { configureSqliteConnection } from "./sqlite";
+import {
+  RowParseError,
+  optionalString,
+  parseRowObject,
+  requireEnum,
+  requireNonNegativeInteger,
+  requireNumber,
+  requireString,
+} from "./row-parse";
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -71,6 +80,18 @@ export interface BaseSyncEvent {
    */
   updatedAt: number;
 }
+
+const WEBHOOK_EVENT_STATUSES = [
+  "pending",
+  "processing",
+  "completed",
+  "failed",
+] as const satisfies readonly WebhookEventStatus[];
+const BASE_SYNC_EVENT_STATUSES = [
+  "pending",
+  "completed",
+  "failed",
+] as const satisfies readonly BaseSyncEventStatus[];
 
 /**
  * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
@@ -278,24 +299,41 @@ export class WebhookQueue {
   getRateLimit(harness: string): number | null {
     const row = this.db
       .query(`SELECT value FROM webhook_meta WHERE key = ?`)
-      .get(this.rateLimitKey(harness)) as { value: string } | undefined;
+      .get(this.rateLimitKey(harness));
     if (!row) {
       return null;
     }
-    const ms = Number(row.value);
+    const ms = Number(readMetaValue(row));
     return Number.isFinite(ms) ? ms : null;
   }
 
-  /** Every persisted per-harness rate-limit window, keyed by harness name. */
+  /**
+   * Every persisted per-harness rate-limit window, keyed by harness name.
+   *
+   * Deliberately per-row tolerant: a malformed `webhook_meta` row is skipped
+   * (and logged when verbose) rather than aborting the whole read, so a single
+   * corrupted row cannot discard every healthy persisted limit at worker
+   * startup. `getActiveHarness` remains fail-fast for a single value; callers
+   * that must not fail on corrupt state should guard it (see `WorkerFailover`).
+   */
   getAllRateLimits(): Record<string, number> {
     const rows = this.db
       .query(`SELECT key, value FROM webhook_meta WHERE key LIKE 'rate_limit:%'`)
-      .all() as { key: string; value: string }[];
+      .all();
     const result: Record<string, number> = {};
     for (const row of rows) {
-      const ms = Number(row.value);
-      if (Number.isFinite(ms)) {
-        result[row.key.slice("rate_limit:".length)] = ms;
+      try {
+        const record = parseRowObject(row, "webhook_meta row");
+        const key = requireString(record, "key", "webhook_meta row");
+        const ms = Number(requireString(record, "value", "webhook_meta row"));
+        if (Number.isFinite(ms)) {
+          result[key.slice("rate_limit:".length)] = ms;
+        }
+      } catch (error) {
+        if (this.verbose) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(`[WebhookQueue] Skipping malformed rate-limit row: ${detail}`);
+        }
       }
     }
     return result;
@@ -328,13 +366,19 @@ export class WebhookQueue {
   /**
    * Read the persisted active harness of the failover chain.
    *
+   * Fail-fast: a malformed `webhook_meta` value throws {@link RowParseError}
+   * rather than being silently coerced. Callers restoring at startup should
+   * guard this (see `WorkerFailover`), since one corrupted row must not prevent
+   * the worker from starting.
+   *
    * @returns Canonical harness name, or `null` when none was persisted.
+   * @throws {RowParseError} When the persisted value is not a string.
    */
   getActiveHarness(): string | null {
     const row = this.db
       .query(`SELECT value FROM webhook_meta WHERE key = ?`)
-      .get(this.activeHarnessKey()) as { value: string } | undefined;
-    return row?.value ?? null;
+      .get(this.activeHarnessKey());
+    return row ? readMetaValue(row) : null;
   }
 
   /**
@@ -441,20 +485,8 @@ export class WebhookQueue {
   getBaseSyncEvent(externalId: string): BaseSyncEvent | null {
     const row = this.db
       .query(`SELECT * FROM base_sync_events WHERE external_id = ?`)
-      .get(externalId) as Record<string, unknown> | null;
-    if (!row) return null;
-    return {
-      externalId: row.external_id as string,
-      repo: row.repo as string,
-      prNumber: row.pr_number as number,
-      baseSha: row.base_sha as string,
-      headSha: row.head_sha as string,
-      headObservedAt: row.head_observed_at as number,
-      attempts: row.attempts as number,
-      status: row.status as BaseSyncEventStatus,
-      lastError: (row.last_error as string | null) ?? undefined,
-      updatedAt: row.updated_at as number,
-    };
+      .get(externalId);
+    return row ? parseBaseSyncEventRow(row) : null;
   }
 
   /** Consume one real execution attempt. Eligibility deferrals never call this. */
@@ -686,7 +718,7 @@ export class WebhookQueue {
         `SELECT id, event_type, payload, status, created_at, updated_at, attempts, last_error
        FROM webhook_events WHERE id = ?`,
       )
-      .get(id) as Record<string, unknown> | null;
+      .get(id);
 
     if (!row) {
       return null;
@@ -695,7 +727,11 @@ export class WebhookQueue {
     return this.rowToEvent(row);
   }
 
-  /** Return pending and in-flight events ordered by creation time (for recovery). */
+  /**
+   * Return pending and in-flight events ordered by creation time for recovery.
+   * A malformed row is left in the database for inspection, but cannot prevent
+   * healthy events from being recovered when the server starts.
+   */
   getPendingEvents(): WebhookEvent[] {
     const rows = this.db
       .query(
@@ -704,9 +740,18 @@ export class WebhookQueue {
        WHERE status IN ('pending', 'processing')
        ORDER BY created_at ASC`,
       )
-      .all() as Record<string, unknown>[];
+      .all();
 
-    return rows.map((row) => this.rowToEvent(row));
+    const events: WebhookEvent[] = [];
+    for (const row of rows) {
+      try {
+        events.push(this.rowToEvent(row));
+      } catch (error) {
+        if (!(error instanceof RowParseError)) throw error;
+        console.warn(`[WebhookQueue] Skipping malformed pending event: ${error.message}`);
+      }
+    }
+    return events;
   }
 
   /** Return permanently failed events for inspection or manual retry. */
@@ -718,7 +763,7 @@ export class WebhookQueue {
        WHERE status = 'failed'
        ORDER BY created_at ASC`,
       )
-      .all() as Record<string, unknown>[];
+      .all();
 
     return rows.map((row) => this.rowToEvent(row));
   }
@@ -750,13 +795,21 @@ export class WebhookQueue {
       FROM webhook_events
       GROUP BY status
     `)
-      .all() as { status: string; count: number }[];
+      .all();
 
     const result = { pending: 0, processing: 0, failed: 0 };
     for (const row of stats) {
-      if (row.status === "pending") result.pending = row.count;
-      if (row.status === "processing") result.processing = row.count;
-      if (row.status === "failed") result.failed = row.count;
+      const record = parseRowObject(row, "webhook_events stats row");
+      const status = record.status;
+      // Aggregate/diagnostic read: skip unrecognized status groups (e.g. a
+      // corrupted BLOB) instead of throwing, so /health and startup reporting
+      // degrade gracefully rather than failing on one bad row.
+      if (typeof status !== "string") continue;
+      if (!(WEBHOOK_EVENT_STATUSES as readonly string[]).includes(status)) continue;
+      const count = requireNumber(record, "count", "webhook_events stats row");
+      if (status === "pending") result.pending = count;
+      else if (status === "processing") result.processing = count;
+      else if (status === "failed") result.failed = count;
     }
 
     return result;
@@ -783,21 +836,49 @@ export class WebhookQueue {
   }
 
   /** Map a SQLite row to a {@link WebhookEvent}. */
-  private rowToEvent(row: Record<string, unknown>): WebhookEvent {
-    return {
-      id: row.id as string,
-      eventType: row.event_type as string,
-      payload: row.payload as string,
-      status: row.status as WebhookEventStatus,
-      createdAt: row.created_at as number,
-      updatedAt: row.updated_at as number,
-      attempts: row.attempts as number,
-      lastError: row.last_error as string | undefined,
-    };
+  private rowToEvent(row: unknown): WebhookEvent {
+    return parseWebhookEventRow(row);
   }
 
   /** Close the underlying SQLite connection. */
   close(): void {
     this.db.close();
   }
+}
+
+/** Read a required `value` column from a `webhook_meta` row. */
+function readMetaValue(row: unknown): string {
+  return requireString(parseRowObject(row, "webhook_meta row"), "value", "webhook_meta row");
+}
+
+/** Parse one `webhook_events` row read from SQLite into a {@link WebhookEvent}. */
+function parseWebhookEventRow(row: unknown): WebhookEvent {
+  const record = parseRowObject(row, "webhook_events row");
+  return {
+    id: requireString(record, "id", "webhook_events row"),
+    eventType: requireString(record, "event_type", "webhook_events row"),
+    payload: requireString(record, "payload", "webhook_events row"),
+    status: requireEnum(WEBHOOK_EVENT_STATUSES, record.status, "status", "webhook_events row"),
+    createdAt: requireNumber(record, "created_at", "webhook_events row"),
+    updatedAt: requireNumber(record, "updated_at", "webhook_events row"),
+    attempts: requireNonNegativeInteger(record, "attempts", "webhook_events row"),
+    lastError: optionalString(record, "last_error", "webhook_events row"),
+  };
+}
+
+/** Parse one `base_sync_events` row read from SQLite into a {@link BaseSyncEvent}. */
+function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
+  const record = parseRowObject(row, "base_sync_events row");
+  return {
+    externalId: requireString(record, "external_id", "base_sync_events row"),
+    repo: requireString(record, "repo", "base_sync_events row"),
+    prNumber: requireNumber(record, "pr_number", "base_sync_events row"),
+    baseSha: requireString(record, "base_sha", "base_sync_events row"),
+    headSha: requireString(record, "head_sha", "base_sync_events row"),
+    headObservedAt: requireNumber(record, "head_observed_at", "base_sync_events row"),
+    attempts: requireNonNegativeInteger(record, "attempts", "base_sync_events row"),
+    status: requireEnum(BASE_SYNC_EVENT_STATUSES, record.status, "status", "base_sync_events row"),
+    lastError: optionalString(record, "last_error", "base_sync_events row"),
+    updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),
+  };
 }

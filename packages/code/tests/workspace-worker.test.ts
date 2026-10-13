@@ -46,32 +46,6 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-/**
- * Temporarily drop ambient GitHub credentials so a GitLab-only workspace does
- * not also build the GitHub acquirers. Without this, an inherited
- * `GITHUB_TOKEN` (or custom App credentials) makes `buildFleetEventAcquirers`
- * add a GitHub `CiFailureWatcherAcquirer` first, and tests that locate the
- * watcher by class silently tick the wrong provider.
- */
-function withoutGitHubCredentials(): () => void {
-  const saved = {
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    GITHUB_APP_ID: process.env.GITHUB_APP_ID,
-    GITHUB_APP_PRIVATE_KEY_PATH: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
-    GITHUB_APP_PRIVATE_KEY_BASE64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
-  };
-  delete process.env.GITHUB_TOKEN;
-  delete process.env.GITHUB_APP_ID;
-  delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-  delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
-  return () => {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
-}
-
 const CONFIG = parseWorkspaceConfig(`
 [defaults]
 tracker = "markdown"
@@ -799,7 +773,15 @@ GITLAB_CODE_HOST_PROXY = ""
   test.each(["closed", "repair"])(
     "GitLab CI keeps same-project MR identities separate: %s",
     async (scenario) => {
-      const restoreGitHubCredentials = withoutGitHubCredentials();
+      // This test exercises GitLab-only event wiring. Clear any ambient GitHub
+      // credentials so buildFleetEventAcquirers does not also register a GitHub
+      // CI watcher that the `instanceof` lookup below could select instead.
+      const savedGithubEnv = {
+        token: process.env.GITHUB_TOKEN,
+        appId: process.env.GITHUB_APP_ID,
+        keyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+        keyBase64: process.env.GITHUB_APP_PRIVATE_KEY_BASE64,
+      };
       const workspaceDir = join(tmpdir(), `ws-gitlab-ci-${crypto.randomUUID()}`);
       mkdirSync(workspaceDir, { recursive: true });
       const state = openWorkspaceState(workspaceDir);
@@ -854,8 +836,24 @@ GITLAB_CODE_HOST_PROXY = ""
       const getLogs = spyOn(GitLabReviewsClient.prototype, "getJobTraces").mockResolvedValue(
         "test failed",
       );
+      // Ambient GitHub credentials would make buildFleetEventAcquirers build a
+      // second, provider-neutral CiFailureWatcherAcquirer ahead of the GitLab
+      // watcher, and `find` below would select that instance. This workspace is
+      // GitLab-only, so pin the environment for the duration of the test.
+      const savedToken = process.env.GITHUB_TOKEN;
+      const savedAppId = process.env.GITHUB_APP_ID;
+      const savedAppKeyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      const savedAppKeyBase64 = process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_APP_ID;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+      delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
       const scheduled: string[] = [];
       try {
+        delete process.env.GITHUB_TOKEN;
+        delete process.env.GITHUB_APP_ID;
+        delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
         const acquirers = await buildFleetEventAcquirers({
           config,
           workspaceDir,
@@ -899,9 +897,25 @@ GITLAB_CODE_HOST_PROXY = ""
         getChange.mockRestore();
         getCi.mockRestore();
         getLogs.mockRestore();
-        restoreGitHubCredentials();
+        if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = savedToken;
+        if (savedAppId === undefined) delete process.env.GITHUB_APP_ID;
+        else process.env.GITHUB_APP_ID = savedAppId;
+        if (savedAppKeyPath === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedAppKeyPath;
+        if (savedAppKeyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppKeyBase64;
         state.close();
         rmSync(workspaceDir, { recursive: true, force: true });
+        if (savedGithubEnv.token === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = savedGithubEnv.token;
+        if (savedGithubEnv.appId === undefined) delete process.env.GITHUB_APP_ID;
+        else process.env.GITHUB_APP_ID = savedGithubEnv.appId;
+        if (savedGithubEnv.keyPath === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+        else process.env.GITHUB_APP_PRIVATE_KEY_PATH = savedGithubEnv.keyPath;
+        if (savedGithubEnv.keyBase64 === undefined)
+          delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+        else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedGithubEnv.keyBase64;
       }
     },
   );

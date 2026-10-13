@@ -85,6 +85,15 @@ export interface SandboxProvider {
    */
   supportsHarness?(harnessName: string): boolean;
   /**
+   * Whether this provider can run inside an enclosing sandbox. Kernel-namespace
+   * wrappers (`nono`, `srt`) and the in-process `native` sandbox cannot nest:
+   * the inner instance cannot set up its namespaces/session state under the
+   * outer confinement and exits before the agent starts. MicroVM providers
+   * (`docker`, `smolvm`) run the agent inside a guest, independent of the host
+   * namespaces, so they may nest. Undefined means "cannot nest".
+   */
+  readonly canNestInSandbox?: boolean;
+  /**
    * Rewrite the resolved agent invocation into its sandboxed form. The result
    * must be directly spawn()-able (no shell interpretation by the caller).
    */

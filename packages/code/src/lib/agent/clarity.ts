@@ -28,6 +28,8 @@ export interface ClarityAssessment {
     severity: "critical" | "major" | "minor";
   }>;
   recommendations: string[];
+  assumptions: string[];
+  outOfScope: string[];
   summary: string;
 }
 
@@ -204,6 +206,22 @@ export async function runClarityCheck(
                 assessmentContent += `\n`;
               }
 
+              if (assessment.assumptions.length > 0) {
+                assessmentContent += `## Assumptions\n\n`;
+                assessment.assumptions.forEach((assumption) => {
+                  assessmentContent += `- ${assumption}\n`;
+                });
+                assessmentContent += `\n`;
+              }
+
+              if (assessment.outOfScope.length > 0) {
+                assessmentContent += `## Out of Scope\n\n`;
+                assessment.outOfScope.forEach((item) => {
+                  assessmentContent += `- ${item}\n`;
+                });
+                assessmentContent += `\n`;
+              }
+
               // Also save raw JSON for programmatic access
               assessmentContent += `## Raw JSON\n\n\`\`\`json\n${JSON.stringify(assessment, null, 2)}\n\`\`\`\n`;
 
@@ -375,7 +393,17 @@ export function parseClarityResponse(output: string): ClarityAssessment {
       throw new Error("warn: Invalid assessment structure - missing required fields");
     }
 
-    return assessment as unknown as ClarityAssessment;
+    // `assumptions`/`outOfScope` were added later; tolerate agents (or cached
+    // responses) that omit them by normalizing to empty arrays.
+    return {
+      ...(assessment as unknown as ClarityAssessment),
+      assumptions: Array.isArray(assessment.assumptions)
+        ? assessment.assumptions.filter((value): value is string => typeof value === "string")
+        : [],
+      outOfScope: Array.isArray(assessment.outOfScope)
+        ? assessment.outOfScope.filter((value): value is string => typeof value === "string")
+        : [],
+    };
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`warn: Malformed JSON in Agent response: ${error.message}`);

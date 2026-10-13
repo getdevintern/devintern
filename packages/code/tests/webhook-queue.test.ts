@@ -10,6 +10,18 @@ import {
   prepareQueueDbDirectory,
   resolveQueueDbPath,
 } from "../src/lib/state/webhook-queue";
+import { RowParseError } from "../src/lib/state/row-parse";
+
+/** Insert a row directly, bypassing the queue, to simulate corrupted state. */
+function insertRawRow(dbPath: string, sql: string): void {
+  const { Database } = require("bun:sqlite");
+  const raw = new Database(dbPath);
+  try {
+    raw.run(sql);
+  } finally {
+    raw.close();
+  }
+}
 
 describe("WebhookQueue", () => {
   let dbPath: string;
@@ -164,6 +176,84 @@ describe("WebhookQueue", () => {
       expect(queue.getBaseSyncEvent("completed")).toBeNull();
       expect(queue.getBaseSyncEvent("exhausted")).toBeNull();
       expect(queue.getBaseSyncEvent("pending")?.status).toBe("pending");
+    });
+  });
+
+  describe("malformed rows", () => {
+    test("getEvent rejects an unknown status", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'bogus', 1, 1, 0)`,
+      );
+      expect(() => queue.getEvent("bad")).toThrow(RowParseError);
+    });
+
+    test("getPendingEvents skips a malformed event and recovers healthy events", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'pending', 1, 1, 'lots')`,
+      );
+      const healthyId = queue.enqueue("push", {});
+      const warn = console.warn;
+      const warnings: string[] = [];
+      try {
+        console.warn = (message: string) => warnings.push(message);
+        expect(queue.getPendingEvents().map((event) => event.id)).toEqual([healthyId]);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings.some((message) => message.includes("Skipping malformed pending event"))).toBe(
+        true,
+      );
+    });
+
+    test("getBaseSyncEvent rejects a non-numeric pr_number", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO base_sync_events (
+           external_id, repo, pr_number, base_sha, head_sha,
+           head_observed_at, attempts, status, updated_at
+         ) VALUES ('bad', 'acme/widgets', 'one', 'base', 'head', 1, 0, 'pending', 1)`,
+      );
+      expect(() => queue.getBaseSyncEvent("bad")).toThrow(RowParseError);
+    });
+
+    test("getRateLimit rejects a blob value", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_meta (key, value) VALUES ('rate_limit:claude-code', x'00')`,
+      );
+      expect(() => queue.getRateLimit("claude-code")).toThrow(RowParseError);
+    });
+
+    test("getAllRateLimits skips a malformed row but keeps healthy ones", () => {
+      queue.setRateLimit("claude-code", 111);
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_meta (key, value) VALUES ('rate_limit:codex', x'00')`,
+      );
+      expect(queue.getAllRateLimits()).toEqual({ "claude-code": 111 });
+    });
+
+    test("getStats skips an unrecognized status instead of throwing", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'bogus', 1, 1, 0)`,
+      );
+      queue.enqueue("issue_comment", {});
+      expect(queue.getStats()).toEqual({ pending: 1, processing: 0, failed: 0 });
+    });
+
+    test("getStats skips a corrupted blob status instead of throwing", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', x'00', 1, 1, 0)`,
+      );
+      expect(queue.getStats()).toEqual({ pending: 0, processing: 0, failed: 0 });
     });
   });
 

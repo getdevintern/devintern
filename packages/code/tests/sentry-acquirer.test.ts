@@ -9,8 +9,20 @@ import {
   SentryClient,
 } from "../src/lib/observability/sentry-client";
 import type { SentryIssue } from "../src/lib/observability/sentry-client";
-import { ErrorMonitorAcquirer } from "../src/lib/acquirers/error-monitor";
+import { ErrorMonitorAcquirer, SourceFetchError } from "../src/lib/acquirers/error-monitor";
+import type { SourceStatusInput } from "../src/lib/acquirers/source-fetch";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { AutomationStateStore } from "../src/lib/automation/state";
+
+async function expectFetchError(promise: Promise<unknown>): Promise<SourceFetchError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof SourceFetchError) return error;
+    throw error;
+  }
+  throw new Error("expected the fetch to reject with a SourceFetchError");
+}
 
 function issue(overrides: Partial<SentryIssue> = {}): SentryIssue {
   return {
@@ -84,6 +96,44 @@ describe("SentryClient", () => {
       new Response("denied", { status: 401 })) as unknown as typeof fetch;
     const client = new SentryClient({ authToken: "bad", organization: "acme", fetchImpl });
     expect(client.fetchUnresolvedIssues()).rejects.toThrow("auth token");
+  });
+
+  test("classifies an auth failure as auth-failed", async () => {
+    const fetchImpl = (async () =>
+      new Response("denied", { status: 403 })) as unknown as typeof fetch;
+    const client = new SentryClient({ authToken: "bad", organization: "acme", fetchImpl });
+    const error = await expectFetchError(client.fetchIssues());
+    expect(error.status).toBe("auth-failed");
+  });
+
+  test("classifies a 429 as rate-limited and preserves Retry-After", async () => {
+    const fetchImpl = (async () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      })) as unknown as typeof fetch;
+    const client = new SentryClient({ authToken: "t", organization: "acme", fetchImpl });
+    const error = await expectFetchError(client.fetchIssues());
+    expect(error.status).toBe("rate-limited");
+    expect(error.retryAfterMs).toBe(30_000);
+  });
+
+  test("classifies a transient API error as unreadable", async () => {
+    const fetchImpl = (async () =>
+      new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    const client = new SentryClient({ authToken: "t", organization: "acme", fetchImpl });
+    const error = await expectFetchError(client.fetchIssues());
+    expect(error.status).toBe("unreadable");
+  });
+
+  test("classifies a network failure as unreadable", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("ECONNRESET");
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({ authToken: "t", organization: "acme", fetchImpl });
+    const error = await expectFetchError(client.fetchIssues());
+    expect(error.status).toBe("unreadable");
+    expect(error.message).toContain("ECONNRESET");
   });
 
   test("posts terminal action feedback without changing issue status", async () => {
@@ -402,5 +452,164 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
 
     expect(fixed).toHaveLength(0);
     expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
+  });
+
+  test("records an ok read and resets failure counters", async () => {
+    const store = new AutomationStateStore(join(dir, "status.db"));
+    try {
+      const { acquirer, fixed } = makeAcquirer([issue()], {
+        statusStore: store,
+        now: () => 1_000,
+      });
+      const outcome = await acquirer.tick();
+
+      expect(outcome.status).toBe("ok");
+      expect(outcome.issues).toHaveLength(1);
+      expect(fixed).toHaveLength(1);
+      const record = store.getSourceStatus("sentry", "primary");
+      expect(record?.status).toBe("ok");
+      expect(record?.consecutiveFailures).toBe(0);
+      expect(record?.lastSuccessAt).toBe(1_000);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("an unreadable read is a distinct outcome and does not advance the cursor", async () => {
+    const store = new AutomationStateStore(join(dir, "status.db"));
+    try {
+      const { acquirer, fixed } = makeAcquirer(new SourceFetchError("unreadable", "boom"), {
+        statusStore: store,
+        now: () => 2_000,
+      });
+
+      const first = await acquirer.tick();
+      expect(first.status).toBe("unreadable");
+      expect(first.issues).toEqual([]);
+      expect(first.error).toContain("boom");
+      expect(fixed).toHaveLength(0);
+      expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
+
+      const record = store.getSourceStatus("sentry", "primary");
+      expect(record?.status).toBe("unreadable");
+      expect(record?.message).toContain("boom");
+      expect(record?.consecutiveFailures).toBe(1);
+
+      await acquirer.tick();
+      expect(store.getSourceStatus("sentry", "primary")?.consecutiveFailures).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("retries a transient failure and processes once the source is readable", async () => {
+    const store = new AutomationStateStore(join(dir, "status.db"));
+    let failing = true;
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => {
+        if (failing) throw new SourceFetchError("unreadable", "temporary");
+        return [issue()];
+      },
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+    };
+    const fixed: SentryIssue[] = [];
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      statusStore: store,
+      now: () => 5_000,
+      executeTask: async (item) => {
+        fixed.push(item);
+        return true;
+      },
+    });
+
+    try {
+      expect((await acquirer.tick()).status).toBe("unreadable");
+      expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(false);
+
+      failing = false;
+      expect((await acquirer.tick()).status).toBe("ok");
+      expect(fixed).toHaveLength(1);
+      expect(queue.hasProcessed("errors:sentry:primary", "issue:1001")).toBe(true);
+
+      const record = store.getSourceStatus("sentry", "primary");
+      expect(record?.status).toBe("ok");
+      expect(record?.consecutiveFailures).toBe(0);
+      expect(record?.lastSuccessAt).toBe(5_000);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("records a rate-limited read with its retry window", async () => {
+    const store = new AutomationStateStore(join(dir, "status.db"));
+    try {
+      const { acquirer } = makeAcquirer(
+        new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+        { statusStore: store, now: () => 10_000 },
+      );
+      const outcome = await acquirer.tick();
+
+      expect(outcome.status).toBe("rate-limited");
+      expect(outcome.retryAfterMs).toBe(30_000);
+      const record = store.getSourceStatus("sentry", "primary");
+      expect(record?.status).toBe("rate-limited");
+      expect(record?.retryAfterAt).toBe(40_000);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("an auth failure is recorded as auth-failed", async () => {
+    const store = new AutomationStateStore(join(dir, "status.db"));
+    try {
+      const { acquirer } = makeAcquirer(new SourceFetchError("auth-failed", "bad token"), {
+        statusStore: store,
+        now: () => 7,
+      });
+      const outcome = await acquirer.tick();
+
+      expect(outcome.status).toBe("auth-failed");
+      expect(store.getSourceStatus("sentry", "primary")?.status).toBe("auth-failed");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a throwing status store never changes the read outcome", async () => {
+    const store = {
+      recordSourceStatus() {
+        throw new Error("SQLITE_BUSY");
+      },
+    };
+    const { acquirer } = makeAcquirer(
+      new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+      { statusStore: store, now: () => 1_000 },
+    );
+
+    const outcome = await acquirer.tick();
+
+    expect(outcome.status).toBe("rate-limited");
+    expect(outcome.retryAfterMs).toBe(30_000);
+  });
+
+  test("skips redundant ok-to-ok status writes", async () => {
+    const statuses: string[] = [];
+    const store = {
+      recordSourceStatus(status: SourceStatusInput) {
+        statuses.push(status.status);
+      },
+    };
+    const { acquirer } = makeAcquirer([issue()], { statusStore: store, now: () => 1_000 });
+
+    await acquirer.tick();
+    await acquirer.tick();
+
+    expect(statuses).toEqual(["ok"]);
   });
 });

@@ -48,6 +48,7 @@ import { probePushAccess } from "../code-host/github/push-probe";
 import { AutomationAcquirer } from "../automation/acquirer";
 import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
+import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
@@ -685,6 +686,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const { ErrorMonitorAcquirer, createErrorMonitorProvider } =
     await import("../acquirers/error-monitor");
   const errorTaskDir = join(workspaceDir, "error-fixes");
+  // One durable health store for every error source, so the dashboard can
+  // show a source as "unreadable" instead of silently empty. Closed on
+  // shutdown after the acquirers stop.
+  let errorMonitorStatusStore: AutomationStateStore | null = null;
   for (const source of config.errorMonitors) {
     if (!source.enabled) continue;
     const repo = findRepo(config, source.repo);
@@ -693,6 +698,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     const env = buildErrorMonitorEnv(source, repo, team, workspaceDir);
 
     const provider = createErrorMonitorProvider(source, env);
+    errorMonitorStatusStore ??= new AutomationStateStore(state.dbPath);
     const execute = createFleetTaskExecutor(
       {
         config,
@@ -718,6 +724,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         commentOnAction: source.commentOnAction,
         queue: state.queue,
         provider,
+        statusStore: errorMonitorStatusStore,
         verbose: options.verbose,
         executeTask: async (issue, markdown) => {
           mkdirSync(errorTaskDir, { recursive: true });
@@ -953,6 +960,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       onShutdown: () => {
         reloader.stop();
         autoUpdater.stop();
+        errorMonitorStatusStore?.close();
+        errorMonitorStatusStore = null;
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this
         // process is still alive, so a socket still bound here can fail it

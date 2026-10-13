@@ -1,5 +1,9 @@
 import { readFileSync } from "fs";
-import { detectSandboxProviders, resolveHarness } from "@devintern/agent-harness";
+import {
+  activeSandboxName,
+  detectSandboxProviders,
+  resolveHarness,
+} from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
 import { buildSandboxDoctorReport } from "./sandbox";
 
@@ -31,7 +35,14 @@ export async function runSandboxCommand(): Promise<never> {
       : "environment"
     : "default";
   const harnessName = resolveHarness().harness.name;
-  const report = buildSandboxDoctorReport(detections, configured, configuredSource, harnessName);
+  const report = buildSandboxDoctorReport(
+    detections,
+    configured,
+    configuredSource,
+    harnessName,
+    process.platform,
+    activeSandboxName(),
+  );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);
 }

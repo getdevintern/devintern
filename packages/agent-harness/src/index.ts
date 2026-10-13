@@ -128,7 +128,11 @@ export {
   getSandboxProvider,
   listSandboxProviders,
 } from "./sandbox/registry.js";
-export { resolveSandbox, type SandboxResolutionOptions } from "./sandbox/resolver.js";
+export {
+  resolveSandbox,
+  activeSandboxName,
+  type SandboxResolutionOptions,
+} from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
 export { NativeSandboxProvider } from "./sandbox/providers/native.js";

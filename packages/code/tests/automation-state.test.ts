@@ -50,4 +50,69 @@ describe("AutomationStateStore", () => {
     expect(store.get(AUTOMATION.id)?.leaseOwner).toBe("worker-b");
     store.close();
   });
+
+  test("derives and persists per-source read health across restarts", () => {
+    const path = join(tmpdir(), `automation-${Date.now()}-${Math.random()}.db`);
+    paths.push(path);
+    const first = new AutomationStateStore(path);
+    first.recordSourceStatus({
+      provider: "sentry",
+      sourceId: "api",
+      status: "unreadable",
+      checkedAt: 100,
+      message: "connection reset",
+    });
+    first.recordSourceStatus({
+      provider: "sentry",
+      sourceId: "api",
+      status: "rate-limited",
+      checkedAt: 200,
+      retryAfterMs: 30_000,
+    });
+    const rateLimited = first.getSourceStatus("sentry", "api");
+    expect(rateLimited?.status).toBe("rate-limited");
+    expect(rateLimited?.consecutiveFailures).toBe(2);
+    expect(rateLimited?.message).toBeUndefined();
+    expect(rateLimited?.retryAfterAt).toBe(30_200);
+    first.recordSourceStatus({ provider: "sentry", sourceId: "api", status: "ok", checkedAt: 300 });
+    first.close();
+
+    const reopened = new AutomationStateStore(path);
+    const recovered = reopened.getSourceStatus("sentry", "api");
+    expect(recovered?.sourceId).toBe("api");
+    expect(recovered?.provider).toBe("sentry");
+    expect(recovered?.status).toBe("ok");
+    expect(recovered?.checkedAt).toBe(300);
+    expect(recovered?.lastSuccessAt).toBe(300);
+    expect(recovered?.consecutiveFailures).toBe(0);
+    expect(recovered?.message).toBeUndefined();
+    expect(recovered?.retryAfterAt).toBeUndefined();
+    reopened.close();
+  });
+
+  test("keeps provider-scoped source health independent", () => {
+    const path = join(tmpdir(), `automation-${Date.now()}-${Math.random()}.db`);
+    paths.push(path);
+    const store = new AutomationStateStore(path);
+    store.recordSourceStatus({
+      provider: "sentry",
+      sourceId: "primary",
+      status: "ok",
+      checkedAt: 1,
+    });
+    store.recordSourceStatus({
+      provider: "datadog",
+      sourceId: "primary",
+      status: "auth-failed",
+      checkedAt: 2,
+      message: "bad key",
+    });
+    expect(store.getSourceStatus("sentry", "primary")?.status).toBe("ok");
+    expect(store.getSourceStatus("datadog", "primary")?.status).toBe("auth-failed");
+    expect(store.listSourceStatuses().map((entry) => entry.provider)).toEqual([
+      "datadog",
+      "sentry",
+    ]);
+    store.close();
+  });
 });
