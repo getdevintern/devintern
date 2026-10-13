@@ -352,6 +352,13 @@ export class WorkerState {
   /**
    * Read the persisted cursor for a polling source.
    *
+   * Loop-facing read, deliberately tolerant: a malformed `cursors` row is
+   * logged and treated as no cursor (`null`) instead of throwing, so one
+   * corrupted row cannot abort a recurring poll tick repeatedly. Returning
+   * `null` forces a full re-fetch, which self-heals by overwriting the row on
+   * the next successful {@link setCursor}. `listCursors` stays fail-fast as a
+   * diagnostic view.
+   *
    * @param source - Source key (e.g. `jira`, `github:reviews:owner/repo#42`)
    */
   getCursor(source: string): Cursor | null {
@@ -362,7 +369,14 @@ export class WorkerState {
     if (!row) {
       return null;
     }
-    return parseCursorRow(row);
+    try {
+      return parseCursorRow(row);
+    } catch (error) {
+      console.warn(
+        `⚠️  [WorkerState] ignoring malformed cursor for "${source}": ${(error as Error).message}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -388,7 +402,13 @@ export class WorkerState {
     this.db.run(`DELETE FROM cursors WHERE source = ?`, [source]);
   }
 
-  /** List all persisted polling cursors (dashboard freshness view). */
+  /**
+   * List all persisted polling cursors (dashboard freshness view).
+   *
+   * Fail-fast: a malformed row throws {@link RowParseError} so a corruption is
+   * surfaced rather than silently hidden. This is a dashboard-only diagnostic
+   * read, not a recurring loop read; `getCursor` is the tolerant counterpart.
+   */
   listCursors(): Cursor[] {
     const rows = this.db
       .query(`SELECT source, cursor_value, etag, updated_at FROM cursors ORDER BY source ASC`)
@@ -396,7 +416,14 @@ export class WorkerState {
     return rows.map((row) => parseCursorRow(row));
   }
 
-  /** Count agent PRs by state (dashboard header view). */
+  /**
+   * Count agent PRs by state (dashboard header view).
+   *
+   * Aggregate/diagnostic read, deliberately tolerant (mirrors
+   * `WebhookQueue.getStats`): a row whose `state` is not a recognized string
+   * (e.g. a corrupted BLOB) is skipped instead of throwing, so one bad row
+   * cannot make `DashboardApi.read`'s catch-all zero out every healthy count.
+   */
   countAgentPrs(): { open: number; closed: number } {
     const rows = this.db
       .query(`SELECT state, COUNT(*) AS count FROM agent_prs GROUP BY state`)
@@ -404,7 +431,9 @@ export class WorkerState {
     const result = { open: 0, closed: 0 };
     for (const row of rows) {
       const record = parseRowObject(row, "agent_prs count row");
-      const state = requireEnum(AGENT_PR_STATES, record.state, "state", "agent_prs count row");
+      const state = record.state;
+      if (typeof state !== "string") continue;
+      if (state !== "open" && state !== "closed") continue;
       const count = requireNumber(record, "count", "agent_prs count row");
       result[state] = count;
     }
@@ -480,6 +509,10 @@ export class WorkerState {
   /**
    * List agent-created PRs that are still open (the review-polling watch list).
    *
+   * Loop-facing read, deliberately per-row tolerant (see
+   * {@link mapAgentPrRows}): one corrupted row is skipped rather than aborting
+   * the recurring review/CI poll tick it feeds.
+   *
    * @param repo - Optional repo slug filter
    */
   listOpenAgentPrs(repo?: string): AgentPr[] {
@@ -501,20 +534,42 @@ export class WorkerState {
           )
           .all();
 
-    return rows.map((row) => this.mapAgentPrRow(row));
+    return this.mapAgentPrRows(rows);
   }
 
-  /** List every open provider change request for dashboard and diagnostics. */
+  /**
+   * List every open provider change request for dashboard and diagnostics.
+   *
+   * Loop-facing read, deliberately per-row tolerant: one corrupted row is
+   * skipped rather than aborting the recurring GitLab review poll it feeds.
+   */
   listOpenAgentChangeRequests(): AgentPr[] {
     const rows = this.db
       .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
       .all();
-    return rows.map((row) => this.mapAgentPrRow(row));
+    return this.mapAgentPrRows(rows);
   }
 
-  /** Map both legacy readonly schemas and the provider-aware schema. */
-  private mapAgentPrRow(row: unknown): AgentPr {
-    return parseAgentPrRow(row);
+  /**
+   * Map both legacy readonly schemas and the provider-aware schema.
+   *
+   * Deliberately per-row tolerant (mirrors `WebhookQueue.getAllRateLimits`): a
+   * malformed `agent_prs` row is skipped and logged rather than throwing, so a
+   * single corrupted row cannot stall the recurring loop that reads the watch
+   * list. Fail-fast schema validation lives in `parseAgentPrRow`.
+   */
+  private mapAgentPrRows(rows: unknown[]): AgentPr[] {
+    const result: AgentPr[] = [];
+    for (const row of rows) {
+      try {
+        result.push(parseAgentPrRow(row));
+      } catch (error) {
+        console.warn(
+          `⚠️  [WorkerState] skipping malformed agent_prs row: ${(error as Error).message}`,
+        );
+      }
+    }
+    return result;
   }
 
   /**
@@ -587,7 +642,14 @@ export class WorkerState {
     );
   }
 
-  /** Read CI autofix retry state, defaulting to a fresh budget. */
+  /**
+   * Read CI autofix retry state, defaulting to a fresh budget.
+   *
+   * Loop-facing read, deliberately tolerant: a malformed `ci_fix_state` row is
+   * logged and treated as a fresh budget rather than throwing, so one corrupted
+   * row cannot wedge CI fixing for a PR on every poll tick. The convergence
+   * path ({@link setCiFixState}) rewrites the row with a valid shape.
+   */
   getCiFixState(repo: string, prNumber: number): CiFixState {
     const row = this.db
       .query(
@@ -598,11 +660,20 @@ export class WorkerState {
     if (!row) {
       return { consecutiveFailures: 0 };
     }
-    const record = parseRowObject(row, "ci_fix_state row");
-    return {
-      consecutiveFailures: requireNumber(record, "consecutive_failures", "ci_fix_state row"),
-      escalatedSha: optionalString(record, "escalated_sha", "ci_fix_state row"),
-    };
+    try {
+      const record = parseRowObject(row, "ci_fix_state row");
+      return {
+        consecutiveFailures: requireNumber(record, "consecutive_failures", "ci_fix_state row"),
+        escalatedSha: optionalString(record, "escalated_sha", "ci_fix_state row"),
+      };
+    } catch (error) {
+      console.warn(
+        `⚠️  [WorkerState] ignoring malformed ci_fix_state for ${repo}#${prNumber}: ${
+          (error as Error).message
+        }`,
+      );
+      return { consecutiveFailures: 0 };
+    }
   }
 
   /** Persist CI autofix retry state. */
@@ -620,6 +691,12 @@ export class WorkerState {
 
   /**
    * Read the locally-recorded actioned state for a ticket.
+   *
+   * Fail-fast: a malformed row throws {@link RowParseError}. Unlike the other
+   * loop-facing reads this has no safe blind default — treating a corrupt
+   * marker as "not actioned" would re-run the ticket and risk a duplicate PR —
+   * so the single caller (`createTaskActionedGate`) guards the call and fails
+   * safe by skipping the ticket.
    *
    * @param source - Tracker source key (matches the poll cursor source)
    * @param taskKey - Tracker task key
@@ -713,6 +790,11 @@ export class WorkerState {
   /**
    * Read one metadata value (e.g. the last task-drain timestamp used by
    * working-window catch-up). Returns null when never written.
+   *
+   * Fail-fast: a malformed `worker_meta` row throws {@link RowParseError}. Its
+   * recurring callers guard the read (`readLastDrainAt` catches,
+   * `loadPendingRescans` wraps it in `scheduleGuard`), so a corrupt value
+   * degrades to "unset" there instead of stalling the poll tick.
    */
   getMeta(key: string): string | null {
     const row = this.db.query(`SELECT value FROM worker_meta WHERE key = ?`).get(key);

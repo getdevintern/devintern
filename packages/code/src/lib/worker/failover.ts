@@ -87,11 +87,28 @@ export class WorkerFailover {
     });
 
     if (queue) {
-      for (const warning of this.manager.restore(
-        queue.getAllRateLimits(),
-        queue.getActiveHarness(),
-      )) {
-        console.warn(`⚠️  ${warning}`);
+      try {
+        // Read the two pieces of persisted state separately so a corrupt
+        // active-harness row does not discard the already-parsed healthy
+        // rate-limit windows (that read is deliberately per-row tolerant).
+        const limits = queue.getAllRateLimits();
+        let active: string | null = null;
+        try {
+          active = queue.getActiveHarness();
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `⚠️  Could not restore persisted active harness, using priority default: ${detail}`,
+          );
+        }
+        for (const warning of this.manager.restore(limits, active)) {
+          console.warn(`⚠️  ${warning}`);
+        }
+      } catch (error) {
+        // Corrupt persisted state must never block worker startup; fall back to
+        // the primary harness with no restored windows.
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`⚠️  Could not restore persisted failover state, starting fresh: ${detail}`);
       }
     }
   }

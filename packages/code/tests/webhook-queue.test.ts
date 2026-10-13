@@ -216,6 +216,34 @@ describe("WebhookQueue", () => {
       );
       expect(() => queue.getRateLimit("claude-code")).toThrow(RowParseError);
     });
+
+    test("getAllRateLimits skips a malformed row but keeps healthy ones", () => {
+      queue.setRateLimit("claude-code", 111);
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_meta (key, value) VALUES ('rate_limit:codex', x'00')`,
+      );
+      expect(queue.getAllRateLimits()).toEqual({ "claude-code": 111 });
+    });
+
+    test("getStats skips an unrecognized status instead of throwing", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'bogus', 1, 1, 0)`,
+      );
+      queue.enqueue("issue_comment", {});
+      expect(queue.getStats()).toEqual({ pending: 1, processing: 0, failed: 0 });
+    });
+
+    test("getStats skips a corrupted blob status instead of throwing", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', x'00', 1, 1, 0)`,
+      );
+      expect(queue.getStats()).toEqual({ pending: 0, processing: 0, failed: 0 });
+    });
   });
 
   describe("legacy database migration", () => {

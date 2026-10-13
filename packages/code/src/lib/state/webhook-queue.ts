@@ -305,18 +305,33 @@ export class WebhookQueue {
     return Number.isFinite(ms) ? ms : null;
   }
 
-  /** Every persisted per-harness rate-limit window, keyed by harness name. */
+  /**
+   * Every persisted per-harness rate-limit window, keyed by harness name.
+   *
+   * Deliberately per-row tolerant: a malformed `webhook_meta` row is skipped
+   * (and logged when verbose) rather than aborting the whole read, so a single
+   * corrupted row cannot discard every healthy persisted limit at worker
+   * startup. `getActiveHarness` remains fail-fast for a single value; callers
+   * that must not fail on corrupt state should guard it (see `WorkerFailover`).
+   */
   getAllRateLimits(): Record<string, number> {
     const rows = this.db
       .query(`SELECT key, value FROM webhook_meta WHERE key LIKE 'rate_limit:%'`)
       .all();
     const result: Record<string, number> = {};
     for (const row of rows) {
-      const record = parseRowObject(row, "webhook_meta row");
-      const key = requireString(record, "key", "webhook_meta row");
-      const ms = Number(requireString(record, "value", "webhook_meta row"));
-      if (Number.isFinite(ms)) {
-        result[key.slice("rate_limit:".length)] = ms;
+      try {
+        const record = parseRowObject(row, "webhook_meta row");
+        const key = requireString(record, "key", "webhook_meta row");
+        const ms = Number(requireString(record, "value", "webhook_meta row"));
+        if (Number.isFinite(ms)) {
+          result[key.slice("rate_limit:".length)] = ms;
+        }
+      } catch (error) {
+        if (this.verbose) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(`[WebhookQueue] Skipping malformed rate-limit row: ${detail}`);
+        }
       }
     }
     return result;
@@ -349,7 +364,13 @@ export class WebhookQueue {
   /**
    * Read the persisted active harness of the failover chain.
    *
+   * Fail-fast: a malformed `webhook_meta` value throws {@link RowParseError}
+   * rather than being silently coerced. Callers restoring at startup should
+   * guard this (see `WorkerFailover`), since one corrupted row must not prevent
+   * the worker from starting.
+   *
    * @returns Canonical harness name, or `null` when none was persisted.
+   * @throws {RowParseError} When the persisted value is not a string.
    */
   getActiveHarness(): string | null {
     const row = this.db
@@ -764,16 +785,16 @@ export class WebhookQueue {
     const result = { pending: 0, processing: 0, failed: 0 };
     for (const row of stats) {
       const record = parseRowObject(row, "webhook_events stats row");
-      const status = requireEnum(
-        WEBHOOK_EVENT_STATUSES,
-        record.status,
-        "status",
-        "webhook_events stats row",
-      );
+      const status = record.status;
+      // Aggregate/diagnostic read: skip unrecognized status groups (e.g. a
+      // corrupted BLOB) instead of throwing, so /health and startup reporting
+      // degrade gracefully rather than failing on one bad row.
+      if (typeof status !== "string") continue;
+      if (!(WEBHOOK_EVENT_STATUSES as readonly string[]).includes(status)) continue;
       const count = requireNumber(record, "count", "webhook_events stats row");
       if (status === "pending") result.pending = count;
-      if (status === "processing") result.processing = count;
-      if (status === "failed") result.failed = count;
+      else if (status === "processing") result.processing = count;
+      else if (status === "failed") result.failed = count;
     }
 
     return result;
