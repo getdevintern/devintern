@@ -10,6 +10,18 @@ import {
   prepareQueueDbDirectory,
   resolveQueueDbPath,
 } from "../src/lib/state/webhook-queue";
+import { RowParseError } from "../src/lib/state/row-parse";
+
+/** Insert a row directly, bypassing the queue, to simulate corrupted state. */
+function insertRawRow(dbPath: string, sql: string): void {
+  const { Database } = require("bun:sqlite");
+  const raw = new Database(dbPath);
+  try {
+    raw.run(sql);
+  } finally {
+    raw.close();
+  }
+}
 
 describe("WebhookQueue", () => {
   let dbPath: string;
@@ -164,6 +176,45 @@ describe("WebhookQueue", () => {
       expect(queue.getBaseSyncEvent("completed")).toBeNull();
       expect(queue.getBaseSyncEvent("exhausted")).toBeNull();
       expect(queue.getBaseSyncEvent("pending")?.status).toBe("pending");
+    });
+  });
+
+  describe("malformed rows", () => {
+    test("getEvent rejects an unknown status", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'bogus', 1, 1, 0)`,
+      );
+      expect(() => queue.getEvent("bad")).toThrow(RowParseError);
+    });
+
+    test("getPendingEvents rejects a non-numeric attempts", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_events (id, event_type, payload, status, created_at, updated_at, attempts)
+         VALUES ('bad', 'push', '{}', 'pending', 1, 1, 'lots')`,
+      );
+      expect(() => queue.getPendingEvents()).toThrow(RowParseError);
+    });
+
+    test("getBaseSyncEvent rejects a non-numeric pr_number", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO base_sync_events (
+           external_id, repo, pr_number, base_sha, head_sha,
+           head_observed_at, attempts, status, updated_at
+         ) VALUES ('bad', 'acme/widgets', 'one', 'base', 'head', 1, 0, 'pending', 1)`,
+      );
+      expect(() => queue.getBaseSyncEvent("bad")).toThrow(RowParseError);
+    });
+
+    test("getRateLimit rejects a blob value", () => {
+      insertRawRow(
+        dbPath,
+        `INSERT INTO webhook_meta (key, value) VALUES ('rate_limit:claude-code', x'00')`,
+      );
+      expect(() => queue.getRateLimit("claude-code")).toThrow(RowParseError);
     });
   });
 
