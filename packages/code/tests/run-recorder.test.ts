@@ -219,6 +219,45 @@ describe("RunStore", () => {
     expect(store.listStages(id).at(-1)?.status).toBe("succeeded");
   });
 
+  test("finishRun is idempotent: repeated calls converge on one terminal outcome", () => {
+    // A retry or a late child process can finish the same run again. The end
+    // state must be the last write, not an appended second outcome.
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-13" });
+    store.finishRun(id, "failed", "first attempt interrupted");
+    store.finishRun(id, "succeeded", "retry completed");
+
+    const run = store.getRun(id);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBe("retry completed");
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("succeeded");
+    expect(outcomes[0]?.summary).toBe("retry completed");
+  });
+
+  test("reapOrphanedRuns records one outcome stage and repeated sweeps are no-ops", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    expect(store.reapOrphanedRuns()).toBe(1);
+    expect(store.reapOrphanedRuns()).toBe(0);
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("failed");
+    expect(outcomes[0]?.summary).toContain("orphaned");
+  });
+
+  test("a late finishRun replaces the reaped outcome instead of appending", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    store.reapOrphanedRuns();
+    store.finishRun(id, "succeeded", "late completion");
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("succeeded");
+    expect(store.getRun(id)?.status).toBe("succeeded");
+  });
+
   test("listRuns filters by task key and orders newest first", () => {
     const first = store.createRun({ origin: "task", taskKey: "PROJ-7" });
     const second = store.createRun({ origin: "task", taskKey: "PROJ-7" });
