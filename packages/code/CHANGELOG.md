@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Structured PR bodies (DEV-145)**: every created pull request now uses a fixed body template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Sections the agent's implementation summary already provides under a recognized heading are reused verbatim; a section it did not supply is marked `N/A`, so a reviewer can tell "nothing to say" apart from "forgot"
+
 ## [2.17.0] - 2026-10-14
 
 Observability and prompt-governance release: every agent execution leaves a durable transcript you can read from the dashboard, role prompts become a versioned and overridable Markdown catalog, the clarity check names its assumptions and exclusions, work sources that cannot be read are no longer mistaken for quiet ones, and DevIntern stops stacking kernel sandboxes on itself.

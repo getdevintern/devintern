@@ -1,5 +1,6 @@
 import type { AtlassianDocument, JiraIssue } from "../../types/jira";
 import type { Task } from "../../types/task-tracker";
+import { buildPrBody } from "./pr-body";
 import type { PRInfo, PRResult } from "./shared";
 
 export abstract class PRClient {
@@ -59,7 +60,7 @@ export abstract class PRClient {
   }
 
   /**
-   * Build default PR description markdown from task tracker details.
+   * Build the structured PR body template from task tracker details.
    *
    * @param task - Source task (JIRA issue or generic Task)
    * @param implementationSummary - Optional agent implementation summary
@@ -68,18 +69,6 @@ export abstract class PRClient {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    const lines = [`## Task: ${key}`, "", `**Summary:** ${summary}`, ""];
-
-    if (implementationSummary) {
-      lines.push("## Implementation Details");
-      lines.push("");
-      lines.push(implementationSummary);
-      lines.push("");
-    }
-
-    lines.push("---");
-    lines.push("*This PR was automatically created by @devintern/code*");
-
-    return lines.join("\n");
+    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
   }
 }

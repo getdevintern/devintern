@@ -173,7 +173,7 @@ devintern MYAPP-456
 - Automatically creates PRs on GitHub or Bitbucket
 - Detects repository platform from git remote URL
 - PR title format: `[TASK-123] Task Summary`
-- PR body includes implementation details and links back to the task
+- PR body uses a fixed template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification` — reusing any matching sections the agent wrote and marking sections it did not supply `N/A`
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
 - Target branch can also be auto-detected from the task description. Add a line like `Target branch: develop` to the card or issue and `devintern` will pick it up. Supported patterns: `Target branch:`, `Base branch:`, `PR target:`. Falls back to `--pr-target-branch` if no pattern matches.
 
