@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { getModuleDir } from "./lib/runtime/path.js";
 import {
@@ -12,21 +13,23 @@ import {
 
 const PROMPTS_DIR = join(getModuleDir(import.meta.url), "prompts");
 
-const SOURCE_TYPES = ["prompt", "log", "figma"] as const;
-const STYLES = ["pm", "technical"] as const;
-const TEMPLATES = ["story-generation.txt", "decomposition.txt"] as const;
-
-/** Every shipped story/decomposition template across source × style. */
-function templatePaths(): string[] {
+/** Recursively collect every shipped `.txt` prompt template. */
+function collectTemplatePaths(dir: string): string[] {
   const paths: string[] = [];
-  for (const source of SOURCE_TYPES) {
-    for (const style of STYLES) {
-      for (const file of TEMPLATES) {
-        paths.push(join(PROMPTS_DIR, source, style, file));
-      }
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      paths.push(...collectTemplatePaths(full));
+    } else if (entry.isFile() && entry.name.endsWith(".txt")) {
+      paths.push(full);
     }
   }
   return paths;
+}
+
+/** Every shipped story/decomposition template, discovered from disk. */
+function templatePaths(): string[] {
+  return collectTemplatePaths(PROMPTS_DIR).sort();
 }
 
 /** A well-specified draft that should satisfy the whole rubric. */
@@ -76,6 +79,12 @@ describe("prompt templates enforce the write-spec rubric", () => {
       "vague-word ban",
     ]);
   });
+
+  test("reports missingGuidance for a template that omits the rubric", () => {
+    const result = lintPromptTemplate("Write a concise user story for the change.");
+    expect(result.valid).toBe(false);
+    expect(result.missingGuidance).toEqual(REQUIRED_PROMPT_GUIDANCE.map((rule) => rule.id));
+  });
 });
 
 describe("findVagueTerms", () => {
@@ -97,6 +106,12 @@ describe("findVagueTerms", () => {
 
   test("returns no terms for measurable prose", () => {
     expect(findVagueTerms("p95 latency stays under 200 ms across 10k requests")).toEqual([]);
+  });
+
+  test("does not flag words that legitimately appear in technical prose", () => {
+    expect(
+      findVagueTerms("Clean up dead code to keep the API simple, easy, and efficient."),
+    ).toEqual([]);
   });
 });
 
@@ -120,5 +135,13 @@ describe("lintDraftDescription", () => {
     );
     expect(result.missingSections).toEqual(["Non-goals"]);
     expect(result.valid).toBe(false);
+  });
+
+  test("matches sections despite casing, heading level, and hyphenation variance", () => {
+    const result = lintDraftDescription(
+      "### acceptance criteria\n\n- Given X, when Y, then Z\n\n#### NON GOALS\n\n- Nope\n\n## success metrics\n\n- 100%",
+    );
+    expect(result.missingSections).toEqual([]);
+    expect(result.valid).toBe(true);
   });
 });

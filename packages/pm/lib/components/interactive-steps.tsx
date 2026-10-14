@@ -171,8 +171,8 @@ export function renderStep(ctx: StepRenderContext): React.ReactNode {
       return (
         <Box flexDirection="column" paddingY={1}>
           <Text bold>Select prompt style:</Text>
-          <Text>1. PM style (user stories, acceptance criteria)</Text>
-          <Text>2. Technical style (includes technical considerations)</Text>
+          <Text>1. PM style (user stories, Given/When/Then, non-goals, success metrics)</Text>
+          <Text>2. Technical style (PM rubric plus technical considerations)</Text>
         </Box>
       );
 

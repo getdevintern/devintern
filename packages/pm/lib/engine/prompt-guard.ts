@@ -13,6 +13,10 @@
  * Vague, unmeasurable adjectives a spec must replace with an observable
  * behavior or a number. Matching is case-insensitive and word-bounded, so
  * "breakfast" does not match "fast".
+ *
+ * Deliberately excludes words that commonly appear in measurable or technical
+ * prose ("clean up", "simple", "easy", "better", "improved", "modern",
+ * "nice", "efficient"); flagging those made the guard too noisy to trust.
  */
 export const VAGUE_TERMS = [
   "fast",
@@ -23,16 +27,8 @@ export const VAGUE_TERMS = [
   "reliable",
   "user-friendly",
   "seamless",
-  "simple",
-  "easy",
-  "efficient",
   "performant",
   "scalable",
-  "modern",
-  "clean",
-  "nice",
-  "better",
-  "improved",
   "optimal",
 ] as const;
 
@@ -46,6 +42,17 @@ export const REQUIRED_DRAFT_SECTIONS = [
 ] as const;
 
 export type DraftSection = (typeof REQUIRED_DRAFT_SECTIONS)[number];
+
+/**
+ * Normalized section matchers. LLM output varies casing, heading level, and
+ * hyphenation (e.g. `### Non goals`, `success metrics`, `Non-Goals`), so match
+ * case-insensitively with flexible separators instead of exact substrings.
+ */
+const SECTION_PATTERNS: Readonly<Record<DraftSection, RegExp>> = {
+  "Acceptance Criteria": /\bacceptance\s+criteria\b/i,
+  "Non-goals": /\bnon[-\s]?goals?\b/i,
+  "Success Metrics": /\bsuccess\s+metrics\b/i,
+};
 
 /**
  * Rubric constraints every story/decomposition template must instruct the
@@ -93,7 +100,7 @@ export interface DraftLintResult {
  */
 export function lintDraftDescription(description: string): DraftLintResult {
   const missingSections = REQUIRED_DRAFT_SECTIONS.filter(
-    (section) => !description.includes(section),
+    (section) => !SECTION_PATTERNS[section].test(description),
   );
   const vagueTerms = findVagueTerms(description);
   return {
