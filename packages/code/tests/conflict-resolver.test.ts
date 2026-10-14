@@ -1158,6 +1158,48 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     expect(agentCalled).toBe(false);
     expect(comments).toEqual([]);
   });
+
+  test("a re-run after the merge already landed converges without a second push", async () => {
+    // First run resolves and publishes the merge.
+    const first = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "merged once\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        return { success: true, output: "done" };
+      },
+    });
+    expect(first.outcome).toBe("resolved");
+    const landedSha = git(
+      testDir,
+      `--git-dir=${originDir} rev-parse refs/heads/feature/change`,
+    ).trim();
+
+    // An interrupted prior run re-executes the whole mutation from scratch.
+    // The worktree is rebuilt from the already-merged remote tip, so the merge
+    // is an ancestor, nothing is left to publish, and the agent is never
+    // re-run: the state converges instead of duplicating the merge.
+    let agentRuns = 0;
+    const second = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async () => {
+        agentRuns++;
+        return { success: true, output: "" };
+      },
+    });
+
+    expect(second.outcome).toBe("skipped");
+    expect(second.message).toContain("already up to date");
+    expect(agentRuns).toBe(0);
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      landedSha,
+    );
+  });
 });
 
 describe("isolateWorktreeHooks", () => {
