@@ -206,6 +206,10 @@ Deploy the team-aware relay control plane before the matching CLI release. A new
 
 ### Pipelines for the fleet and per repository
 
+For the pipeline model itself — the default flow, required ordering, the
+`verify` step, the plugin API, and runnable examples — see the dedicated
+[Customizing the Task Pipeline](./pipelines.md) guide.
+
 Task delivery runs a configurable pipeline (`implement`, `commit`, optional `verify`/`auto-review`, `finalize`, plus any registered plugin steps). In a fleet the pipeline can be customized once for the whole workspace, per repository, or in the repository's own checkout. Declare a fleet-wide default in `[defaults]` and a per-repository override in `[[repos]]`:
 
 ```toml
@@ -254,7 +258,7 @@ Two repositories served by one worker can therefore run entirely different pipel
 
 **Validation.** Before implementation starts, the worker reads the selected definition, loads its plugins, and validates the step order. A missing file, invalid JSON, unknown step, or invalid ordering fails the run with the configuration scope, the file path, and the routed repository named — it never silently falls back to another scope. Step arrays from different scopes are not combined.
 
-**Flags.** A selected workspace pipeline is a complete definition. The CLI `--verify` fallback only applies when no scope declares a pipeline; it is never appended to one. `--create-pr` and `--auto-review` keep their existing meaning: they decide whether `finalize` opens a PR and whether `auto-review` does work. These are operator-controlled fallbacks, not a fleet policy: enforcing non-bypassable steps is out of scope and will be designed separately.
+**Flags.** A selected workspace pipeline is a complete definition; step arrays from different scopes are never merged. `--create-pr` and `--auto-review` keep their existing meaning: they decide whether `finalize` opens a PR and whether `auto-review` does work. Verification is a pipeline step (`{ "use": "verify" }`), not a CLI flag. These are operator-controlled fallbacks, not a fleet policy: enforcing non-bypassable steps is out of scope and will be designed separately. See [Customizing the Task Pipeline → Built-in steps and CLI flags](./pipelines.md#built-in-steps-and-cli-flags).
 
 **Live reload.** Changing a `pipeline_file` reference in `workspace.toml`, or editing the referenced JSON file, applies to subsequent task runs without restarting the worker. A task already in flight keeps the pipeline it selected. Task logs record the selection (scope, configuration path, and step sequence) without exposing secret values.
 

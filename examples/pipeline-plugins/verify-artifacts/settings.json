@@ -1,0 +1,16 @@
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/verify-artifacts.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      {
+        "use": "verify-artifacts",
+        "path": "dist/report.json",
+        "requiredFields": ["version", "checks"],
+        "onFail": "halt"
+      },
+      { "use": "finalize" }
+    ]
+  }
+}
