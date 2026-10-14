@@ -9,6 +9,11 @@ export type ReviewPriority = "critical" | "high" | "medium" | "low" | "info";
  *
  * `high` requires the claim to have been run, `medium` to have been pointed at
  * or shown impossible, and `low` covers assertions and unproven claims.
+ *
+ * Validation only enforces the ladder's floor: `high`/`medium` are downgraded
+ * to `low` when `evidence` is missing or is a named non-concrete marker. The
+ * `high`-vs-`medium` split is advisory, since a free-form evidence string
+ * cannot be verified.
  */
 export type ReviewConfidence = "high" | "medium" | "low";
 

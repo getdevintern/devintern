@@ -60,7 +60,7 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
   const findings = feedback.items
     .map(
       (item, index) =>
-        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}\n   Fix: ${item.suggestion}`,
+        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}${item.confidence ? `\n   Confidence: ${item.confidence}` : ""}${item.evidence ? `\n   Evidence: ${item.evidence}` : ""}\n   Fix: ${item.suggestion}`,
     )
     .join("\n");
   // `taskContent` is our own already-framed task prompt; only the raw findings

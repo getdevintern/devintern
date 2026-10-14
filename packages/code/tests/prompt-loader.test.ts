@@ -205,7 +205,7 @@ describe("loadPrompt - bundled catalog", () => {
       {
         iteration: "2",
         itemsList: "1. **[HIGH] bug** in `x.ts`\n   - Issue: bad\n   - Suggestion: fix",
-        commitInstruction: "4. After making changes, amend them into the previous commit:",
+        commitInstruction: "6. After making changes, amend them into the previous commit:",
       },
       bundledOptions(),
     );
@@ -225,7 +225,7 @@ describe("loadPrompt - bundled catalog", () => {
       {
         iteration: "2",
         itemsList: "1. **[HIGH] bug** in `x.ts`\n   - Issue: bad\n   - Suggestion: fix",
-        commitInstruction: "4. After making changes, amend them into the previous commit:",
+        commitInstruction: "6. After making changes, amend them into the previous commit:",
       },
       bundledOptions(),
     );

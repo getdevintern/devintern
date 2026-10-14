@@ -90,18 +90,18 @@ export function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration
     .map(
       (item, idx) =>
         `${idx + 1}. **[${item.priority.toUpperCase()}] ${item.category}** ${item.file ? `in \`${item.file}\`` : ""}${item.line ? ` (line ${item.line})` : ""}
-   - Issue: ${item.issue}
+   - Issue: ${item.issue}${item.confidence ? `\n   - Confidence: ${item.confidence}` : ""}${item.evidence ? `\n   - Evidence: ${item.evidence}` : ""}
    - Suggestion: ${item.suggestion}`,
     )
     .join("\n\n");
 
   const commitInstruction =
     iteration === 1
-      ? `4. After making changes, commit them with a descriptive message:
+      ? `6. After making changes, commit them with a descriptive message:
    - Format: "fix: address PR review feedback"
    - Include which issues were fixed in the commit body
    - DO NOT push - this will be done automatically`
-      : `4. After making changes, amend them into the previous commit:
+      : `6. After making changes, amend them into the previous commit:
    - Use: git commit --amend
    - Extend the existing commit message by appending a new line describing iteration ${iteration} fixes
    - DO NOT push - this will be done automatically`;
