@@ -328,6 +328,28 @@ export default definition;
 
 Steps return `continue`, `warn`, or `halt` results. A result may include `data`, which later steps can read through `context.results`; warnings accumulate in `context.warnings`. A halt marks the task incomplete unless it includes `haltKind: "stop"`, which stops delivery without changing the task's status. A step may return `{ kind: "repeat", from: "implement", maxRepeats: 2, feedback }` to ask the agent to revise the implementation with structured findings before recommitting. Repeats can also target an earlier custom step. Throw `StepExecutionError` from `@getdevintern/code/pipeline` to retry a transient step failure once. Other thrown errors use the existing task failure handler. Custom agent-backed steps can use `context.runAgentPrompt(prompt)`, `context.getDiff()`, `context.parseReviewFeedback(output)`, and `context.filterByPriority(items, minPriority)`.
 
+### Workspace pipeline files
+
+A workspace worker can point at a standalone JSON file instead of committing a `pipeline` block to every repository. The file uses the exact same schema as the `pipeline` section of `settings.json`:
+
+```json
+{
+  "plugins": ["./steps/check-policy.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback" },
+    { "use": "finalize" }
+  ]
+}
+```
+
+Reference it from `workspace.toml` with `pipeline_file` on `[defaults]` (a fleet-wide default) or on an individual `[[repos]]` entry (a per-repository override). The worker resolves the reference against the workspace directory (normally `~/.devintern`) and passes the absolute path to each task subprocess. See [Workspaces (Multi-Repo Fleet) → Pipelines for the fleet and per repository](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for precedence, live reload, and deployment guidance.
+
+Relative `plugins` and `verify.prompt` paths resolve against the **directory of the declaring configuration file**: the workspace directory for `pipeline_file` files, and the repository root for `settings.json`. Package plugin names resolve from the same base, so a shared plugin's dependencies must be installed next to the declaring file — install workspace pipeline plugin dependencies in `~/.devintern` (or the repository, for a `settings.json` plugin).
+
+A selected workspace pipeline is complete on its own: step arrays are never merged across scopes, and the CLI `--verify`-driven fallback only applies when no scope declares a pipeline. `--auto-review` and `--create-pr` still control whether their steps do work, exactly as with a `settings.json` pipeline.
+
 ## Verbose API Logging
 
 To enable detailed API call logging for debugging, set the `DEVINTERN_VERBOSE` environment variable:

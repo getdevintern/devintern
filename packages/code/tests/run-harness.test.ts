@@ -259,6 +259,9 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(outDir, { recursive: true, force: true });
+  delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
+  delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
+  delete process.env.DEVINTERN_WORKSPACE_REPO;
 });
 
 afterAll(() => {
@@ -469,6 +472,65 @@ describe("runAgentHarness git delivery", () => {
     pipelineConfig = { steps: [{ use: "implement" }, { use: "verify" }] };
 
     await expect(runAgentHarness(baseInput())).rejects.toThrow("follow commit");
+    expect(commitCalls).toBe(0);
+  });
+
+  test("workspace per-repository pipeline overrides repository settings", async () => {
+    scenario.stdout = "done";
+    pipelineConfig = { steps: [{ use: "implement" }, { use: "verify" }] };
+    const file = join(outDir, "backend-pipeline.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }] }),
+    );
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = file;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+  });
+
+  test("a selected workspace pipeline ignores the CLI verify fallback", async () => {
+    scenario.stdout = "done";
+    const file = join(outDir, "fallback-pipeline.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }] }),
+    );
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = file;
+
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
+
+    expect(verifyCalls).toBe(0);
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+  });
+
+  test("fails a missing workspace pipeline file with the routed repository", async () => {
+    const file = join(outDir, "missing-workspace.json");
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = file;
+    process.env.DEVINTERN_WORKSPACE_REPO = "backend";
+
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/repository "backend"/);
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/Cannot read pipeline file/);
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/missing-workspace\.json/);
+    expect(commitCalls).toBe(0);
+  });
+
+  test("names the routed repository and source when the workspace pipeline is invalid", async () => {
+    const file = join(outDir, "invalid-workspace.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        steps: [{ use: "implement" }, { use: "commit" }, { use: "nope" }, { use: "finalize" }],
+      }),
+    );
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = file;
+    process.env.DEVINTERN_WORKSPACE_REPO = "backend";
+
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/repository "backend"/);
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/workspace-repo/);
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/invalid-workspace\.json/);
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(/Unknown pipeline step/);
     expect(commitCalls).toBe(0);
   });
 

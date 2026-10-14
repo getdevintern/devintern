@@ -113,6 +113,38 @@ describe("buildRepoEnv", () => {
     expect(unset.PR_LABELS).toBe("from-env");
   });
 
+  test("pins workspace pipeline references for the routed repository", () => {
+    const env = buildRepoEnv(repo({ pipelineFile: "pipelines/backend.json" }), workspaceDir, {
+      pipelineDefaultFile: join(workspaceDir, "pipelines/default.json"),
+    });
+    expect(env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
+      join(workspaceDir, "pipelines/backend.json"),
+    );
+    expect(env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
+      join(workspaceDir, "pipelines/default.json"),
+    );
+  });
+
+  test("keeps an absolute pipeline_file unchanged", () => {
+    const absolute = join(workspaceDir, "absolute.json");
+    const env = buildRepoEnv(repo({ pipelineFile: absolute }), workspaceDir);
+    expect(env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(absolute);
+    expect(env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBeUndefined();
+  });
+
+  test("clears pipeline references inherited from the worker process env", () => {
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = "/stale/repo.json";
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT = "/stale/default.json";
+    try {
+      const env = buildRepoEnv(repo(), workspaceDir);
+      expect(env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBeUndefined();
+      expect(env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBeUndefined();
+    } finally {
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
+    }
+  });
+
   test("error monitor credentials are isolated per source and override team/repo layers", () => {
     writeFileSync(join(workspaceDir, ".env"), "SENTRY_AUTH_TOKEN=workspace\n");
     mkdirSync(join(workspaceDir, "env"), { recursive: true });

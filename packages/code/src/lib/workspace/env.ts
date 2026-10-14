@@ -20,6 +20,19 @@ export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
 
 /**
+ * Absolute path of a repository's workspace-level pipeline override.
+ *
+ * The worker resolves a repo's `pipeline_file` against the workspace directory
+ * and pins the absolute path here for the task subprocess. The subprocess
+ * selects between this, the repo's `settings.json` pipeline, and the workspace
+ * default (see {@link WORKSPACE_PIPELINE_DEFAULT_ENV}).
+ */
+export const WORKSPACE_PIPELINE_REPO_ENV = "DEVINTERN_WORKSPACE_PIPELINE_REPO";
+
+/** Absolute path of the workspace-wide default pipeline definition. */
+export const WORKSPACE_PIPELINE_DEFAULT_ENV = "DEVINTERN_WORKSPACE_PIPELINE_DEFAULT";
+
+/**
  * Explicit actioned-ticket source key pinned into a task subprocess.
  *
  * The workspace gate is built from `[defaults].tracker`/team identity, while
@@ -108,12 +121,14 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
  * @param options.actionedSource - Actioned-ticket source key to pin (see
  *                                 {@link ACTIONED_SOURCE_ENV}).
+ * @param options.pipelineDefaultFile - Absolute path of the workspace default
+ *                                      pipeline file, if one is configured.
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string } = {},
+  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
 ): Record<string, string | undefined> {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -130,6 +145,18 @@ export function buildRepoEnv(
   // The subprocess runs in a throwaway worktree; keep runtime paths out of it.
   pinWorkerRuntimeEnv(env, workspaceDir);
   env[WORKSPACE_REPO_ENV] = repo.name;
+  // A subprocess inherits the worker's process env, so clear any pipeline
+  // references the shell or parent had before pinning this repo's selection.
+  delete env[WORKSPACE_PIPELINE_REPO_ENV];
+  delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
+  if (repo.pipelineFile) {
+    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
+      ? repo.pipelineFile
+      : join(workspaceDir, repo.pipelineFile);
+  }
+  if (options.pipelineDefaultFile) {
+    env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;
+  }
   // `buildTeamTaskEnv` sets the team after layering; a non-team repo env must
   // never inherit a team name leaked from the shell.
   delete env[WORKSPACE_TEAM_ENV];
@@ -234,7 +261,7 @@ export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string } = {},
+  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
 ): Record<string, string | undefined> {
   const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));

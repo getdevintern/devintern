@@ -22,6 +22,9 @@ import {
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolvePipelineSteps } from "../task/pipeline-config";
+import { describePipelineSelection, selectPipelineConfig } from "../task/pipeline-selection";
+import type { PipelineConfig } from "../../types/settings";
+import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
@@ -458,22 +461,40 @@ export async function runAgentSession(
 
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
-  const configuredPipeline = loadProjectSettings()?.pipeline;
-  const pipelineSteps = await resolvePipelineSteps(
-    configuredPipeline ??
-      (input.verify
-        ? {
-            steps: [
-              { use: "implement" },
-              { use: "commit" },
-              { use: "verify", ...input.verify },
-              { use: "auto-review" },
-              { use: "finalize" },
-            ],
-          }
-        : undefined),
-    process.cwd(),
-  );
+  // Select exactly one pipeline: a workspace per-repo override, the repo's
+  // settings.json, the workspace default, or the built-in default. The CLI
+  // `verify` fallback only applies when no scope declared a pipeline, and is
+  // never merged into a selected one. Selection, file loading, plugin loading,
+  // and ordering validation all run before the agent starts.
+  const verifyFallback: PipelineConfig | undefined = input.verify
+    ? {
+        steps: [
+          { use: "implement" },
+          { use: "commit" },
+          { use: "verify", ...input.verify },
+          { use: "auto-review" },
+          { use: "finalize" },
+        ],
+      }
+    : undefined;
+  let selection!: ReturnType<typeof selectPipelineConfig>;
+  let configuredPipeline: PipelineConfig | undefined;
+  let pipelineSteps: Awaited<ReturnType<typeof resolvePipelineSteps>>;
+  try {
+    selection = selectPipelineConfig({ settings: loadProjectSettings(), cwd: process.cwd() });
+    configuredPipeline = selection.config ?? verifyFallback;
+    pipelineSteps = await resolvePipelineSteps(configuredPipeline, selection.baseDir);
+  } catch (error) {
+    const repo = process.env[WORKSPACE_REPO_ENV];
+    const source = selection
+      ? ` (${describePipelineSelection(selection, configuredPipeline)})`
+      : "";
+    throw new Error(
+      `Invalid pipeline configuration${repo ? ` for repository "${repo}"` : ""}${source}: ${(error as Error).message}`,
+    );
+  }
+  console.log(`🧩 Pipeline: ${describePipelineSelection(selection, configuredPipeline)}`);
+
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
   await new Promise<void>((resolve, reject) => {

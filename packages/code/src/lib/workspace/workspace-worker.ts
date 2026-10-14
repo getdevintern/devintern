@@ -25,7 +25,7 @@ import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
-import { findRepo, findTeam, loadWorkspaceConfig } from "./config";
+import { findRepo, findTeam, loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import {
   applyWorkspaceProcessEnv,
@@ -254,7 +254,11 @@ export async function resolveWorkspaceAutomationContext(
   const cwd = await repoManager.ensureBaseWorktree(repo);
   return {
     cwd,
-    env: buildRepoEnv(repo, workspaceDir),
+    env: buildRepoEnv(repo, workspaceDir, {
+      pipelineDefaultFile: config.defaults.pipelineFile
+        ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
+        : undefined,
+    }),
     repo: repo.name,
     taskFileDir,
     release() {},
