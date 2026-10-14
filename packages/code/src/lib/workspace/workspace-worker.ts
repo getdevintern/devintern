@@ -45,6 +45,7 @@ import {
 import { WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
+import { Utils } from "../utils";
 import { probePushAccess } from "../code-host/github/push-probe";
 import { AutomationAcquirer } from "../automation/acquirer";
 import type { AutomationConfig } from "../automation/config";
@@ -138,6 +139,22 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       recordAttempt: (taskKey, type, description) =>
         retryStore?.recordIncompleteAttempt(taskKey, type, description),
       maxAgeMs: orphanMaxAgeMs(),
+      // Probe the run's repo base worktree so orphan recovery decides
+      // resume/fresh with the same ref check the pipeline uses. A missing
+      // repo/worktree falls back to trusting the record rather than dropping a
+      // legitimate resume.
+      branchExists: async (branch, run) => {
+        const repoCwd = run.repo
+          ? join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)
+          : undefined;
+        if (!repoCwd || !existsSync(repoCwd)) {
+          return true;
+        }
+        return (
+          (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
+          (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
+        );
+      },
     });
 
     // Dashboard-scheduled retries claimed by the previous worker: settle the
@@ -160,8 +177,15 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       // Session pickup: orphaned runs with complete recorded state are
       // re-queued as dashboard retries (drained by the retry acquirer with
       // `--force`), so the pipeline resumes their branch and prior report
-      // instead of restarting from scratch.
-      scheduleOrphanPickups(retryQueue, recovery.resumable);
+      // instead of restarting from scratch. A run already covered by a pending
+      // or running retry is skipped by the store; report that mismatch.
+      const queuedPickups = scheduleOrphanPickups(retryQueue, recovery.resumable);
+      if (queuedPickups < recovery.resumable.length) {
+        console.warn(
+          `⚠️  [fleet] ${recovery.resumable.length - queuedPickups} resumable run(s) not queued ` +
+            "for pickup because a retry is already active for the task",
+        );
+      }
     } finally {
       retryQueue.close();
     }
@@ -656,6 +680,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
             extraArgs: () => ["--force", ...fleetTaskArgs(config)],
             repo: retry.repo,
             source: "retry",
+            // Pin the run this retry targets so session pickup resumes its
+            // branch and prior report instead of the just-opened run.
+            pickupRunId: retry.runId,
           },
         )(taskKey, routable);
       },

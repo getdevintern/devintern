@@ -86,6 +86,14 @@ export interface OrphanRecoveryDeps {
    * branch + report from the run store for the orphaned run.
    */
   resolvePickup?: (run: RunRecord) => Promise<SessionPickupDecision>;
+  /**
+   * Optional existence probe for a run's recorded branch, letting orphan
+   * recovery classify resume/fresh with the same criteria as the pipeline
+   * (`refs/heads` or `refs/remotes/origin`). The fleet caller supplies a
+   * repo-scoped probe; when absent (non-fleet/simple mode) the record is
+   * trusted. Ignored when `resolvePickup` is injected.
+   */
+  branchExists?: (branch: string, run: RunRecord) => boolean | Promise<boolean>;
   log?: typeof console.log;
   warn?: typeof console.warn;
 }
@@ -167,6 +175,9 @@ export async function recoverOrphanedTaskRuns(
         runStore: deps.runStore,
         taskKey: run.taskKey ?? "",
         runId: run.id,
+        ...(deps.branchExists
+          ? { branchExists: (branch: string) => deps.branchExists!(branch, run) }
+          : {}),
       }));
 
   for (const run of orphans) {

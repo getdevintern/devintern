@@ -6,7 +6,9 @@ import { tmpdir } from "os";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { SessionPickupRunStore } from "../src/lib/state/session-pickup";
 import {
+  PICKUP_RUN_ID_ENV,
   isPickupStatus,
+  pickupSelection,
   readImplementationReport,
   resolveSessionPickup,
 } from "../src/lib/state/session-pickup";
@@ -158,6 +160,65 @@ describe("resolveSessionPickup", () => {
     expect(decision).toEqual({ kind: "fresh", reason: "no prior attempt on record" });
   });
 
+  test("rejects a pinned run that belongs to another task", async () => {
+    // A stale or mis-propagated DEVINTERN_PICKUP_RUN_ID must not let this task
+    // resume another task's branch and inherit its implementation report.
+    const other = failedRunWithState("PROJ-13", "feature/proj-13", "other report");
+    failedRunWithState("PROJ-14", "feature/proj-14", "own report");
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-14",
+      runId: other,
+    });
+
+    expect(decision).toEqual({ kind: "fresh", reason: "pinned run belongs to another task" });
+  });
+
+  test("resumes the prior attempt when the current run is excluded", async () => {
+    // The pipeline opens the current run before resolving pickup; excluding it
+    // must leave the immediately preceding terminal attempt as the candidate.
+    const prior = failedRunWithState("PROJ-10", "feature/proj-10", "prior report");
+    const current = store.createRun({ origin: "task", taskKey: "PROJ-10" });
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-10",
+      excludeRunId: current,
+    });
+
+    expect(decision.kind).toBe("resume");
+    if (decision.kind !== "resume") return;
+    expect(decision.session.runId).toBe(prior);
+    expect(decision.session.branch).toBe("feature/proj-10");
+    expect(decision.session.report).toBe("prior report");
+  });
+
+  test("the just-opened in_progress run shadows the prior attempt without exclusion", async () => {
+    // Documents the bug the pipeline avoids by passing excludeRunId.
+    failedRunWithState("PROJ-11", "feature/proj-11", "prior report");
+    store.createRun({ origin: "task", taskKey: "PROJ-11" });
+
+    const decision = await resolveSessionPickup({ runStore: store, taskKey: "PROJ-11" });
+    expect(decision).toEqual({ kind: "fresh", reason: "prior run is in_progress" });
+  });
+
+  test("an explicit run id wins over the excluded id", async () => {
+    const prior = failedRunWithState("PROJ-12", "feature/proj-12", "first report");
+    const newer = failedRunWithState("PROJ-12", "feature/proj-12-attempt-2", "second report");
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-12",
+      runId: prior,
+      excludeRunId: newer,
+    });
+
+    expect(decision.kind).toBe("resume");
+    if (decision.kind !== "resume") return;
+    expect(decision.session.runId).toBe(prior);
+  });
+
   test("degrades to fresh when the run store is unavailable", async () => {
     const broken: SessionPickupRunStore = {
       getRun: () => {
@@ -227,5 +288,33 @@ describe("isPickupStatus", () => {
     expect(isPickupStatus("succeeded")).toBe(false);
     expect(isPickupStatus("in_progress")).toBe(false);
     expect(isPickupStatus("deferred")).toBe(false);
+  });
+});
+
+describe("pickupSelection", () => {
+  test("pins the env-provided run id and ignores the current run", () => {
+    const selection = pickupSelection(7, {
+      [PICKUP_RUN_ID_ENV]: "42",
+    } as NodeJS.ProcessEnv);
+    expect(selection).toEqual({ runId: 42 });
+  });
+
+  test("excludes the current run when the env is absent", () => {
+    expect(pickupSelection(7, {} as NodeJS.ProcessEnv)).toEqual({ excludeRunId: 7 });
+  });
+
+  test("ignores malformed env values and falls back to excluding the current run", () => {
+    expect(pickupSelection(7, { [PICKUP_RUN_ID_ENV]: "abc" } as NodeJS.ProcessEnv)).toEqual({
+      excludeRunId: 7,
+    });
+    expect(pickupSelection(7, { [PICKUP_RUN_ID_ENV]: "0" } as NodeJS.ProcessEnv)).toEqual({
+      excludeRunId: 7,
+    });
+  });
+
+  test("excludes an undefined current run when unpinned", () => {
+    expect(pickupSelection(undefined, {} as NodeJS.ProcessEnv)).toEqual({
+      excludeRunId: undefined,
+    });
   });
 });

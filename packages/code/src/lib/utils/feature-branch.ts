@@ -138,8 +138,33 @@ export async function continueFeatureBranch(
       return { success: true, branchName: branch, message: `Resumed existing branch '${branch}'` };
     }
 
+    // A fleet run interrupted by a crash keeps its worktree for debugging
+    // (repo-manager), and that worktree still holds the recorded branch, so a
+    // plain checkout is refused with "'<branch>' is already used by worktree at
+    // ...". Git emits that on stderr (`error`), not stdout (`output`). Free the
+    // branch by removing the holding worktree — keeping its commits — and retry.
+    let conflict = isWorktreeConflict(checkout);
+    if (conflict) {
+      const freed = await removeWorktreeHoldingBranch(branch, gitOpts);
+      if (freed.removed) {
+        const retry = await Utils.executeGitCommand(["checkout", branch], gitOpts);
+        if (retry.success) {
+          // Bring back any uncommitted work stashed while freeing the holder so
+          // the resumed attempt inherits it rather than starting from the
+          // branch's committed state alone.
+          await restorePreservedStash(freed.preservedStash, gitOpts);
+          return {
+            success: true,
+            branchName: branch,
+            message: `Resumed existing branch '${branch}'`,
+          };
+        }
+        conflict = isWorktreeConflict(retry);
+      }
+    }
+
     const remoteExists = await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd });
-    if (remoteExists && !checkout.output.includes("already used by worktree")) {
+    if (remoteExists && !conflict) {
       const create = await Utils.executeGitCommand(
         ["checkout", "-b", branch, `origin/${branch}`],
         gitOpts,
@@ -188,6 +213,20 @@ export async function collectLandedWork(
     }
     if (stat.success && stat.output.trim()) {
       sections.push(`Changes:\n${stat.output.trim()}`);
+    }
+
+    // An interrupted fleet run keeps its worktree, and that worktree may hold
+    // edits the agent never committed. Surface them here so the resumed prompt
+    // does not present the branch as covering only its committed state.
+    const held = await findWorktreeHoldingPath(branch, gitOpts);
+    if (held) {
+      const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: held });
+      if (status.success && status.output.trim()) {
+        sections.push(
+          `Uncommitted changes left in the interrupted worktree ` +
+            `(preserved and restored when the branch is resumed):\n${status.output.trim()}`,
+        );
+      }
     }
     return sections.length > 0 ? sections.join("\n\n") : undefined;
   } catch {
@@ -324,6 +363,164 @@ function findWorktreePathForBranch(porcelain: string, branchName: string): strin
     }
   }
   return null;
+}
+
+/** Whether a failed checkout was refused because a worktree holds the branch. */
+function isWorktreeConflict(result: GitCommandResult): boolean {
+  return (
+    Boolean(result.error?.includes("already used by worktree")) ||
+    result.output.includes("already used by worktree")
+  );
+}
+
+/** Path of the worktree currently holding `branchName`, if any. */
+async function findWorktreeHoldingPath(
+  branchName: string,
+  gitOpts: GitOptions,
+): Promise<string | null> {
+  const worktreeListResult = await Utils.executeGitCommand(
+    ["worktree", "list", "--porcelain"],
+    gitOpts,
+  );
+  if (!worktreeListResult.success) {
+    return null;
+  }
+  return findWorktreePathForBranch(worktreeListResult.output, branchName);
+}
+
+/** Outcome of freeing a branch from the worktree that held it. */
+interface FreeWorktreeResult {
+  /** True only when the worktree was actually removed. */
+  removed: boolean;
+  /** Stash message of uncommitted work preserved from the worktree, if any. */
+  preservedStash?: string;
+}
+
+/**
+ * Outcome of trying to preserve a worktree's uncommitted work before removal.
+ *
+ * `unpreservable` means the tree was dirty but stashing it failed, so removing
+ * the worktree would discard the exact edits pickup exists to protect.
+ */
+type PreserveResult =
+  | { kind: "clean" }
+  | { kind: "preserved"; stash: string }
+  | { kind: "unpreservable" };
+
+/**
+ * Preserve uncommitted changes left in `worktreePath` by stashing them. Stash
+ * entries live in the repository shared by every worktree, so they outlive the
+ * worktree's removal and can be restored on the resumed branch.
+ *
+ * @returns "preserved" with the stash message when work was stashed, "clean"
+ * when the worktree had nothing to lose or its state could not be checked, and
+ * "unpreservable" when dirty work exists that could not be stashed.
+ */
+async function preserveUncommittedWork(
+  worktreePath: string,
+  branchName: string,
+): Promise<PreserveResult> {
+  const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: worktreePath });
+  if (!status.success || !status.output.trim()) {
+    return { kind: "clean" };
+  }
+
+  const message = `devintern: recovered uncommitted work from worktree holding ${branchName}`;
+  const stash = await Utils.executeGitCommand(
+    ["stash", "push", "--include-untracked", "-m", message],
+    { cwd: worktreePath },
+  );
+  if (!stash.success) {
+    console.warn(
+      `⚠️  Could not preserve uncommitted changes in ${worktreePath}: ${
+        stash.error ?? "stash failed"
+      }`,
+    );
+    return { kind: "unpreservable" };
+  }
+  console.log(`💾 Preserved uncommitted work from ${worktreePath} as stash: ${message}`);
+  return { kind: "preserved", stash: message };
+}
+
+/** Restore a stash preserved by {@link preserveUncommittedWork} onto the current branch. */
+async function restorePreservedStash(
+  message: string | undefined,
+  gitOpts: GitOptions,
+): Promise<void> {
+  if (!message) {
+    return;
+  }
+  const list = await Utils.executeGitCommand(["stash", "list"], gitOpts);
+  const entry = list.output.split("\n").find((line) => line.includes(message));
+  const ref = entry?.split(":")[0]?.trim();
+  if (!ref) {
+    console.warn(`⚠️  Preserved work stash not found; it remains available via 'git stash list'`);
+    return;
+  }
+  const pop = await Utils.executeGitCommand(["stash", "pop", ref], gitOpts);
+  if (pop.success) {
+    console.log(`✅ Restored preserved uncommitted work from stash ${ref}`);
+  } else {
+    console.warn(`⚠️  Could not restore preserved work from ${ref}: ${pop.error ?? "pop failed"}`);
+    console.warn("   It is still available via 'git stash list'.");
+  }
+}
+
+/**
+ * Remove the worktree holding `branchName` so the branch can be checked out,
+ * without deleting the branch ref itself (resume must keep its commits).
+ *
+ * Any uncommitted edits the interrupted attempt left behind are stashed first
+ * so force-removing the worktree does not silently discard them. When the tree
+ * is dirty and stashing fails, the removal is aborted and the holder is left in
+ * place: losing the edits is worse than failing to resume.
+ *
+ * @returns whether the worktree was actually removed, plus the preserved stash.
+ */
+async function removeWorktreeHoldingBranch(
+  branchName: string,
+  gitOpts: GitOptions,
+): Promise<FreeWorktreeResult> {
+  const worktreeToRemove = await findWorktreeHoldingPath(branchName, gitOpts);
+  if (!worktreeToRemove) {
+    return { removed: false };
+  }
+
+  console.log(`⚠️  Branch '${branchName}' is checked out in ${worktreeToRemove}, freeing it...`);
+  const preservation = await preserveUncommittedWork(worktreeToRemove, branchName);
+  if (preservation.kind === "unpreservable") {
+    console.warn(
+      `⚠️  Refusing to remove worktree at ${worktreeToRemove}: it holds uncommitted ` +
+        `changes that could not be stashed. Leaving it in place to avoid data loss.`,
+    );
+    return { removed: false };
+  }
+  const preservedStash = preservation.kind === "preserved" ? preservation.stash : undefined;
+
+  const removeResult = await Utils.executeGitCommand(
+    ["worktree", "remove", worktreeToRemove, "--force"],
+    gitOpts,
+  );
+  if (!removeResult.success) {
+    // Try to forcibly delete the worktree directory and prune its registration.
+    try {
+      rmSync(worktreeToRemove, { recursive: true, force: true });
+    } catch {
+      // Ignore deletion errors; verification below reports the real outcome.
+    }
+    await Utils.executeGitCommand(["worktree", "prune"], gitOpts);
+  }
+
+  // Report the real outcome: the holder must actually be gone, otherwise the
+  // caller cannot check the branch out and must not be told it was freed.
+  const stillHeld = await findWorktreeHoldingPath(branchName, gitOpts);
+  const removed = !stillHeld;
+  if (removed) {
+    console.log(`✅ Freed branch '${branchName}' from worktree at ${worktreeToRemove}`);
+  } else {
+    console.warn(`⚠️  Could not free branch '${branchName}' from worktree at ${worktreeToRemove}`);
+  }
+  return { removed, ...(preservedStash ? { preservedStash } : {}) };
 }
 
 /** Remove any worktree currently holding `branchName`, then drop the branch. */

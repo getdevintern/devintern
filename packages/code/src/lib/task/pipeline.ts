@@ -31,11 +31,12 @@ import { WorkerState } from "../state/worker-state";
 import {
   RunStore,
   beginRun,
+  getActiveRunContext,
   recordRunBranch,
   recordRunStage,
   recordRunTicket,
 } from "../state/run-recorder";
-import { resolveSessionPickup } from "../state/session-pickup";
+import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
 import { TaskFormatter } from "../task/formatter";
@@ -719,6 +720,48 @@ async function resolveEffectiveTargetBranch(descriptionText: string | undefined)
 }
 
 /**
+ * Build the retry/prompt context handed to the formatter, or undefined when
+ * there is nothing to tell the agent.
+ *
+ * The resume branch, prior report, and landed-work summary are only claimed
+ * when git delivery is enabled: {@link ensureFeatureBranch} skips the checkout
+ * under `--no-git`, so the prompt must not tell the agent a branch was resumed
+ * when it will not be.
+ *
+ * @param input.pickup - Session pickup decision from the run store
+ * @param input.priorRetryState - Prior incomplete-attempt state, when retrying
+ * @param input.gitEnabled - Whether the feature branch will be checked out
+ * @param input.lastFailureSummary - Fallback failure summary for a plain retry
+ */
+export function buildRetryPromptContext(input: {
+  pickup: SessionPickupDecision;
+  priorRetryState: ReturnType<typeof getRetryState>;
+  gitEnabled: boolean;
+  lastFailureSummary?: string;
+}): RetryPromptContext | undefined {
+  const { pickup, priorRetryState, gitEnabled, lastFailureSummary } = input;
+  if (!priorRetryState && pickup.kind !== "resume") {
+    return undefined;
+  }
+  const priorAttempt = pickup.kind === "resume" ? pickup.session.attempt : undefined;
+  const retryContext: RetryPromptContext = {
+    attempt: priorRetryState ? priorRetryState.attemptCount + 1 : (priorAttempt ?? 1) + 1,
+    newSinceMs: priorRetryState?.reportedAt,
+  };
+  if (pickup.kind === "resume") {
+    if (gitEnabled) {
+      retryContext.resumeBranch = pickup.session.branch;
+      retryContext.previousReport = pickup.session.report;
+      retryContext.landedWork = pickup.session.landed;
+    }
+    retryContext.previousFailureSummary = pickup.session.outcomeReason;
+  } else {
+    retryContext.previousFailureSummary = lastFailureSummary;
+  }
+  return retryContext;
+}
+
+/**
  * Create the task output directory, download direct and embedded attachments,
  * and write the agent prompt file (including retry context when applicable).
  */
@@ -804,26 +847,23 @@ async function materializeTaskPrompt(input: {
     // to the agent so it continues instead of re-deriving it.
     let retryContext: RetryPromptContext | undefined;
     if (priorRetryState || pickup.kind === "resume") {
-      const priorAttempt = pickup.kind === "resume" ? pickup.session.attempt : undefined;
-      retryContext = {
-        attempt: priorRetryState ? priorRetryState.attemptCount + 1 : (priorAttempt ?? 1) + 1,
-        newSinceMs: priorRetryState?.reportedAt,
-      };
-      if (pickup.kind === "resume") {
-        retryContext.resumeBranch = pickup.session.branch;
-        retryContext.previousReport = pickup.session.report;
-        retryContext.landedWork = pickup.session.landed;
-        retryContext.previousFailureSummary = pickup.session.outcomeReason;
-      } else {
+      let lastFailureSummary: string | undefined;
+      if (pickup.kind !== "resume") {
         try {
           const lastRun = new RunStore()
             .listRuns({ taskKey: workflowKey, limit: 10 })
             .find((run) => run.status === "escalated" || run.status === "failed");
-          retryContext.previousFailureSummary = lastRun?.outcomeReason;
+          lastFailureSummary = lastRun?.outcomeReason;
         } catch {
           // Prompt context only — proceed without it.
         }
       }
+      retryContext = buildRetryPromptContext({
+        pickup,
+        priorRetryState,
+        gitEnabled: Boolean(runContext.options.git),
+        lastFailureSummary,
+      });
     }
 
     TaskFormatter.saveFormattedTask(
@@ -842,7 +882,7 @@ async function materializeTaskPrompt(input: {
  * Create (or resume) the feature branch before the agent runs, and prepare the
  * fleet worktree when one is configured. Exits when branch creation fails.
  */
-async function ensureFeatureBranch(input: {
+export async function ensureFeatureBranch(input: {
   taskKey: string;
   workflowKey: string;
   effectiveTargetBranch: string;
@@ -972,7 +1012,7 @@ interface TaskExecutionContext extends ImplementationInput {
   resumeBranch?: string;
 }
 
-const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
+export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
   {
     name: "prepare-branch",
     run: async ({ taskKey, workflowKey, effectiveTargetBranch, resumeBranch }) =>
@@ -1058,12 +1098,17 @@ export async function processSingleTask(
     // Session pickup: reconstruct branch + prior report from the run store so a
     // restart or dashboard retry resumes instead of redoing the work. Falls
     // back to a fresh run when the recorded state is incomplete.
+    // A dashboard/orphan retry pins the run it targets via env; otherwise the
+    // run `prepareTask` just opened is excluded so the prior terminal attempt
+    // (branch + report) is selected instead of the current in_progress run.
+    const currentRunId = getActiveRunContext()?.id;
     const pickupStore = new RunStore();
     let pickup: SessionPickupDecision;
     try {
       pickup = await resolveSessionPickup({
         runStore: pickupStore,
         taskKey: workflowKey,
+        ...pickupSelection(currentRunId),
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),

@@ -33,6 +33,7 @@ import type { TaskStep, TaskStepResult } from "../task/step-runner";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
 import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
+import type { VerifyDependencies } from "./verify";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
@@ -434,6 +435,23 @@ const reviewStep: TaskStep<DeliveryState> = {
 
 const publishStep: TaskStep<DeliveryState> = { name: "publish", run: publishImplementation };
 
+/**
+ * Resolve the verification dependencies from the delivery state.
+ *
+ * The state carries the functions the rest of the pipeline already uses
+ * ({@link PipelineContext}), so reading them here keeps verify aligned with the
+ * configured agent/diff seams instead of the module-level defaults captured
+ * when `verify.ts` was first evaluated.
+ */
+function verifyDependencies(state: DeliveryState): VerifyDependencies {
+  return {
+    getDiff: () => state.getDiff(),
+    runAgent: (prompt) => state.runAgentPrompt(prompt),
+    parseFeedback: (output) => state.parseReviewFeedback(output),
+    filterItems: (items, minPriority) => state.filterByPriority(items, minPriority),
+  };
+}
+
 function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
   const configured = state.context.pipelineSteps;
   if (!configured) {
@@ -442,7 +460,10 @@ function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[]
           implementStep,
           commitStep,
           { name: "repair", run: repairImplementation },
-          { name: "verify", run: verifyImplementation },
+          {
+            name: "verify",
+            run: (current) => verifyImplementation(current, verifyDependencies(current)),
+          },
           reviewStep,
           publishStep,
         ]
@@ -472,7 +493,13 @@ function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[]
             { name: repairName, run: repairImplementation },
             {
               name: `__verify-${index}`,
-              run: (current) => verifyImplementation(current, undefined, entry.config, repairName),
+              run: (current) =>
+                verifyImplementation(
+                  current,
+                  verifyDependencies(current),
+                  entry.config,
+                  repairName,
+                ),
             },
           ];
         }

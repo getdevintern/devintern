@@ -12,6 +12,7 @@ import {
   resolveStatusName,
 } from "../src/lib/worker/orphan-recovery";
 import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunRecord } from "../src/lib/state/run-recorder";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
@@ -65,6 +66,7 @@ describe("recoverOrphanedTaskRuns", () => {
     tracker?: TaskTrackerClient | null;
     now?: number;
     maxAgeMs?: number;
+    branchExists?: (branch: string, run: RunRecord) => boolean;
   }
 
   function recover({
@@ -73,6 +75,7 @@ describe("recoverOrphanedTaskRuns", () => {
     tracker = fakeTracker() as TaskTrackerClient | null,
     now = Date.now(),
     maxAgeMs = DEFAULT_ORPHAN_MAX_AGE_MS,
+    branchExists,
   }: RecoveryOptions = {}) {
     return recoverOrphanedTaskRuns({
       runStore: store,
@@ -84,6 +87,7 @@ describe("recoverOrphanedTaskRuns", () => {
         retryStore.recordIncompleteAttempt(key, type, description),
       maxAgeMs,
       now,
+      ...(branchExists ? { branchExists } : {}),
       log: () => {},
       warn: () => {},
     });
@@ -175,6 +179,30 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(result.resumable).toHaveLength(0);
     expect(posted).toHaveLength(1);
     expect(transitions).toEqual([{ key: "PROJ-12", status: "To Do" }]);
+  });
+
+  test("requeues instead of resuming when the recorded branch no longer exists", async () => {
+    // Complete recorded state, but the branch probe says it is gone: resume
+    // must not be scheduled, matching the pipeline's failure-and-requeue path.
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-13",
+      branch: "feature/proj-13",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+
+    const result = await recover({ branchExists: () => false });
+
+    expect(result.resumable).toHaveLength(0);
+    expect(result.recovered).toBe(1);
+    expect(posted).toHaveLength(1);
+    expect(transitions).toEqual([{ key: "PROJ-13", status: "To Do" }]);
   });
 
   test("does not clobber a ticket that moved on after the crash", async () => {
