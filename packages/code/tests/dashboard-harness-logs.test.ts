@@ -51,7 +51,7 @@ describe("dashboard harness logs", () => {
     mkdirSync(harnessLogsDir(workspaceDir), { recursive: true });
     writeFileSync(
       join(harnessLogsDir(workspaceDir), name),
-      "=== devintern harness run ===\ntaskKey: DEV-128\n[out] token=ghp_abcdefghijklmnopqrstuvwxyz\n",
+      "=== devintern harness run ===\ntaskKey: DEV-128\ntoken=ghp_abcdefghijklmnopqrstuvwxyz\n",
     );
     return { runId, name };
   }
@@ -79,7 +79,7 @@ describe("dashboard harness logs", () => {
     const response = handleRunHarnessLog(data, String(runId), encodeURIComponent(name));
     expect(response.status).toBe(200);
     const body = response.body as { content: string };
-    expect(body.content).toContain("[out]");
+    expect(body.content).toContain("taskKey: DEV-128");
     expect(body.content).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
     expect(body.content).toContain("[redacted]");
   });

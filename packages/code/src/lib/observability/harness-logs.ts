@@ -224,58 +224,6 @@ export function parseHarnessLogName(
   };
 }
 
-/**
- * Stateful writer that prefixes each real line with its stream tag. It tracks
- * whether the write head sits at a line start, so a line delivered across
- * several chunks gets exactly one prefix (at its start) instead of one per
- * chunk. Bytes are never buffered: each chunk is written as it arrives.
- */
-interface StreamWriter {
-  push(chunk: string): void;
-  /** Terminate a trailing unterminated line at close. */
-  flush(): void;
-}
-
-function createStreamWriter(write: (text: string) => void, tag: "out" | "err"): StreamWriter {
-  let atLineStart = true;
-  return {
-    push(chunk: string): void {
-      const lines = chunk.split("\n");
-      let text = "";
-      for (let index = 0; index < lines.length; index++) {
-        const isLast = index === lines.length - 1;
-        const line = lines[index] ?? "";
-        // The empty segment after a trailing newline is the next line start;
-        // defer its prefix until content actually arrives.
-        if (isLast && line === "") {
-          if (chunk.endsWith("\n")) {
-            atLineStart = true;
-          }
-          break;
-        }
-        if (atLineStart) {
-          text += `[${tag}] `;
-          atLineStart = false;
-        }
-        text += line;
-        if (!isLast) {
-          text += "\n";
-          atLineStart = true;
-        }
-      }
-      if (text) {
-        write(text);
-      }
-    },
-    flush(): void {
-      if (!atLineStart) {
-        write("\n");
-        atLineStart = true;
-      }
-    },
-  };
-}
-
 /** Best-effort write; a failed write must never break the run. */
 function safeWrite(fd: number, text: string | Uint8Array): void {
   try {
@@ -467,12 +415,26 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
     );
   };
 
-  const stdoutWriter = createStreamWriter(writeBody, "out");
-  const stderrWriter = createStreamWriter(writeBody, "err");
   let stdoutTail = "";
   let stderrTail = "";
   let closed = false;
+  let lastChar = "";
   const startedMs = startedAt.getTime();
+
+  /**
+   * Write a transcript chunk as-is. The body is a single interleaved stream:
+   * harnesses stream normal progress to stderr and only their final answer to
+   * stdout, so tagging each line by origin marks ordinary transcript output as
+   * an error. Only the last written byte is tracked, to terminate a trailing
+   * partial line at close.
+   */
+  const writeTranscript = (chunk: string): void => {
+    if (chunk.length === 0) {
+      return;
+    }
+    writeBody(chunk);
+    lastChar = chunk[chunk.length - 1] ?? lastChar;
+  };
 
   const accumulate = (stream: "stdout" | "stderr", chunk: string): void => {
     const combined = (stream === "stdout" ? stdoutTail : stderrTail) + chunk;
@@ -487,20 +449,21 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
   return {
     stdout(chunk: string): void {
       accumulate("stdout", chunk);
-      stdoutWriter.push(chunk);
+      writeTranscript(chunk);
     },
     stderr(chunk: string): void {
       accumulate("stderr", chunk);
-      stderrWriter.push(chunk);
+      writeTranscript(chunk);
     },
     close(outcome: AgentRunOutcome): void {
       if (closed) {
         return;
       }
       closed = true;
-      // Emit any buffered partial lines before the footer so none are lost.
-      stdoutWriter.flush();
-      stderrWriter.flush();
+      // Terminate a trailing partial line so the footer starts cleanly.
+      if (lastChar !== "" && lastChar !== "\n") {
+        writeBody("\n");
+      }
       const finishedAt = new Date();
       const maxTurnsReached = detectMaxTurnsReached(
         stdoutTail,

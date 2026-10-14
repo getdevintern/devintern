@@ -139,3 +139,5 @@ Tests must never touch a developer's real `.devintern-code/queue.db` (webhook qu
 3. The same preload hashes every `.devintern-code/queue.db` reachable by the ancestor walk from cwd and fails the suite if one is created, deleted, or mutated.
 
 When adding tests, keep following the per-test pattern in `webhook-queue.test.ts` / `worker-state.test.ts`: create a unique `mkdtempSync` directory under `os.tmpdir()`, pass an explicit `dbPath` / set `WEBHOOK_QUEUE_DB`, and clean up in `afterEach`. `AutomationStateStore` has no default path and requires an explicit argument by design. See `tests/state-db-isolation.test.ts` for the contract these guarantees make.
+
+The workspace home is isolated the same way: `tests/run-tests.ts` seeds `DEVINTERN_WORKSPACE_DIR` into the child environment and `tests/setup/guard-workspace-dir.ts` (bunfig preload) pins it to a unique mkdtemp directory per test-file process. Without this, a test that spawns the real CLI with a stub agent (e.g. `markdown-file.test.ts` running `/usr/bin/true`) writes harness run transcripts and other workspace state into the developer's real `~/.devintern`.

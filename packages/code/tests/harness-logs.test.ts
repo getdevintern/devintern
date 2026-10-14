@@ -107,15 +107,14 @@ describe("harness run logs", () => {
     expect(content).toContain("harness: claude-code");
     expect(content).toContain("label: implementation");
     expect(content).toContain("command: agent -p do the thing");
-    expect(content).toContain("[out] first line");
-    expect(content).toContain("[out] second line");
-    expect(content).toContain("[err] a warning");
+    expect(content).toContain("first line\nsecond line\n");
+    expect(content).toContain("a warning\n");
     expect(content).toContain("=== end of harness run ===");
     expect(content).toContain("exitCode: 0");
     expect(content).toContain("maxTurnsReached: false");
   });
 
-  test("prefixes only real line starts across chunk boundaries", () => {
+  test("writes chunks contiguously without per-line decoration", () => {
     const sink = createHarnessLogSink({ harness: HARNESS, label: "implementation" });
     sink!.stdout("first ");
     sink!.stdout("line\nsecond");
@@ -123,7 +122,7 @@ describe("harness run logs", () => {
     sink!.close({ exitCode: 0, signal: null });
     const files = readdirSync(harnessLogsDir());
     const content = readFileSync(join(harnessLogsDir(), files[0]!), "utf8");
-    expect(content).toContain("[out] first line\n[out] second line\n");
+    expect(content).toContain("first line\nsecond line\n");
   });
 
   test("keeps one line intact when delivered across chunks", () => {
@@ -134,8 +133,8 @@ describe("harness run logs", () => {
     sink!.close({ exitCode: 0, signal: null });
     const files = readdirSync(harnessLogsDir());
     const content = readFileSync(join(harnessLogsDir(), files[0]!), "utf8");
-    expect(content).toContain("[out] abcdefghi\n");
-    expect(content).not.toContain("[out] abc\n");
+    expect(content).toContain("abcdefghi\n");
+    expect(content).not.toContain("abc\n");
   });
 
   test("flushes a trailing partial line at close", () => {
@@ -144,7 +143,7 @@ describe("harness run logs", () => {
     sink!.close({ exitCode: 0, signal: null });
     const files = readdirSync(harnessLogsDir());
     const content = readFileSync(join(harnessLogsDir(), files[0]!), "utf8");
-    expect(content).toContain("[out] no trailing newline\n");
+    expect(content).toContain("no trailing newline\n");
   });
 
   test("records a max-turns termination from partial output", () => {
@@ -265,11 +264,11 @@ describe("harness run logs", () => {
     mkdirSync(harnessLogsDir(), { recursive: true });
     writeFileSync(
       join(harnessLogsDir(), name),
-      "=== devintern harness run ===\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz\n[out] done\n",
+      "=== devintern harness run ===\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz\ndone\n",
     );
     const content = readHarnessLogContent(name);
     expect(content).not.toBeNull();
-    expect(content!.content).toContain("[out] done");
+    expect(content!.content).toContain("done");
     expect(content!.content).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
     expect(content!.content).toContain("[redacted]");
   });
@@ -291,7 +290,7 @@ describe("harness run logs", () => {
         "-----BEGIN RSA PRIVATE KEY-----",
         "MIIEowIBAAKCAQEA1234567890abcdefghijklmnopqrstuvwxyz",
         "-----END RSA PRIVATE KEY-----",
-        "[out] done",
+        "done",
         "",
       ].join("\n"),
     );
@@ -300,7 +299,7 @@ describe("harness run logs", () => {
     expect(content!.content).not.toContain("MIIEowIBAAKCAQEA");
     expect(content!.content).toContain("[redacted private key]");
     expect(content!.content).not.toContain("sk-abcdefghijklmnopqrstuvwxyz123456");
-    expect(content!.content).toContain("[out] done");
+    expect(content!.content).toContain("done");
   });
 
   test("rejects path traversal in log names", () => {

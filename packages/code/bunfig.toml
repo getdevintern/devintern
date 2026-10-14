@@ -9,6 +9,11 @@
 # the run if any real .devintern-code/queue.db is mutated, so tests can never
 # write into a developer's live state database.
 #
+# guard-workspace-dir.ts pins DEVINTERN_WORKSPACE_DIR to a unique temp directory
+# so default resolution of the workspace home (~/.devintern) can never write
+# there either — harness run transcripts, repos mirror, worktrees, locks, and
+# auth state all resolve through it.
+#
 # guard-sentry.ts pins SENTRY_DISABLED=1 so test code and CLI subprocesses it
 # spawns never report events to the baked-in production Sentry DSN (expected
 # user-input validation errors from test scenarios were being shipped to
@@ -16,5 +21,6 @@
 preload = [
   "./tests/setup/guard-git-state.ts",
   "./tests/setup/guard-queue-db.ts",
+  "./tests/setup/guard-workspace-dir.ts",
   "./tests/setup/guard-sentry.ts",
 ]
