@@ -11,12 +11,17 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --filter=!@getdevintern/code",
-    "format": "turbo run format",
-    "format:check": "turbo run format:check",
-    "lint": "turbo run lint",
+    "format": "turbo run format && bun run format:examples",
+    "format:check": "turbo run format:check && bun run format:check:examples",
+    "format:examples": "oxfmt \"examples/pipeline-plugins/**/*.ts\"",
+    "format:check:examples": "oxfmt --check \"examples/pipeline-plugins/**/*.ts\"",
+    "lint": "turbo run lint && bun run lint:examples",
+    "lint:examples": "oxlint examples/pipeline-plugins",
     "prepare": "lefthook install",
-    "typecheck": "turbo run typecheck",
-    "test": "turbo run test"
+    "typecheck": "turbo run typecheck && bun run typecheck:examples",
+    "typecheck:examples": "tsc --noEmit -p examples/pipeline-plugins",
+    "test": "turbo run test && bun run test:examples",
+    "test:examples": "bun run examples/pipeline-plugins/run-tests.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

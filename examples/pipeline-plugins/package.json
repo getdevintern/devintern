@@ -1,0 +1,13 @@
+{
+  "name": "@devintern/pipeline-plugin-examples",
+  "private": true,
+  "type": "module",
+  "description": "Runnable examples for customizing the @getdevintern/code task pipeline.",
+  "scripts": {
+    "test": "bun run run-tests.ts",
+    "format": "oxfmt \"**/*.ts\"",
+    "format:check": "oxfmt --check \"**/*.ts\"",
+    "lint": "oxlint .",
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -16,7 +16,7 @@
 
 **Also useful:** feasibility questions go back on the ticket instead of becoming a wrong PR; optional auto-review checks the diff before you see it; reviewer feedback returns to the same worker as commits on the existing branch.
 
-The task pipeline can also run opt-in requirements verification and project-defined steps before publishing; see [pipeline customization](https://devintern.com/docs/code/configuration#pipeline-customization).
+The task pipeline can also run opt-in requirements verification and project-defined TypeScript steps before publishing; see [customizing the task pipeline](https://devintern.com/docs/code/pipelines).
 
 Pair with **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) to turn rough notes, logs, or Figma into well-specified tickets first.
 
@@ -51,6 +51,7 @@ Full docs: **[devintern.com/docs/code](https://devintern.com/docs/code/quick-sta
 
 - [Quick start](https://devintern.com/docs/code/quick-start)
 - [Configuration](https://devintern.com/docs/code/configuration)
+- [Pipelines](https://devintern.com/docs/code/pipelines)
 - [Usage](https://devintern.com/docs/code/usage)
 - [Markdown file tasks](https://devintern.com/docs/code/markdown-tasks)
 - [Worker / unattended automation](https://devintern.com/docs/code/worker)

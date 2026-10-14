@@ -1,0 +1,14 @@
+{
+  "summary": "The greeting requirement is not fully met",
+  "items": [
+    {
+      "priority": "high",
+      "category": "bug",
+      "file": "src/greet.ts",
+      "line": "4",
+      "issue": "The greeting is missing the required exclamation mark.",
+      "suggestion": "Return `Hello, ${name}!`."
+    }
+  ],
+  "approved": false
+}

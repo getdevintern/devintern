@@ -21,6 +21,8 @@ Observability and prompt-governance release: every agent execution leaves a dura
 
 ### Fixed
 
+- **Structured PR descriptions request a complete final briefing**: implementation, plan retry, and verification repair prompts now request all six PR sections. Marked final summaries are published without streamed progress messages; raw output remains available for diagnostics, and agents that omit the markers retain the legacy fallback.
+
 - **Corrupt CI retry state can no longer silently reset the retry cap**: reading a malformed `ci_fix_state` row used to log and treat it as a fresh budget, which could reset the CI-fix attempt counter and let a failing PR be repaired forever. A malformed row now throws, the periodic watcher catches the error per PR and keeps polling the rest, and a fully green CI result is the one explicit path that repairs the row to a fresh budget. Recovery of pending/in-flight queue events likewise skips a single malformed row so healthy events still come back after a server restart, and `attempts` counters are validated as non-negative integers
 
 ### Technical

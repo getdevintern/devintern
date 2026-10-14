@@ -3,7 +3,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getPRDiff, parseReviewFeedback } from "../src/lib/review/auto-review-loop";
+import {
+  generateFixPrompt,
+  getPRDiff,
+  parseReviewFeedback,
+} from "../src/lib/review/auto-review-loop";
 import type { ReviewFeedbackItem } from "../src/types/auto-review";
 
 describe("review diff command safety", () => {
@@ -90,5 +94,68 @@ describe("review feedback validation", () => {
     expect(
       parseReviewFeedback(JSON.stringify({ ...verdict, approved: true, items: [] })).approved,
     ).toBe(true);
+  });
+  test("keeps evidence/confidence and rejects an unknown confidence", () => {
+    const proven = { ...finding, confidence: "low" as const, evidence: "unproven" };
+    expect(parseReviewFeedback(JSON.stringify({ ...verdict, items: [proven] }))).toEqual({
+      ...verdict,
+      items: [proven],
+    });
+    expect(() =>
+      parseReviewFeedback(
+        JSON.stringify({ ...verdict, items: [{ ...finding, confidence: "certain" }] }),
+      ),
+    ).toThrow();
+  });
+
+  test("downgrades an unproven confidence instead of rejecting the payload", () => {
+    const parse = (item: ReviewFeedbackItem) =>
+      parseReviewFeedback(JSON.stringify({ ...verdict, items: [item] }));
+
+    // Above-low confidence without concrete evidence is coerced to low, so the
+    // finding is still reported rather than dropped.
+    expect(parse({ ...finding, confidence: "high" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low" }],
+    });
+    expect(parse({ ...finding, confidence: "medium" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low" }],
+    });
+    expect(parse({ ...finding, confidence: "high", evidence: "unproven" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low", evidence: "unproven" }],
+    });
+    expect(parse({ ...finding, confidence: "medium", evidence: "" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low", evidence: "" }],
+    });
+    expect(parse({ ...finding, confidence: "high", evidence: "asserted" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low", evidence: "asserted" }],
+    });
+    expect(parse({ ...finding, confidence: "medium", evidence: "N/A" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low", evidence: "N/A" }],
+    });
+    expect(parse({ ...finding, confidence: "high", evidence: "none" })).toEqual({
+      ...verdict,
+      items: [{ ...finding, confidence: "low", evidence: "none" }],
+    });
+
+    const ranIt = { ...finding, confidence: "high" as const, evidence: "bun test -> 12 pass" };
+    expect(parse(ranIt)).toEqual({ ...verdict, items: [ranIt] });
+  });
+
+  test("propagates evidence/confidence into the fix prompt", () => {
+    const item: ReviewFeedbackItem = {
+      ...finding,
+      confidence: "low",
+      evidence: "unproven",
+    };
+    const prompt = generateFixPrompt([item], 1);
+
+    expect(prompt).toContain("Confidence: low");
+    expect(prompt).toContain("Evidence: unproven");
   });
 });

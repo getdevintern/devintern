@@ -283,72 +283,19 @@ Task delivery runs `implement`, `commit`, optional `auto-review` (when `--auto-r
 }
 ```
 
-`verify` asks the configured agent whether the committed diff meets the task requirements. It is opt-in; you may add several `verify` entries with different prompts. `prompt` accepts inline instructions or a path to a prompt file relative to the project directory. `minSeverity` defaults to `high`. On a failed verdict, `onFail` can `loopback` (default: ask the agent to repair, commit, and verify again), `halt` (mark the task incomplete and return it to To Do), or `warn` (continue). `maxIterations` limits repair cycles and defaults to `3`. If verification cannot get a valid verdict after two attempts, the task is marked incomplete before any push.
-When Git delivery is disabled, `commit` and `finalize` skip their Git work, `verify` records a warning because there is no committed diff, and custom steps still run.
+`verify` asks the configured agent whether the committed diff meets the task
+requirements; `onFail` selects `loopback` (default), `halt`, or `warn`. Custom
+steps are project-relative modules or installed packages that default-export a
+step definition, listed under `pipeline.plugins`. The order must start with
+`implement` (optionally preceded by a `clarity` marker), include `commit` once,
+and end with `finalize`; `verify` and `auto-review` must follow `commit`. A
+workspace worker can instead point at a standalone JSON pipeline file with
+`pipeline_file`, overridable per repository.
 
-`auto-review` accepts `maxIterations` and `minSeverity` (default `medium`). Local pre-push hook validation still runs before publishing if you omit `auto-review` from the sequence.
-
-The order must start with `implement` (optionally preceded by a `clarity` marker), include `commit` once, and end with `finalize`. `verify` and `auto-review` must follow `commit`. The `clarity` marker refers to the existing feasibility preamble; `--skip-clarity-check` still controls whether it runs. Custom steps can run after `implement` and before `finalize`.
-
-For a custom step, list a project-relative module or an installed package under `pipeline.plugins`. The module default-exports a definition. The plugin runs in the local DevIntern process with the project's Bun runtime.
-
-```json
-{
-  "pipeline": {
-    "plugins": ["./.devintern-code/steps/check-policy.ts"],
-    "steps": [
-      { "use": "implement" },
-      { "use": "commit" },
-      { "use": "check-policy", "threshold": 0.9 },
-      { "use": "finalize" }
-    ]
-  }
-}
-```
-
-```ts
-import type { StepDefinition } from "@getdevintern/code/pipeline";
-
-const definition: StepDefinition = {
-  name: "check-policy",
-  create: (config) => ({
-    name: "check-policy",
-    async run(context) {
-      // Inspect context.workingDir and context.output.
-      if (Number(config.threshold) > 1) {
-        return { kind: "halt", reason: "Policy threshold is invalid" };
-      }
-      return { kind: "continue" };
-    },
-  }),
-};
-
-export default definition;
-```
-
-Steps return `continue`, `warn`, or `halt` results. A result may include `data`, which later steps can read through `context.results`; warnings accumulate in `context.warnings`. A halt marks the task incomplete unless it includes `haltKind: "stop"`, which stops delivery without changing the task's status. A step may return `{ kind: "repeat", from: "implement", maxRepeats: 2, feedback }` to ask the agent to revise the implementation with structured findings before recommitting. Repeats can also target an earlier custom step. Throw `StepExecutionError` from `@getdevintern/code/pipeline` to retry a transient step failure once. Other thrown errors use the existing task failure handler. Custom agent-backed steps can use `context.runAgentPrompt(prompt)`, `context.getDiff()`, `context.parseReviewFeedback(output)`, and `context.filterByPriority(items, minPriority)`.
-
-### Workspace pipeline files
-
-A workspace worker can point at a standalone JSON file instead of committing a `pipeline` block to every repository. The file uses the exact same schema as the `pipeline` section of `settings.json`:
-
-```json
-{
-  "plugins": ["./steps/check-policy.ts"],
-  "steps": [
-    { "use": "implement" },
-    { "use": "commit" },
-    { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback" },
-    { "use": "finalize" }
-  ]
-}
-```
-
-Reference it from `workspace.toml` with `pipeline_file` on `[defaults]` (a fleet-wide default) or on an individual `[[repos]]` entry (a per-repository override). The worker resolves the reference against the workspace directory (normally `~/.devintern`) and passes the absolute path to each task subprocess. See [Workspaces (Multi-Repo Fleet) → Pipelines for the fleet and per repository](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for precedence, live reload, and deployment guidance.
-
-Relative `plugins` and `verify.prompt` paths resolve against the **directory of the declaring configuration file**: the directory of the `pipeline_file` itself, and the repository root for `settings.json`. Package plugin names resolve from the same base, so a shared plugin's dependencies must be installed next to the declaring file — install `pipeline_file` plugin dependencies in that file's directory (or the repository, for a `settings.json` plugin). A relative `verify.prompt` is treated as a file path **only when a file of that name exists** next to the declaring configuration (or, for `settings.json`, under the repository root). When no such file exists the string is left relative, and the verify step resolves it against the task working directory (the repository worktree) before falling back to using it verbatim as inline instructions. A misspelled or absent prompt path therefore does not fail the run — it either silently picks up a same-named file in the repository or becomes a literal prompt — so verify the file resolves in the intended location before relying on it.
-
-A selected workspace pipeline is complete on its own: step arrays are never merged across scopes, and the CLI `--verify`-driven fallback only applies when no scope declares a pipeline. `--auto-review` and `--create-pr` still control whether their steps do work, exactly as with a `settings.json` pipeline.
+See the dedicated [Customizing the Task Pipeline](./pipelines.md) guide for the
+default flow, ordering rules, the `verify` options, the plugin API
+(`PipelineContext`, step results, `StepExecutionError`), configuration
+precedence, workspace pipeline files, and runnable examples.
 
 ## Verbose API Logging
 
@@ -513,6 +460,8 @@ The role prompts DevIntern sends to the agent are versioned Markdown files rathe
 | `estimation.md` | Fibonacci story-point estimation                |
 | `review.md`  | Adversarial pull-request review (auto-review loop) |
 | `fix.md`     | Addressing structured review feedback              |
+
+The `review` and `fix` prompts include a **blast-radius lens**: the reviewer must trace callers, callees, and sibling consumers beyond the diff, name the one fact the change is safe because of, and back it with evidence (`asserted` → `pointed` → `cant-happen` → `ran-it`). Findings carry a `confidence` of `high`, `medium`, or `low`; a finding without evidence is reported as `low` rather than dropped, and the fixer must prove each fix with a runnable check or mark it unproven. The optional `verify` pipeline step applies the same lens to the committed diff.
 
 Each file starts with lightweight frontmatter that declares its `name`, `description`, `placeholders`, and `requiredSections`:
 
