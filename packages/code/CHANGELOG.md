@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Structured PR bodies (DEV-145)**: every created pull request now uses a fixed body template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Sections the agent's implementation summary already provides under a recognized heading are reused verbatim; a section it did not supply is marked `N/A`, so a reviewer can tell "nothing to say" apart from "forgot"
+- **Structured PR bodies (DEV-145)**: every created pull request now uses a fixed body template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Sections the agent's implementation summary already provides under a recognized heading are reused (matching aliases and hyphenated spellings, and merging several headings that map to one section such as `In scope` and `Out of scope`); a section it did not supply is marked `N/A`, so a reviewer can tell "nothing to say" apart from "forgot"
 
 ## [2.17.0] - 2026-10-14
 

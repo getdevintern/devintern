@@ -96,6 +96,64 @@ Ran the CLI end to end.`;
     expect(body).toContain("## Verification\n\nRan the CLI end to end.");
   });
 
+  test("recognizes hyphenated heading aliases", () => {
+    const body = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "Add a widget",
+      implementationSummary: "## Trade-offs\nChose memory over persistence.",
+    });
+
+    expect(body).toContain("## Tradeoffs\n\nChose memory over persistence.");
+  });
+
+  test("merges In scope and Out of scope instead of dropping one", () => {
+    const summary = `## In scope
+Only the editor.
+
+## Out of scope
+Realtime collaboration.`;
+
+    const body = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "Add a widget",
+      implementationSummary: summary,
+    });
+
+    expect(body).toContain(
+      "## Scope\n\n**In scope:**\nOnly the editor.\n\n**Out of scope:**\nRealtime collaboration.",
+    );
+  });
+
+  test("merges distinct aliases that map to the same section", () => {
+    const summary = `## Summary
+first pass
+
+## Changes Made
+second pass`;
+
+    const body = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "Add a widget",
+      implementationSummary: summary,
+    });
+
+    expect(body).toContain(
+      "## What changed\n\n**Summary:**\nfirst pass\n\n**Changes Made:**\nsecond pass",
+    );
+  });
+
+  test("demotes unrecognized top-level headings kept as content", () => {
+    const body = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "Add a widget",
+      implementationSummary: "## Non-goals\nNot doing X.",
+    });
+
+    expect(body).toContain("## What changed\n\n**Non-goals**\nNot doing X.");
+    expect(body).not.toContain("## Non-goals");
+    expect(headings(body)).toHaveLength(6);
+  });
+
   test("includes the automatic-creation footer", () => {
     const body = buildPrBody({ taskKey: "DEV-1", taskSummary: "Add a widget" });
     expect(body).toContain("*This PR was automatically created by @devintern/code*");
@@ -235,5 +293,11 @@ describe("parsePrBodySections", () => {
     const sections = parsePrBodySections("Preamble text\n## Verification\ndone");
 
     expect(sections).toEqual({ verification: "done" });
+  });
+
+  test("merges multiple headings that map to one section", () => {
+    const sections = parsePrBodySections("## In scope\nA\n\n## Out of scope\nB");
+
+    expect(sections).toEqual({ scope: "**In scope:**\nA\n\n**Out of scope:**\nB" });
   });
 });
