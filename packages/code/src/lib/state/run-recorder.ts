@@ -439,33 +439,51 @@ export class RunStore {
    *
    * Only one worker owns a queue database, so any run still `in_progress`
    * when a worker starts was abandoned by a crashed or killed predecessor.
-   * A late `finishRun` from an outlived subprocess still wins afterwards —
-   * it overwrites the row unconditionally and replaces the reaped outcome
-   * stage. The update and the per-run outcome stages are one transaction, and
-   * the sweep only targets `in_progress` rows, so repeated calls are no-ops.
+   * A late `finishRun` from an outlived subprocess still wins: it either
+   * commits before the sweep (the conditional update then matches zero rows
+   * for that id and the sweep leaves the run and its outcome alone) or after
+   * it (overwriting the row and replacing the reaped outcome stage). The
+   * sweep runs as an immediate transaction so it takes the write lock before
+   * its orphan scan: a concurrent writer can then only commit before the scan
+   * (making the conditional update match zero rows) or wait for the sweep's
+   * commit, instead of invalidating the scan's snapshot mid-transaction with
+   * `SQLITE_BUSY_SNAPSHOT`. Each run's conditional update and its outcome
+   * stage are one transaction, and the sweep only touches rows that are still
+   * `in_progress`, so repeated calls are no-ops.
    *
    * @returns Number of reaped runs
    */
   reapOrphanedRuns(): number {
-    const orphans = this.db
-      .query(`SELECT id FROM runs WHERE status = 'in_progress'`)
-      .all() as Array<{ id: number }>;
-    if (orphans.length === 0) {
-      return 0;
-    }
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
-    return this.db.transaction(() => {
-      const result = this.db.run(
-        `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
-         WHERE status = 'in_progress'`,
-        [reason, now],
-      );
-      for (const orphan of orphans) {
-        this.replaceOutcomeStage(orphan.id, "failed", reason);
-      }
-      return result.changes;
-    })();
+    return this.db
+      .transaction(() => {
+        // Select inside the immediate transaction and update per id so a
+        // concurrent writer (an outlived subprocess committing `finishRun`)
+        // can never leave the row and its outcome stage disagreeing: a run
+        // that is no longer `in_progress` matches zero rows and is left
+        // untouched. `.immediate()` acquires the write lock at BEGIN, so the
+        // scan's read snapshot cannot be invalidated by a write landing
+        // between the SELECT and the UPDATE (Bun ignores an `{immediate:true}`
+        // options object, so the method form is required).
+        const orphans = this.db
+          .query(`SELECT id FROM runs WHERE status = 'in_progress'`)
+          .all() as Array<{ id: number }>;
+        let reaped = 0;
+        for (const orphan of orphans) {
+          const result = this.db.run(
+            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
+             WHERE id = ? AND status = 'in_progress'`,
+            [reason, now, orphan.id],
+          );
+          if (result.changes === 1) {
+            this.replaceOutcomeStage(orphan.id, "failed", reason);
+            reaped += 1;
+          }
+        }
+        return reaped;
+      })
+      .immediate();
   }
 
   /**
