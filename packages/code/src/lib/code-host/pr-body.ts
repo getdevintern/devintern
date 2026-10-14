@@ -1,3 +1,5 @@
+import { extractImplementationSummary } from "../agent/implementation-summary";
+
 /**
  * Structured PR-body template.
  *
@@ -230,7 +232,11 @@ export function parsePrBodySections(
  */
 export function buildPrBody(input: PrBodyInput): string {
   const { taskKey, taskSummary, implementationSummary } = input;
-  const { sections: parsed, preamble } = parsePrBody(implementationSummary);
+  const { sections: parsed, preamble } = parsePrBody(
+    implementationSummary === undefined
+      ? undefined
+      : extractImplementationSummary(implementationSummary),
+  );
   const whatChanged = [preamble, renderSection(parsed["what-changed"])]
     .filter(Boolean)
     .join("\n\n");

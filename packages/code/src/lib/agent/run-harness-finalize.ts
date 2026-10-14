@@ -33,6 +33,7 @@ import type { TaskStep, TaskStepResult } from "../task/step-runner";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
 import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
+import { extractImplementationSummary, withImplementationSummary } from "./implementation-summary";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
@@ -103,7 +104,9 @@ async function implementPlan(
     "\n🔄 Agent created a plan but didn't implement it. Re-running to execute the plan...",
   );
   if (planPath !== "PLAN_DETECTED_NO_PATH") console.log(`   Plan file detected: ${planPath}`);
-  const prompt = createPlanImplementationPrompt(planPath, ctx.taskContent);
+  const prompt = withImplementationSummary(
+    createPlanImplementationPrompt(planPath, ctx.taskContent),
+  );
   const args = ctx.harness.buildArgs({
     maxTurns: ctx.maxTurns,
     skipPermissions: true,
@@ -314,7 +317,12 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
   ) {
     try {
       if (!state.planRetry) console.log("\n💬 Posting implementation summary to task tracker...");
-      await postImplementationComment(tracker, taskKey, state.output, taskSummary);
+      await postImplementationComment(
+        tracker,
+        taskKey,
+        extractImplementationSummary(state.output),
+        taskSummary,
+      );
     } catch (error) {
       console.warn(`⚠️  Failed to post implementation comment: ${error}`);
       if (!state.planRetry) {
