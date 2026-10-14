@@ -34,6 +34,18 @@ import { DEFAULT_ISSUE_TYPES, getDefaultIssueType, orderIssueTypes } from "../is
 export { extractJsonPayload } from "./json.js";
 export { defaultPromptsDir, loadPrompt } from "./prompts.js";
 export {
+  VAGUE_TERMS,
+  REQUIRED_DRAFT_SECTIONS,
+  REQUIRED_PROMPT_GUIDANCE,
+  findVagueTerms,
+  lintDraftDescription,
+  lintPromptTemplate,
+  type VagueTerm,
+  type DraftSection,
+  type DraftLintResult,
+  type PromptTemplateLintResult,
+} from "./prompt-guard.js";
+export {
   EngineError,
   type EngineCallEvents,
   type EngineErrorCode,

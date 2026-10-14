@@ -11,6 +11,10 @@ Guidance:
 - Consider both an immediate fix and preventive follow-ups when useful
 - One responsibility per task; roughly a day or two when possible
 - Group tiny work; split oversized work
+- Write each task's acceptance criteria as Given/When/Then scenarios — one observable behavior each, and independently testable
+- Include negative and edge cases (invalid input, empty state, permissions, failure/timeout, retry)
+- Ban vague words (e.g. "fast", "intuitive", "robust", "user-friendly", "seamless") — state the specific, measurable behavior instead
+- Give each task explicit Non-goals and measurable Success Metrics
 
 Return only valid JSON (no other text). Use markdown inside each description string:
 
@@ -18,7 +22,7 @@ Return only valid JSON (no other text). Use markdown inside each description str
   "subtasks": [
     {
       "summary": "Brief, actionable task title",
-      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance Criteria\n\n- Criterion 1\n- Criterion 2"
+      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance Criteria\n\n- Given [precondition], when [action], then [observable outcome]\n- Given [negative or edge case], when [action], then [expected handling]\n\n## Non-goals\n\n- [What this task explicitly does not cover]\n\n## Success Metrics\n\n- [Measurable outcome with baseline, target, or threshold]"
     }
   ]
 }
