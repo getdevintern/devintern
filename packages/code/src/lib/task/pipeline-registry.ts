@@ -1,16 +1,39 @@
-import type { TaskStepResult } from "./step-runner";
+import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
+import type { ProjectSettings } from "../../types/settings";
+import type { TaskTrackerClient } from "../trackers/client";
+import type { TaskStepRecord, TaskStepResult } from "./step-runner";
 
 /** Fields available to a custom delivery step. */
 export interface PipelineContext {
   taskKey?: string;
   taskSummary?: string;
+  task?: unknown;
+  tracker?: TaskTrackerClient;
+  projectSettings: ProjectSettings | null;
   taskContent: string;
+  taskFile: string;
   workingDir: string;
   outputDir: string;
   output: string;
   committed: boolean;
   prTargetBranch: string;
+  enableGit: boolean;
+  createPr: boolean;
+  skipComments: boolean;
+  autoReview: boolean;
+  autoReviewIterations: number;
+  maxTurns: number;
   warnings: string[];
+  results: TaskStepRecord[];
+  loopbackFeedback?: ReviewFeedback;
+  loopbackReason?: string;
+  /** Run the configured coding agent with a custom prompt. */
+  runAgentPrompt(prompt: string): Promise<string>;
+  /** Read the current diff against the configured PR target branch. */
+  getDiff(): string;
+  /** Parse an agent review verdict and filter findings by priority. */
+  parseReviewFeedback(output: string): ReviewFeedback;
+  filterByPriority(items: ReviewFeedbackItem[], minPriority: ReviewPriority): ReviewFeedbackItem[];
 }
 
 export interface PipelineStep {
