@@ -465,12 +465,29 @@ curl https://webhooks.yourdomain.com/health
 3. Check response codes and bodies
 4. Use **Redeliver** to test
 
+### Delivery Deduplication & Retries
+
+The server tracks each provider delivery in two states:
+
+- **in flight** — accepted and currently being processed.
+- **handled** — finished (successfully or permanently failed) and durably recorded in the queue database.
+
+A redelivery that arrives while the original is still in flight is answered with `409 Conflict` instead of `200`, so it is never acknowledged as done and lost. Once the run finishes, the delivery becomes `handled` and future redeliveries are answered with `200 Duplicate delivery`.
+
+Handler failures are classified:
+
+- **Permanent** (HTTP 4xx such as `403`/`404`) — retrying cannot succeed, so the delivery is acknowledged and recorded and is not redelivered again.
+- **Transient** (HTTP `429`/`5xx`, timeouts, connection errors) — the delivery is left unhandled so the platform redelivers it (GitHub, GitLab, or the DevIntern relay).
+
+The durable `handled` record lives in `queue.db`; in-flight state is process-local, so a restart lets an unfinished delivery be reclaimed rather than blocked forever.
+
 ### Common Issues
 
 | Issue               | Solution                                          |
 | ------------------- | ------------------------------------------------- |
 | 401 Unauthorized    | Check `WEBHOOK_SECRET` matches GitHub App config  |
 | 403 Forbidden       | Check IP allowlisting if enabled                  |
+| 409 Conflict        | A previous delivery is still running; GitHub will redeliver |
 | 500 Internal Error  | Check server logs for stack trace                 |
 | Timeout             | Ensure Agent Harness CLI is installed and working |
 | No webhook received | Check GitHub App webhook URL and events           |

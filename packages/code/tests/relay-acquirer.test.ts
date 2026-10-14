@@ -4,9 +4,10 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { RelayAcquirer } from "../src/lib/relay/acquirer";
-import type { RelayEnvelope } from "../src/lib/relay/acquirer";
+import type { RelayEnvelope, RelayHandlers } from "../src/lib/relay/acquirer";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { PermanentWebhookError } from "../src/lib/webhook/webhook-errors";
 
 const RELAY_URL = "http://relay.test";
 
@@ -55,7 +56,7 @@ describe("RelayAcquirer", () => {
   /** Build an acquirer whose fetch returns scripted responses in sequence. */
   function makeAcquirer(
     responses: Array<{ status?: number; events?: RelayEnvelope[]; cursor?: number } | Error>,
-    options: { agentPrs?: [string, number][] } = {},
+    options: { agentPrs?: [string, number][]; evaluateTask?: RelayHandlers["evaluateTask"] } = {},
   ): { acquirer: RelayAcquirer; requests: string[]; authHeaders: string[] } {
     const requests: string[] = [];
     const authHeaders: string[] = [];
@@ -101,9 +102,11 @@ describe("RelayAcquirer", () => {
         handlePrComment: async (repo, pr, commentId) => {
           log.comments.push([repo, pr, commentId]);
         },
-        evaluateTask: async (taskKey, trackerSource, team) => {
-          log.tasks.push([taskKey, trackerSource, team]);
-        },
+        evaluateTask:
+          options.evaluateTask ??
+          (async (taskKey, trackerSource, team) => {
+            log.tasks.push([taskKey, trackerSource, team]);
+          }),
         reconcileCodeHost: async (event) => {
           log.codeHosts.push(event);
         },
@@ -302,13 +305,51 @@ describe("RelayAcquirer", () => {
     expect(log.addressed.length).toBe(0);
   });
 
-  test("handler failures do not kill the loop and are not retried", async () => {
-    const failing = envelope({
+  test("transient handler failures are not acked and retry on redelivery", async () => {
+    const flaky = envelope({
       seq: 1,
       eventType: "task.changed",
       source: "jira",
-      ref: { task: "BOOM-1" },
-      deliveryId: "boom",
+      ref: { task: "FLAKY-1" },
+      deliveryId: "flaky",
+    });
+    let attempts = 0;
+    const evaluateTask: RelayHandlers["evaluateTask"] = async (taskKey, trackerSource) => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error("upstream unavailable (503)");
+      }
+      log.tasks.push([taskKey, trackerSource]);
+    };
+
+    const { acquirer } = makeAcquirer([{ events: [flaky], cursor: 1 }], { evaluateTask });
+    acquirer.start();
+    await waitFor(() => attempts === 1);
+    // Transient → not recorded handled, cursor not advanced.
+    expect(queue.hasProcessed("relay", "jira:flaky")).toBe(false);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
+    await acquirer.stop();
+
+    // The relay redelivers; the released claim lets the retry run.
+    const { acquirer: retry } = makeAcquirer([{ events: [flaky], cursor: 1 }, { events: [] }], {
+      evaluateTask,
+    });
+    retry.start();
+    await waitFor(() => log.tasks.length === 1);
+    await retry.stop();
+
+    expect(log.tasks).toEqual([["FLAKY-1", "jira"]]);
+    expect(queue.hasProcessed("relay", "jira:flaky")).toBe(true);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+  });
+
+  test("permanent handler failures are acked and the loop continues", async () => {
+    const gone = envelope({
+      seq: 1,
+      eventType: "task.changed",
+      source: "jira",
+      ref: { task: "GONE-1" },
+      deliveryId: "gone",
     });
     const following = envelope({
       seq: 2,
@@ -317,35 +358,12 @@ describe("RelayAcquirer", () => {
       ref: { task: "OK-2" },
       deliveryId: "ok",
     });
-    let call = 0;
-    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-      call++;
-      if (call === 1) {
-        return new Response(JSON.stringify({ events: [failing, following], cursor: 2 }), {
-          status: 200,
-        });
-      }
-      return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-      });
-    }) as typeof fetch;
-
-    const acquirer = new RelayAcquirer({
-      relayUrl: RELAY_URL,
-      relayToken: "drt_test_token",
-      workerState,
-      queue,
-      fetchImpl,
-      isAgentPr: () => false,
-      handlers: {
-        addressPr: async () => false,
-        handlePrComment: async () => {},
-        evaluateTask: async (taskKey, trackerSource) => {
-          if (taskKey === "BOOM-1") {
-            throw new Error("handler exploded");
-          }
-          log.tasks.push([taskKey, trackerSource]);
-        },
+    const { acquirer } = makeAcquirer([{ events: [gone, following], cursor: 2 }, { events: [] }], {
+      evaluateTask: async (taskKey, trackerSource) => {
+        if (taskKey === "GONE-1") {
+          throw new PermanentWebhookError("issue was deleted", { status: 404 });
+        }
+        log.tasks.push([taskKey, trackerSource]);
       },
     });
 
@@ -354,7 +372,9 @@ describe("RelayAcquirer", () => {
     await acquirer.stop();
 
     expect(log.tasks).toEqual([["OK-2", "jira"]]);
-    // The failing envelope is marked processed — no retry loop.
-    expect(queue.hasProcessed("relay", "jira:boom")).toBe(true);
+    // The permanent failure is recorded, not retried, and the loop moves on.
+    expect(queue.hasProcessed("relay", "jira:gone")).toBe(true);
+    expect(queue.hasProcessed("relay", "jira:ok")).toBe(true);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
   });
 });

@@ -25,6 +25,9 @@ import {
 
 export type WebhookEventStatus = "pending" | "processing" | "completed" | "failed";
 
+/** Outcome of claiming a provider delivery for processing. */
+export type WebhookDeliveryClaim = "handled" | "inFlight" | "started";
+
 export interface WebhookEvent {
   id: string;
   eventType: string;
@@ -150,6 +153,13 @@ export class WebhookQueue {
   private db: Database;
   private maxRetries: number;
   private verbose: boolean;
+  /**
+   * Deliveries currently being processed by this process. Deliberately
+   * in-memory: a crash drops a claim so a redelivery (or startup recovery) can
+   * re-claim work that never finished. The durable handled record lives in
+   * `processed_events`.
+   */
+  private readonly inFlight = new Set<string>();
 
   /**
    * Open (or create) the SQLite-backed webhook queue database.
@@ -432,6 +442,55 @@ export class WebhookQueue {
       source,
       externalId,
     ]);
+  }
+
+  /** Namespaced key for the in-memory in-flight set. */
+  private deliveryKey(source: string, externalId: string): string {
+    return `${source}\u0000${externalId}`;
+  }
+
+  /**
+   * Claim a provider delivery for in-flight processing.
+   *
+   * Unlike the raw {@link hasProcessed} / {@link markProcessed} pair, an
+   * in-flight claim is not recorded as handled, so a redelivery that arrives
+   * while the original is still running is never acknowledged as done.
+   *
+   * @param source - Event origin (e.g. `github`)
+   * @param externalId - Provider delivery id
+   * @returns `"handled"` when the durable record exists, `"inFlight"` when the
+   *          delivery is already claimed in this process, `"started"` when the
+   *          caller now owns it.
+   */
+  beginDelivery(source: string, externalId: string): WebhookDeliveryClaim {
+    if (this.hasProcessed(source, externalId)) {
+      return "handled";
+    }
+    const key = this.deliveryKey(source, externalId);
+    if (this.inFlight.has(key)) {
+      return "inFlight";
+    }
+    this.inFlight.add(key);
+    return "started";
+  }
+
+  /** Record a claimed delivery as handled: durable dedupe row, claim released. */
+  completeDelivery(source: string, externalId: string): void {
+    this.inFlight.delete(this.deliveryKey(source, externalId));
+    this.markProcessed(source, externalId);
+  }
+
+  /**
+   * Release a claim without recording it handled (a transient failure). The
+   * delivery may then be re-claimed by a redelivery and reprocessed.
+   */
+  abandonDelivery(source: string, externalId: string): void {
+    this.inFlight.delete(this.deliveryKey(source, externalId));
+  }
+
+  /** Whether the delivery is currently claimed in this process. */
+  isInFlight(source: string, externalId: string): boolean {
+    return this.inFlight.has(this.deliveryKey(source, externalId));
   }
 
   /** Configured retry ceiling, shared by webhook and base-sync work. */

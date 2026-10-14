@@ -18,6 +18,8 @@ import type {
 } from "../../types/github-webhooks";
 
 import { debugLog, handleUsageLimit, resolveActiveHarness, reviewQueue, runtime } from "./runtime";
+import type { WebhookDeliveryRef } from "./runtime";
+import { classifyWebhookError } from "./webhook-errors";
 import type { ReviewGitContext } from "./review-git";
 import {
   commitUncommittedReviewChanges,
@@ -89,11 +91,13 @@ function isAutoReviewTrigger(reviewBody: string | null, botName?: string): boole
  * @param eventId - Persisted queue event id, if any
  * @param event - Pull request review webhook payload
  * @param config - Server configuration
+ * @param delivery - Provider delivery claim to settle when processing ends
  */
 export async function processReviewWithPersistence(
   eventId: string | undefined,
   event: PullRequestReviewEvent,
   config: WebhookServerConfig,
+  delivery?: WebhookDeliveryRef,
 ): Promise<void> {
   // Mark as processing
   if (eventId && runtime.queue) {
@@ -107,24 +111,43 @@ export async function processReviewWithPersistence(
     if (eventId && runtime.queue) {
       runtime.queue.markCompleted(eventId);
     }
+    if (delivery && runtime.queue) {
+      runtime.queue.completeDelivery(delivery.source, delivery.externalId);
+    }
   } catch (error) {
     if (error instanceof UsageLimitError) {
       // Deferred by an account-global usage limit — fail over to the next
       // harness (or pause and re-queue for after reset) instead of counting
-      // a failure.
+      // a failure. The delivery stays in flight until the retry settles.
       handleUsageLimit(error.resetHint);
       if (eventId && runtime.queue) {
         runtime.queue.requeuePending(eventId);
       }
       reviewQueue
-        .add(() => processReviewWithPersistence(eventId, event, config))
+        .add(() => processReviewWithPersistence(eventId, event, config, delivery))
         .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
       return;
     }
-    // Mark as failed (will retry if under max retries)
+    const permanent = classifyWebhookError(error) === "permanent";
     if (eventId && runtime.queue) {
-      runtime.queue.markFailed(eventId, (error as Error).message);
+      // Permanent failures are terminal (ack + record); transient ones retry.
+      if (permanent) {
+        runtime.queue.markCompleted(eventId);
+      } else {
+        runtime.queue.markFailed(eventId, (error as Error).message);
+      }
     }
+    if (delivery && runtime.queue) {
+      if (permanent) {
+        runtime.queue.completeDelivery(delivery.source, delivery.externalId);
+      } else {
+        runtime.queue.abandonDelivery(delivery.source, delivery.externalId);
+      }
+    }
+    captureError(error, {
+      stage: "webhook-review",
+      pr: `${event.repository.full_name}#${event.pull_request.number}`,
+    });
     throw error; // Re-throw so the queue's catch handler logs it
   }
 }
@@ -135,11 +158,13 @@ export async function processReviewWithPersistence(
  * @param eventId - Persisted queue event id, if any
  * @param event - Issue comment webhook payload
  * @param config - Server configuration
+ * @param delivery - Provider delivery claim to settle when processing ends
  */
 export async function processIssueCommentWithPersistence(
   eventId: string | undefined,
   event: IssueCommentEvent,
   config: WebhookServerConfig,
+  delivery?: WebhookDeliveryRef,
 ): Promise<void> {
   if (eventId && runtime.queue) {
     runtime.queue.markProcessing(eventId);
@@ -151,6 +176,9 @@ export async function processIssueCommentWithPersistence(
     if (eventId && runtime.queue) {
       runtime.queue.markCompleted(eventId);
     }
+    if (delivery && runtime.queue) {
+      runtime.queue.completeDelivery(delivery.source, delivery.externalId);
+    }
   } catch (error) {
     if (error instanceof UsageLimitError) {
       handleUsageLimit(error.resetHint);
@@ -158,22 +186,32 @@ export async function processIssueCommentWithPersistence(
         runtime.queue.requeuePending(eventId);
       }
       reviewQueue
-        .add(() => processIssueCommentWithPersistence(eventId, event, config))
+        .add(() => processIssueCommentWithPersistence(eventId, event, config, delivery))
         .catch((e) => console.error("❌ Error reprocessing deferred PR comment:", e));
       return;
     }
+    const permanent = classifyWebhookError(error) === "permanent";
     if (eventId && runtime.queue) {
-      runtime.queue.markFailed(eventId, (error as Error).message);
+      if (permanent) {
+        runtime.queue.markCompleted(eventId);
+      } else {
+        runtime.queue.markFailed(eventId, (error as Error).message);
+      }
+    }
+    if (delivery && runtime.queue) {
+      if (permanent) {
+        runtime.queue.completeDelivery(delivery.source, delivery.externalId);
+      } else {
+        runtime.queue.abandonDelivery(delivery.source, delivery.externalId);
+      }
     }
     // Usage-limit deferrals are re-queued, not failures; everything else is a
     // PR-comment processing the user expected to happen.
-    if (!(error instanceof UsageLimitError)) {
-      captureError(error, {
-        stage: "webhook-comment",
-        pr: `${event.repository.full_name}#${event.issue.number}`,
-        eventId,
-      });
-    }
+    captureError(error, {
+      stage: "webhook-comment",
+      pr: `${event.repository.full_name}#${event.issue.number}`,
+      eventId,
+    });
     throw error; // Re-throw so the queue's catch handler logs it
   }
 }
@@ -528,15 +566,10 @@ async function processReviewAsync(
     if (config.debug) {
       console.error((error as Error).stack);
     }
-    // This catch swallows (queue persistence treats the event as completed),
-    // so without reporting here a failed review would be invisible to error
-    // tracking. Usage-limit deferrals are expected scheduling, not failures.
-    if (!(error instanceof UsageLimitError)) {
-      captureError(error, {
-        stage: "webhook-review",
-        pr: `${owner}/${repo}#${prNumber}`,
-      });
-    }
+    // Propagate so the persistence wrapper can classify the failure: permanent
+    // errors are acknowledged and recorded, transient ones retry. The wrapper
+    // reports the error to tracking (with the PR context) exactly once.
+    throw error;
   }
   // Note: We don't cleanup this branch's worktree here - it's reused across
   // reviews of the same PR for efficiency (deps stay cached). Worktrees from
