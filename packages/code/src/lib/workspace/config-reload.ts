@@ -201,11 +201,16 @@ export class WorkspaceConfigReloader {
 
   /**
    * Manual reload fallback for environments where file watching is
-   * unavailable. Installed once per process (the daemon creates a single
+   * unavailable. Installed once per reloader (the daemon creates a single
    * reloader; the handler outlives stop(), which only tears down the watcher).
+   *
+   * A pre-existing SIGHUP listener is not a reason to skip installation:
+   * `@devintern/agent-harness`'s process reaper registers one for cleanup and
+   * terminates on SIGHUP only when it is the sole owner, so the two coexist —
+   * the reloader claims SIGHUP for a live reload while the reaper stands down.
    */
   private installSignalFallback(): void {
-    if (process.listenerCount("SIGHUP") > 0 || this.signalHandler) return;
+    if (this.signalHandler) return;
     this.signalHandler = () => this.reload("SIGHUP");
     process.on("SIGHUP" as const, this.signalHandler as (signal: NodeJS.Signals) => void);
   }

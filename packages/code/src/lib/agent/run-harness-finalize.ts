@@ -21,6 +21,7 @@ import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToF
 import { createGitHelpers } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import { runTaskSteps } from "../task/step-runner";
 import type { TaskStep } from "../task/step-runner";
 import type { ReviewFeedback } from "../../types/auto-review";
@@ -105,11 +106,19 @@ async function implementPlan(
   const resolvedPath = await resolveExecutablePathWithRetry(ctx.executablePath, {
     displayName: ctx.harness.displayName,
   });
+  const spawnArgs = [...args, ...buildPromptArgs(ctx.harness, prompt)];
   const { child, cleanup } = await spawnAgent({
     resolvedPath,
-    args: [...args, ...buildPromptArgs(ctx.harness, prompt)],
+    args: spawnArgs,
     spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
     sandbox: await getSandbox(ctx.harness.name),
+    sink: createHarnessLogSink({
+      harness: ctx.harness,
+      label: "plan-retry",
+      taskKey,
+      cwd: process.cwd(),
+      command: [resolvedPath, ...spawnArgs],
+    }),
   });
 
   const output = await new Promise<string | undefined>((resolve) => {

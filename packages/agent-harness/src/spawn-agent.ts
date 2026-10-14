@@ -13,6 +13,7 @@ import type { ChildProcess, SpawnOptions } from "child_process";
 import { existsSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
+import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
@@ -27,6 +28,38 @@ export interface SpawnAgentOptions {
   sandbox?: ResolvedSandbox | null;
   /** Policy overrides merged into the default policy (extra writable paths etc.). */
   policy?: Partial<SandboxPolicy>;
+  /**
+   * Optional durable output sink. When set, every stdout/stderr chunk is
+   * forwarded to the sink as it arrives, and {@link AgentOutputSink.close} is
+   * called exactly once when the process exits or fails to spawn. The caller
+   * owns the sink's destination (file, buffer, …); the harness only forwards
+   * events so no execution path can silently skip persistence.
+   */
+  sink?: AgentOutputSink;
+}
+
+/** Terminal outcome of a spawned agent process, as seen by the sink. */
+export interface AgentRunOutcome {
+  /** Process exit code, or -1 when the process never produced one. */
+  exitCode: number;
+  /** Signal that terminated the process, when it was killed. */
+  signal: NodeJS.Signals | null;
+  /** Spawn failure message (e.g. ENOENT); absent on a normal exit. */
+  error?: string;
+}
+
+/**
+ * Receives an agent process's output and terminal outcome. Implementations
+ * must tolerate repeated or concurrent calls and must never throw into the
+ * spawn/stream path.
+ */
+export interface AgentOutputSink {
+  /** A stdout chunk as emitted by the CLI. */
+  stdout(chunk: string): void;
+  /** A stderr chunk as emitted by the CLI. */
+  stderr(chunk: string): void;
+  /** Called once when the process exits or fails to spawn. */
+  close(outcome: AgentRunOutcome): void;
 }
 
 export interface SpawnedAgent {
@@ -178,33 +211,97 @@ export function applyNestingGuard(
 }
 
 export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAgent> {
-  const { resolvedPath, args, spawnOptions = {}, sandbox } = options;
+  const { resolvedPath, args, spawnOptions = {}, sandbox, sink } = options;
 
-  if (!sandbox) {
-    return {
-      child: spawnReapable(resolvedPath, args, spawnOptions),
-      cleanup: async () => {},
+  try {
+    if (!sandbox) {
+      const child = spawnReapable(resolvedPath, args, spawnOptions);
+      attachOutputSink(child, sink);
+      return { child, cleanup: async () => {} };
+    }
+
+    const workingDir =
+      options.policy?.workingDir ?? (spawnOptions.cwd as string | undefined) ?? process.cwd();
+    const defaults = buildDefaultSandboxPolicy(workingDir);
+    const policy: SandboxPolicy = {
+      ...defaults,
+      harnessName: sandbox.harnessName,
+      ...options.policy,
+      writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
     };
+
+    const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
+    const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);
+    const env = wrapped.env
+      ? { ...(spawnOptions.env ?? process.env), ...wrapped.env }
+      : spawnOptions.env;
+
+    const child = spawnReapable(wrapped.path, wrapped.args, { ...spawnOptions, env });
+    attachOutputSink(child, sink);
+    return {
+      child,
+      cleanup: wrapped.cleanup ?? (async () => {}),
+    };
+  } catch (error) {
+    // A sandbox that throws before the child exists must still close the sink
+    // so the run leaves a usable (header-only) log instead of a dangling fd.
+    sink?.close({
+      exitCode: -1,
+      signal: null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
+}
 
-  const workingDir =
-    options.policy?.workingDir ?? (spawnOptions.cwd as string | undefined) ?? process.cwd();
-  const defaults = buildDefaultSandboxPolicy(workingDir);
-  const policy: SandboxPolicy = {
-    ...defaults,
-    harnessName: sandbox.harnessName,
-    ...options.policy,
-    writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
+/**
+ * Forward a child's output and terminal outcome to an optional sink. The sink
+ * receives the same chunks the caller streams to the terminal; `close` fires
+ * exactly once (streams `close` after `error`, and kill paths still emit
+ * `close`), so a log always gets its footer.
+ */
+function attachOutputSink(child: ChildProcess, sink: AgentOutputSink | undefined): void {
+  if (!sink) {
+    return;
+  }
+  // Decode incrementally so a multi-byte UTF-8 character split across chunk
+  // boundaries is reassembled instead of persisting as U+FFFD.
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+  child.stdout?.on("data", (data: Buffer) => {
+    const text = stdoutDecoder.write(data);
+    if (text) {
+      sink.stdout(text);
+    }
+  });
+  child.stderr?.on("data", (data: Buffer) => {
+    const text = stderrDecoder.write(data);
+    if (text) {
+      sink.stderr(text);
+    }
+  });
+
+  let closed = false;
+  const finish = (outcome: AgentRunOutcome): void => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    // Flush any trailing bytes held by the decoders before the sink closes.
+    const stdoutRest = stdoutDecoder.end();
+    if (stdoutRest) {
+      sink.stdout(stdoutRest);
+    }
+    const stderrRest = stderrDecoder.end();
+    if (stderrRest) {
+      sink.stderr(stderrRest);
+    }
+    sink.close(outcome);
   };
-
-  const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
-  const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);
-  const env = wrapped.env
-    ? { ...(spawnOptions.env ?? process.env), ...wrapped.env }
-    : spawnOptions.env;
-
-  return {
-    child: spawnReapable(wrapped.path, wrapped.args, { ...spawnOptions, env }),
-    cleanup: wrapped.cleanup ?? (async () => {}),
-  };
+  child.once("error", (error: Error) => {
+    finish({ exitCode: -1, signal: null, error: error.message });
+  });
+  child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    finish({ exitCode: code ?? -1, signal });
+  });
 }

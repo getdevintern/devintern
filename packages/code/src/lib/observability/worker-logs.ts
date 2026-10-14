@@ -158,22 +158,39 @@ export function extractTaskKey(message: string): string | null {
   return null;
 }
 
+/** Key-name shape whose value is treated as a credential. */
+const SECRET_KEY_PATTERN =
+  "[A-Za-z0-9_]*(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key|pat)[A-Za-z0-9_]*";
+
 /**
- * Mask obvious credentials before serving a line: KEY=value assignments whose
- * key smells like a secret, plus common token shapes that can appear echoed
- * without a variable name.
+ * Mask obvious credentials: `KEY=value`, `KEY: value`, and `"KEY": "value"`
+ * assignments whose key smells like a secret, plus common token shapes that can
+ * appear echoed without a variable name, and PEM private-key blocks. Pass the
+ * whole transcript (not one line at a time) so multi-line PEM blocks match.
+ *
+ * Best-effort, not a guarantee: unknown formats, standalone base64 key
+ * material, and secrets in prose still pass through.
  */
 export function redactSecrets(message: string): string {
+  // Keys that look like credentials, quoted (JSON) or bare (env/YAML). The
+  // value may be quoted (possibly with spaces) or bare, separated by `=`/`:`.
   let redacted = message.replace(
-    /\b([A-Za-z0-9_]*(?:token|secret|password|passwd|api_?key|private[_-]?key|access[_-]?key|pat)[a-z0-9_]*)\s*=\s*(\S+)/gi,
-    (_match, key: string) => `${key}=[redacted]`,
+    new RegExp(
+      `(\\b${SECRET_KEY_PATTERN}\\b|"${SECRET_KEY_PATTERN}")(\\s*[:=]\\s*)("[^"\\n]*"|'[^'\\n]*'|\\S+)`,
+      "gi",
+    ),
+    (_match, key: string, separator: string) => `${key}${separator}[redacted]`,
   );
   redacted = redacted
     .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, "[redacted]")
     .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[redacted]")
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted]")
     .replace(/\bBearer\s+[A-Za-z0-9._~-]{8,}/gi, "Bearer [redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted]");
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted]")
+    .replace(
+      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----[\s\S]{0,65536}?-----END [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----/g,
+      "[redacted private key]",
+    );
   return redacted;
 }
 

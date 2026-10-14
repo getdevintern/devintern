@@ -146,6 +146,8 @@ export {
   buildDefaultSandboxPolicy,
   type SpawnAgentOptions,
   type SpawnedAgent,
+  type AgentOutputSink,
+  type AgentRunOutcome,
 } from "./spawn-agent.js";
 
 // Max-turns detection

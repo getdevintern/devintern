@@ -397,6 +397,25 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 └── attachments/                         # Jira attachments
 ```
 
+## Harness Run Logs
+
+Every agent harness execution writes a durable transcript under the workspace home (`~/.devintern`, or the `DEVINTERN_WORKSPACE_DIR` override):
+
+```
+~/.devintern/logs/harness/
+└── <started-at>__<origin>__<run42|norun>__<TASK-1|nokey>__<label|run>__<pid>__<rand>.log
+```
+
+Each file is self-describing: a header records the run origin (task type), task key, run id, harness, spawn label, working directory, command, and start time; the body is the interleaved stdout/stderr as it streamed, written verbatim with no per-line stream tags (harnesses stream normal progress to stderr, so tagging it would mark ordinary output as an error); the footer records the end time, duration, exit code, signal, whether the body was truncated at the per-file size cap, and whether a max-turns limit or usage limit was detected. Because persistence happens at the process boundary, a run that fails, times out, is killed, or exhausts its turn budget still leaves a usable log with whatever output was produced.
+
+This covers every agent execution, including task implementation, plan retries, feasibility/clarity checks, estimation, git-hook fixes, auto-review, PR/MR review addressing, conflict resolution, and webhook review runs (webhook reviews are recorded as `pr_mention` runs so their transcripts appear on the dashboard).
+
+- Logging is **on by default**. Set `DEVINTERN_HARNESS_LOGS=0` to disable it.
+- Raw output is written unredacted so the transcript is complete; the dashboard masks obvious credentials when serving a log. Redaction is best-effort pattern matching, not a guarantee: it catches credential-looking `KEY=value` / `KEY: value` / `"key": "value"` assignments, well-known token shapes, and PEM private-key blocks, but not unknown formats, standalone base64 secrets, or secrets in prose. Treat these logs as sensitive and set `DEVINTERN_HARNESS_LOGS=0` where transcripts may carry material secrets.
+- A single transcript is truncated once its body reaches 10 MB; override with `DEVINTERN_HARNESS_LOG_MAX_FILE_MB`.
+- Files older than 30 days are pruned on write, the directory is capped at 500 files (oldest first) and a 256 MB total budget. Override with `DEVINTERN_HARNESS_LOG_RETENTION_DAYS`, `DEVINTERN_HARNESS_LOG_MAX_FILES`, and `DEVINTERN_HARNESS_LOG_MAX_TOTAL_MB`.
+- The local dashboard surfaces a run's harness logs on its detail page; the same data is available as JSON at `GET /api/runs/:id/harness-logs` and `GET /api/runs/:id/harness-logs/:name`.
+
 ## Prompt Catalog
 
 The role prompts DevIntern sends to the agent are versioned Markdown files rather than inline TypeScript, so they can be reviewed, diffed, and overridden. The bundled catalog ships with the CLI:

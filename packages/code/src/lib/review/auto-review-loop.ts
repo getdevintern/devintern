@@ -25,6 +25,7 @@ import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import type {
   AutoReviewLoopOptions,
   AutoReviewLoopResult,
@@ -299,6 +300,12 @@ export async function runAgentPrompt(
         args: agentArgs,
         spawnOptions: { cwd: workingDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "auto-review",
+          cwd: workingDir,
+          command: [resolvedPath, ...agentArgs],
+        }),
       });
 
       let stdout = "";
