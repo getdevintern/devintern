@@ -99,6 +99,36 @@ describe("parseWorkspaceConfig", () => {
     });
   });
 
+  test("parses workspace and per-repo pipeline_file references", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+pipeline_file = "pipelines/default.json"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+pipeline_file = "pipelines/backend.json"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+`);
+    expect(config.defaults.pipelineFile).toBe("pipelines/default.json");
+    expect(findRepo(config, "backend")?.pipelineFile).toBe("pipelines/backend.json");
+    expect(findRepo(config, "frontend")?.pipelineFile).toBeUndefined();
+  });
+
+  test("rejects an empty pipeline_file value", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+pipeline_file = ""
+`),
+    ).toThrow(/\[defaults\]\.pipeline_file must be a non-empty string/);
+  });
+
   test("applies the default worktrees TTL when [workspace] is omitted", () => {
     const config = parseWorkspaceConfig(`
 [defaults]

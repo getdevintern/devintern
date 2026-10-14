@@ -1,4 +1,5 @@
 import { readFileSync } from "fs";
+import { isAbsolute, join } from "path";
 
 import {
   supportsEstimate,
@@ -68,6 +69,11 @@ export interface WorkspaceDefaults {
   workerTaskArgs?: string;
   /** Labels applied to PRs created for repos that do not override them. */
   prLabels?: string[];
+  /**
+   * Workspace-relative JSON file holding the fleet-wide default pipeline
+   * definition. Falls back to the built-in default when unset.
+   */
+  pipelineFile?: string;
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
 }
@@ -104,6 +110,12 @@ export interface RepoConfig {
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
   prLabels?: string[];
+  /**
+   * Workspace-relative JSON file holding this repository's pipeline override.
+   * Takes precedence over the repo's checked-in `settings.json` pipeline and
+   * over `[defaults].pipeline_file`.
+   */
+  pipelineFile?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
@@ -579,6 +591,7 @@ function parseDefaultsSection(
       defaultsTable.pr_labels === undefined
         ? undefined
         : readStringList(defaultsTable, "pr_labels", "[defaults]", errors),
+    pipelineFile: readString(defaultsTable, "pipeline_file", "[defaults]", errors),
     pollIntervalSeconds:
       readOptionalInteger(defaultsTable, "poll_interval", "[defaults]", errors, {
         min: 1,
@@ -650,6 +663,7 @@ function parseReposSection(
         table.pr_labels === undefined
           ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
+      pipelineFile: readString(table, "pipeline_file", label, errors),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -863,6 +877,19 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
     );
   }
   return parseWorkspaceConfig(text, path);
+}
+
+/**
+ * Resolve a `pipeline_file` reference against the workspace directory.
+ *
+ * Relative paths are workspace-relative (normally `~/.devintern`); absolute
+ * paths are returned unchanged.
+ *
+ * @param workspaceDir - Workspace home directory.
+ * @param file - The declared `pipeline_file` value.
+ */
+export function resolveWorkspacePipelinePath(workspaceDir: string, file: string): string {
+  return isAbsolute(file) ? file : join(workspaceDir, file);
 }
 
 /**
