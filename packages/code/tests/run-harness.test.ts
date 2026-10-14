@@ -353,6 +353,31 @@ describe("runAgentHarness non-commit outcomes", () => {
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("requests a structured briefing and posts it without progress output", async () => {
+    const summary = "## What changed\nImplemented the thing.\n## Verification\nTests passed.";
+    scenario.stdout = `Exploring the codebase.\n<!-- devintern:summary:start -->\n${summary}\n<!-- devintern:summary:end -->`;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts[0]).toContain("implement the thing");
+    for (const heading of [
+      "Why",
+      "What changed",
+      "Scope",
+      "Tradeoffs",
+      "Blast Radius",
+      "Verification",
+    ]) {
+      expect(agentPrompts[0]).toContain(`## ${heading}\n`);
+    }
+    expect(postImplementationCommentMock).toHaveBeenCalledWith(
+      tracker,
+      "TASK-1",
+      summary,
+      "Do the thing",
+    );
+  });
+
   test("commits and posts the implementation summary when no PR is requested", async () => {
     scenario.stdout = "done";
 
@@ -381,6 +406,7 @@ describe("runAgentHarness git delivery", () => {
     expect(commitCalls).toBe(2);
     expect(hookCalls).toBe(1);
     expect(autoReviewCalls).toBe(0);
+    expect(agentPrompts[1]).toContain("## Final implementation summary");
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
@@ -655,6 +681,7 @@ describe("runAgentHarness git delivery", () => {
     expect(runs).toBe(2);
     expect(commitCalls).toBe(2);
     expect(agentPrompts[1]).toContain("Missing case");
+    expect(agentPrompts[1]).toContain("## Final implementation summary");
     expect(deliveryEvents).toEqual(["commit", "commit", "push"]);
   });
 
