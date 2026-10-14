@@ -20,6 +20,18 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
  * watch list), fork PRs are skipped, and pushes are never forced — retries
  * always build on top of whatever is actually published, so a human push
  * that lands mid-resolution is incorporated rather than fought.
+ *
+ * Idempotency: the push is the only remote mutation, and every attempt
+ * rebuilds it from a freshly fetched remote tip (`prepareReviewWorktree`
+ * resets the branch to `origin/<branch>`) then pushes fast-forward-only. So
+ * re-running after an interruption at any point converges on the same
+ * published state: before the merge the merge is recomputed; after a local
+ * commit but before the push the local work is discarded and rebuilt; after
+ * the push the merge is already an ancestor of the branch tip, so
+ * {@link attemptMerge} reports "already up to date" and returns `skipped`
+ * without re-running the agent or re-writing the remote. The expected-head
+ * lease and the non-fast-forward checks in `Utils.pushCurrentBranch` are the
+ * explicit guards that keep a concurrent human push from being overwritten.
  */
 
 import { runAgent } from "./address";

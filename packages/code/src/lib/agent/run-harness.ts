@@ -33,6 +33,7 @@ import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comm
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
 import type { VerifyConfig } from "./verify";
+import { withImplementationSummary } from "./implementation-summary";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -136,7 +137,10 @@ export async function runAgentSession(
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process with enhanced permissions and max turns
-      const spawnArgs = [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)];
+      const spawnArgs = [
+        ...agentArgs,
+        ...buildPromptArgs(harness, withImplementationSummary(promptOverride ?? taskContent)),
+      ];
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,

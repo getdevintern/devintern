@@ -3,6 +3,8 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+import type { Database } from "bun:sqlite";
+
 import { RunStore } from "../src/lib/state/run-recorder";
 
 describe("RunStore", () => {
@@ -217,6 +219,115 @@ describe("RunStore", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-6" });
     store.finishRun(id, "succeeded");
     expect(store.listStages(id).at(-1)?.status).toBe("succeeded");
+  });
+
+  test("finishRun is idempotent: repeated calls converge on one terminal outcome", () => {
+    // A retry or a late child process can finish the same run again. The end
+    // state must be the last write, not an appended second outcome.
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-13" });
+    store.finishRun(id, "failed", "first attempt interrupted");
+    store.finishRun(id, "succeeded", "retry completed");
+
+    const run = store.getRun(id);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBe("retry completed");
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("succeeded");
+    expect(outcomes[0]?.summary).toBe("retry completed");
+  });
+
+  test("reapOrphanedRuns records one outcome stage and repeated sweeps are no-ops", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    expect(store.reapOrphanedRuns()).toBe(1);
+    expect(store.reapOrphanedRuns()).toBe(0);
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("failed");
+    expect(outcomes[0]?.summary).toContain("orphaned");
+  });
+
+  test("a late finishRun replaces the reaped outcome instead of appending", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+    store.reapOrphanedRuns();
+    store.finishRun(id, "succeeded", "late completion");
+
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.status).toBe("succeeded");
+    expect(store.getRun(id)?.status).toBe("succeeded");
+  });
+
+  test("reap takes the write lock before its scan so a mid-sweep finishRun cannot abort it", () => {
+    const id = store.createRun({ origin: "conflict_resolution" });
+
+    // Simulate the outlived child process the module's docs contemplate: a
+    // `finishRun` on a second connection that attempts to commit in the window
+    // between the sweep's orphan scan and its per-run writes. A zero busy
+    // timeout makes that writer fail fast instead of blocking this single
+    // thread; in production it would simply wait for the sweep's commit.
+    const other = new RunStore(dbPath);
+    const otherDb = (other as unknown as { db: Database }).db;
+    otherDb.run("PRAGMA busy_timeout = 0");
+
+    const db = (store as unknown as { db: Database }).db;
+    const realQuery = db.query.bind(db) as (sql: string) => unknown;
+    let injected = false;
+    let injectionError: string | null = null;
+    (db as unknown as { query: typeof realQuery }).query = (sql: string) => {
+      const stmt = realQuery(sql) as { all: (...args: unknown[]) => unknown };
+      if (sql.includes("WHERE status = 'in_progress'") && !injected) {
+        const realAll = stmt.all.bind(stmt);
+        stmt.all = (...args: unknown[]) => {
+          const rows = realAll(...args);
+          if (!injected) {
+            injected = true;
+            // Runs after the orphan SELECT but before the sweep's writes, i.e.
+            // exactly inside the read-then-write window.
+            try {
+              other.finishRun(id, "succeeded", "late completion");
+            } catch (error) {
+              injectionError = (error as Error).message;
+            }
+          }
+          return rows;
+        };
+      }
+      return stmt;
+    };
+
+    let reaped: number;
+    try {
+      // Against the previous deferred sweep this aborts with
+      // SQLITE_BUSY_SNAPSHOT ("database is locked") because the scan's read
+      // snapshot was invalidated by the mid-transaction write.
+      reaped = store.reapOrphanedRuns();
+    } finally {
+      (db as unknown as { query: typeof realQuery }).query = realQuery;
+      other.close();
+    }
+
+    expect(injected).toBe(true);
+    const run = store.getRun(id);
+    const outcomes = store.listStages(id).filter((s) => s.stage === "outcome");
+    expect(outcomes).toHaveLength(1);
+    // The terminal row and its outcome stage must never disagree.
+    expect(String(outcomes[0]?.status)).toBe(String(run?.status));
+    if (reaped === 0) {
+      // The concurrent finishRun won the race before the sweep took the lock.
+      expect(injectionError).toBeNull();
+      expect(run?.status).toBe("succeeded");
+      expect(outcomes[0]?.status).toBe("succeeded");
+    } else {
+      // The sweep took the write lock first: the concurrent writer was refused
+      // and the sweep reaped the run.
+      expect(reaped).toBe(1);
+      expect(String(injectionError)).toContain("locked");
+      expect(run?.status).toBe("failed");
+      expect(outcomes[0]?.status).toBe("failed");
+    }
   });
 
   test("listRuns filters by task key and orders newest first", () => {
