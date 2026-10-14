@@ -44,6 +44,45 @@ describe("resolveSessionPickup", () => {
     return runId;
   }
 
+  test("selects only runs in the current tracker, team, repo, and origin", async () => {
+    const scope = { tracker: "github", team: "team-b", repo: "shared", origin: "task" as const };
+    const own = store.createRun({ ...scope, taskKey: "1", branch: "feature/own" });
+    store.addStage(
+      own,
+      "implementation",
+      "succeeded",
+      "done",
+      JSON.stringify({ report: "own report" }),
+    );
+    store.finishRun(own, "failed");
+    for (const foreignScope of [
+      { ...scope, team: "team-a" },
+      { ...scope, tracker: "gitlab" },
+      { ...scope, repo: "other" },
+      { ...scope, origin: "error_monitor" as const },
+      { ...scope, automationId: "nightly" },
+    ]) {
+      const foreign = store.createRun({ ...foreignScope, taskKey: "1", branch: "feature/foreign" });
+      store.addStage(
+        foreign,
+        "implementation",
+        "succeeded",
+        "done",
+        JSON.stringify({ report: "foreign report" }),
+      );
+      store.finishRun(foreign, "failed");
+      expect(
+        await resolveSessionPickup({ runStore: store, taskKey: "1", runId: foreign, scope }),
+      ).toEqual({
+        kind: "fresh",
+        reason: "pinned run belongs to another task context",
+      });
+    }
+    const decision = await resolveSessionPickup({ runStore: store, taskKey: "1", scope });
+    expect(decision.kind).toBe("resume");
+    if (decision.kind === "resume") expect(decision.session.runId).toBe(own);
+  });
+
   test("resumes the latest retriable run with branch, report, and landed work", async () => {
     const runId = failedRunWithState("PROJ-1", "feature/proj-1", "I added the parser");
 

@@ -206,6 +206,30 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     }
     return false;
   }
+  if (
+    outcome.result.message === "No changes to commit" &&
+    ctx.resumeBranch &&
+    (await Utils.getCurrentBranch()) === ctx.resumeBranch &&
+    !(await Utils.isProtectedBranch(ctx.resumeBranch))
+  ) {
+    const branchName = ctx.prTargetBranch.replace(/^origin\//, "");
+    const remoteBase = `refs/remotes/origin/${branchName}`;
+    const base = (await Utils.gitRefExists(remoteBase)) ? remoteBase : `refs/heads/${branchName}`;
+    const inherited = await Utils.executeGitCommand(["rev-list", "--count", `${base}..HEAD`]);
+    if (
+      inherited.success &&
+      /^\d+$/.test(inherited.output.trim()) &&
+      Number(inherited.output.trim()) > 0
+    ) {
+      // The resumed branch already contains implementation commits. Continue
+      // through verification, hooks, and publishing without inventing a new
+      // commit just to satisfy the fresh-run delivery assumption.
+      state.committed = true;
+      console.log("✅ Delivering implementation commits inherited from the prior attempt");
+      return true;
+    }
+  }
+
   console.log(
     'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
   );

@@ -211,6 +211,8 @@ Any of those actions bumps the ticket's update stamp, so the worker picks it up 
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
+Pickup only inherits runs from the same tracker, team, repository, and run origin. A branch held by a user-owned checkout is left untouched; only disposable worktrees inside the worker's repository worktree directory can be removed for pickup, and Git's removal refusals are respected. If checkout cannot be resumed, the new attempt's prompt describes a fresh run. If the inherited implementation is already committed and needs no new edits, delivery still runs configured verification and hooks before publishing those commits.
+
 Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
 ### Tickets already actioned after a PR

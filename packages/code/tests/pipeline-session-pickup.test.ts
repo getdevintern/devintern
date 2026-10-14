@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,11 +18,14 @@ import { buildRetryPromptContext, taskSteps } from "../src/lib/task/pipeline";
 import { runTaskSteps } from "../src/lib/task/step-runner";
 import { Utils } from "../src/lib/utils";
 import { WORKSPACE_REPO_ENV } from "../src/lib/workspace/env";
+import type { FormattedTaskDetails } from "../src/types/task-tracker";
 
 let dbPath: string;
 let store: RunStore;
 let originalOptions: typeof runContext.options;
 let originalContinue: typeof Utils.continueFeatureBranch | undefined;
+let originalCreate: typeof Utils.createFeatureBranch;
+let outputDirEnv: string | undefined;
 let workspaceRepo: string | undefined;
 
 beforeEach(() => {
@@ -33,6 +36,9 @@ beforeEach(() => {
   store = new RunStore(dbPath);
   originalOptions = runContext.options;
   originalContinue = Utils.continueFeatureBranch;
+  originalCreate = Utils.createFeatureBranch;
+  outputDirEnv = process.env.DEVINTERN_OUTPUT_DIR;
+  process.env.DEVINTERN_OUTPUT_DIR = `${dbPath}.output`;
   workspaceRepo = process.env[WORKSPACE_REPO_ENV];
   delete process.env[WORKSPACE_REPO_ENV];
 });
@@ -43,6 +49,10 @@ afterEach(() => {
     rmSync(`${dbPath}${suffix}`, { force: true });
   }
   runContext.options = originalOptions;
+  Utils.createFeatureBranch = originalCreate;
+  rmSync(`${dbPath}.output`, { recursive: true, force: true });
+  if (outputDirEnv === undefined) delete process.env.DEVINTERN_OUTPUT_DIR;
+  else process.env.DEVINTERN_OUTPUT_DIR = outputDirEnv;
   if (originalContinue) {
     Utils.continueFeatureBranch = originalContinue;
   }
@@ -61,6 +71,72 @@ function resumableRun(taskKey: string, branch: string, report: string): number {
 }
 
 describe("pipeline session pickup wiring", () => {
+  test.each([true, false])(
+    "writes the actual branch preparation outcome into the prompt (resumed=%s)",
+    async (resumed) => {
+      runContext.options = { git: true } as never;
+      Utils.continueFeatureBranch = async (branch) => ({
+        success: resumed,
+        branchName: branch,
+        message: "checkout outcome",
+      });
+      Utils.createFeatureBranch = async () => ({
+        success: true,
+        branchName: "feature/proj-1-attempt-2",
+        message: "fresh branch",
+      });
+      const context = {
+        taskKey: "PROJ-1",
+        workflowKey: "PROJ-1",
+        effectiveTargetBranch: "main",
+        resumeBranch: "feature/proj-1",
+        task: {},
+        tracker: {},
+        relatedIssues: [],
+        priorRetryState: null,
+        taskDetails: {
+          key: "PROJ-1",
+          summary: "Implement feature",
+          issueType: "Story",
+          status: "To Do",
+          priority: "Medium",
+          reporter: "pm@example.com",
+          created: "2026-01-01",
+          updated: "2026-01-01",
+          description: "Implement feature",
+          labels: [],
+          components: [],
+          fixVersions: [],
+          comments: [],
+          attachments: [],
+          linkedResources: [],
+          relatedIssues: [],
+        } as FormattedTaskDetails,
+        pickup: {
+          kind: "resume",
+          session: {
+            runId: 1,
+            taskKey: "PROJ-1",
+            status: "failed",
+            branch: "feature/proj-1",
+            report: "inherited report",
+          },
+        } as SessionPickupDecision,
+        outputFile: "",
+        taskDir: "",
+        attachmentMap: new Map(),
+      };
+      const steps = taskSteps.filter((step) =>
+        ["prepare-branch", "prepare-prompt"].includes(step.name),
+      );
+      await runTaskSteps(steps, context as never);
+      const prompt = readFileSync(context.outputFile, "utf8");
+      expect(prompt.includes("checked out for you")).toBe(resumed);
+      expect(prompt.includes("inherited report")).toBe(resumed);
+      if (resumed) expect(context.resumeBranch).toBe("feature/proj-1");
+      else expect(context.resumeBranch).toBeUndefined();
+    },
+  );
   test("resumes the excluded prior attempt's branch through the prepare-branch step", async () => {
     const prior = resumableRun("PROJ-1", "feature/proj-1", "prior report");
     // The pipeline opens the current run before resolving pickup; the resolver

@@ -53,6 +53,7 @@ import {
   writeUsageLimitHint,
 } from "../worker/usage-limit-protocol";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
+import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
 import { reportProcessingFailure } from "./processing-failure";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
@@ -161,6 +162,7 @@ interface ImplementationInput {
   task: Awaited<ReturnType<TaskTrackerClient["getTask"]>>;
   taskDetails: ReturnType<TaskTrackerClient["formatTaskDetails"]>;
   effectiveTargetBranch: string;
+  resumeBranch?: string;
 }
 
 /**
@@ -223,6 +225,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     isPlanRetry: false,
     prTargetBranchExplicit: options.prTargetBranchExplicit,
     requestedPrTargetBranch: options.requestedPrTargetBranch,
+    resumeBranch: input.resumeBranch,
   });
 
   // An incomplete-summary file written during this run means the agent
@@ -887,7 +890,7 @@ export async function ensureFeatureBranch(input: {
   workflowKey: string;
   effectiveTargetBranch: string;
   resumeBranch?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const { taskKey, workflowKey, effectiveTargetBranch, resumeBranch } = input;
   const options = runContext.options;
 
@@ -898,14 +901,17 @@ export async function ensureFeatureBranch(input: {
     // the normal fresh-branch path below.
     if (resumeBranch) {
       console.log(`\n♻️  Resuming prior attempt's branch '${resumeBranch}'...`);
-      const resumed = await Utils.continueFeatureBranch(resumeBranch);
+      const repo = process.env[WORKSPACE_REPO_ENV];
+      const resumed = await Utils.continueFeatureBranch(resumeBranch, {
+        ownedWorktreeRoot: repo ? join(worktreesDir(resolveWorkspaceDir()), repo) : undefined,
+      });
       if (resumed.success) {
         console.log(`✅ ${resumed.message}`);
         recordRunBranch(resumed.branchName);
         if (process.env[WORKSPACE_REPO_ENV]) {
           await Utils.prepareWorktreeForAgent(process.cwd());
         }
-        return;
+        return true;
       }
       console.warn(`⚠️  ${resumed.message}; starting a fresh branch instead`);
     }
@@ -954,6 +960,7 @@ export async function ensureFeatureBranch(input: {
   if (process.env[WORKSPACE_REPO_ENV]) {
     await Utils.prepareWorktreeForAgent(process.cwd());
   }
+  return false;
 }
 
 /** Move the task to its In Progress status now that implementation is starting. */
@@ -1010,13 +1017,32 @@ interface TaskExecutionContext extends ImplementationInput {
   projectKey: string;
   /** Recorded branch to inherit via session pickup, when resuming. */
   resumeBranch?: string;
+  relatedIssues: Awaited<ReturnType<TaskTrackerClient["getRelatedWorkItems"]>>;
+  priorRetryState: ReturnType<typeof getRetryState>;
+  pickup: SessionPickupDecision;
 }
 
 export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
   {
     name: "prepare-branch",
-    run: async ({ taskKey, workflowKey, effectiveTargetBranch, resumeBranch }) =>
-      ensureFeatureBranch({ taskKey, workflowKey, effectiveTargetBranch, resumeBranch }),
+    run: async (context) => {
+      const resumed = await ensureFeatureBranch(context);
+      if (!resumed) {
+        context.resumeBranch = undefined;
+        if (runContext.options.git && context.pickup?.kind === "resume") {
+          context.pickup = { kind: "fresh", reason: "recorded branch could not be resumed" };
+        }
+      }
+    },
+  },
+  {
+    name: "prepare-prompt",
+    run: async (context) => {
+      // Branch preparation can fall back to a fresh branch. Generate guidance
+      // only after that decision, so the prompt never claims discarded work
+      // has been inherited.
+      Object.assign(context, await materializeTaskPrompt(context));
+    },
   },
   {
     name: "feasibility",
@@ -1048,6 +1074,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
       task,
       taskDetails,
       effectiveTargetBranch,
+      resumeBranch,
     }) =>
       runImplementation({
         outputFile,
@@ -1057,6 +1084,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
         task,
         taskDetails,
         effectiveTargetBranch,
+        resumeBranch,
       }),
   },
 ];
@@ -1108,6 +1136,14 @@ export async function processSingleTask(
       pickup = await resolveSessionPickup({
         runStore: pickupStore,
         taskKey: workflowKey,
+        scope:
+          currentRunId !== undefined
+            ? (pickupStore.getRun(currentRunId) ?? {})
+            : {
+                tracker: process.env.TASK_TRACKER || "jira",
+                team: process.env.DEVINTERN_WORKSPACE_TEAM,
+                repo: process.env.DEVINTERN_WORKSPACE_REPO,
+              },
         ...pickupSelection(currentRunId),
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
@@ -1127,28 +1163,21 @@ export async function processSingleTask(
       console.log(`\n🆕 Session pickup unavailable (${pickup.reason}); starting fresh`);
     }
 
-    const { taskDir, outputFile, attachmentMap } = await materializeTaskPrompt({
-      task,
-      taskDetails,
-      tracker,
-      relatedIssues,
-      workflowKey,
-      priorRetryState,
-      pickup,
-    });
-
     const result = await runTaskSteps(taskSteps, {
       taskKey,
       totalTasks,
       skipClarityCheck,
-      outputFile,
-      taskDir,
+      outputFile: "",
+      taskDir: "",
       workflowKey,
       tracker,
       task,
       taskDetails,
       effectiveTargetBranch,
-      attachmentMap,
+      attachmentMap: new Map<string, string>(),
+      relatedIssues,
+      priorRetryState,
+      pickup,
       projectSettings,
       projectKey,
       resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,

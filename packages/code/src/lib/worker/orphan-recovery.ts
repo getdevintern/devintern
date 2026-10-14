@@ -175,6 +175,7 @@ export async function recoverOrphanedTaskRuns(
         runStore: deps.runStore,
         taskKey: run.taskKey ?? "",
         runId: run.id,
+        scope: run,
         ...(deps.branchExists
           ? { branchExists: (branch: string) => deps.branchExists!(branch, run) }
           : {}),

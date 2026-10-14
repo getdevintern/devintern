@@ -1,4 +1,5 @@
-import { rmSync } from "fs";
+import { lstatSync, realpathSync, rmSync } from "fs";
+import { basename, dirname, join } from "path";
 import type { GitCommandResult, GitOptions } from "./types";
 import { GIT_CLEAN_ARGS } from "./constants";
 import { Utils } from "./registry";
@@ -117,10 +118,12 @@ export async function createFeatureBranch(
  * pre-branch cleanup, so already-landed changes survive.
  *
  * @param branch - Recorded branch to resume
+ * @param options.ownedWorktreeRoot - Directory containing disposable fleet
+ * worktrees. Without it, branch-holding worktrees are always left untouched.
  */
 export async function continueFeatureBranch(
   branch: string,
-  options?: { cwd?: string },
+  options?: { cwd?: string; ownedWorktreeRoot?: string },
 ): Promise<{ success: boolean; branchName: string; message: string }> {
   const cwd = options?.cwd;
   const gitOpts = cwd ? { cwd } : undefined;
@@ -145,7 +148,7 @@ export async function continueFeatureBranch(
     // branch by removing the holding worktree — keeping its commits — and retry.
     let conflict = isWorktreeConflict(checkout);
     if (conflict) {
-      const freed = await removeWorktreeHoldingBranch(branch, gitOpts);
+      const freed = await removeWorktreeHoldingBranch(branch, gitOpts, options?.ownedWorktreeRoot);
       if (freed.removed) {
         const retry = await Utils.executeGitCommand(["checkout", branch], gitOpts);
         if (retry.success) {
@@ -399,8 +402,8 @@ interface FreeWorktreeResult {
 /**
  * Outcome of trying to preserve a worktree's uncommitted work before removal.
  *
- * `unpreservable` means the tree was dirty but stashing it failed, so removing
- * the worktree would discard the exact edits pickup exists to protect.
+ * `unpreservable` means the state could not be checked, or dirty work could
+ * not be stashed. Removal would risk discarding the edits pickup protects.
  */
 type PreserveResult =
   | { kind: "clean" }
@@ -413,15 +416,18 @@ type PreserveResult =
  * worktree's removal and can be restored on the resumed branch.
  *
  * @returns "preserved" with the stash message when work was stashed, "clean"
- * when the worktree had nothing to lose or its state could not be checked, and
- * "unpreservable" when dirty work exists that could not be stashed.
+ * when the worktree had nothing to lose, and "unpreservable" when its state
+ * could not be checked or dirty work could not be stashed.
  */
 async function preserveUncommittedWork(
   worktreePath: string,
   branchName: string,
 ): Promise<PreserveResult> {
   const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: worktreePath });
-  if (!status.success || !status.output.trim()) {
+  if (!status.success) {
+    return { kind: "unpreservable" };
+  }
+  if (!status.output.trim()) {
     return { kind: "clean" };
   }
 
@@ -480,9 +486,26 @@ async function restorePreservedStash(
 async function removeWorktreeHoldingBranch(
   branchName: string,
   gitOpts: GitOptions,
+  ownedWorktreeRoot: string | undefined,
 ): Promise<FreeWorktreeResult> {
   const worktreeToRemove = await findWorktreeHoldingPath(branchName, gitOpts);
   if (!worktreeToRemove) {
+    return { removed: false };
+  }
+
+  // Only disposable fleet worktrees may be removed. A primary checkout has a
+  // .git directory; linked worktrees have a .git file. Resolve paths to prevent
+  // a symlink inside the owned root from granting ownership of another tree.
+  try {
+    if (
+      !ownedWorktreeRoot ||
+      dirname(realpathSync(worktreeToRemove)) !== realpathSync(ownedWorktreeRoot) ||
+      basename(worktreeToRemove) === "base" ||
+      !lstatSync(join(worktreeToRemove, ".git")).isFile()
+    ) {
+      return { removed: false };
+    }
+  } catch {
     return { removed: false };
   }
 
@@ -502,13 +525,9 @@ async function removeWorktreeHoldingBranch(
     gitOpts,
   );
   if (!removeResult.success) {
-    // Try to forcibly delete the worktree directory and prune its registration.
-    try {
-      rmSync(worktreeToRemove, { recursive: true, force: true });
-    } catch {
-      // Ignore deletion errors; verification below reports the real outcome.
-    }
-    await Utils.executeGitCommand(["worktree", "prune"], gitOpts);
+    // Git can refuse removal of a primary, locked, or submodule-containing
+    // checkout. Never bypass that refusal with a recursive filesystem delete.
+    return { removed: false, ...(preservedStash ? { preservedStash } : {}) };
   }
 
   // Report the real outcome: the holder must actually be gone, otherwise the

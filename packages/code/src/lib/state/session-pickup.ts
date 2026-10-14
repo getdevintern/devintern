@@ -89,6 +89,8 @@ export type SessionPickupRunStore = Pick<RunStore, "getRun" | "listRuns" | "list
 export interface SessionPickupOptions {
   runStore: SessionPickupRunStore;
   taskKey: string;
+  /** Task keys are only unique within this tracker/team/repository context. */
+  scope?: Partial<Pick<RunRecord, "tracker" | "team" | "repo" | "origin" | "automationId">>;
   /** Prefer this specific run (e.g. the run a dashboard retry targeted). */
   runId?: number;
   /**
@@ -168,7 +170,14 @@ function findCandidateRun(
   taskKey: string,
   runId?: number,
   excludeRunId?: number,
+  scope: SessionPickupOptions["scope"] = {},
 ): CandidateRun {
+  const matchesScope = (run: RunRecord) =>
+    run.origin === (scope.origin ?? "task") &&
+    run.tracker === scope.tracker &&
+    run.team === scope.team &&
+    run.repo === scope.repo &&
+    run.automationId === scope.automationId;
   if (runId !== undefined) {
     const run = runStore.getRun(runId) ?? undefined;
     if (!run) {
@@ -177,10 +186,13 @@ function findCandidateRun(
     if (run.taskKey !== taskKey) {
       return { kind: "none", reason: "pinned run belongs to another task" };
     }
+    if (!matchesScope(run)) {
+      return { kind: "none", reason: "pinned run belongs to another task context" };
+    }
     return { kind: "found", run };
   }
   const runs = runStore.listRuns({ taskKey });
-  const run = runs.find((candidate) => candidate.id !== excludeRunId);
+  const run = runs.find((candidate) => candidate.id !== excludeRunId && matchesScope(candidate));
   return run ? { kind: "found", run } : { kind: "none", reason: "no prior attempt on record" };
 }
 
@@ -195,11 +207,11 @@ function findCandidateRun(
 export async function resolveSessionPickup(
   options: SessionPickupOptions,
 ): Promise<SessionPickupDecision> {
-  const { runStore, taskKey, runId, excludeRunId, branchExists, describeLanded } = options;
+  const { runStore, taskKey, runId, excludeRunId, scope, branchExists, describeLanded } = options;
 
   let candidate: CandidateRun;
   try {
-    candidate = findCandidateRun(runStore, taskKey, runId, excludeRunId);
+    candidate = findCandidateRun(runStore, taskKey, runId, excludeRunId, scope);
   } catch {
     return { kind: "fresh", reason: "run store unavailable" };
   }

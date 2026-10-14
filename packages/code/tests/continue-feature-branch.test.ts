@@ -60,6 +60,43 @@ describe("continueFeatureBranch", () => {
     expect(result.message).toContain("feature/missing");
   });
 
+  test("never removes the primary checkout or its shared git database", async () => {
+    execSync("git checkout -b feature/primary", { cwd: repoDir });
+    const retry = join(testDir, "retry");
+    execSync(`git worktree add --detach "${retry}" main`, { cwd: repoDir });
+    writeFileSync(join(repoDir, "wip.txt"), "keep primary work\n");
+    const result = await Utils.continueFeatureBranch("feature/primary", {
+      cwd: retry,
+      ownedWorktreeRoot: testDir,
+    });
+    expect(result.success).toBe(false);
+    expect(existsSync(join(repoDir, ".git"))).toBe(true);
+    expect(existsSync(join(repoDir, "wip.txt"))).toBe(true);
+    expect(await Utils.getCurrentBranch(repoDir)).toBe("feature/primary");
+  });
+
+  test("leaves user-owned linked worktrees untouched", async () => {
+    const holder = join(testDir, "user-checkout");
+    execSync(`git worktree add -b feature/user "${holder}" main`, { cwd: repoDir });
+    writeFileSync(join(holder, "wip.txt"), "keep user work\n");
+    const result = await Utils.continueFeatureBranch("feature/user", { cwd: repoDir });
+    expect(result.success).toBe(false);
+    expect(existsSync(join(holder, "wip.txt"))).toBe(true);
+  });
+
+  test("respects Git's refusal to remove a locked owned worktree", async () => {
+    const holder = join(testDir, "locked");
+    execSync(`git worktree add -b feature/locked "${holder}" main`, { cwd: repoDir });
+    execSync(`git worktree lock "${holder}"`, { cwd: repoDir });
+    const result = await Utils.continueFeatureBranch("feature/locked", {
+      cwd: repoDir,
+      ownedWorktreeRoot: testDir,
+    });
+    expect(result.success).toBe(false);
+    expect(existsSync(holder)).toBe(true);
+    expect(await Utils.getCurrentBranch(holder)).toBe("feature/locked");
+  });
+
   test("frees a branch held by another worktree and resumes it", async () => {
     // Mirrors a fleet run interrupted by a crash: it keeps its worktree for
     // debugging, and that worktree still holds the recorded branch. A plain
@@ -74,7 +111,10 @@ describe("continueFeatureBranch", () => {
     const holder = join(testDir, "holder");
     execSync(`git worktree add "${holder}" feature/proj-9`, { cwd: repoDir });
 
-    const result = await Utils.continueFeatureBranch("feature/proj-9", { cwd: repoDir });
+    const result = await Utils.continueFeatureBranch("feature/proj-9", {
+      cwd: repoDir,
+      ownedWorktreeRoot: testDir,
+    });
 
     expect(result.success).toBe(true);
     expect(await Utils.getCurrentBranch(repoDir)).toBe("feature/proj-9");
@@ -99,7 +139,10 @@ describe("continueFeatureBranch", () => {
     const landed = await Utils.collectLandedWork("feature/proj-10", "main", { cwd: repoDir });
     expect(landed).toContain("wip.txt");
 
-    const result = await Utils.continueFeatureBranch("feature/proj-10", { cwd: repoDir });
+    const result = await Utils.continueFeatureBranch("feature/proj-10", {
+      cwd: repoDir,
+      ownedWorktreeRoot: testDir,
+    });
 
     expect(result.success).toBe(true);
     expect(await Utils.getCurrentBranch(repoDir)).toBe("feature/proj-10");
@@ -129,7 +172,10 @@ describe("continueFeatureBranch", () => {
     };
 
     try {
-      const result = await Utils.continueFeatureBranch("feature/proj-11", { cwd: repoDir });
+      const result = await Utils.continueFeatureBranch("feature/proj-11", {
+        cwd: repoDir,
+        ownedWorktreeRoot: testDir,
+      });
 
       expect(result.success).toBe(false);
       // Force-removing the worktree would discard the edits pickup exists to

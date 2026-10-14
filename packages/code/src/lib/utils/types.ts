@@ -108,7 +108,7 @@ export interface UtilsSurface {
   ): Promise<{ success: boolean; branchName: string; message: string }>;
   continueFeatureBranch(
     branch: string,
-    options?: { cwd?: string },
+    options?: { cwd?: string; ownedWorktreeRoot?: string },
   ): Promise<{ success: boolean; branchName: string; message: string }>;
   collectLandedWork(
     branch: string,
