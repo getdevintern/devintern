@@ -85,8 +85,9 @@ function saveVerification(state: DeliveryState, prompt: string, feedback: Review
 export async function verifyImplementation(
   state: DeliveryState,
   deps: VerifyDependencies = defaultDeps,
+  config: VerifyConfig | undefined = state.context.verify,
+  repairStep = "repair",
 ): Promise<TaskStepResult | void> {
-  const config = state.context.verify;
   if (!config) return;
   if (!state.committed) return { kind: "halt", reason: "No committed implementation to verify" };
   const maxIterations = config.maxIterations ?? 3;
@@ -141,5 +142,5 @@ export async function verifyImplementation(
     return { kind: "halt", reason: feedback.summary };
   }
   state.pendingFeedback = feedback;
-  return { kind: "repeat", from: "repair", maxRepeats: maxIterations };
+  return { kind: "repeat", from: repairStep, maxRepeats: maxIterations };
 }

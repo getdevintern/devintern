@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { runTaskSteps } from "../src/lib/task/step-runner";
 import type { TaskStep } from "../src/lib/task/step-runner";
+import { StepExecutionError } from "../src/lib/task/pipeline-registry";
 
 describe("runTaskSteps", () => {
   test("runs phases in order with one shared context", async () => {
@@ -156,5 +157,43 @@ describe("runTaskSteps", () => {
         {},
       ),
     ).rejects.toBe(failure);
+  });
+
+  test("continues after a warning and retries a transient step error once", async () => {
+    const visited: string[] = [];
+    let attempts = 0;
+    const steps: TaskStep<string[]>[] = [
+      { name: "warn", run: async () => ({ kind: "warn", reason: "advisory" }) },
+      {
+        name: "transient",
+        run: async (context) => {
+          attempts++;
+          if (attempts === 1) throw new StepExecutionError("retry me");
+          context.push("done");
+        },
+      },
+    ];
+
+    expect(await runTaskSteps(steps, visited)).toEqual({ kind: "completed" });
+    expect(attempts).toBe(2);
+    expect(visited).toEqual(["done"]);
+  });
+
+  test("halts after the retryable error fails twice", async () => {
+    let attempts = 0;
+    const result = await runTaskSteps(
+      [
+        {
+          name: "check",
+          run: async () => {
+            attempts++;
+            throw new StepExecutionError("still broken");
+          },
+        },
+      ],
+      {},
+    );
+    expect(result).toEqual({ kind: "halted", step: "check", reason: "still broken" });
+    expect(attempts).toBe(2);
   });
 });

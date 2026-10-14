@@ -16,6 +16,8 @@
 
 **Also useful:** feasibility questions go back on the ticket instead of becoming a wrong PR; optional auto-review checks the diff before you see it; reviewer feedback returns to the same worker as commits on the existing branch.
 
+The task pipeline can also run opt-in requirements verification and project-defined steps before publishing; see [pipeline customization](https://devintern.com/docs/code/configuration#pipeline-customization).
+
 Pair with **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)** (`devpm`) to turn rough notes, logs, or Figma into well-specified tickets first.
 
 ## Install
