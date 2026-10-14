@@ -1,6 +1,7 @@
 import type { ReviewFeedback, ReviewFeedbackItem } from "../../types/auto-review";
 
 const PRIORITIES = new Set(["critical", "high", "medium", "low", "info"]);
+const CONFIDENCES = new Set(["high", "medium", "low"]);
 const CATEGORIES = new Set([
   "code-quality",
   "bug",
@@ -24,7 +25,10 @@ function isFinding(value: unknown): value is ReviewFeedbackItem {
     typeof item.suggestion === "string" &&
     item.suggestion.trim().length > 0 &&
     (item.file === undefined || typeof item.file === "string") &&
-    (item.line === undefined || typeof item.line === "string")
+    (item.line === undefined || typeof item.line === "string") &&
+    (item.confidence === undefined ||
+      (typeof item.confidence === "string" && CONFIDENCES.has(item.confidence))) &&
+    (item.evidence === undefined || typeof item.evidence === "string")
   );
 }
 

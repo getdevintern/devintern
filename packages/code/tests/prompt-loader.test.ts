@@ -174,6 +174,51 @@ describe("loadPrompt - bundled catalog", () => {
     expect(prompt).not.toContain("{{");
   });
 
+  test("review prompt traces the blast radius and demands evidence", () => {
+    const prompt = loadPrompt(
+      "review",
+      {
+        repository: "acme/widgets",
+        prNumber: "42",
+        iteration: "1",
+        prDiff: "--- a/x.ts\n+++ b/x.ts\n@@\n-old\n+new",
+      },
+      bundledOptions(),
+    );
+
+    expect(prompt).toContain("## Blast Radius");
+    expect(prompt).toContain("Callers");
+    expect(prompt).toContain("Callees");
+    expect(prompt).toContain("Sibling consumers");
+    expect(prompt).toContain("the one fact the change is safe because of");
+    expect(prompt).toContain("## Evidence and Confidence");
+    expect(prompt).toContain("ran-it");
+    expect(prompt).toContain("cant-happen");
+    expect(prompt).toContain("pointed");
+    expect(prompt).toContain('"confidence": "high|medium|low"');
+    expect(prompt).toContain("Findings without evidence");
+  });
+
+  test("fix prompt requires a runnable check for each fix", () => {
+    const prompt = loadPrompt(
+      "fix",
+      {
+        iteration: "2",
+        itemsList: "1. **[HIGH] bug** in `x.ts`\n   - Issue: bad\n   - Suggestion: fix",
+        commitInstruction: "4. After making changes, amend them into the previous commit:",
+      },
+      bundledOptions(),
+    );
+
+    expect(prompt).toContain("Review Iteration 2");
+    expect(prompt).toContain("[HIGH] bug");
+    expect(prompt).toContain("amend them into the previous commit");
+    expect(prompt).toContain("## Prove the Fix");
+    expect(prompt).toContain("blast radius");
+    expect(prompt).toContain("ran-it");
+    expect(prompt).toContain("unproven");
+  });
+
   test("fix prompt includes feedback items and commit instructions", () => {
     const prompt = loadPrompt(
       "fix",

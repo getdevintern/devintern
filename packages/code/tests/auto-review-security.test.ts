@@ -91,4 +91,16 @@ describe("review feedback validation", () => {
       parseReviewFeedback(JSON.stringify({ ...verdict, approved: true, items: [] })).approved,
     ).toBe(true);
   });
+  test("keeps evidence/confidence and rejects an unknown confidence", () => {
+    const proven = { ...finding, confidence: "low" as const, evidence: "unproven" };
+    expect(parseReviewFeedback(JSON.stringify({ ...verdict, items: [proven] }))).toEqual({
+      ...verdict,
+      items: [proven],
+    });
+    expect(() =>
+      parseReviewFeedback(
+        JSON.stringify({ ...verdict, items: [{ ...finding, confidence: "certain" }] }),
+      ),
+    ).toThrow();
+  });
 });

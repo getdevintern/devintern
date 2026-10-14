@@ -514,6 +514,8 @@ The role prompts DevIntern sends to the agent are versioned Markdown files rathe
 | `review.md`  | Adversarial pull-request review (auto-review loop) |
 | `fix.md`     | Addressing structured review feedback              |
 
+The `review` and `fix` prompts include a **blast-radius lens**: the reviewer must trace callers, callees, and sibling consumers beyond the diff, name the one fact the change is safe because of, and back it with evidence (`asserted` → `pointed` → `cant-happen` → `ran-it`). Findings carry a `confidence` of `high`, `medium`, or `low`; a finding without evidence is reported as `low` rather than dropped, and the fixer must prove each fix with a runnable check or mark it unproven. The optional `verify` pipeline step applies the same lens to the committed diff.
+
 Each file starts with lightweight frontmatter that declares its `name`, `description`, `placeholders`, and `requiredSections`:
 
 ```markdown
