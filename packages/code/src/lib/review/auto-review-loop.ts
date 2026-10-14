@@ -8,7 +8,7 @@
  * 4. Repeat until all important issues resolved or max iterations reached
  */
 
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
@@ -23,6 +23,8 @@ import { parseAgentJsonObject } from "../agent/json";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
+import { validateReviewFeedback } from "./feedback";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
@@ -51,7 +53,7 @@ const PRIORITY_WEIGHTS: Record<ReviewPriority, number> = {
  * @param iteration - Current auto-review iteration (1-based)
  * @returns Prompt instructing the agent to return structured JSON feedback
  */
-function generateReviewPrompt(
+export function generateReviewPrompt(
   repository: string,
   prNumber: number,
   prDiff: string,
@@ -67,7 +69,10 @@ function generateReviewPrompt(
       repository,
       prNumber: String(prNumber),
       iteration: String(iteration),
-      prDiff,
+      // The diff is attacker-controlled: frame it so embedded instructions are
+      // treated as data, and fence it here (not in the template) so the framing
+      // stays outside the code block.
+      prDiff: untrustedContentBlock(`\`\`\`diff\n${prDiff}\n\`\`\``, "pull request diff"),
     },
     { useAmbientOverrides: false },
   );
@@ -80,7 +85,7 @@ function generateReviewPrompt(
  * @param iteration - Current iteration (controls commit vs amend instructions)
  * @returns Fix prompt for the agent harness
  */
-function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
+export function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: number): string {
   const itemsList = feedbackItems
     .map(
       (item, idx) =>
@@ -107,7 +112,9 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
     "fix",
     {
       iteration: String(iteration),
-      itemsList,
+      // Feedback items derive from the (attacker-influenced) PR diff, so frame
+      // them as untrusted data before the agent acts on them.
+      itemsList: untrustedContentBlock(itemsList, "agent review feedback"),
       commitInstruction,
     },
     { useAmbientOverrides: false },
@@ -125,12 +132,22 @@ function generateFixPrompt(feedbackItems: ReviewFeedbackItem[], iteration: numbe
 export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Strip origin/ prefix if present for fetch command
   const branchName = baseBranch.replace(/^origin\//, "");
-  const remoteBase = `origin/${branchName}`;
+  const remoteBase = `refs/remotes/origin/${branchName}`;
+  // Branch names can contain shell metacharacters. Keep refs in argv, validate
+  // them as literal branch names, and use full refs to avoid revision ambiguity.
+  try {
+    execFileSync("git", ["check-ref-format", `refs/heads/${branchName}`], {
+      cwd: workingDir,
+      stdio: "pipe",
+    });
+  } catch {
+    throw new Error("Invalid PR base branch name");
+  }
 
   // Explicitly fetch the base branch we need
   console.log(`📥 Fetching ${remoteBase} from origin...`);
   try {
-    execSync(`git fetch origin ${branchName}:refs/remotes/origin/${branchName}`, {
+    execFileSync("git", ["fetch", "origin", `refs/heads/${branchName}:${remoteBase}`], {
       cwd: workingDir,
       encoding: "utf-8",
       stdio: "pipe",
@@ -139,7 +156,7 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
     // Try a broader fetch if specific branch fetch fails
     console.log(`⚠️  Specific branch fetch failed, trying full fetch...`);
     try {
-      execSync("git fetch origin", {
+      execFileSync("git", ["fetch", "origin"], {
         cwd: workingDir,
         encoding: "utf-8",
         stdio: "pipe",
@@ -151,7 +168,7 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
 
   // Check if this is a shallow clone and unshallow if needed
   try {
-    const isShallow = execSync("git rev-parse --is-shallow-repository", {
+    const isShallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
       cwd: workingDir,
       encoding: "utf-8",
       stdio: "pipe",
@@ -160,14 +177,14 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
     if (isShallow === "true") {
       console.log(`📥 Shallow repository detected, fetching full history...`);
       try {
-        execSync("git fetch --unshallow origin", {
+        execFileSync("git", ["fetch", "--unshallow", "origin"], {
           cwd: workingDir,
           encoding: "utf-8",
           stdio: "pipe",
         });
       } catch {
         console.log(`⚠️  Failed to unshallow, trying to deepen history...`);
-        execSync("git fetch --deepen=1000 origin", {
+        execFileSync("git", ["fetch", "--deepen=1000", "origin"], {
           cwd: workingDir,
           encoding: "utf-8",
           stdio: "pipe",
@@ -180,7 +197,7 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
 
   // Verify the remote branch exists
   try {
-    execSync(`git rev-parse --verify ${remoteBase}`, {
+    execFileSync("git", ["rev-parse", "--verify", `${remoteBase}^{commit}`], {
       cwd: workingDir,
       encoding: "utf-8",
       stdio: "pipe",
@@ -193,11 +210,15 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Approach 1: Use three-dot syntax which handles merge-base internally
   console.log(`🔍 Getting diff between ${remoteBase} and HEAD...`);
   try {
-    const result = execSync(`git diff ${remoteBase}...HEAD`, {
-      cwd: workingDir,
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    });
+    const result = execFileSync(
+      "git",
+      ["diff", "--no-ext-diff", "--no-textconv", `${remoteBase}...HEAD`, "--"],
+      {
+        cwd: workingDir,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+      },
+    );
     return result;
   } catch (error) {
     console.log(`⚠️  Three-dot diff failed: ${error}`);
@@ -205,17 +226,21 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
 
   // Approach 2: Try explicit merge-base
   try {
-    const mergeBase = execSync(`git merge-base HEAD ${remoteBase}`, {
+    const mergeBase = execFileSync("git", ["merge-base", "HEAD", remoteBase], {
       cwd: workingDir,
       encoding: "utf-8",
       stdio: "pipe",
     }).trim();
 
-    const result = execSync(`git diff ${mergeBase}..HEAD`, {
-      cwd: workingDir,
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    });
+    const result = execFileSync(
+      "git",
+      ["diff", "--no-ext-diff", "--no-textconv", `${mergeBase}..HEAD`, "--"],
+      {
+        cwd: workingDir,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+      },
+    );
     return result;
   } catch (error) {
     console.log(`⚠️  Merge-base diff failed: ${error}`);
@@ -224,11 +249,15 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Approach 3: Fall back to two-dot diff (shows all changes, not just since divergence)
   console.log(`⚠️  Falling back to two-dot diff (may include extra changes)...`);
   try {
-    const result = execSync(`git diff ${remoteBase}..HEAD`, {
-      cwd: workingDir,
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    });
+    const result = execFileSync(
+      "git",
+      ["diff", "--no-ext-diff", "--no-textconv", `${remoteBase}..HEAD`, "--"],
+      {
+        cwd: workingDir,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+      },
+    );
     return result;
   } catch (error) {
     throw new Error(`Failed to get PR diff with all approaches: ${error}`);
@@ -246,16 +275,8 @@ export function parseReviewFeedback(agentOutput: string): ReviewFeedback {
   try {
     const feedback = parseAgentJsonObject(agentOutput, "approved");
 
-    // Validate structure
-    if (
-      !feedback.summary ||
-      !Array.isArray(feedback.items) ||
-      typeof feedback.approved !== "boolean"
-    ) {
-      throw new Error("Invalid feedback structure");
-    }
-
-    return feedback as unknown as ReviewFeedback;
+    validateReviewFeedback(feedback);
+    return feedback;
   } catch (error) {
     throw new Error(`Failed to parse review feedback JSON: ${error}`);
   }

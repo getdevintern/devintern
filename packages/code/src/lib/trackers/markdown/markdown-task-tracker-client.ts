@@ -25,6 +25,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
+import { untrustedContentBlock } from "../../prompts/untrusted-content";
 import type { TaskTrackerClient } from "../client";
 
 export interface MarkdownTaskRaw {
@@ -43,7 +44,9 @@ export interface MarkdownTaskTrackerOptions {
   cwd?: string;
 }
 
-const IMPLEMENTATION_INSTRUCTIONS = `## Implementation Instructions
+const IMPLEMENTATION_INSTRUCTIONS_HEADING = "## Implementation Instructions";
+
+const IMPLEMENTATION_INSTRUCTIONS = `${IMPLEMENTATION_INSTRUCTIONS_HEADING}
 
 Please analyze the above task description and implement the requested functionality.
 `;
@@ -324,14 +327,16 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   }
 
   /**
-   * Write the agent prompt file, preserving the source markdown and appending
-   * implementation instructions when they are not already present.
+   * Write the agent prompt file. The local task file is entirely user-controlled,
+   * so its whole contents are framed as untrusted external data. The
+   * generic implementation instructions always follow the frame, regardless
+   * of headings in the task file.
    */
   writeAgentPrompt(outputPath: string, task: Task): void {
     const raw = task.raw as MarkdownTaskRaw;
     const content = raw.fullContent;
-    const hasInstructions = content.includes("## Implementation Instructions");
-    const prompt = hasInstructions ? content : `${content}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
+    const framed = untrustedContentBlock(content.trimEnd(), "local task file");
+    const prompt = `${framed}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
     writeFileSync(outputPath, prompt, "utf8");
   }
 

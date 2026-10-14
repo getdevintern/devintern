@@ -279,6 +279,8 @@ This logs every API call, response, and retry attempt to the console. Leave it u
 
 With `--create-pr --auto-review`, the CLI critiques its own PR, applies fixes, and re-reviews until the review is approved, no important issues remain, or the iteration cap is reached. The cap is a ceiling, not a quota: most runs stop earlier on approval. How many iterations actually ran is recorded in the run record (`auto_review` stage) and in `auto-review-summary.json` in the task's output directory.
 
+Review results are validated before priority filtering. Unknown priorities, malformed findings, and approvals that contradict medium-or-higher findings are rejected as review errors. In the task pipeline, auto-review errors are recorded but push and PR creation can still proceed; auto-review is not a publication gate.
+
 One setting controls every auto-review path (direct CLI runs, workspace/worker runs, and the webhook server):
 
 ```bash
