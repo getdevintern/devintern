@@ -9,7 +9,7 @@ import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
-import { findRepo, findTeam } from "./config";
+import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
@@ -274,14 +274,25 @@ export function createFleetTaskExecutor(
           const worktree = await repoManager.createTaskWorktree(repo, taskKey);
           console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
 
+          // Read per run so a live-reloaded `[defaults].pipeline_file` applies
+          // to subsequent tasks.
+          const pipelineDefaultFile = config.defaults.pipelineFile
+            ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
+            : undefined;
+
+          const env = team
+            ? buildTeamTaskEnv(repo, team, workspaceDir, {
+                actionedSource: deps.actionedSource,
+                pipelineDefaultFile,
+              })
+            : buildRepoEnv(repo, workspaceDir, {
+                actionedSource: deps.actionedSource,
+                pipelineDefaultFile,
+              });
           const ok = await runTask(taskKey, extraArgs, {
             cwd: worktree,
             env: {
-              ...(team
-                ? buildTeamTaskEnv(repo, team, workspaceDir, {
-                    actionedSource: deps.actionedSource,
-                  })
-                : buildRepoEnv(repo, workspaceDir, { actionedSource: deps.actionedSource })),
+              ...env,
               [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
             },
             signal,

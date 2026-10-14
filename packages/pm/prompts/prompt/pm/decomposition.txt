@@ -11,6 +11,10 @@ Guidance:
 - Keep implementation details light — let developers decide the how
 - Suggest researching existing code patterns as part of the work
 - Prefer incremental value; order roughly research → design → build → test
+- Write each subtask's acceptance criteria as Given/When/Then scenarios — one observable behavior each, and independently testable
+- Include negative and edge cases (invalid input, empty state, permissions, failure/timeout)
+- Ban vague words (e.g. "fast", "intuitive", "robust", "user-friendly", "seamless") — state the specific, measurable behavior instead
+- Give each subtask explicit Non-goals and measurable Success Metrics
 
 Return only valid JSON (no other text). Use markdown inside each description string:
 
@@ -18,7 +22,7 @@ Return only valid JSON (no other text). Use markdown inside each description str
   "subtasks": [
     {
       "summary": "Clear, action-oriented title",
-      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance Criteria\n\n- [ ] Deliverable is complete\n- [ ] Quality criteria met"
+      "description": "## Goal\n\n[What needs to be achieved]\n\n## Details\n\n- Specific requirements\n- Expected outcomes\n\n## Acceptance Criteria\n\n- Given [precondition], when [action], then [observable outcome]\n- Given [negative or edge case], when [action], then [expected handling]\n\n## Non-goals\n\n- [What this subtask explicitly does not cover]\n\n## Success Metrics\n\n- [Measurable outcome with baseline, target, or threshold]"
     }
   ]
 }

@@ -9,6 +9,8 @@ import {
   runAgentPrompt,
 } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
+import { validateReviewFeedback } from "../review/feedback";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -34,7 +36,7 @@ const defaultDeps: VerifyDependencies = {
   filterItems: filterByPriority,
 };
 
-const DEFAULT_INSTRUCTIONS = `Verify whether the implementation satisfies the task's functional requirements. Check completeness, correctness, acceptance criteria, and regressions. Return only JSON with this shape: {"summary":"...","items":[{"priority":"critical|high|medium|low|info","category":"bug|testing|documentation|code-quality|performance|security|style","file":"path","line":"42","issue":"...","suggestion":"..."}],"approved":true}. Report each unmet requirement as a high or critical item. Set approved true only when every requirement is satisfied.`;
+const DEFAULT_INSTRUCTIONS = `Verify whether the implementation satisfies the task's functional requirements. Check completeness, correctness, acceptance criteria, and regressions. Then apply a blast-radius lens: trace the callers, callees, and sibling consumers of the changed code beyond the diff and name the one fact the change is safe because of. Back each finding with evidence on this ladder (weakest to strongest): asserted, pointed at a real file:line, shown can't-happen, ran a check. Mark each item with a confidence of high (ran it), medium (pointed or can't-happen), or low (asserted or unproven); findings without evidence are reported with low confidence rather than dropped. Return only JSON with this shape: {"summary":"...","items":[{"priority":"critical|high|medium|low|info","confidence":"high|medium|low","category":"bug|testing|documentation|code-quality|performance|security|style","file":"path","line":"42","issue":"...","evidence":"command run and result, file:line, or unproven","suggestion":"..."}],"approved":true}. Report each unmet requirement as a high or critical item. Set approved true only when every requirement is satisfied.`;
 
 const PRIORITIES: readonly ReviewPriority[] = ["critical", "high", "medium", "low", "info"];
 
@@ -45,7 +47,12 @@ function instructionsFor(config: VerifyConfig, workingDir: string): string {
 }
 
 function buildVerifyPrompt(config: VerifyConfig, taskContent: string, diff: string, cwd: string) {
-  return `${instructionsFor(config, cwd)}\n\n## Task\n${taskContent}\n\n## Implementation diff\n\`\`\`diff\n${diff}\n\`\`\``;
+  // `taskContent` is the already-formatted task prompt assembled by our own
+  // formatter: its untrusted sections are framed at the leaf. Wrap only the raw
+  // external diff here; re-framing the task would nest frames and neutralize the
+  // authentic inner boundary markers.
+  const framedDiff = untrustedContentBlock(`\`\`\`diff\n${diff}\n\`\`\``, "implementation diff");
+  return `${instructionsFor(config, cwd)}\n\n## Task\n${taskContent.trimEnd()}\n\n## Implementation diff\n${framedDiff}`;
 }
 
 /** Build a focused repair prompt for the next implementation run. */
@@ -53,10 +60,12 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
   const findings = feedback.items
     .map(
       (item, index) =>
-        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}\n   Fix: ${item.suggestion}`,
+        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}${item.confidence ? `\n   Confidence: ${item.confidence}` : ""}${item.evidence ? `\n   Evidence: ${item.evidence}` : ""}\n   Fix: ${item.suggestion}`,
     )
     .join("\n");
-  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${findings}\n\nOriginal task:\n${taskContent}\n\nDo not commit or push; the task runner handles delivery.`;
+  // `taskContent` is our own already-framed task prompt; only the raw findings
+  // from the verifier are external and need framing.
+  return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${taskContent.trimEnd()}\n\nDo not commit or push; the task runner handles delivery.`;
 }
 
 function saveVerification(state: DeliveryState, prompt: string, feedback: ReviewFeedback): void {
@@ -72,27 +81,17 @@ function saveVerification(state: DeliveryState, prompt: string, feedback: Review
   }
 }
 
-function validateFeedback(feedback: ReviewFeedback): void {
-  if (!Array.isArray(feedback.items)) throw new Error("Verification verdict has no items array");
-  for (const item of feedback.items) {
-    if (
-      !item ||
-      !PRIORITIES.includes(item.priority) ||
-      typeof item.issue !== "string" ||
-      typeof item.suggestion !== "string"
-    ) {
-      throw new Error("Verification verdict contains an invalid finding");
-    }
-  }
-}
-
 /** Verify the committed diff before auto-review and publishing. */
 export async function verifyImplementation(
   state: DeliveryState,
   deps: VerifyDependencies = defaultDeps,
+  config: VerifyConfig | undefined = state.context.verify,
+  repairStep = "repair",
 ): Promise<TaskStepResult | void> {
-  const config = state.context.verify;
   if (!config) return;
+  if (!state.enableGit) {
+    return { kind: "warn", reason: "verify skipped: git workflow disabled" };
+  }
   if (!state.committed) return { kind: "halt", reason: "No committed implementation to verify" };
   const maxIterations = config.maxIterations ?? 3;
   if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
@@ -122,7 +121,7 @@ export async function verifyImplementation(
         state.context.executablePath,
       );
       feedback = deps.parseFeedback(output);
-      validateFeedback(feedback);
+      validateReviewFeedback(feedback);
       break;
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;
@@ -140,11 +139,11 @@ export async function verifyImplementation(
 
   if (config.onFail === "warn") {
     console.warn(`⚠️  Verification found ${blocking.length} blocking issue(s); continuing`);
-    return;
+    return { kind: "warn", reason: feedback.summary };
   }
   if (config.onFail === "halt") {
     return { kind: "halt", reason: feedback.summary };
   }
   state.pendingFeedback = feedback;
-  return { kind: "repeat", from: "repair", maxRepeats: maxIterations };
+  return { kind: "repeat", from: repairStep, maxRepeats: maxIterations };
 }

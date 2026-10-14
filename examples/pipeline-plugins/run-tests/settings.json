@@ -1,0 +1,18 @@
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/run-tests.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      {
+        "use": "run-tests",
+        "command": "bun",
+        "args": ["test"],
+        "cwd": ".",
+        "maxDiagnosticsBytes": 4000,
+        "onFail": "halt"
+      },
+      { "use": "finalize" }
+    ]
+  }
+}

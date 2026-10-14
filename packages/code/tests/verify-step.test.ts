@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
+import {
+  UNTRUSTED_CONTENT_NOTICE,
+  untrustedContentBlock,
+} from "../src/lib/prompts/untrusted-content";
 import type { DeliveryState } from "../src/lib/agent/run-harness-finalize";
 import type { FinalizeContext } from "../src/lib/agent/run-harness-git";
 import type { ReviewFeedback } from "../src/types/auto-review";
@@ -18,6 +22,24 @@ const feedback: ReviewFeedback = {
 
 function state(verify: FinalizeContext["verify"]): DeliveryState {
   return {
+    taskContent: "Implement the feature",
+    taskFile: join(outputDir, "task.md"),
+    workingDir: process.cwd(),
+    outputDir,
+    prTargetBranch: "main",
+    projectSettings: null,
+    enableGit: true,
+    createPr: false,
+    skipComments: false,
+    autoReview: false,
+    autoReviewIterations: 5,
+    maxTurns: 500,
+    warnings: [],
+    results: [],
+    runAgentPrompt: async () => "",
+    getDiff: () => "",
+    parseReviewFeedback: () => feedback,
+    filterByPriority: (items) => items,
     context: {
       verify,
       taskFile: join(outputDir, "task.md"),
@@ -31,6 +53,8 @@ function state(verify: FinalizeContext["verify"]): DeliveryState {
     committed: true,
     planRetry: false,
     autoReviewRan: false,
+    hookValidated: false,
+    implementationStepSeen: false,
   };
 }
 
@@ -80,7 +104,19 @@ describe("verifyImplementation", () => {
       kind: "halt",
       reason: feedback.summary,
     });
-    expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toBeUndefined();
+    expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toEqual({
+      kind: "warn",
+      reason: feedback.summary,
+    });
+  });
+
+  test("warns when Git delivery is disabled", async () => {
+    const run = state({});
+    run.enableGit = false;
+    expect(await verifyImplementation(run, deps())).toEqual({
+      kind: "warn",
+      reason: "verify skipped: git workflow disabled",
+    });
   });
 
   test("retries a transient verifier error once", async () => {
@@ -94,6 +130,18 @@ describe("verifyImplementation", () => {
     };
 
     expect(await verifyImplementation(run, injected)).toBeUndefined();
+    expect(attempts).toBe(2);
+  });
+
+  test("halts after repeated verdicts that approve unresolved blocking findings", async () => {
+    const injected = deps({ ...feedback, approved: true });
+    let attempts = 0;
+    injected.runAgent = async () => {
+      attempts++;
+      return "verdict";
+    };
+    const result = await verifyImplementation(state({}), injected);
+    expect(result?.kind).toBe("halt");
     expect(attempts).toBe(2);
   });
 
@@ -113,5 +161,85 @@ describe("verifyImplementation", () => {
     await expect(verifyImplementation(state({ maxIterations: 0 }), deps())).rejects.toThrow(
       "positive integer",
     );
+  });
+
+  test("frames the raw diff without re-framing the task prompt", async () => {
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    await verifyImplementation(state({}), injected);
+
+    expect(captured).toContain(UNTRUSTED_CONTENT_NOTICE);
+    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: implementation diff -->");
+    expect(captured).toContain("Implement the feature");
+    expect(captured).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+  });
+
+  test("does not nest or neutralize an already-framed task prompt", async () => {
+    const framedTask = untrustedContentBlock("Implement the feature", "task description");
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    const run = state({});
+    run.context.taskContent = framedTask;
+    await verifyImplementation(run, injected);
+
+    expect(captured).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
+    expect(captured).not.toContain("[neutralized untrusted-content boundary marker]");
+    expect(captured).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+  });
+
+  test("frames findings and preserves the already-framed original task", () => {
+    const framedTask = untrustedContentBlock("Implement the feature", "task description");
+    const prompt = buildRepairPrompt(framedTask, feedback);
+
+    expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: verification findings -->");
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task description -->");
+    expect(prompt).not.toContain("[neutralized untrusted-content boundary marker]");
+    expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
+  });
+
+  test("default instructions request confidence and evidence", async () => {
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    await verifyImplementation(state({}), injected);
+
+    expect(captured).toContain('"confidence":"high|medium|low"');
+    expect(captured).toContain('"evidence":"command run and result, file:line, or unproven"');
+  });
+
+  test("propagates evidence/confidence into the repair prompt", () => {
+    const withEvidence: ReviewFeedback = {
+      summary: "unproven change",
+      approved: false,
+      items: [
+        {
+          priority: "high",
+          category: "bug",
+          issue: "Missing case",
+          suggestion: "Handle it",
+          confidence: "low",
+          evidence: "unproven",
+        },
+      ],
+    };
+    const prompt = buildRepairPrompt("Implement the feature", withEvidence);
+
+    expect(prompt).toContain("Confidence: low");
+    expect(prompt).toContain("Evidence: unproven");
   });
 });

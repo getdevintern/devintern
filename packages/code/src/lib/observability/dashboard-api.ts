@@ -43,6 +43,8 @@ import type {
 } from "../state/run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
+import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
+import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
 import { resolveWorkspaceDir } from "../workspace/paths";
 import { WorkerState } from "../state/worker-state";
@@ -324,6 +326,35 @@ export class DashboardData {
       }
       return { run, stages: stores.runs.listStages(id) };
     });
+  }
+
+  /**
+   * Harness execution logs attributed to a run, newest first. A log matches by
+   * run id or by the run's task key, so executions that started before the run
+   * row existed (or outside a run context) still associate with the ticket.
+   *
+   * @param runId - Run id
+   */
+  listRunHarnessLogs(runId: number): HarnessLogFile[] {
+    const run = this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(runId));
+    if (!run) {
+      return [];
+    }
+    return listHarnessLogs({ runId, taskKey: run.taskKey });
+  }
+
+  /**
+   * Read one harness log's tail, only when it belongs to the given run.
+   *
+   * @param runId - Run id
+   * @param name - Log filename (path components are rejected)
+   */
+  readRunHarnessLog(runId: number, name: string): HarnessLogContent | null {
+    const match = this.listRunHarnessLogs(runId).find((file) => file.name === name);
+    if (!match) {
+      return null;
+    }
+    return readHarnessLogContent(name);
   }
 
   /** Eligibility plus audit history for a run's retry action. */
@@ -993,7 +1024,60 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
     reason: eligibility.reason,
     audit: data.getRetryAuditStore().listForRun(id),
   };
-  return { status: 200, body: { run: detail.run, stages: detail.stages, retry } };
+  return {
+    status: 200,
+    body: {
+      run: detail.run,
+      stages: detail.stages,
+      retry,
+      harnessLogs: data.listRunHarnessLogs(id),
+    },
+  };
+}
+
+/**
+ * `GET /api/runs/:id/harness-logs` — the harness log list for a run, newest
+ * first. Same data the run-detail response embeds in its `harnessLogs` field.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Raw run id path segment
+ */
+export function handleRunHarnessLogs(data: DashboardData, idParam: string): ApiResponse {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+  return { status: 200, body: { harnessLogs: data.listRunHarnessLogs(id) } };
+}
+
+/**
+ * `GET /api/runs/:id/harness-logs/:name` — the redacted tail of one harness
+ * execution log, scoped to the run it belongs to.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Raw run id path segment
+ * @param nameParam - Log filename (path components are rejected)
+ */
+export function handleRunHarnessLog(
+  data: DashboardData,
+  idParam: string,
+  nameParam: string,
+): ApiResponse {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+  let name: string;
+  try {
+    name = decodeURIComponent(nameParam);
+  } catch {
+    return badRequest("invalid log name");
+  }
+  const content = data.readRunHarnessLog(id, name);
+  if (!content) {
+    return { status: 404, body: { error: "harness log not found" } };
+  }
+  return { status: 200, body: content };
 }
 
 /**

@@ -139,9 +139,8 @@ Please implement the task NOW. Do not just plan or describe what needs to be don
 IMPORTANT: You MUST actually implement the changes, not just plan them. Create/modify files as needed. Do not exit until actual code changes have been made.
 
 For reference, here is the original task:
----
-${originalTaskContent}
----
+
+${originalTaskContent.trimEnd()}
 
 Now implement the solution. Write the actual code.`;
 }

@@ -72,6 +72,28 @@ export interface RunDetailResponse {
   stages: RunStageRecord[];
   /** Retry action metadata for this run (eligibility + audit trail). */
   retry: RetryInfo;
+  /** Per-execution harness transcripts attributed to this run, newest first. */
+  harnessLogs: HarnessLogFile[];
+}
+
+/** One durable agent-harness execution transcript under `logs/harness/`. */
+export interface HarnessLogFile {
+  name: string;
+  size: number;
+  modifiedAt: number;
+  startedAt: number | null;
+  origin: string;
+  taskKey?: string;
+  runId?: number;
+  label?: string;
+}
+
+/** Redacted tail of a harness execution log. */
+export interface HarnessLogContent {
+  name: string;
+  content: string;
+  truncated: boolean;
+  totalBytes: number;
 }
 
 /** One audited dashboard retry of a run. */

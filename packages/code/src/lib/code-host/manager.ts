@@ -1,9 +1,10 @@
-import type { AtlassianDocument, JiraIssue } from "../../types/jira";
+import type { JiraIssue } from "../../types/jira";
 import type { Task } from "../../types/task-tracker";
 import { GitHubAppAuth } from "./github/app-auth";
 import { BitbucketPRClient } from "./bitbucket/pr-client";
 import { GitHubPRClient } from "./github/pr-client";
 import { GitLabMRClient } from "./gitlab/mr-client";
+import { buildPrBody } from "./pr-body";
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "./provider";
 import type { CodeHostRepository } from "./provider";
 import { isTransientPrFailure, parsePrLabels, resolveGitLabCodeHostConfig } from "./shared";
@@ -27,32 +28,6 @@ export class PRManager {
         console.log("🔑 Using GitHub App authentication for PR creation");
       }
     }
-  }
-
-  /** Extract plain text from ADF for PR bodies (duplicate of base helper). */
-  private convertAtlassianDocumentToString(doc: AtlassianDocument | string): string {
-    if (typeof doc === "string") {
-      return doc;
-    }
-
-    // Simple conversion - extract text content from Atlassian Document Format
-    const extractText = (nodes: any[]): string => {
-      if (!nodes) return "";
-
-      return nodes
-        .map((node) => {
-          if (node.type === "text") {
-            return node.text || "";
-          }
-          if (node.content) {
-            return extractText(node.content);
-          }
-          return "";
-        })
-        .join("");
-    };
-
-    return extractText(doc.content);
   }
 
   /**
@@ -267,23 +242,11 @@ export class PRManager {
     return `[${taskKey}] ${taskSummary}`;
   }
 
-  /** @inheritdoc PRClient.createPRBody */
+  /** Build the structured PR body template from task metadata and the summary. */
   private createPRBody(task: Task | JiraIssue, implementationSummary?: string): string {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    const lines = [`## Task: ${key}`, "", `**Summary:** ${summary}`, ""];
-
-    if (implementationSummary) {
-      lines.push("## Implementation Details");
-      lines.push("");
-      lines.push(implementationSummary);
-      lines.push("");
-    }
-
-    lines.push("---");
-    lines.push("*This PR was automatically created by @devintern/code*");
-
-    return lines.join("\n");
+    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
   }
 }

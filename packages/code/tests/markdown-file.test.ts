@@ -232,7 +232,7 @@ Description.
     }
   }, 30000);
 
-  test("does not duplicate implementation instructions when already present", () => {
+  test("keeps file instructions framed and appends trusted instructions", () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "my-task.md");
@@ -248,7 +248,12 @@ Description.
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
         const count = (taskDetails.match(/## Implementation Instructions/g) || []).length;
-        expect(count).toBe(1);
+        expect(count).toBe(2);
+        const boundary = "<!-- END UNTRUSTED EXTERNAL CONTENT: local task file -->";
+        expect(taskDetails.indexOf("Already here.")).toBeLessThan(taskDetails.indexOf(boundary));
+        expect(taskDetails.slice(taskDetails.indexOf(boundary))).toContain(
+          "Please analyze the above task description",
+        );
       }
     } finally {
       cleanup(testDir);

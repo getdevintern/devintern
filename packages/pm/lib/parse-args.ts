@@ -107,8 +107,10 @@ Options:
                         the tracker supports it). Repeatable. Supported: images, text/docs,
                         pdf (not .docx/.xlsx). Max 10 files.
   --style, -s <type>   Prompt style: "pm" (default) or "technical"
-                        - pm: Focuses on user stories and acceptance criteria
-                        - technical: Includes Technical Considerations section
+                        - pm: User stories with Given/When/Then acceptance criteria,
+                              non-goals, and success metrics
+                        - technical: Adds a Technical Considerations section on top
+                              of the PM rubric
   --model, -m <model>  Model to use (agent-specific, e.g., "sonnet", "opus", or provider/model)
   --effort <level>     Reasoning effort for agent runs: low, medium, or high.
                         Overrides the AGENT_EFFORT environment variable; emitted by

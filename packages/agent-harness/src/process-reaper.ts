@@ -47,7 +47,12 @@ function reapAllGroups(signal: NodeJS.Signals): void {
  * surviving group (enough for dev servers; we don't get to wait and escalate).
  *
  * SIGHUP (e.g. a closed terminal) has no default handler that reaches `exit`, so
- * it gets its own listener.
+ * it gets its own listener. Adding any SIGHUP listener suppresses the OS default
+ * (terminate), so we exit explicitly — but only while this listener is the sole
+ * owner. A host that registers its own SIGHUP handler (for example the worker's
+ * `WorkspaceConfigReloader`, where SIGHUP means "reload and keep running") must
+ * keep control: reaping groups and exiting underneath it would kill in-flight
+ * agent children on every reload, so a shared signal defers entirely.
  */
 function installExitHandlers(): void {
   if (handlersInstalled) return;
@@ -55,6 +60,7 @@ function installExitHandlers(): void {
 
   process.on("exit", () => reapAllGroups("SIGTERM"));
   process.on("SIGHUP", () => {
+    if (process.listenerCount("SIGHUP") > 1) return;
     reapAllGroups("SIGTERM");
     process.exit(129); // 128 + SIGHUP(1)
   });

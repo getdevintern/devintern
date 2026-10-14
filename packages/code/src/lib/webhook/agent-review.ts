@@ -10,6 +10,7 @@ import {
 import { HEADLESS_AGENT_STDIO, buildHeadlessAgentArgs } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { getSandbox } from "../agent/sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 
 import { resolveActiveHarness } from "./runtime";
 
@@ -72,6 +73,13 @@ export async function runAgentHarnessForReview(
         args: agentArgs,
         spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "review",
+          origin: "pr_mention",
+          cwd: workDir,
+          command: [resolvedPath, ...agentArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {

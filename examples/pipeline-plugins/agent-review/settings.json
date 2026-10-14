@@ -1,0 +1,17 @@
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/agent-review.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      {
+        "use": "agent-review",
+        "promptFile": "./.devintern-code/prompts/agent-review.md",
+        "minPriority": "medium",
+        "maxIterations": 2,
+        "onBlocked": "loopback"
+      },
+      { "use": "finalize" }
+    ]
+  }
+}

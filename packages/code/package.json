@@ -1,9 +1,13 @@
 {
   "name": "@getdevintern/code",
-  "version": "2.16.0",
+  "version": "2.17.0",
   "description": "Self-hosted worker that turns tracker tickets and Sentry errors into pull requests with any coding agent. BYOK. Free interactive use.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./pipeline": "./src/lib/task/pipeline-api.ts"
+  },
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
@@ -91,6 +95,7 @@
   },
   "files": [
     "dist/**/*",
+    "src/**/*",
     "prompts/**/*",
     "README.md",
     "LICENSE.md",

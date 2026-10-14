@@ -20,6 +20,11 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
+import { createHarnessLogSink } from "../observability/harness-logs";
+import { resolvePipelineSteps } from "../task/pipeline-config";
+import { describePipelineSelection, selectPipelineConfig } from "../task/pipeline-selection";
+import type { PipelineConfig } from "../../types/settings";
+import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
@@ -28,6 +33,7 @@ import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comm
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
 import type { VerifyConfig } from "./verify";
+import { withImplementationSummary } from "./implementation-summary";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -131,11 +137,21 @@ export async function runAgentSession(
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process with enhanced permissions and max turns
+      const spawnArgs = [
+        ...agentArgs,
+        ...buildPromptArgs(harness, withImplementationSummary(promptOverride ?? taskContent)),
+      ];
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)],
+        args: spawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "implementation",
+          cwd: process.cwd(),
+          command: [resolvedPath, ...spawnArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {
@@ -449,11 +465,46 @@ export async function runAgentSession(
 
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
+  // Select exactly one pipeline: a workspace per-repo override, the repo's
+  // settings.json, the workspace default, or the built-in default. The CLI
+  // `verify` fallback only applies when no scope declared a pipeline, and is
+  // never merged into a selected one. Selection, file loading, plugin loading,
+  // and ordering validation all run before the agent starts.
+  const verifyFallback: PipelineConfig | undefined = input.verify
+    ? {
+        steps: [
+          { use: "implement" },
+          { use: "commit" },
+          { use: "verify", ...input.verify },
+          { use: "auto-review" },
+          { use: "finalize" },
+        ],
+      }
+    : undefined;
+  let selection!: ReturnType<typeof selectPipelineConfig>;
+  let configuredPipeline: PipelineConfig | undefined;
+  let pipelineSteps: Awaited<ReturnType<typeof resolvePipelineSteps>>;
+  try {
+    selection = selectPipelineConfig({ settings: loadProjectSettings(), cwd: process.cwd() });
+    configuredPipeline = selection.config ?? verifyFallback;
+    pipelineSteps = await resolvePipelineSteps(configuredPipeline, selection.baseDir);
+  } catch (error) {
+    const repo = process.env[WORKSPACE_REPO_ENV];
+    const source = selection
+      ? ` (${describePipelineSelection(selection, configuredPipeline)})`
+      : "";
+    throw new Error(
+      `Invalid pipeline configuration${repo ? ` for repository "${repo}"` : ""}${source}: ${(error as Error).message}`,
+    );
+  }
+  console.log(`🧩 Pipeline: ${describePipelineSelection(selection, configuredPipeline)}`);
+
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
   await new Promise<void>((resolve, reject) => {
     finalizeAgentRun({
       ...session.context,
+      pipelineSteps,
       runRepair: async (prompt) => {
         const repair = await runAgentSession(input, prompt);
         return repair.kind === "complete"

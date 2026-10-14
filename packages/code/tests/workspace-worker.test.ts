@@ -1176,3 +1176,122 @@ describe("worktree sweeping", () => {
     }
   });
 });
+
+describe("workspace pipeline references", () => {
+  const PIPELINE_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+pipeline_file = "pipelines/default.json"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+pipeline_file = "pipelines/backend.json"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+
+[[routing.rules]]
+repo = "backend"
+labels = ["backend"]
+
+[[routing.rules]]
+repo = "frontend"
+labels = ["frontend"]
+`);
+
+  let workspaceDir: string;
+  let state: WorkspaceState;
+  let repoManager: FakeRepoManager;
+  let runs: Array<{ repo?: string; env: Record<string, string | undefined> }>;
+
+  const makeExecutor = (config = PIPELINE_CONFIG) =>
+    createFleetTaskExecutor({
+      config,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async (_taskKey, _args, opts) => {
+        runs.push({ repo: opts.env.DEVINTERN_WORKSPACE_REPO, env: opts.env });
+        return true;
+      },
+    });
+
+  beforeEach(() => {
+    workspaceDir = join(
+      tmpdir(),
+      `ws-pipeline-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+    repoManager = new FakeRepoManager(workspaceDir);
+    runs = [];
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("routes each repository its own workspace pipeline reference", async () => {
+    const executor = makeExecutor();
+    await executor("T-B", toRoutableTask({ key: "T-B", labels: ["backend"], components: [] }));
+    await executor("T-F", toRoutableTask({ key: "T-F", labels: ["frontend"], components: [] }));
+
+    const backend = runs.find((run) => run.repo === "backend");
+    const frontend = runs.find((run) => run.repo === "frontend");
+    expect(backend?.env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
+      join(workspaceDir, "pipelines/backend.json"),
+    );
+    expect(backend?.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
+      join(workspaceDir, "pipelines/default.json"),
+    );
+    expect(frontend?.env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBeUndefined();
+    expect(frontend?.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
+      join(workspaceDir, "pipelines/default.json"),
+    );
+  });
+
+  test("a live-reloaded pipeline_file reference applies to subsequent runs", async () => {
+    const executor = makeExecutor();
+    await executor("T-1", toRoutableTask({ key: "T-1", labels: ["backend"], components: [] }));
+    expect(runs[0]?.env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
+      join(workspaceDir, "pipelines/backend.json"),
+    );
+
+    const reloaded = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+pipeline_file = "pipelines/default-v2.json"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+pipeline_file = "pipelines/backend-v2.json"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+
+[[routing.rules]]
+repo = "backend"
+labels = ["backend"]
+
+[[routing.rules]]
+repo = "frontend"
+labels = ["frontend"]
+`);
+    applyWorkspaceConfig(PIPELINE_CONFIG, reloaded);
+    await executor("T-2", toRoutableTask({ key: "T-2", labels: ["backend"], components: [] }));
+
+    expect(runs[1]?.env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
+      join(workspaceDir, "pipelines/backend-v2.json"),
+    );
+    expect(runs[1]?.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
+      join(workspaceDir, "pipelines/default-v2.json"),
+    );
+  });
+});

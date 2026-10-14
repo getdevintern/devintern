@@ -49,12 +49,14 @@ task_query = "sprint in openSprints() AND labels = devintern"
 worker_task_args = "--create-pr"
 poll_interval = 60
 # pr_labels = ["devintern", "auto-pr"]
+# pipeline_file = "pipelines/default.json"   # optional fleet-wide pipeline
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
 default_branch = "main"
 # pr_labels = ["backend"]
+# pipeline_file = "pipelines/backend.json"   # optional per-repo override
 # env_file = "env/backend.env"        # optional, relative to ~/.devintern
   [repos.env]                         # optional per-repo overrides
   GITHUB_REPO = "acme/backend"
@@ -98,6 +100,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
 - Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
@@ -201,6 +204,64 @@ Tracker relay registrations and `task.changed` envelopes carry the stable team n
 
 Deploy the team-aware relay control plane before the matching CLI release. A new CLI against an old relay fails team-scoped registration with an actionable upgrade message; old CLI team-less registrations remain supported by the new control plane.
 
+### Pipelines for the fleet and per repository
+
+For the pipeline model itself — the default flow, required ordering, the
+`verify` step, the plugin API, and runnable examples — see the dedicated
+[Customizing the Task Pipeline](./pipelines.md) guide.
+
+Task delivery runs a configurable pipeline (`implement`, `commit`, optional `verify`/`auto-review`, `finalize`, plus any registered plugin steps). In a fleet the pipeline can be customized once for the whole workspace, per repository, or in the repository's own checkout. Declare a fleet-wide default in `[defaults]` and a per-repository override in `[[repos]]`:
+
+```toml
+[defaults]
+tracker = "jira"
+task_query = "labels = devintern"
+pipeline_file = "pipelines/default.json"    # fleet-wide fallback
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+pipeline_file = "pipelines/backend.json"    # this repo only
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+# no pipeline_file: uses the fleet default (or the repo's settings.json)
+```
+
+The referenced file is a JSON document with the same pipeline schema as `settings.json`:
+
+```json
+{
+  "plugins": ["./steps/check-policy.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback" },
+    { "use": "finalize" }
+  ]
+}
+```
+
+`pipeline_file` is resolved against the workspace directory (normally `~/.devintern`), so the example above reads `~/.devintern/pipelines/backend.json`.
+
+**Precedence.** Exactly one complete pipeline runs for a task; ordered step arrays are never merged across scopes. From highest to lowest:
+
+1. The routed repo's `[[repos]].pipeline_file` (workspace per-repository override).
+2. The repository's checked-in `.devintern-code/settings.json` `pipeline` block.
+3. `[defaults].pipeline_file` (workspace default).
+4. The built-in default (`implement → commit → auto-review → finalize`).
+
+Two repositories served by one worker can therefore run entirely different pipelines, and a repository that customizes nothing keeps the current flow.
+
+**Relative paths and plugin dependencies.** Relative `plugins` and `verify.prompt` paths in a `pipeline_file` resolve against the directory containing that file (for the example above, `~/.devintern/pipelines`), while a `settings.json` pipeline keeps resolving them against the repository root. Package plugin names resolve from the same base, so a shared plugin's dependencies must be installed next to the declaring file — install `pipeline_file` plugin dependencies in that file's directory (for the example above, `cd ~/.devintern/pipelines && bun add <package>`; a relative module such as `./steps/check-policy.ts` must live at `~/.devintern/pipelines/steps/check-policy.ts`), and repository plugin dependencies in the repository. A relative `verify.prompt` is treated as a file path **only when a file of that name exists** next to the declaring `pipeline_file`. When no such file exists the string is left relative, and the verify step then resolves it against the task working directory (the repository worktree) before falling back to using it verbatim as inline instructions. A misspelled or absent path therefore does not fail the run — it either silently picks up a same-named file in the repository or becomes a literal prompt — so verify the file resolves in the intended location before relying on it. Each task runs in its own CLI subprocess, so plugin registries never leak between tasks.
+
+**Validation.** Before implementation starts, the worker reads the selected definition, loads its plugins, and validates the step order. A missing file, invalid JSON, unknown step, or invalid ordering fails the run with the configuration scope, the file path, and the routed repository named — it never silently falls back to another scope. Step arrays from different scopes are not combined.
+
+**Flags.** A selected workspace pipeline is a complete definition; step arrays from different scopes are never merged. `--create-pr` and `--auto-review` keep their existing meaning: they decide whether `finalize` opens a PR and whether `auto-review` does work. Verification is a pipeline step (`{ "use": "verify" }`), not a CLI flag. These are operator-controlled fallbacks, not a fleet policy: enforcing non-bypassable steps is out of scope and will be designed separately. See [Customizing the Task Pipeline → Built-in steps and CLI flags](./pipelines.md#built-in-steps-and-cli-flags).
+
+**Live reload.** Changing a `pipeline_file` reference in `workspace.toml`, or editing the referenced JSON file, applies to subsequent task runs without restarting the worker. A task already in flight keeps the pipeline it selected. Task logs record the selection (scope, configuration path, and step sequence) without exposing secret values.
+
 ### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
 
 When a watched PR conflicts with its base branch, the worker normally resolves it right away (`conflict_resolution = "auto"`, the default — no behavior change on upgrade). Every resolution hands the conflicted files to the AI agent, which consumes tokens — even at 3am when nobody is reviewing the PR anyway.
@@ -279,7 +340,7 @@ While the daemon is running you can request one immediate drain (for example whi
 
 The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
 
-- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, conflict-resolution mode/schedules, and `[worker].auto_update` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
+- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `pipeline_file` references, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, conflict-resolution mode/schedules, and `[worker].auto_update` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
 - **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
 - **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
 - **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.

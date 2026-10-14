@@ -18,6 +18,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 
 - See whether the worker is running, waiting for its next working window, or processing a task
 - Follow each run from task pickup through implementation and pull request creation
+- Read the raw agent transcript for any harness execution under the run (clarity, implementation, review, and more)
 - Open the task or pull request behind a run
 - Understand why a run failed and retry it after fixing the cause
 - Run a recurring automation immediately instead of waiting for its next scheduled time

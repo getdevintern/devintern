@@ -13,6 +13,7 @@ import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "../agent/analysis-mode";
 import { parseAgentJsonObject } from "../agent/json";
 import { getSandbox } from "../agent/sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
 import { getStoryPointsFieldForProject } from "../config/project-settings";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -84,11 +85,23 @@ export async function runEstimation(
       let timedOut = false;
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
+      const estimationSpawnArgs = [
+        ...estimationArgs,
+        ...buildPromptArgs(harness, estimationContent),
+      ];
       const { child: estimationAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...estimationArgs, ...buildPromptArgs(harness, estimationContent)],
+        args: estimationSpawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "estimation",
+          origin: "estimate",
+          taskKey,
+          cwd: process.cwd(),
+          command: [resolvedPath, ...estimationSpawnArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {

@@ -387,20 +387,51 @@ export class RunStore {
   }
 
   /**
+   * Write a run's single terminal `outcome` stage, replacing any prior one.
+   *
+   * A run can be finished more than once: a retried base-sync, a late child
+   * process that outlived a reap, or a manual recovery. Replacing the outcome
+   * row instead of appending is what makes the write idempotent, so the
+   * recorded terminal state converges on exactly one outcome however a prior
+   * attempt was interrupted. Callers wrap this in the same transaction as the
+   * `runs` update so a crash between the two writes cannot leave a terminal run
+   * with a stale or missing outcome stage.
+   *
+   * @param runId - Run id
+   * @param status - Terminal status
+   * @param reason - Optional human-readable reason
+   */
+  private replaceOutcomeStage(runId: number, status: StageStatus, reason?: string): void {
+    this.db.run(`DELETE FROM run_stages WHERE run_id = ? AND stage = 'outcome'`, [runId]);
+    this.db.run(
+      `INSERT INTO run_stages (run_id, stage, status, summary, detail, created_at)
+       VALUES (?, 'outcome', ?, ?, NULL, ?)`,
+      [runId, status, reason ?? null, Date.now()],
+    );
+  }
+
+  /**
    * Mark a run terminal and record an `outcome` stage row.
+   *
+   * The row update and the outcome stage are one transaction, and the outcome
+   * stage is replaced rather than appended, so calling this again for the same
+   * run converges on the same end state instead of accumulating duplicate
+   * outcomes or leaving a terminal run with no outcome after an interruption.
    *
    * @param runId - Run id
    * @param status - Terminal status
    * @param reason - Optional human-readable reason
    */
   finishRun(runId: number, status: Exclude<RunStatus, "in_progress">, reason?: string): void {
-    this.db.run(`UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ? WHERE id = ?`, [
-      status,
-      reason ?? null,
-      Date.now(),
-      runId,
-    ]);
-    this.addStage(runId, "outcome", status, reason);
+    this.db.transaction(() => {
+      this.db.run(`UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ? WHERE id = ?`, [
+        status,
+        reason ?? null,
+        Date.now(),
+        runId,
+      ]);
+      this.replaceOutcomeStage(runId, status, reason);
+    })();
   }
 
   /**
@@ -408,20 +439,51 @@ export class RunStore {
    *
    * Only one worker owns a queue database, so any run still `in_progress`
    * when a worker starts was abandoned by a crashed or killed predecessor.
-   * A late `finishRun` from an outlived subprocess still wins afterwards —
-   * it overwrites the row unconditionally.
+   * A late `finishRun` from an outlived subprocess still wins: it either
+   * commits before the sweep (the conditional update then matches zero rows
+   * for that id and the sweep leaves the run and its outcome alone) or after
+   * it (overwriting the row and replacing the reaped outcome stage). The
+   * sweep runs as an immediate transaction so it takes the write lock before
+   * its orphan scan: a concurrent writer can then only commit before the scan
+   * (making the conditional update match zero rows) or wait for the sweep's
+   * commit, instead of invalidating the scan's snapshot mid-transaction with
+   * `SQLITE_BUSY_SNAPSHOT`. Each run's conditional update and its outcome
+   * stage are one transaction, and the sweep only touches rows that are still
+   * `in_progress`, so repeated calls are no-ops.
    *
    * @returns Number of reaped runs
    */
   reapOrphanedRuns(): number {
-    const result = this.db.run(
-      `UPDATE runs SET status = 'failed',
-         outcome_reason = 'orphaned: worker exited before the run finished',
-         finished_at = ?
-       WHERE status = 'in_progress'`,
-      [Date.now()],
-    );
-    return result.changes;
+    const reason = "orphaned: worker exited before the run finished";
+    const now = Date.now();
+    return this.db
+      .transaction(() => {
+        // Select inside the immediate transaction and update per id so a
+        // concurrent writer (an outlived subprocess committing `finishRun`)
+        // can never leave the row and its outcome stage disagreeing: a run
+        // that is no longer `in_progress` matches zero rows and is left
+        // untouched. `.immediate()` acquires the write lock at BEGIN, so the
+        // scan's read snapshot cannot be invalidated by a write landing
+        // between the SELECT and the UPDATE (Bun ignores an `{immediate:true}`
+        // options object, so the method form is required).
+        const orphans = this.db
+          .query(`SELECT id FROM runs WHERE status = 'in_progress'`)
+          .all() as Array<{ id: number }>;
+        let reaped = 0;
+        for (const orphan of orphans) {
+          const result = this.db.run(
+            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
+             WHERE id = ? AND status = 'in_progress'`,
+            [reason, now, orphan.id],
+          );
+          if (result.changes === 1) {
+            this.replaceOutcomeStage(orphan.id, "failed", reason);
+            reaped += 1;
+          }
+        }
+        return reaped;
+      })
+      .immediate();
   }
 
   /**
@@ -685,6 +747,36 @@ export class RunStore {
 
 let currentStore: RunStore | null = null;
 let currentRunId: number | null = null;
+let currentRunMeta: RunMeta | null = null;
+
+/**
+ * Identity of the run currently being processed, for ambient consumers such
+ * as the harness-log sink that need to attribute an execution to a run.
+ */
+export interface ActiveRunContext {
+  id: number;
+  origin: RunOrigin;
+  taskKey?: string;
+  harness?: string;
+}
+
+/**
+ * The run currently being processed, or null when no run is active (e.g. a
+ * spawn from a code path that does not record runs, or between the end of one
+ * run and the start of the next). Task processing is strictly sequential, so
+ * there is at most one active run.
+ */
+export function getActiveRunContext(): ActiveRunContext | null {
+  if (currentRunId === null || currentRunMeta === null) {
+    return null;
+  }
+  return {
+    id: currentRunId,
+    origin: currentRunMeta.origin,
+    taskKey: currentRunMeta.taskKey,
+    harness: currentRunMeta.harness,
+  };
+}
 
 /** Log a recording failure without ever propagating it into the pipeline. */
 function warnOnce(action: string, error: unknown): void {
@@ -700,8 +792,10 @@ export function beginRun(meta: RunMeta): void {
   try {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
+    currentRunMeta = meta;
   } catch (error) {
     currentRunId = null;
+    currentRunMeta = null;
     warnOnce("begin", error);
   }
 }
@@ -800,5 +894,6 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
     warnOnce("end", error);
   } finally {
     currentRunId = null;
+    currentRunMeta = null;
   }
 }

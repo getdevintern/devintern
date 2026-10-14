@@ -16,6 +16,7 @@ import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
 import { resolveOutputDir } from "../config/output-dir";
 
@@ -279,6 +280,12 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         args: agentArgs,
         spawnOptions: { stdio: HEADLESS_AGENT_STDIO, cwd: workingDir },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: `hook-fix-${hookType}`,
+          cwd: workingDir,
+          command: [resolvedPath, ...agentArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {
