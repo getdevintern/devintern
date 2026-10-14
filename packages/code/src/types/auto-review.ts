@@ -4,6 +4,19 @@
 
 export type ReviewPriority = "critical" | "high" | "medium" | "low" | "info";
 
+/**
+ * How far a finding's safety fact was proven up the evidence ladder.
+ *
+ * `high` requires the claim to have been run, `medium` to have been pointed at
+ * or shown impossible, and `low` covers assertions and unproven claims.
+ *
+ * Validation only enforces the ladder's floor: `high`/`medium` are downgraded
+ * to `low` when `evidence` is missing or is a named non-concrete marker. The
+ * `high`-vs-`medium` split is advisory, since a free-form evidence string
+ * cannot be verified.
+ */
+export type ReviewConfidence = "high" | "medium" | "low";
+
 export type ReviewCategory =
   | "code-quality"
   | "bug"
@@ -28,6 +41,18 @@ export interface ReviewFeedbackItem {
 
   /** Description of the issue */
   issue: string;
+
+  /**
+   * How far the finding's safety fact was proven. Findings without evidence
+   * are reported with `low` rather than dropped.
+   */
+  confidence?: ReviewConfidence;
+
+  /**
+   * Backing for the finding: a runnable check and its result, a real
+   * `file:line`, or the literal `"unproven"`.
+   */
+  evidence?: string;
 
   /** Suggested fix or improvement */
   suggestion: string;

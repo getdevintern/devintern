@@ -36,7 +36,7 @@ const defaultDeps: VerifyDependencies = {
   filterItems: filterByPriority,
 };
 
-const DEFAULT_INSTRUCTIONS = `Verify whether the implementation satisfies the task's functional requirements. Check completeness, correctness, acceptance criteria, and regressions. Return only JSON with this shape: {"summary":"...","items":[{"priority":"critical|high|medium|low|info","category":"bug|testing|documentation|code-quality|performance|security|style","file":"path","line":"42","issue":"...","suggestion":"..."}],"approved":true}. Report each unmet requirement as a high or critical item. Set approved true only when every requirement is satisfied.`;
+const DEFAULT_INSTRUCTIONS = `Verify whether the implementation satisfies the task's functional requirements. Check completeness, correctness, acceptance criteria, and regressions. Then apply a blast-radius lens: trace the callers, callees, and sibling consumers of the changed code beyond the diff and name the one fact the change is safe because of. Back each finding with evidence on this ladder (weakest to strongest): asserted, pointed at a real file:line, shown can't-happen, ran a check. Mark each item with a confidence of high (ran it), medium (pointed or can't-happen), or low (asserted or unproven); findings without evidence are reported with low confidence rather than dropped. Return only JSON with this shape: {"summary":"...","items":[{"priority":"critical|high|medium|low|info","confidence":"high|medium|low","category":"bug|testing|documentation|code-quality|performance|security|style","file":"path","line":"42","issue":"...","evidence":"command run and result, file:line, or unproven","suggestion":"..."}],"approved":true}. Report each unmet requirement as a high or critical item. Set approved true only when every requirement is satisfied.`;
 
 const PRIORITIES: readonly ReviewPriority[] = ["critical", "high", "medium", "low", "info"];
 
@@ -60,7 +60,7 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
   const findings = feedback.items
     .map(
       (item, index) =>
-        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}\n   Fix: ${item.suggestion}`,
+        `${index + 1}. [${item.priority}] ${item.issue}${item.file ? ` in ${item.file}` : ""}${item.confidence ? `\n   Confidence: ${item.confidence}` : ""}${item.evidence ? `\n   Evidence: ${item.evidence}` : ""}\n   Fix: ${item.suggestion}`,
     )
     .join("\n");
   // `taskContent` is our own already-framed task prompt; only the raw findings

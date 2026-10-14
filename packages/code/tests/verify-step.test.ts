@@ -207,4 +207,39 @@ describe("verifyImplementation", () => {
     expect(prompt).not.toContain("[neutralized untrusted-content boundary marker]");
     expect(prompt).not.toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task -->");
   });
+
+  test("default instructions request confidence and evidence", async () => {
+    let captured = "";
+    const injected = deps({ ...feedback, approved: true, items: [] });
+    injected.runAgent = async (prompt) => {
+      captured = prompt;
+      return "verdict";
+    };
+
+    await verifyImplementation(state({}), injected);
+
+    expect(captured).toContain('"confidence":"high|medium|low"');
+    expect(captured).toContain('"evidence":"command run and result, file:line, or unproven"');
+  });
+
+  test("propagates evidence/confidence into the repair prompt", () => {
+    const withEvidence: ReviewFeedback = {
+      summary: "unproven change",
+      approved: false,
+      items: [
+        {
+          priority: "high",
+          category: "bug",
+          issue: "Missing case",
+          suggestion: "Handle it",
+          confidence: "low",
+          evidence: "unproven",
+        },
+      ],
+    };
+    const prompt = buildRepairPrompt("Implement the feature", withEvidence);
+
+    expect(prompt).toContain("Confidence: low");
+    expect(prompt).toContain("Evidence: unproven");
+  });
 });
