@@ -21,6 +21,8 @@ describe("pipeline configuration", () => {
     const api = await import("@getdevintern/code/pipeline");
     expect(api.registerStep).toBeFunction();
     expect(api.StepExecutionError).toBeFunction();
+    expect(api.untrustedContentBlock).toBeFunction();
+    expect(api.UNTRUSTED_CONTENT_NOTICE).toBeString();
     const name = `public-api-${randomUUID()}`;
     api.registerStep({ name, create: () => ({ name, run: async () => {} }) });
     expect(api.getStep(name)).toBeDefined();

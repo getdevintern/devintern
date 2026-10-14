@@ -1,0 +1,5 @@
+{
+  "name": "run-tests-fixture",
+  "private": true,
+  "type": "module"
+}

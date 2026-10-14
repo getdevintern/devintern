@@ -167,6 +167,10 @@ Point the CLI at a ticket and get a reviewed diff back. Interactive use is free 
 
 When a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR. See the [quick-start guide](docs/code/quick-start.md) and [full usage reference](docs/code/usage.md).
 
+Delivery is a configurable pipeline. Add built-in verification or your own
+project-local TypeScript steps with the [Customizing the Task Pipeline](docs/code/pipelines.md)
+guide ([runnable examples](examples/pipeline-plugins/README.md)).
+
 ## Need a ticket first?
 
 [DevIntern PM](https://devintern.com/pm-desktop/) (desktop, free) and [`devpm`](https://www.npmjs.com/package/@getdevintern/pm) turn a prompt, error log, or Figma frame into a well-specified tracker ticket. They are optional intake for the worker.

@@ -1,0 +1,17 @@
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/pr-explainer-narrative.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "loopback" },
+      { "use": "auto-review" },
+      {
+        "use": "pr-explainer-narrative",
+        "promptFile": "./.devintern-code/prompts/pr-explainer-narrative.md",
+        "outputName": "pr-explanation.md"
+      },
+      { "use": "finalize" }
+    ]
+  }
+}
