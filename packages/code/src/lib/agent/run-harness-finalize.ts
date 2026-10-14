@@ -8,6 +8,7 @@ import {
 } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
+import { extractPrExplanation } from "../code-host/pr-body";
 import { resolveOutputDir } from "../config/output-dir";
 import { getTodoStatusForProject, resolveProjectKey } from "../config/project-settings";
 import {
@@ -329,7 +330,11 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
     console.log("\n⏭️  Skipping task tracker comment posting (--skip-comments)");
   }
   if (ctx.createPr && ctx.task) {
-    await state.helpers.createPrAndTransition(state.output, state.autoReviewRan);
+    await state.helpers.createPrAndTransition(
+      state.output,
+      state.autoReviewRan,
+      extractPrExplanation(state.results),
+    );
   }
 }
 

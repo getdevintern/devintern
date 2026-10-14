@@ -6,10 +6,11 @@
  * prior step results, framing task/diff as untrusted data, writing an artifact,
  * and degrading to an advisory warning on failure — live here.
  *
- * This scaffold does not change the published PR body. The CLI builds the body
- * from the implementation output (`buildPrBody`), and there is no public API to
- * inject a plugin's data into it. Treat the result as an explanation artifact
- * and see the example README for the follow-up.
+ * The returned `data.content` is picked up by the CLI's PR-body builder for any
+ * step whose name starts with `pr-explainer-`: when a PR is created, the
+ * explanation is appended as an `Explanation` section. The artifact is still
+ * written for the local dashboard, and a failure remains advisory — it never
+ * blocks publication. See the example README for details.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

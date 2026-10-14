@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildPrBody,
+  extractPrExplanation,
   parsePrBodySections,
   PR_BODY_SECTION_KEYS,
 } from "../src/lib/code-host/pr-body";
@@ -271,6 +272,38 @@ second pass`;
 
     expect(body).toContain("## Why\n\nTask DEV-1: Handle OAuth2: tokens & refresh (v2) #42");
   });
+
+  test("appends an Explanation section when an explanation is provided", () => {
+    const body = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "Add a widget",
+      explanation: "Reviewers should focus on the undo stack.",
+    });
+
+    expect(body).toContain("## Explanation\n\nReviewers should focus on the undo stack.");
+    expect(headings(body)).toEqual([
+      "Why",
+      "What changed",
+      "Scope",
+      "Tradeoffs",
+      "Blast Radius",
+      "Verification",
+      "Explanation",
+    ]);
+    // Still before the automatic-creation footer.
+    expect(body.indexOf("## Explanation")).toBeLessThan(body.indexOf("---"));
+  });
+
+  test("omits the Explanation section when absent or blank", () => {
+    expect(headings(buildPrBody({ taskKey: "DEV-1", taskSummary: "X" }))).toHaveLength(6);
+    const blank = buildPrBody({
+      taskKey: "DEV-1",
+      taskSummary: "X",
+      explanation: "   \n  ",
+    });
+    expect(blank).not.toContain("## Explanation");
+    expect(headings(blank)).toHaveLength(6);
+  });
 });
 
 describe("parsePrBodySections", () => {
@@ -299,5 +332,33 @@ describe("parsePrBodySections", () => {
     const sections = parsePrBodySections("## In scope\nA\n\n## Out of scope\nB");
 
     expect(sections).toEqual({ scope: "**In scope:**\nA\n\n**Out of scope:**\nB" });
+  });
+});
+
+describe("extractPrExplanation", () => {
+  test("returns undefined when no explainer step recorded content", () => {
+    expect(extractPrExplanation([])).toBeUndefined();
+    expect(
+      extractPrExplanation([{ step: "verify", result: { data: { content: "not an explainer" } } }]),
+    ).toBeUndefined();
+  });
+
+  test("collects content from pr-explainer-* steps in order", () => {
+    const explanation = extractPrExplanation([
+      { step: "pr-explainer-narrative", result: { data: { content: "  Narrative.  " } } },
+      { step: "commit", result: { data: { skipped: true } } },
+      { step: "pr-explainer-visual", result: { data: { content: "Visual." } } },
+    ]);
+
+    expect(explanation).toBe("Narrative.\n\nVisual.");
+  });
+
+  test("skips explainer steps that failed or carry no string content", () => {
+    const explanation = extractPrExplanation([
+      { step: "pr-explainer-narrative", result: { data: { path: "/tmp/x" } } },
+      { step: "pr-explainer-visual", result: { data: { content: "   " } } },
+    ]);
+
+    expect(explanation).toBeUndefined();
   });
 });

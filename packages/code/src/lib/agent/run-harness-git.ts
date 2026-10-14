@@ -151,7 +151,11 @@ export function createGitHelpers(ctx: FinalizeContext) {
     };
   };
 
-  const createPrAndTransition = async (implementationOutput: string, autoReviewRan = false) => {
+  const createPrAndTransition = async (
+    implementationOutput: string,
+    autoReviewRan = false,
+    explanation?: string,
+  ) => {
     console.log("\n🔀 Creating pull request...");
     try {
       const prManager = new PRManager();
@@ -194,6 +198,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
         {
           targetBranchExplicit: prTargetBranchExplicit,
           requestedTargetBranch: requestedPrTargetBranch,
+          explanation,
         },
       );
 

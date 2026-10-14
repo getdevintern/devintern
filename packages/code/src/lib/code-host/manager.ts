@@ -76,8 +76,10 @@ export class PRManager {
    * @param implementationSummary - Optional summary appended to PR body
    * @param options - PR metadata: `labels` (defaults to the comma-separated
    *   `PR_LABELS` environment variable), `targetBranchExplicit` (whether the
-   *   user supplied --pr-target-branch), and `requestedTargetBranch` (original
-   *   explicit target before Git fallback resolution)
+   *   user supplied --pr-target-branch), `requestedTargetBranch` (original
+   *   explicit target before Git fallback resolution), and `explanation`
+   *   (reviewer-facing text contributed by a `pr-explainer-*` pipeline step;
+   *   appended as an extra section and ignored when absent)
    */
   async createPullRequest(
     task: Task | JiraIssue,
@@ -88,6 +90,7 @@ export class PRManager {
       labels?: string[];
       targetBranchExplicit?: boolean;
       requestedTargetBranch?: string;
+      explanation?: string;
     } = {},
   ): Promise<PRResult> {
     const labels = options.labels ?? parsePrLabels(process.env.PR_LABELS);
@@ -107,7 +110,7 @@ export class PRManager {
 
     const prInfo: PRInfo = {
       title: this.createPRTitle(taskKey, taskSummary),
-      body: this.createPRBody(task, implementationSummary),
+      body: this.createPRBody(task, implementationSummary, options.explanation),
       sourceBranch,
       targetBranch:
         repoInfo.platform === "gitlab"
@@ -243,10 +246,14 @@ export class PRManager {
   }
 
   /** Build the structured PR body template from task metadata and the summary. */
-  private createPRBody(task: Task | JiraIssue, implementationSummary?: string): string {
+  private createPRBody(
+    task: Task | JiraIssue,
+    implementationSummary?: string,
+    explanation?: string,
+  ): string {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
+    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary, explanation });
   }
 }

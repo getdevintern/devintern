@@ -122,8 +122,16 @@ each variant's `CREDITS.md`. The visual guidance originates in Humanlayer's
 
 ## Follow-ups
 
-- **PR-body integration.** The CLI builds the PR body from the implementation
-  output and exposes no public API for a plugin to contribute to it. The
-  explainer examples write an artifact instead and record this as a follow-up.
 - **Official plugin repository.** Revisit a maintained, installable plugin
   repository after the public API stabilizes and there is demand for it.
+
+## Where the explainer output goes
+
+A `pr-explainer-*` step records `{ path, content }` in `context.results`. The
+CLI's PR-body builder appends `content` as an `Explanation` section for any
+configured step whose name starts with `pr-explainer-`, so a PR opened by such a
+step includes the explanation. The step also writes the Markdown artifact under
+the task output directory, where the local dashboard (`devintern dashboard`)
+lists it under the run's **Artifacts** card alongside the built-in `verify` and
+auto-review artifacts. Both paths are advisory: a failed explainer emits a
+`warn` result and never blocks publication.

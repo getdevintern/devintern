@@ -16,6 +16,8 @@ import type {
   RetryAuditEntry,
   RunDetailResponse,
   RunStageRecord,
+  TaskArtifactContent,
+  TaskArtifactFile,
 } from "@/lib/api";
 import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
 import { runWorkLink } from "@/lib/run-work";
@@ -311,6 +313,99 @@ function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[
   );
 }
 
+/** One task artifact (explainer, verify output, review iteration): lazily loads content. */
+function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }) {
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<TaskArtifactContent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function toggle(): Promise<void> {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (content || loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(file.name)}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      setContent((await response.json()) as TaskArtifactContent);
+      setError(null);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const markdown = /\.md$/i.test(file.name);
+  return (
+    <div className="rounded-md border">
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        aria-expanded={open}
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span className="font-mono text-xs">{file.name}</span>
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          {formatTime(file.modifiedAt)} · {formatBytes(file.size)}
+        </span>
+      </button>
+      {open ? (
+        <div className="border-t px-3 py-2">
+          {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+          {content ? (
+            <>
+              {content.truncated ? (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Showing the tail of {formatBytes(content.totalBytes)} on disk.
+                </p>
+              ) : null}
+              {markdown ? (
+                <Markdown>{content.content}</Markdown>
+              ) : (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
+                  {content.content}
+                </pre>
+              )}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Task artifacts written under the run's output directory. */
+function ArtifactsCard({ runId, artifacts }: { runId: number; artifacts: TaskArtifactFile[] }) {
+  if (artifacts.length === 0) {
+    return null;
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          Artifacts ({artifacts.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {artifacts.map((file) => (
+          <ArtifactItem key={file.name} runId={runId} file={file} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 /** One run: metadata card plus a stage-by-stage timeline. */
 export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => void }) {
   const { data, error, loading, refresh } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
@@ -462,6 +557,8 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
           <RetryAuditList entries={data.retry.audit} />
 
           <HarnessLogsCard runId={data.run.id} logs={data.harnessLogs ?? []} />
+
+          <ArtifactsCard runId={data.run.id} artifacts={data.artifacts ?? []} />
 
           <div className="space-y-0">
             {data.stages.map((stage, index) => (

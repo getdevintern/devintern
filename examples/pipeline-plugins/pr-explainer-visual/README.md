@@ -53,9 +53,10 @@ grounding, untrusted framing, advisory failure) identical.
 
 The step writes `pr-explanation.md` under `context.outputDir` and returns
 `{ kind: "continue", data: { path, content } }`. As with the narrative variant,
-there is no public API to inject this into the PR body — it is an explanation
-artifact, and PR-body integration is a documented follow-up. Generation failure
-returns `{ kind: "warn" }` and publication continues.
+the CLI's PR-body builder appends `content` as an `Explanation` section for any
+configured `pr-explainer-*` step, and the artifact is listed under the run's
+**Artifacts** card in the local dashboard. Generation failure returns
+`{ kind: "warn" }` and publication continues.
 
 ## Validate
 

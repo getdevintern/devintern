@@ -64,11 +64,16 @@ export abstract class PRClient {
    *
    * @param task - Source task (JIRA issue or generic Task)
    * @param implementationSummary - Optional agent implementation summary
+   * @param explanation - Optional reviewer explanation from a pipeline plugin
    */
-  protected createPRBody(task: Task | JiraIssue, implementationSummary?: string): string {
+  protected createPRBody(
+    task: Task | JiraIssue,
+    implementationSummary?: string,
+    explanation?: string,
+  ): string {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
+    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary, explanation });
   }
 }

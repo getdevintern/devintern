@@ -48,12 +48,12 @@ structured data:
 { kind: "continue", data: { path: "<outputDir>/pr-explanation.md", content: "..." } }
 ```
 
-**PR body integration.** The CLI builds the PR body from the implementation
-output (`buildPrBody`) and exposes no public API for a plugin to inject text
-into it. This example therefore produces an **explanation artifact**, not a PR
-body change. Feeding it into the PR body is recorded as a follow-up; see the
-root examples README. If generation fails, the step returns
-`{ kind: "warn" }` and publication continues.
+**PR body integration.** The CLI's PR-body builder picks up the `content` a
+`pr-explainer-*` step records in `context.results` and appends it as an
+`Explanation` section on the PR. The artifact is also listed under the run's
+**Artifacts** card in the local dashboard (`devintern dashboard`). Both paths
+are advisory: if generation fails, the step returns `{ kind: "warn" }` and
+publication continues.
 
 ## Validate
 

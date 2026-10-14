@@ -302,6 +302,22 @@ before publication: return `{ kind: "repeat", from: "commit", maxRepeats: 1 }`
 (or repeat from `implement`) so the `commit` step runs again. Prefer placing
 mutating steps **before** `commit` when possible.
 
+### Surfacing artifacts in the PR and dashboard
+
+A step can write files under `context.outputDir` (the task output directory,
+default `/tmp/devintern-tasks/<task-key>/`). These are the artifacts the local
+dashboard lists under a run's **Artifacts** card, alongside the built-in
+`verify-prompt.txt` / `verify-feedback.json` and auto-review `iteration-N/`
+files. `devintern dashboard` reads them from the same `DEVINTERN_OUTPUT_DIR`, so
+a dashboard on another host (or after `/tmp` cleanup) will not see them.
+
+A step named with the **`pr-explainer-` prefix** can additionally contribute to
+the PR body: when it returns `{ kind: "continue", data: { content } }`, the CLI
+appends `content` as an `Explanation` section to any PR it creates for the task.
+The built-in `pr-explainer-narrative` and `pr-explainer-visual` examples use
+this convention. Contributions are advisory — a `warn` (or a missing
+explanation) is ignored and never blocks publication.
+
 ### Transient retries with `StepExecutionError`
 
 Throw `StepExecutionError` for a transient execution failure that deserves one
@@ -435,7 +451,7 @@ Complete, runnable examples live under
 | `verify-artifacts` | Require a generated artifact and expose it through `context.results`. |
 | `transient-retry` | `StepExecutionError` single-retry vs a permanent halt. |
 | `agent-review` | `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority` with a bounded repeat. |
-| `pr-explainer-narrative`, `pr-explainer-visual` | Diff-grounded explanation artifacts written before `finalize`. |
+| `pr-explainer-narrative`, `pr-explainer-visual` | Diff-grounded explanations written before `finalize`; surfaced in the PR body and the dashboard. |
 
 Run the whole suite with `bun run examples/pipeline-plugins/run-tests.ts`.
 
@@ -453,5 +469,5 @@ These files implement the behavior described above:
 
 The explainer examples' prompt guidance is adapted from public skill
 repositories; pinned revisions and attribution are in the example `CREDITS.md`
-files. Feeding an explanation artifact into the published PR body is not yet
-supported by the public API and is tracked as a follow-up.
+files. A `pr-explainer-*` step's explanation is appended to the PR body, and
+task artifacts are listed in the local dashboard's run detail view.

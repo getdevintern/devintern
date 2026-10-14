@@ -424,10 +424,13 @@ Everything in the output directory is a debug artifact and safe to delete. Retry
 ├── feasibility-assessment.md            # Clarity check results
 ├── implementation-summary.md            # Success output
 ├── implementation-summary-incomplete.md # Failure output
+├── verify-prompt.txt                    # Built-in verify: exact prompt sent
+├── verify-feedback.json                 # Built-in verify: parsed verdict
 ├── auto-review-summary.json             # Auto-review loop results
 ├── iteration-{N}/                       # Auto-review iterations
 │   ├── feedback.json
 │   └── review-prompt.txt
+├── pr-explanation.md                    # pr-explainer-* plugin output
 └── attachments/                         # Jira attachments
 ```
 
@@ -449,6 +452,15 @@ This covers every agent execution, including task implementation, plan retries, 
 - A single transcript is truncated once its body reaches 10 MB; override with `DEVINTERN_HARNESS_LOG_MAX_FILE_MB`.
 - Files older than 30 days are pruned on write, the directory is capped at 500 files (oldest first) and a 256 MB total budget. Override with `DEVINTERN_HARNESS_LOG_RETENTION_DAYS`, `DEVINTERN_HARNESS_LOG_MAX_FILES`, and `DEVINTERN_HARNESS_LOG_MAX_TOTAL_MB`.
 - The local dashboard surfaces a run's harness logs on its detail page; the same data is available as JSON at `GET /api/runs/:id/harness-logs` and `GET /api/runs/:id/harness-logs/:name`.
+
+## Task Artifacts in the Dashboard
+
+The local dashboard's run detail page also lists a run's **task artifacts** — the files written under `{output-dir}/{task-key}/` (implementation and feasibility summaries, `verify-prompt.txt` / `verify-feedback.json`, `iteration-{N}/`, the `pr-explainer-*` output, and attachments). The dashboard process must resolve the same `DEVINTERN_OUTPUT_DIR` as the run, and since the default path is under `/tmp`, artifacts are ephemeral and host-local. The same data is available as JSON:
+
+- `GET /api/runs/:id/artifacts` — the run's artifact list (relative paths), sorted.
+- `GET /api/runs/:id/artifacts/:name` — the redacted tail of one artifact; nested paths (`iteration-1/feedback.json`) are URL-encoded.
+
+Artifact reads are bounded and secret-redacted like harness logs.
 
 ## Prompt Catalog
 

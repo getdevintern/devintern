@@ -19,6 +19,8 @@ import {
   handleAutomations,
   handleLogs,
   handleRetryRun,
+  handleRunArtifact,
+  handleRunArtifacts,
   handleRunAutomation,
   handleRunHarnessLog,
   handleRunHarnessLogs,
@@ -145,6 +147,8 @@ export function startDashboardServer(
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
   const runHarnessLogsPattern = /^\/api\/runs\/([^/]+)\/harness-logs$/;
   const runHarnessLogPattern = /^\/api\/runs\/([^/]+)\/harness-logs\/([^/]+)$/;
+  const runArtifactsPattern = /^\/api\/runs\/([^/]+)\/artifacts$/;
+  const runArtifactPattern = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
@@ -184,6 +188,14 @@ export function startDashboardServer(
         const harnessLog = pathname.match(runHarnessLogPattern);
         if (harnessLog) {
           return json(handleRunHarnessLog(data, harnessLog[1], harnessLog[2]));
+        }
+        const artifacts = pathname.match(runArtifactsPattern);
+        if (artifacts) {
+          return json(handleRunArtifacts(data, artifacts[1]));
+        }
+        const artifact = pathname.match(runArtifactPattern);
+        if (artifact) {
+          return json(handleRunArtifact(data, artifact[1], artifact[2]));
         }
         const runDetail = pathname.match(runDetailPattern);
         if (runDetail) {

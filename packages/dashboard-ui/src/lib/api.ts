@@ -74,6 +74,8 @@ export interface RunDetailResponse {
   retry: RetryInfo;
   /** Per-execution harness transcripts attributed to this run, newest first. */
   harnessLogs: HarnessLogFile[];
+  /** Task artifacts under the run's output directory, sorted by path. */
+  artifacts: TaskArtifactFile[];
 }
 
 /** One durable agent-harness execution transcript under `logs/harness/`. */
@@ -90,6 +92,22 @@ export interface HarnessLogFile {
 
 /** Redacted tail of a harness execution log. */
 export interface HarnessLogContent {
+  name: string;
+  content: string;
+  truncated: boolean;
+  totalBytes: number;
+}
+
+/** One file under a task's output directory (explainer, verify, iterations). */
+export interface TaskArtifactFile {
+  /** POSIX-relative path within the task output directory. */
+  name: string;
+  size: number;
+  modifiedAt: number;
+}
+
+/** Redacted tail of a task artifact. */
+export interface TaskArtifactContent {
   name: string;
   content: string;
   truncated: boolean;
