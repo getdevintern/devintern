@@ -78,6 +78,7 @@ let agentPrompts: string[];
 let autoReviewOptions: Array<{ maxIterations?: number; minPriority?: string }>;
 let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
+let prCreateOptions: { explanation?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
 
 class FakeChild extends EventEmitter {
@@ -143,7 +144,14 @@ mock.module("../src/lib/utils", () => ({
 mock.module("../src/lib/code-host", () => ({
   ...realCodeHost,
   PRManager: class {
-    async createPullRequest() {
+    async createPullRequest(
+      _task: unknown,
+      _sourceBranch: string,
+      _targetBranch: string,
+      _implementationSummary: string,
+      options?: { explanation?: string },
+    ) {
+      prCreateOptions = options;
       return prResult;
     }
   },
@@ -242,6 +250,7 @@ beforeEach(() => {
   autoReviewOptions = [];
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
+  prCreateOptions = undefined;
   postImplementationCommentMock = mock(async () => {});
   outDir = mkdtempSync(join(tmpdir(), "run-harness-"));
   mkdirSync(join(outDir, "task-1"), { recursive: true });
@@ -369,6 +378,37 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("forwards a pr-explainer plugin's content as the PR explanation", async () => {
+    scenario.stdout = "done";
+    const name = `pr-explainer-${randomUUID()}`;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async () => ({
+          kind: "continue",
+          data: { content: "Reviewers: focus on the undo stack." },
+        }),
+      }),
+    });
+    pipelineConfig = {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(prCreateOptions?.explanation).toBe("Reviewers: focus on the undo stack.");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("omits the PR explanation when no pr-explainer plugin ran", async () => {
+    scenario.stdout = "done";
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(prCreateOptions?.explanation).toBeUndefined();
   });
 
   test("retries a plan-only run and publishes the committed implementation", async () => {
