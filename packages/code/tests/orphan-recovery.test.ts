@@ -140,6 +140,43 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(state?.descriptionHash).toBe(hashDescription("description of Summary of PROJ-1"));
   });
 
+  test("resumes an orphaned run with a recorded branch and report instead of notifying", async () => {
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-11",
+      branch: "feature/proj-11",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+
+    const result = await recover();
+
+    expect(result.reaped).toBe(1);
+    expect(result.recovered).toBe(0);
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    // A resumable run must not be reported as a failure.
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+    expect(retryStore.getRetryState("PROJ-11")).toBeNull();
+  });
+
+  test("falls back to failure feedback when the recorded state is incomplete", async () => {
+    // Branch recorded but no implementation report: nothing to inherit.
+    store.createRun({ origin: "task", taskKey: "PROJ-12", branch: "feature/proj-12" });
+
+    const result = await recover();
+
+    expect(result.recovered).toBe(1);
+    expect(result.resumable).toHaveLength(0);
+    expect(posted).toHaveLength(1);
+    expect(transitions).toEqual([{ key: "PROJ-12", status: "To Do" }]);
+  });
+
   test("does not clobber a ticket that moved on after the crash", async () => {
     store.createRun({ origin: "task", taskKey: "PROJ-2" });
     tasksByKey["PROJ-2"] = ticket("PROJ-2", "Done");
@@ -259,7 +296,7 @@ describe("recoverOrphanedTaskRuns", () => {
 
     const result = await recover();
 
-    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0 });
+    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0, resumable: [] });
     expect(posted).toHaveLength(0);
   });
 

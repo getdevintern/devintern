@@ -109,6 +109,92 @@ export async function createFeatureBranch(
   }
 }
 
+/**
+ * Check out an existing feature branch so a re-run can inherit a prior
+ * attempt's work (session pickup). Prefers a local branch; falls back to
+ * creating a tracking branch from `origin/<branch>` when only the remote ref
+ * exists. Never creates a new branch name and never runs the destructive
+ * pre-branch cleanup, so already-landed changes survive.
+ *
+ * @param branch - Recorded branch to resume
+ */
+export async function continueFeatureBranch(
+  branch: string,
+  options?: { cwd?: string },
+): Promise<{ success: boolean; branchName: string; message: string }> {
+  const cwd = options?.cwd;
+  const gitOpts = cwd ? { cwd } : undefined;
+  try {
+    if (!(await Utils.isGitRepository(cwd))) {
+      return { success: false, branchName: branch, message: "Not in a git repository" };
+    }
+
+    // Best-effort refresh of the remote ref so a branch pushed by the prior
+    // attempt is available locally.
+    await Utils.executeGitCommand(["fetch", "origin", branch], gitOpts);
+
+    const checkout = await Utils.executeGitCommand(["checkout", branch], gitOpts);
+    if (checkout.success) {
+      return { success: true, branchName: branch, message: `Resumed existing branch '${branch}'` };
+    }
+
+    const remoteExists = await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd });
+    if (remoteExists && !checkout.output.includes("already used by worktree")) {
+      const create = await Utils.executeGitCommand(
+        ["checkout", "-b", branch, `origin/${branch}`],
+        gitOpts,
+      );
+      if (create.success) {
+        return { success: true, branchName: branch, message: `Resumed remote branch '${branch}'` };
+      }
+    }
+
+    return {
+      success: false,
+      branchName: branch,
+      message: `Could not resume branch '${branch}': ${checkout.error ?? "branch not available"}`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      branchName: branch,
+      message: `Git operation failed: ${(error as Error).message}`,
+    };
+  }
+}
+
+/**
+ * Best-effort description of work already landed on `branch` relative to a base
+ * (commits and a diff stat). Returns undefined when either ref is missing or git
+ * fails, so callers never treat absence as proof of no work.
+ */
+export async function collectLandedWork(
+  branch: string,
+  baseBranch: string,
+  options?: { cwd?: string },
+): Promise<string | undefined> {
+  const gitOpts = options?.cwd ? { cwd: options.cwd } : undefined;
+  try {
+    const [log, stat] = await Promise.all([
+      Utils.executeGitCommand(
+        ["log", "--oneline", "--no-decorate", `${baseBranch}..${branch}`],
+        gitOpts,
+      ),
+      Utils.executeGitCommand(["diff", "--stat", `${baseBranch}...${branch}`], gitOpts),
+    ]);
+    const sections: string[] = [];
+    if (log.success && log.output.trim()) {
+      sections.push(`Commits:\n${log.output.trim()}`);
+    }
+    if (stat.success && stat.output.trim()) {
+      sections.push(`Changes:\n${stat.output.trim()}`);
+    }
+    return sections.length > 0 ? sections.join("\n\n") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve and check out the base branch, tolerating worktree-locked branches. */
 async function resolveFeatureBaseBranch(
   baseBranch: string | undefined,
@@ -349,4 +435,6 @@ async function createFeatureBranchRef(
 
 Object.assign(Utils, {
   createFeatureBranch,
+  continueFeatureBranch,
+  collectLandedWork,
 });

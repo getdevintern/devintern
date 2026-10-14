@@ -207,7 +207,7 @@ When a run cannot finish, devintern posts an "Implementation Incomplete" comment
 
 The gate ignores the automation's own comments: posting the failure comment (and moving the ticket back) updates the tracker's timestamp, but neither of those counts as a change, so a failed ticket sits still until a human edits it. This applies to every failure kind — incomplete implementations as well as crash, interrupt, and usage-limit comments.
 
-Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. Each attempt gets its own branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
+Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. When the previous attempt left complete recorded state — a branch plus its own implementation report — the retry **picks up where it stopped** (session pickup): the recorded branch is checked out and the prior report is handed to the agent so it inherits already-landed work instead of redoing it. When that state is incomplete (no branch, no report, or the branch is gone), the retry starts fresh and gets its own attempt branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
@@ -234,6 +234,8 @@ A graceful stop (Ctrl-C, `SIGTERM`) comments on an in-flight ticket and moves it
 The worker now bridges that gap on startup. Before any new tickets are acquired, it detects task runs left `in_progress` by the previous (dead) worker instance and gives each affected ticket the same treatment a graceful shutdown would have: the processing-failure comment is posted (explaining that the worker exited unexpectedly before a pull request could be created, and how to unlock a retry), and the ticket is moved back to your To Do status so it is no longer stranded. Each recovery is logged.
 
 Recovery respects the retry gate: the requeued ticket is not re-run on restart (no duplicate execution). It sits in To Do like any other ticket whose last attempt failed, and runs again when the ticket changes — an edited description, a new comment, or `--force`.
+
+**Session pickup.** When an interrupted run left complete recorded state — a branch and its own implementation report — the worker does not post a failure and restart from scratch. It queues a pickup retry (`--force`) that reuses the same branch and hands the prior report to the agent, so the work already done is inherited rather than redone. Incomplete state (no branch, no report, or a branch that no longer exists) falls back to the normal failure-and-requeue path above; the recorded run is authoritative, and a ticket a human has already moved out of In Progress is never resumed.
 
 Two guards keep the recovery from making noise or causing harm:
 

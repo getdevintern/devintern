@@ -21,6 +21,7 @@ import {
   resolveStatusName,
 } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
+import type { RunRecord } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { createTaskActionedGate } from "../task/actioned-state";
@@ -126,7 +127,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
-    await recoverOrphanedTaskRuns({
+    const recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
       trackerType,
@@ -145,6 +146,8 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     // forever. The orphaned run itself was reaped above.
     const retryQueue = new ScheduledRetryStore(dbPath);
     try {
+      // Settle rows left running by the dead worker first, so a task whose
+      // interrupted retry was itself resumable can be re-queued just below.
       const orphans = retryQueue.failRunning(
         "worker restarted while this retry was running; schedule it again",
       );
@@ -153,6 +156,12 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           `⚠️  [fleet] scheduled retry of ${orphan.taskKey} was interrupted by a worker restart`,
         );
       }
+
+      // Session pickup: orphaned runs with complete recorded state are
+      // re-queued as dashboard retries (drained by the retry acquirer with
+      // `--force`), so the pipeline resumes their branch and prior report
+      // instead of restarting from scratch.
+      scheduleOrphanPickups(retryQueue, recovery.resumable);
     } finally {
       retryQueue.close();
     }
@@ -160,6 +169,40 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     retryStore?.close();
     runStore.close();
   }
+}
+
+/**
+ * Enqueue a dashboard retry for every orphaned run whose recorded state can be
+ * resumed. The retry acquirer drains these with `--force`, and the pipeline
+ * reconstructs the branch and prior report (session pickup) instead of
+ * restarting. Routing context (repo/team) is persisted so a retry lands in the
+ * same checkout even when task keys overlap.
+ *
+ * @returns Number of pickups actually queued
+ */
+export function scheduleOrphanPickups(
+  retryStore: Pick<ScheduledRetryStore, "schedule">,
+  runs: RunRecord[],
+): number {
+  let queued = 0;
+  for (const run of runs) {
+    if (!run.taskKey) continue;
+    const scheduled = retryStore.schedule({
+      taskKey: run.taskKey,
+      runId: run.id,
+      ...(run.team ? { team: run.team } : {}),
+      ...(run.repo ? { repo: run.repo } : {}),
+      actor: "orphan-recovery",
+    });
+    if (scheduled.scheduled) {
+      queued++;
+      console.log(
+        `♻️  [fleet] queued a session pickup for ${run.taskKey} ` +
+          `(run #${run.id}, branch '${run.branch ?? "unknown"}')`,
+      );
+    }
+  }
+  return queued;
 }
 
 /**
