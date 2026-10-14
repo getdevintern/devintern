@@ -5,6 +5,25 @@
  */
 
 import type { ProcessedReviewComment, ProcessedReviewFeedback } from "../../types/github-webhooks";
+import { untrustedContentBlock } from "../prompts/untrusted-content";
+
+/**
+ * Frame a single-line, attacker-influenced header field (PR title, branch name,
+ * file path, reviewer) as untrusted data.
+ *
+ * These fields embed into prompts too, so a PR author who controls a title,
+ * branch name, or path could otherwise inject instructions or forge boundary
+ * markers. Framing them through {@link untrustedContentBlock} keeps the whole
+ * formatter consistent; an empty value yields an empty string so callers never
+ * emit an empty block.
+ *
+ * @param value - Field text to frame
+ * @param source - Short human-readable origin for the boundary markers
+ */
+function frameField(value: string | undefined, source: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? untrustedContentBlock(trimmed, source) : "";
+}
 
 /**
  * Format structured PR review feedback into an agent prompt.
@@ -23,9 +42,9 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
   lines.push("## PR Information");
   lines.push("");
   lines.push(`- **Repository:** ${feedback.repository}`);
-  lines.push(`- **PR #${feedback.prNumber}:** ${feedback.prTitle}`);
-  lines.push(`- **Branch:** \`${feedback.branch}\``);
-  lines.push(`- **Reviewer:** @${feedback.reviewer}`);
+  lines.push(`- **PR #${feedback.prNumber}:** ${frameField(feedback.prTitle, "pr title")}`);
+  lines.push(`- **Branch:** ${frameField(`\`${feedback.branch}\``, "branch name")}`);
+  lines.push(`- **Reviewer:** ${frameField(`@${feedback.reviewer}`, "reviewer")}`);
   lines.push(`- **Review Status:** ${formatReviewState(feedback.reviewState)}`);
   lines.push("");
 
@@ -33,7 +52,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
   if (feedback.reviewBody && feedback.reviewBody.trim()) {
     lines.push("## Overall Review Comment");
     lines.push("");
-    lines.push(feedback.reviewBody);
+    lines.push(untrustedContentBlock(feedback.reviewBody.trim(), "overall review comment"));
     lines.push("");
   }
 
@@ -45,8 +64,8 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     // Group comments by file
     const commentsByFile = groupCommentsByFile(feedback.comments);
 
-    for (const [filePath, fileComments] of Object.entries(commentsByFile)) {
-      lines.push(`### \`${filePath}\``);
+    for (const [filePath, fileComments] of commentsByFile) {
+      lines.push(`### ${frameField(`\`${filePath}\``, "file path")}`);
       lines.push("");
 
       for (const comment of fileComments) {
@@ -64,7 +83,7 @@ export function formatReviewPrompt(feedback: ProcessedReviewFeedback): string {
     lines.push("");
 
     for (const comment of feedback.conversationComments) {
-      lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+      lines.push(untrustedContentBlock(quoteBody(comment.body), "review conversation comment"));
       lines.push("");
     }
   }
@@ -120,19 +139,18 @@ function formatReviewState(state: ProcessedReviewFeedback["reviewState"]): strin
  */
 function groupCommentsByFile(
   comments: ProcessedReviewComment[],
-): Record<string, ProcessedReviewComment[]> {
-  const grouped: Record<string, ProcessedReviewComment[]> = {};
+): Map<string, ProcessedReviewComment[]> {
+  const grouped = new Map<string, ProcessedReviewComment[]>();
 
   for (const comment of comments) {
-    if (!grouped[comment.path]) {
-      grouped[comment.path] = [];
-    }
-    grouped[comment.path].push(comment);
+    const fileComments = grouped.get(comment.path) ?? [];
+    fileComments.push(comment);
+    grouped.set(comment.path, fileComments);
   }
 
   // Sort comments within each file by line number
-  for (const filePath of Object.keys(grouped)) {
-    grouped[filePath].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+  for (const fileComments of grouped.values()) {
+    fileComments.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
   }
 
   return grouped;
@@ -148,22 +166,35 @@ function formatSingleComment(comment: ProcessedReviewComment): string {
 
   // Line reference
   const lineRef = comment.line ? `Line ${comment.line}` : "General";
-  lines.push(`**${lineRef}** (by @${comment.reviewer}):`);
+  lines.push(`**${lineRef}** (by ${frameField(`@${comment.reviewer}`, "reviewer")}):`);
   lines.push("");
+
+  const external: string[] = [];
 
   // Diff context (code block)
   if (comment.diffHunk) {
     const language = detectLanguage(comment.path);
-    lines.push("```" + language);
-    lines.push(comment.diffHunk);
-    lines.push("```");
-    lines.push("");
+    external.push("```" + language);
+    external.push(comment.diffHunk);
+    external.push("```");
+    external.push("");
   }
 
   // The actual feedback
-  lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+  external.push(quoteBody(comment.body));
+
+  lines.push(untrustedContentBlock(external.join("\n"), "review comment"));
 
   return lines.join("\n");
+}
+
+/**
+ * Render multi-line text as a markdown blockquote.
+ *
+ * @param body - Raw text to quote
+ */
+function quoteBody(body: string): string {
+  return `> ${body.split("\n").join("\n> ")}`;
 }
 
 /**
@@ -285,8 +316,8 @@ export function formatSingleCommentPrompt(
   lines.push("# Address Single PR Review Comment");
   lines.push("");
   lines.push(`**Repository:** ${repository}`);
-  lines.push(`**Branch:** \`${branch}\``);
-  lines.push(`**File:** \`${comment.path}\``);
+  lines.push(`**Branch:** ${frameField(`\`${branch}\``, "branch name")}`);
+  lines.push(`**File:** ${frameField(`\`${comment.path}\``, "file path")}`);
   if (comment.line) {
     lines.push(`**Line:** ${comment.line}`);
   }
@@ -296,15 +327,15 @@ export function formatSingleCommentPrompt(
 
   if (comment.diffHunk) {
     const language = detectLanguage(comment.path);
-    lines.push("```" + language);
-    lines.push(comment.diffHunk);
-    lines.push("```");
+    lines.push(
+      untrustedContentBlock(`\`\`\`${language}\n${comment.diffHunk}\n\`\`\``, "code under review"),
+    );
     lines.push("");
   }
 
   lines.push("## Reviewer Feedback");
   lines.push("");
-  lines.push(`> ${comment.body.split("\n").join("\n> ")}`);
+  lines.push(untrustedContentBlock(quoteBody(comment.body), "review comment"));
   lines.push("");
   lines.push("## Instructions");
   lines.push("");
@@ -338,17 +369,29 @@ export function formatCiFixPrompt(feedback: CiFailureFeedback): string {
     "## PR Information",
     "",
     `- **Repository:** ${feedback.repository}`,
-    `- **PR #${feedback.prNumber}:** ${feedback.prTitle ?? ""}`.trimEnd(),
+    `- **PR #${feedback.prNumber}:** ${frameField(feedback.prTitle, "pr title")}`.trimEnd(),
   ];
-  if (feedback.branch) lines.push(`- **Branch:** \`${feedback.branch}\``);
+  if (feedback.branch) {
+    lines.push(`- **Branch:** ${frameField(`\`${feedback.branch}\``, "branch name")}`);
+  }
   lines.push("", "## Failing Checks", "");
   for (const failure of feedback.failures) {
     const details = failure.detailsUrl ? ` (${failure.detailsUrl})` : "";
-    lines.push(`- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`);
+    lines.push(
+      untrustedContentBlock(
+        `- **${failure.name}** — \`${failure.conclusion ?? "unknown"}\`${details}`,
+        "ci check metadata",
+      ),
+    );
   }
   lines.push("");
   if (feedback.logs?.trim()) {
-    lines.push("## Failure Logs (excerpt)", "", "```", feedback.logs.trimEnd(), "```", "");
+    lines.push(
+      "## Failure Logs (excerpt)",
+      "",
+      untrustedContentBlock(`\`\`\`\n${feedback.logs.trimEnd()}\n\`\`\``, "ci logs"),
+      "",
+    );
   } else {
     lines.push(
       "## Failure Logs",

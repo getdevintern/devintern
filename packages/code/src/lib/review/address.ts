@@ -20,6 +20,7 @@ import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
 import { getSandbox } from "../agent/sandbox";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
@@ -95,6 +96,12 @@ export async function runAgent(
         args: agentArgs,
         spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "address-review",
+          cwd: workDir,
+          command: [resolvedPath, ...agentArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {

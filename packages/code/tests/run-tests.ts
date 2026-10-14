@@ -15,6 +15,11 @@ const gitCeilingDirectories = [resolve(tmpdir()), existingCeilings]
 // developer's real .devintern-code/queue.db if their cwd sits inside a
 // configured project tree.
 //
+// DEVINTERN_WORKSPACE_DIR is pinned for the same reason (guard-workspace-dir.ts
+// re-pins it per test process): a test-spawned CLI with a stub agent would
+// otherwise write harness run logs and other workspace state into the
+// developer's real ~/.devintern.
+//
 // SENTRY_DISABLED is pinned for the same reason (guard-sentry.ts re-pins it in
 // each test process): test-spawned CLI subprocesses must never report events
 // to the baked-in production Sentry DSN (DEVINTERN-7).
@@ -27,12 +32,21 @@ process.on("exit", () => {
   }
 });
 
+// Ambient prompt overrides make prompt-rendering tests non-hermetic: a
+// developer's DEVINTERN_PROMPTS_DIR (or an ancestor `.devintern-code/prompts/`)
+// would silently change their results. Drop the variable from the child
+// environment so the bundled catalog is the default for the whole run; tests
+// that exercise overrides pass explicit `overrideDirs` instead.
+const childEnv = { ...process.env };
+delete childEnv.DEVINTERN_PROMPTS_DIR;
+
 const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
   cwd: import.meta.dir,
   env: {
-    ...process.env,
+    ...childEnv,
     GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
     WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
+    DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
     SENTRY_DISABLED: "1",
   },
   stdin: "inherit",

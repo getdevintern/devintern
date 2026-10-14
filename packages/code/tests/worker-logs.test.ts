@@ -58,6 +58,29 @@ describe("worker log parsing", () => {
     // Unrelated assignments survive untouched.
     expect(redactSecrets("WORKER_POLL_INTERVAL=30")).toBe("WORKER_POLL_INTERVAL=30");
   });
+
+  test("redacts YAML/JSON assignments and quoted or spaced values", () => {
+    expect(redactSecrets('"api_key": "sk-abcdefghijklmnopqrstuvwxyz123456"')).toBe(
+      '"api_key": [redacted]',
+    );
+    expect(redactSecrets("database_password: hunter2")).toBe("database_password: [redacted]");
+    expect(redactSecrets('secret: "p@ss word"')).toBe("secret: [redacted]");
+    expect(redactSecrets("access-key = 'abc def'")).toBe("access-key = [redacted]");
+  });
+
+  test("redacts multi-line PEM private-key blocks", () => {
+    const pem = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEowIBAAKCAQEA1234567890abcdefghijklmnopqrstuvwxyz",
+      "abcdefghijklmnopqrstuvwxyz0987654321",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+    const output = redactSecrets(`before\n${pem}\nafter`);
+    expect(output).toContain("[redacted private key]");
+    expect(output).not.toContain("MIIEowIBAAKCAQEA");
+    expect(output).toContain("before");
+    expect(output).toContain("after");
+  });
 });
 
 describe("worker log tailing", () => {

@@ -20,6 +20,7 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
+import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolvePipelineSteps } from "../task/pipeline-config";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
@@ -132,11 +133,18 @@ export async function runAgentSession(
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
       // Spawn agent process with enhanced permissions and max turns
+      const spawnArgs = [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)];
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
-        args: [...agentArgs, ...buildPromptArgs(harness, promptOverride ?? taskContent)],
+        args: spawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
         sandbox: await getSandbox(harness.name),
+        sink: createHarnessLogSink({
+          harness,
+          label: "implementation",
+          cwd: process.cwd(),
+          command: [resolvedPath, ...spawnArgs],
+        }),
       });
 
       const stopOnUsageLimit = (): void => {

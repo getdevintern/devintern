@@ -565,6 +565,9 @@ describe("dashboard server", () => {
       const detail = await fetch(`${base}/api/runs/${id}`);
       expect(detail.status).toBe(200);
 
+      const harnessLogs = await fetch(`${base}/api/runs/${id}/harness-logs`);
+      expect(harnessLogs.status).toBe(200);
+
       const worker = (await (await fetch(`${base}/api/worker`)).json()) as {
         worker: { status: string };
       };

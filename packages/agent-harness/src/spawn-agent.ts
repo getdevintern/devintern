@@ -8,9 +8,12 @@
  * invocation is rewritten by the provider first.
  */
 
+import { spawnSync } from "child_process";
 import type { ChildProcess, SpawnOptions } from "child_process";
+import { existsSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
+import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
@@ -25,6 +28,38 @@ export interface SpawnAgentOptions {
   sandbox?: ResolvedSandbox | null;
   /** Policy overrides merged into the default policy (extra writable paths etc.). */
   policy?: Partial<SandboxPolicy>;
+  /**
+   * Optional durable output sink. When set, every stdout/stderr chunk is
+   * forwarded to the sink as it arrives, and {@link AgentOutputSink.close} is
+   * called exactly once when the process exits or fails to spawn. The caller
+   * owns the sink's destination (file, buffer, …); the harness only forwards
+   * events so no execution path can silently skip persistence.
+   */
+  sink?: AgentOutputSink;
+}
+
+/** Terminal outcome of a spawned agent process, as seen by the sink. */
+export interface AgentRunOutcome {
+  /** Process exit code, or -1 when the process never produced one. */
+  exitCode: number;
+  /** Signal that terminated the process, when it was killed. */
+  signal: NodeJS.Signals | null;
+  /** Spawn failure message (e.g. ENOENT); absent on a normal exit. */
+  error?: string;
+}
+
+/**
+ * Receives an agent process's output and terminal outcome. Implementations
+ * must tolerate repeated or concurrent calls and must never throw into the
+ * spawn/stream path.
+ */
+export interface AgentOutputSink {
+  /** A stdout chunk as emitted by the CLI. */
+  stdout(chunk: string): void;
+  /** A stderr chunk as emitted by the CLI. */
+  stderr(chunk: string): void;
+  /** Called once when the process exits or fails to spawn. */
+  close(outcome: AgentRunOutcome): void;
 }
 
 export interface SpawnedAgent {
@@ -38,13 +73,45 @@ export interface SpawnedAgent {
 }
 
 /**
+ * Absolute git administrative directories for `workingDir`, when it is inside
+ * a repository. A linked worktree (the review worktrees under `/tmp`) keeps
+ * its index, refs, and objects under the source repo's `.git`, outside the
+ * worktree itself, so `git add`/`commit` there create `index.lock` outside
+ * the default writable set and fail under confinement. The resolved git dir
+ * and common dir are returned so callers can grant them write access.
+ *
+ * @param workingDir - The directory the agent operates in.
+ * @returns Existing absolute git dir paths (empty when `workingDir` is not a repo).
+ */
+export function gitAdminPaths(workingDir: string): string[] {
+  if (!existsSync(workingDir)) return [];
+  const rev = (flag: string): string | undefined => {
+    const result = spawnSync("git", ["-C", workingDir, "rev-parse", flag], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    if (result.error || result.status !== 0) return undefined;
+    const value = result.stdout.trim();
+    if (!value) return undefined;
+    const absolute = isAbsolute(value) ? value : resolve(workingDir, value);
+    return existsSync(absolute) ? absolute : undefined;
+  };
+  const dirs = [rev("--absolute-git-dir"), rev("--git-common-dir")].filter(
+    (p): p is string => p !== undefined,
+  );
+  return [...new Set(dirs)];
+}
+
+/**
  * Build the default sandbox policy for an agent run.
  *
  * Write access covers the working directory, the task output dir, the OS
  * tmpdir (review worktrees, Chromium profile scratch, ssh-agent sockets),
  * and the Playwright/Puppeteer browser caches so agents that launch a
  * browser for testing or research keep working under filesystem confinement.
- * Network stays open: agents need LLM APIs, git push, and package registries.
+ * The working dir's git administrative directories are included so `git
+ * add`/`commit` work in a linked worktree. Network stays open: agents need
+ * LLM APIs, git push, and package registries.
  *
  * Env tuning: `AGENT_SANDBOX_WRITABLE_PATHS` (colon-separated) adds writable
  * paths; `AGENT_SANDBOX_ALLOWED_DOMAINS` (comma-separated) switches the
@@ -84,6 +151,7 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
       tempScope,
       ...browserCaches,
       ...extraWritable,
+      ...gitAdminPaths(workingDir),
     ],
     network: allowedDomains.length > 0 ? { allowedDomains } : "open",
     workingDir,
@@ -143,33 +211,97 @@ export function applyNestingGuard(
 }
 
 export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAgent> {
-  const { resolvedPath, args, spawnOptions = {}, sandbox } = options;
+  const { resolvedPath, args, spawnOptions = {}, sandbox, sink } = options;
 
-  if (!sandbox) {
-    return {
-      child: spawnReapable(resolvedPath, args, spawnOptions),
-      cleanup: async () => {},
+  try {
+    if (!sandbox) {
+      const child = spawnReapable(resolvedPath, args, spawnOptions);
+      attachOutputSink(child, sink);
+      return { child, cleanup: async () => {} };
+    }
+
+    const workingDir =
+      options.policy?.workingDir ?? (spawnOptions.cwd as string | undefined) ?? process.cwd();
+    const defaults = buildDefaultSandboxPolicy(workingDir);
+    const policy: SandboxPolicy = {
+      ...defaults,
+      harnessName: sandbox.harnessName,
+      ...options.policy,
+      writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
     };
+
+    const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
+    const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);
+    const env = wrapped.env
+      ? { ...(spawnOptions.env ?? process.env), ...wrapped.env }
+      : spawnOptions.env;
+
+    const child = spawnReapable(wrapped.path, wrapped.args, { ...spawnOptions, env });
+    attachOutputSink(child, sink);
+    return {
+      child,
+      cleanup: wrapped.cleanup ?? (async () => {}),
+    };
+  } catch (error) {
+    // A sandbox that throws before the child exists must still close the sink
+    // so the run leaves a usable (header-only) log instead of a dangling fd.
+    sink?.close({
+      exitCode: -1,
+      signal: null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
+}
 
-  const workingDir =
-    options.policy?.workingDir ?? (spawnOptions.cwd as string | undefined) ?? process.cwd();
-  const defaults = buildDefaultSandboxPolicy(workingDir);
-  const policy: SandboxPolicy = {
-    ...defaults,
-    harnessName: sandbox.harnessName,
-    ...options.policy,
-    writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
+/**
+ * Forward a child's output and terminal outcome to an optional sink. The sink
+ * receives the same chunks the caller streams to the terminal; `close` fires
+ * exactly once (streams `close` after `error`, and kill paths still emit
+ * `close`), so a log always gets its footer.
+ */
+function attachOutputSink(child: ChildProcess, sink: AgentOutputSink | undefined): void {
+  if (!sink) {
+    return;
+  }
+  // Decode incrementally so a multi-byte UTF-8 character split across chunk
+  // boundaries is reassembled instead of persisting as U+FFFD.
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+  child.stdout?.on("data", (data: Buffer) => {
+    const text = stdoutDecoder.write(data);
+    if (text) {
+      sink.stdout(text);
+    }
+  });
+  child.stderr?.on("data", (data: Buffer) => {
+    const text = stderrDecoder.write(data);
+    if (text) {
+      sink.stderr(text);
+    }
+  });
+
+  let closed = false;
+  const finish = (outcome: AgentRunOutcome): void => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    // Flush any trailing bytes held by the decoders before the sink closes.
+    const stdoutRest = stdoutDecoder.end();
+    if (stdoutRest) {
+      sink.stdout(stdoutRest);
+    }
+    const stderrRest = stderrDecoder.end();
+    if (stderrRest) {
+      sink.stderr(stderrRest);
+    }
+    sink.close(outcome);
   };
-
-  const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
-  const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);
-  const env = wrapped.env
-    ? { ...(spawnOptions.env ?? process.env), ...wrapped.env }
-    : spawnOptions.env;
-
-  return {
-    child: spawnReapable(wrapped.path, wrapped.args, { ...spawnOptions, env }),
-    cleanup: wrapped.cleanup ?? (async () => {}),
-  };
+  child.once("error", (error: Error) => {
+    finish({ exitCode: -1, signal: null, error: error.message });
+  });
+  child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    finish({ exitCode: code ?? -1, signal });
+  });
 }

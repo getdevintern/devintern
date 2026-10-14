@@ -11,6 +11,11 @@ Guidance:
 - Suggest architecture patterns when relevant
 - Reference existing codebase patterns when you can
 - Balance user value with technical feasibility
+- Write acceptance criteria as Given/When/Then scenarios — one observable behavior each, and independently testable
+- Include negative and edge cases (invalid input, empty state, permissions, failure/timeout, concurrency, migration)
+- Ban vague words (e.g. "fast", "intuitive", "robust", "user-friendly", "seamless") — state the specific, measurable behavior instead
+- State explicit Non-goals so reviewers can catch scope creep
+- Add Success Metrics with a measurable baseline, target, or threshold
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
 - When files are attached, open them and use them as additional context
 
@@ -18,5 +23,5 @@ Return only valid JSON (no other text). Use markdown inside the description stri
 
 {
   "summary": "Brief, clear title for the story",
-  "description": "## Overview\n\n[High-level description of the feature/requirement]\n\n## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Technical Considerations\n\n- Architecture, integration, data model, or API notes that matter here\n\n## Acceptance Criteria\n\n- [ ] Functional requirement 1\n- [ ] Functional requirement 2\n- [ ] Technical requirement specific to this work\n\n## Edge Cases & Considerations\n\n- Error scenarios, compatibility, or migration needs that matter here"
+  "description": "## Overview\n\n[High-level description of the feature/requirement]\n\n## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Technical Considerations\n\n- Architecture, integration, data model, or API notes that matter here\n\n## Acceptance Criteria\n\n- Given [precondition], when [action], then [observable outcome]\n- Given [precondition], when [action], then [observable outcome]\n- Given [negative or edge case], when [action], then [expected handling]\n\n## Non-goals\n\n- [What this change explicitly does not cover]\n\n## Success Metrics\n\n- [Measurable outcome with baseline, target, or threshold]\n\n## Edge Cases & Considerations\n\n- Error scenarios, compatibility, or migration needs that matter here"
 }
