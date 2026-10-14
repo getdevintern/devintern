@@ -145,6 +145,41 @@ describe("buildRepoEnv", () => {
     }
   });
 
+  test("team layers cannot re-route the pinned pipeline references", () => {
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = "/stale/repo.json";
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT = "/stale/default.json";
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "jira",
+      taskQuery: "project = PLAT",
+      env: {
+        DEVINTERN_WORKSPACE_PIPELINE_REPO: "/team/repo.json",
+        DEVINTERN_WORKSPACE_PIPELINE_DEFAULT: "/team/default.json",
+      },
+    };
+    try {
+      const pinned = buildTeamTaskEnv(
+        repo({ pipelineFile: "pipelines/backend.json" }),
+        team,
+        workspaceDir,
+        { pipelineDefaultFile: join(workspaceDir, "pipelines/default.json") },
+      );
+      expect(pinned.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
+        join(workspaceDir, "pipelines/backend.json"),
+      );
+      expect(pinned.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
+        join(workspaceDir, "pipelines/default.json"),
+      );
+
+      const cleared = buildTeamTaskEnv(repo(), team, workspaceDir);
+      expect(cleared.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBeUndefined();
+      expect(cleared.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBeUndefined();
+    } finally {
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
+    }
+  });
+
   test("error monitor credentials are isolated per source and override team/repo layers", () => {
     writeFileSync(join(workspaceDir, ".env"), "SENTRY_AUTH_TOKEN=workspace\n");
     mkdirSync(join(workspaceDir, "env"), { recursive: true });

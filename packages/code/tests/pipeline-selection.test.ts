@@ -213,6 +213,22 @@ describe("resolveWorkspaceRelativePaths", () => {
     });
     expect(selection.config?.plugins).toEqual(["./local-step.ts"]);
   });
+
+  test("passes non-string plugin entries through so validation can report them", () => {
+    const config = resolveWorkspaceRelativePaths(
+      { plugins: [123 as unknown as string], steps: [] },
+      workspaceDir,
+    );
+    expect(config.plugins).toEqual([123] as unknown as string[]);
+  });
+
+  test("reports a non-string plugin entry with the descriptive pipeline error", async () => {
+    await expect(
+      resolvePipelineSteps({ plugins: [123 as unknown as string] }, workspaceDir),
+    ).rejects.toThrow(
+      /pipeline\.plugins must be an array of nonempty module paths or package names/,
+    );
+  });
 });
 
 describe("describePipelineSelection", () => {
@@ -282,5 +298,68 @@ describe("workspace pipeline plugin resolution", () => {
     });
     const steps = await resolvePipelineSteps(selection.config, selection.baseDir);
     expect(steps.map((step) => step.use)).toEqual(["commit", "plugin", "finalize"]);
+  });
+
+  test("resolves a relative plugin from a nested pipeline file's directory", async () => {
+    const pipelineDir = join(workspaceDir, "pipelines");
+    mkdirSync(pipelineDir, { recursive: true });
+    const stepName = `nestedstep${randomUUID().replace(/-/g, "")}`;
+    writeFileSync(
+      join(pipelineDir, "step.ts"),
+      `export default { name: ${JSON.stringify(stepName)}, create: () => ({ name: ${JSON.stringify(stepName)}, run: async () => {} }) };\n`,
+    );
+    const file = writePipeline(pipelineDir, "backend.json", {
+      plugins: ["./step.ts"],
+      steps: [{ use: "implement" }, { use: "commit" }, { use: stepName }, { use: "finalize" }],
+    });
+    const selection = selectPipelineConfig({
+      settings: null,
+      cwd: repoDir,
+      env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
+    });
+    expect(selection.baseDir).toBe(pipelineDir);
+    const steps = await resolvePipelineSteps(selection.config, selection.baseDir);
+    expect(steps.map((step) => step.use)).toEqual(["commit", "plugin", "finalize"]);
+  });
+
+  test("does not fall back to the workspace root for a nested pipeline file", async () => {
+    const pipelineDir = join(workspaceDir, "pipelines");
+    mkdirSync(pipelineDir, { recursive: true });
+    writeFileSync(
+      join(workspaceDir, "step.ts"),
+      `export default { name: "rootstep", create: () => ({ name: "rootstep", run: async () => {} }) };\n`,
+    );
+    const file = writePipeline(pipelineDir, "backend.json", {
+      plugins: ["./step.ts"],
+      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
+    });
+    const selection = selectPipelineConfig({
+      settings: null,
+      cwd: repoDir,
+      env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
+    });
+    await expect(resolvePipelineSteps(selection.config, selection.baseDir)).rejects.toThrow(
+      /Failed to load pipeline plugin '.*\/pipelines\/step\.ts'/,
+    );
+  });
+
+  test("resolves a relative verify prompt from a nested pipeline file's directory", () => {
+    const pipelineDir = join(workspaceDir, "pipelines");
+    mkdirSync(join(pipelineDir, "prompts"), { recursive: true });
+    writeFileSync(join(pipelineDir, "prompts/verify.md"), "Check it");
+    const file = writePipeline(pipelineDir, "backend.json", {
+      steps: [
+        { use: "implement" },
+        { use: "commit" },
+        { use: "verify", prompt: "./prompts/verify.md" },
+        { use: "finalize" },
+      ],
+    });
+    const selection = selectPipelineConfig({
+      settings: null,
+      cwd: repoDir,
+      env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
+    });
+    expect(selection.config?.steps?.[2]?.prompt).toBe(join(pipelineDir, "prompts/verify.md"));
   });
 });

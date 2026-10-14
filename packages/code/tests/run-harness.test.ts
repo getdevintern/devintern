@@ -505,6 +505,21 @@ describe("runAgentHarness git delivery", () => {
     expect(deliveryEvents).toEqual(["commit", "push"]);
   });
 
+  test("a workspace default pipeline ignores the CLI verify fallback", async () => {
+    scenario.stdout = "done";
+    const file = join(outDir, "default-pipeline.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }] }),
+    );
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT = file;
+
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
+
+    expect(verifyCalls).toBe(0);
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+  });
+
   test("fails a missing workspace pipeline file with the routed repository", async () => {
     const file = join(outDir, "missing-workspace.json");
     process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = file;

@@ -145,18 +145,7 @@ export function buildRepoEnv(
   // The subprocess runs in a throwaway worktree; keep runtime paths out of it.
   pinWorkerRuntimeEnv(env, workspaceDir);
   env[WORKSPACE_REPO_ENV] = repo.name;
-  // A subprocess inherits the worker's process env, so clear any pipeline
-  // references the shell or parent had before pinning this repo's selection.
-  delete env[WORKSPACE_PIPELINE_REPO_ENV];
-  delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
-  if (repo.pipelineFile) {
-    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
-      ? repo.pipelineFile
-      : join(workspaceDir, repo.pipelineFile);
-  }
-  if (options.pipelineDefaultFile) {
-    env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;
-  }
+  pinPipelineEnv(env, repo, workspaceDir, options);
   // `buildTeamTaskEnv` sets the team after layering; a non-team repo env must
   // never inherit a team name leaked from the shell.
   delete env[WORKSPACE_TEAM_ENV];
@@ -178,6 +167,33 @@ export function buildRepoEnv(
   }
 
   return env;
+}
+
+/**
+ * Clear and pin the workspace pipeline references for one repo.
+ *
+ * A task subprocess inherits the worker's process env (and, for a team task,
+ * the team credential layers), so stale `DEVINTERN_WORKSPACE_PIPELINE_REPO` /
+ * `DEVINTERN_WORKSPACE_PIPELINE_DEFAULT` values must be cleared before pinning
+ * this repo's selection. Callers re-run this after every later layer so no
+ * team `env_file` or inline `[teams.env]` value can re-route the pipeline.
+ */
+function pinPipelineEnv(
+  env: Record<string, string | undefined>,
+  repo: RepoConfig,
+  workspaceDir: string,
+  options: { pipelineDefaultFile?: string },
+): void {
+  delete env[WORKSPACE_PIPELINE_REPO_ENV];
+  delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
+  if (repo.pipelineFile) {
+    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
+      ? repo.pipelineFile
+      : join(workspaceDir, repo.pipelineFile);
+  }
+  if (options.pipelineDefaultFile) {
+    env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;
+  }
 }
 
 /** Team-only credential layers, excluding the shared workspace environment. */
@@ -266,6 +282,10 @@ export function buildTeamTaskEnv(
   const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
   pinWorkerRuntimeEnv(env, workspaceDir);
+  // The team layer merged after `buildRepoEnv` pinned the pipeline selection,
+  // so re-pin it here: a team `env_file` or inline value must not re-route the
+  // pipeline or resurrect a stale reference.
+  pinPipelineEnv(env, repo, workspaceDir, options);
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;

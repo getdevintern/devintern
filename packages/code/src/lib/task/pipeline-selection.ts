@@ -94,7 +94,9 @@ export function resolveWorkspaceRelativePaths(
   baseDir: string,
 ): PipelineConfig {
   const plugins = config.plugins?.map((entry) =>
-    entry.startsWith(".") && !isAbsolute(entry) ? resolve(baseDir, entry) : entry,
+    typeof entry === "string" && entry.startsWith(".") && !isAbsolute(entry)
+      ? resolve(baseDir, entry)
+      : entry,
   );
   const steps = config.steps?.map((step) => {
     if (step.use !== "verify" || typeof step.prompt !== "string") return step;
