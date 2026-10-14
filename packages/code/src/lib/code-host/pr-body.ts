@@ -87,6 +87,73 @@ function normalizeHeading(raw: string): string {
     .trim();
 }
 
+interface ParsedPrBody {
+  sections: Partial<Record<PrBodySectionKey, string>>;
+  /** Lines seen before the first recognized section heading. */
+  preamble: string;
+}
+
+const FENCE_OPEN = /^\s{0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE = /^\s{0,3}([`~]{3,})\s*$/;
+const HEADING = /^\s{0,3}#{1,6}\s+(.*\S)\s*$/;
+
+function parsePrBody(markdown: string | undefined): ParsedPrBody {
+  if (!markdown) return { sections: {}, preamble: "" };
+
+  const sections: Partial<Record<PrBodySectionKey, string>> = {};
+  const preamble: string[] = [];
+  let current: PrBodySectionKey | undefined;
+  let buffer: string[] = [];
+  let fence: { marker: string; length: number } | undefined;
+
+  const flush = () => {
+    if (!current) return;
+    const text = buffer.join("\n").trim();
+    if (text && !sections[current]) sections[current] = text;
+  };
+
+  const push = (line: string) => {
+    if (current) buffer.push(line);
+    else preamble.push(line);
+  };
+
+  for (const line of markdown.split("\n")) {
+    const opening = line.match(FENCE_OPEN);
+
+    if (fence) {
+      const closing = line.match(FENCE_CLOSE);
+      if (closing && closing[1][0] === fence.marker && closing[1].length >= fence.length) {
+        fence = undefined;
+      }
+      push(line);
+      continue;
+    }
+
+    if (opening) {
+      fence = { marker: opening[1][0], length: opening[1].length };
+      push(line);
+      continue;
+    }
+
+    const heading = line.match(HEADING);
+    if (heading) {
+      const mapped = HEADING_ALIASES[normalizeHeading(heading[1])];
+      if (mapped) {
+        flush();
+        buffer = [];
+        current = mapped;
+        continue;
+      }
+      push(line);
+      continue;
+    }
+    push(line);
+  }
+  flush();
+
+  return { sections, preamble: preamble.join("\n").trim() };
+}
+
 /**
  * Extract recognized template sections from an implementation summary.
  *
@@ -96,31 +163,7 @@ function normalizeHeading(raw: string): string {
 export function parsePrBodySections(
   markdown: string | undefined,
 ): Partial<Record<PrBodySectionKey, string>> {
-  if (!markdown) return {};
-
-  const sections: Partial<Record<PrBodySectionKey, string>> = {};
-  let current: PrBodySectionKey | undefined;
-  let buffer: string[] = [];
-
-  const flush = () => {
-    if (!current) return;
-    const text = buffer.join("\n").trim();
-    if (text && !sections[current]) sections[current] = text;
-  };
-
-  for (const line of markdown.split("\n")) {
-    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*\S)\s*$/);
-    if (heading) {
-      flush();
-      buffer = [];
-      current = HEADING_ALIASES[normalizeHeading(heading[1])];
-      continue;
-    }
-    if (current) buffer.push(line);
-  }
-  flush();
-
-  return sections;
+  return parsePrBody(markdown).sections;
 }
 
 /**
@@ -133,14 +176,16 @@ export function parsePrBodySections(
  */
 export function buildPrBody(input: PrBodyInput): string {
   const { taskKey, taskSummary, implementationSummary } = input;
-  const parsed = parsePrBodySections(implementationSummary);
+  const { sections: parsed, preamble } = parsePrBody(implementationSummary);
   const hasStructuredSections = Object.values(parsed).some((value) => (value ?? "").trim());
+  const structuredWhatChanged = (parsed["what-changed"] ?? "").trim();
+  const whatChanged = [preamble, structuredWhatChanged].filter(Boolean).join("\n\n");
 
+  const taskReference = `Task ${taskKey}: ${taskSummary}`.trim();
   const content: Record<PrBodySectionKey, string> = {
-    why: (parsed.why ?? "").trim() || `Task ${taskKey}: ${taskSummary}`.trim(),
+    why: [taskReference, (parsed.why ?? "").trim()].filter(Boolean).join("\n\n"),
     "what-changed":
-      (parsed["what-changed"] ?? "").trim() ||
-      (hasStructuredSections ? "" : (implementationSummary ?? "").trim()),
+      whatChanged || (hasStructuredSections ? "" : (implementationSummary ?? "").trim()),
     scope: (parsed.scope ?? "").trim(),
     tradeoffs: (parsed.tradeoffs ?? "").trim(),
     "blast-radius": (parsed["blast-radius"] ?? "").trim(),
