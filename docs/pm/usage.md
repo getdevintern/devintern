@@ -79,8 +79,8 @@ devpm --prompt <text> [options]
 - `--custom, -c <text>`: Additional custom instructions for the requirements
 - `--attach <path>`: Attach a local file for agent context (and upload on create when the tracker supports it). Repeatable. Supported: images, text/docs, PDF (not Office binaries such as `.docx`). Max 10 files.
 - `--style, -s <type>`: Prompt style: "pm" (default) or "technical"
-  - **pm**: Focuses on user stories and acceptance criteria
-  - **technical**: Includes Technical Considerations section
+  - **pm**: Focuses on user stories and Given/When/Then acceptance criteria, non-goals, and success metrics
+  - **technical**: Adds a Technical Considerations section on top of the PM rubric
 - `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
 - `--effort <level>`: Reasoning effort for agent runs — `low`, `medium`, or `high`. Overrides the `AGENT_EFFORT` environment variable. Emitted only by harnesses that support reasoning effort (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); ignored by the others with a warning. Because pi encodes effort in the model string, it only applies when a model is set (`AGENT_MODEL` or `--model`); with no model, pi ignores the effort with a warning.
 - `--decompose`: Decompose the story into subtasks (default: off)
@@ -149,9 +149,12 @@ Attach local context files (screenshots, transcripts, roadmaps, specs) with `--a
    - **Attachments** (optional): Local files listed for the agent to open before drafting
 2. **Story Creation**: Creates a comprehensive story with:
    - User story format
-   - Acceptance criteria
+   - Acceptance criteria in Given/When/Then form, plus negative and edge cases
+   - Explicit non-goals and measurable success metrics
    - Technical considerations
    - Design notes (for Figma) or reproduction steps (for bugs)
+
+   Drafts avoid vague adjectives (e.g. "fast", "intuitive", "robust") in favor of observable, measurable behavior.
 3. **Epic Linking** (optional): Links the story to the specified epic. Only runs for trackers with a real epic/parent hierarchy (Jira, Linear, Azure DevOps, Asana). Skipped for Trello, GitHub Issues, and Markdown.
 4. **Attachment upload** (optional): Uploads attached files to the created issue when the tracker supports it.
 5. **Task Decomposition** (optional): Breaks down the story into subtasks that are:

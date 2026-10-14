@@ -13,10 +13,15 @@ Guidance:
 - In Error Details, include only a short relevant excerpt — not the full log
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
 - When files are attached (screenshots, logs), treat them as evidence of the failure
+- Write acceptance criteria as Given/When/Then scenarios — one observable behavior each, and independently testable
+- Include negative and edge cases (invalid input, empty state, permissions, failure/timeout, retry)
+- Ban vague words (e.g. "fast", "intuitive", "robust", "user-friendly", "seamless") — state the specific, measurable behavior instead
+- State explicit Non-goals so reviewers can catch scope creep
+- Add Success Metrics with a measurable baseline, target, or threshold
 
 Return only valid JSON (no other text). Use markdown inside the description string:
 
 {
   "summary": "Brief, clear title describing the bug or issue",
-  "description": "## Problem Description\n\nClear explanation of what's broken from user perspective\n\n## Error Details\n\n```\n[short relevant excerpt]\n```\n\n## Expected Behavior\n\n- What should happen\n\n## Actual Behavior\n\n- What currently happens\n\n## User Impact\n\n- Who is affected\n- Severity and frequency\n\n## Acceptance Criteria\n\n- Issue is resolved\n- No regression in related functionality"
+  "description": "## Problem Description\n\nClear explanation of what's broken from user perspective\n\n## Error Details\n\n```\n[short relevant excerpt]\n```\n\n## Expected Behavior\n\n- What should happen\n\n## Actual Behavior\n\n- What currently happens\n\n## User Impact\n\n- Who is affected\n- Severity and frequency\n\n## Acceptance Criteria\n\n- Given [precondition], when [action], then [observable outcome]\n- Given [negative or edge case], when [action], then [expected handling]\n\n## Non-goals\n\n- [What this fix explicitly does not cover]\n\n## Success Metrics\n\n- [Measurable outcome with baseline, target, or threshold]"
 }

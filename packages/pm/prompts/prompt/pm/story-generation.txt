@@ -10,7 +10,11 @@ Guidance:
 - Frame requirements from a user perspective
 - Keep technical implementation details light
 - Suggest investigating existing code and patterns when implementing
-- Write clear, actionable acceptance criteria
+- Write acceptance criteria as Given/When/Then scenarios — one observable behavior each, and independently testable
+- Include negative and edge cases (invalid input, empty state, permissions, failure/timeout, concurrency)
+- Ban vague words (e.g. "fast", "intuitive", "robust", "user-friendly", "seamless") — state the specific, measurable behavior instead
+- State explicit Non-goals so reviewers can catch scope creep
+- Add Success Metrics with a measurable baseline, target, or threshold
 - Prefer concise, scannable descriptions — complete enough to act on, not a wall of text
 - When files are attached, open them and ground the story in that context
 
@@ -18,5 +22,5 @@ Return only valid JSON (no other text). Use markdown inside the description stri
 
 {
   "summary": "Brief, clear title for the story (user-facing benefit)",
-  "description": "## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Background\n\n[Context and motivation for this feature]\n\n## Acceptance Criteria\n\n- [ ] Criterion 1\n- [ ] Criterion 2\n- [ ] Criterion 3\n\n## User Impact\n\n- Who benefits from this\n- Expected outcomes\n\n## Notes\n\n- Additional considerations\n- Edge cases to consider"
+  "description": "## User Story\n\nAs a [user type], I want [goal] so that [benefit]\n\n## Background\n\n[Context and motivation for this feature]\n\n## Acceptance Criteria\n\n- Given [precondition], when [action], then [observable outcome]\n- Given [precondition], when [action], then [observable outcome]\n- Given [negative or edge case], when [action], then [expected handling]\n\n## Non-goals\n\n- [What this change explicitly does not cover]\n\n## Success Metrics\n\n- [Measurable outcome with baseline, target, or threshold]\n\n## Notes\n\n- Additional considerations"
 }
