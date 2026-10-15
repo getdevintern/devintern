@@ -23,7 +23,8 @@ await context.artifacts.addFile({
 Keys are 1–128 characters: letters, numbers, dots, underscores, and hyphens,
 starting with a letter or number. Kinds are `explanation`, `verification`,
 `image`, `report`, and `debug`. Media types identify how to preview content.
-Relative paths resolve against `context.workingDir`. Source files must be within `context.workingDir` or `context.outputDir`.
+Relative paths resolve against `context.workingDir`. Source files must be within
+`context.workingDir` or `context.outputDir`.
 
 The runtime immediately snapshots the file and records its run ID, producing
 step, step execution number, current commit SHA when available, timestamp,
@@ -35,8 +36,8 @@ bodies do not need to be duplicated there.
 
 Use `context.artifacts.list()` to inspect captured metadata and
 `context.artifacts.readText(id)` to read a bounded text artifact, or
-`readBytes(id)` for binary data. The explainer examples consume verification
-artifacts instead of relying on a large serialized `data.content` field.
+`readBytes(id)` for binary data. The explainer examples read registered
+verification reports to ground their explanations in recorded evidence.
 
 Capture failures warn and return `null`; they never turn a passing implementation
 into a failed run. Files are limited to 32 MiB and 200 snapshots per run. Text
@@ -67,7 +68,6 @@ Endpoints:
 
 Artifact IDs are opaque and scoped to their run; filenames are not API keys.
 The dashboard and worker must share the database and workspace artifact storage.
-Existing loose debug outputs are not retroactively attributed to historical runs.
 
 ## Select what appears on the PR
 
@@ -161,14 +161,19 @@ PR comments resolve them to uploaded URLs. Referenced files must also be selecte
 for `embed` or `link` publication to be uploaded. Unavailable references become
 plain text; local dashboard URLs are never inferred as remote upload locations.
 
-## Migrate existing explainer plugins
+## Explainer plugins
 
-Copy the updated shared `explainer.ts` alongside your plugin wrappers. The
-narrative and visual examples register `explanation-narrative` and
-`explanation-visual` respectively. Their result data keeps the source `path`;
-the artifact registry holds the report content. Add the explicit publication
-selection above to preserve reviewer-facing explanations.
+The narrative and visual examples share `explainer.ts`. Each gathers the task,
+final diff, and recorded verification evidence, runs the configured agent, and
+writes Markdown under `context.outputDir`.
 
-Older plugins returning only `data: { path, content }` still run, but their
-outputs are neither registered nor published. The `pr-explainer-*` naming
-convention does not trigger publication.
+The narrative example registers `explanation-narrative`; the visual example
+registers `explanation-visual`. Their step-result `data` contains the source
+`path`, while the artifact registry stores the report content and metadata.
+Both artifacts appear in the run's dashboard. Their example pipeline settings
+select narrative output inline and visual output collapsed in the managed PR
+comment.
+
+Copy the plugin wrapper, shared scaffold, and prompt files as described in each
+example's README, then configure its pipeline step and publication selection.
+Generation and capture failures remain advisory.

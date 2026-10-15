@@ -59,7 +59,7 @@ The example settings explicitly select this key for one managed GitHub PR
 comment. The dashboard displays the same registered output for this run.
 Generation, capture, and publication failures remain advisory.
 See [Pipeline artifacts](../../../docs/code/artifacts.md) for the full contract,
-upload adapters, and migration instructions.
+upload adapters, and plugin configuration.
 
 ## Validate
 

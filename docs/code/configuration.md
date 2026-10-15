@@ -460,7 +460,7 @@ from this disposable debug output. Snapshots survive worktree and `/tmp`
 cleanup and retain their exact run/step attribution. PR publication uses an
 explicit artifact selection and one managed comment. See
 [Pipeline artifacts](./artifacts.md) for registration, API endpoints, uploads,
-storage, and migration from `data.content` explainer plugins.
+storage, and explainer plugin configuration.
 
 ## Prompt Catalog
 

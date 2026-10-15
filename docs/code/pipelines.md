@@ -312,9 +312,9 @@ cannot overwrite earlier evidence.
 
 Publication is explicit through `pipeline.artifacts.publish`: select artifact
 keys and render them inline, collapsed, embedded, or linked in one managed
-GitHub PR comment. Plugin names and `data.content` do not control publication.
+GitHub PR comment.
 See [Pipeline artifacts](./artifacts.md) for the contract, configuration,
-uploader adapters, reference resolution, and migration instructions.
+uploader adapters, reference resolution, and explainer plugin setup.
 
 ### Transient retries with `StepExecutionError`
 

@@ -130,6 +130,6 @@ each variant's `CREDITS.md`. The visual guidance originates in Humanlayer's
 Explainers register immutable outputs through `context.artifacts.addFile`.
 The narrative key is `explanation-narrative`; the visual key is
 `explanation-visual`. Their `settings.json` files explicitly select publication
-in one managed PR comment. Plugin names and `data.content` have no publishing
-semantics. The same artifacts appear in the dashboard, scoped to the exact run.
+in one managed PR comment. The same artifacts appear in the dashboard, scoped
+to the exact run.
 See [Pipeline artifacts](../../docs/code/artifacts.md) for the full contract.
