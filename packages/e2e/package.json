@@ -1,0 +1,13 @@
+{
+  "name": "@devintern/e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests/local",
+    "test:e2e": "bun run scripts/github.ts",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "typecheck": "tsc --noEmit"
+  }
+}
