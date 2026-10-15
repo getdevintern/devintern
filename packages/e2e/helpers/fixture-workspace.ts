@@ -1,4 +1,14 @@
-import { chmodSync, cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isolatedEnvironment } from "./environment";
@@ -14,6 +24,7 @@ export class FixtureWorkspace {
   readonly base = `e2e/base-${this.id}`;
   readonly head = `feature/${this.id}`;
   readonly env = isolatedEnvironment(this.root);
+  readonly ownedBranches = new Set([this.head, this.base]);
 
   constructor(private readonly apiTokenVariable = "GITHUB_TOKEN") {}
 
@@ -28,6 +39,8 @@ export class FixtureWorkspace {
     const agent = join(this.root, "bin/agent.ts");
     cpSync(join(packageRoot, "helpers/fake-agent.ts"), agent);
     chmodSync(agent, 0o700);
+    this.env.E2E_AGENT_INVOCATIONS = join(this.root, "agent-invocations.jsonl");
+    this.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(this.root, "review-worktree");
 
     // Token stays in the subprocess environment, never in a URL, argv or git config.
     const askpass = join(this.root, "bin/askpass.sh");
@@ -66,8 +79,15 @@ export class FixtureWorkspace {
     return checkedCommand(["git", ...args], this.cwd, this.env);
   }
 
-  async runCli(apiToken?: string, implicitTarget = false) {
-    const result = await command(
+  async runTask(
+    options: {
+      apiToken?: string;
+      implicitTarget?: boolean;
+      agentMode?: "implement" | "fail" | "no-change";
+      gitToken?: string;
+    } = {},
+  ) {
+    return command(
       [
         process.execPath,
         cliPath,
@@ -77,22 +97,83 @@ export class FixtureWorkspace {
         "--skip-clarity-check",
         "--skip-comments",
         "--create-pr",
-        ...(implicitTarget ? [] : ["--pr-target-branch", this.base]),
+        ...(options.implicitTarget ? [] : ["--pr-target-branch", this.base]),
         "--hook-retries",
         "0",
         "--no-update",
       ],
       this.cwd,
-      { ...this.env, ...(apiToken === undefined ? {} : { [this.apiTokenVariable]: apiToken }) },
+      {
+        ...this.env,
+        E2E_AGENT_MODE: options.agentMode ?? "implement",
+        ...(options.gitToken === undefined ? {} : { E2E_GIT_TOKEN: options.gitToken }),
+        ...(options.apiToken === undefined ? {} : { [this.apiTokenVariable]: options.apiToken }),
+      },
     );
-    if (result.exitCode !== 0) {
+  }
+
+  async runCli(apiToken?: string, implicitTarget = false) {
+    const result = await this.runTask({ apiToken, implicitTarget });
+    if (result.exitCode !== 0)
       throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
-    }
     return result;
   }
 
+  async runReview(url: string) {
+    return command([process.execPath, cliPath, "address-review", url], this.cwd, {
+      ...this.env,
+      AGENT_CLI_PATH: join(this.root, "bin/agent.ts"),
+      E2E_AGENT_MODE: "review",
+    });
+  }
+
+  async remoteSha(branch: string): Promise<string | undefined> {
+    const value = await this.git("ls-remote", "origin", `refs/heads/${branch}`);
+    return value ? value.split(/\s+/)[0] : undefined;
+  }
+
+  async seedBranchCollision(): Promise<{ existingSha: string; attemptHead: string }> {
+    await this.git("checkout", "-b", this.head);
+    writeFileSync(join(this.cwd, "existing-work.txt"), "Preserve this existing implementation.\n");
+    await this.git("add", "existing-work.txt");
+    await this.git("commit", "-m", "Seed existing work that must be preserved");
+    const existingSha = await this.git("rev-parse", "HEAD");
+    await this.git("push", "origin", this.head);
+    await this.git("checkout", this.base);
+    // Leave only the remote ref, matching a fresh clone of a previous attempt.
+    await this.git("branch", "-D", this.head);
+    const attemptHead = `${this.head}-attempt-2`;
+    this.ownedBranches.add(attemptHead);
+    return { existingSha, attemptHead };
+  }
+
+  runRecords(): Array<{ status: string; pr_url: string | null; outcome_reason: string | null }> {
+    const db = new Database(this.env.WEBHOOK_QUEUE_DB, { readonly: true });
+    try {
+      return db
+        .query("SELECT status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id")
+        .all(this.id) as Array<{
+        status: string;
+        pr_url: string | null;
+        outcome_reason: string | null;
+      }>;
+    } finally {
+      db.close();
+    }
+  }
+
+  agentInvocations(): Array<{ mode: string }> {
+    const path = this.env.E2E_AGENT_INVOCATIONS;
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
   async deleteRemoteBranch(branch: string): Promise<void> {
-    if (![this.head, this.base].includes(branch))
+    if (!this.ownedBranches.has(branch))
       throw new Error("Refusing to delete a branch not owned by this scenario");
     const check = () =>
       command(

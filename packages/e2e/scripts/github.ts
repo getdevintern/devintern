@@ -7,7 +7,14 @@ if (!existsSync(resolve(import.meta.dir, "../../code/dist/index.js"))) {
   throw new Error("Build the CLI first: bun run --filter @getdevintern/code build");
 }
 const child = Bun.spawn(
-  [process.execPath, "test", "./tests/code/github.test.ts", "--timeout", "240000"],
+  [
+    process.execPath,
+    "test",
+    "./tests/code/github.test.ts",
+    "./tests/code/github-lifecycle.test.ts",
+    "--timeout",
+    "240000",
+  ],
   {
     cwd: resolve(import.meta.dir, ".."),
     env: {

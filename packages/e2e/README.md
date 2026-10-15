@@ -46,7 +46,7 @@ hooks and agent configuration are excluded. Tokens are passed through the
 environment and Git askpass, never embedded in remote URLs or command arguments.
 Telemetry, updates and license checks are disabled for the test subprocesses.
 
-Cleanup closes PRs and deletes the exact two branches owned by each scenario,
+Cleanup closes PRs and deletes the exact branches owned by each scenario,
 including when an assertion fails. Closed PRs remain as GitHub history. Cleanup
 failures fail the test and identify the branches. A forcibly killed runner can
 leave resources behind; inspect and remove its branches/PRs manually. There is
@@ -100,7 +100,8 @@ test subprocesses. No task-tracker or real AI-agent credentials are needed.
 To use another test instance, set **both** `E2E_GITLAB_URL` and
 `E2E_GITLAB_TOKEN`. The token needs `api` scope and permission to create/delete
 private projects in its own namespace, permanently remove those projects, and
-push branches. This suite targets GitLab Self-Managed; GitLab.com does not
+push branches, and create project access tokens (used for a read-only Git identity
+and a separate Developer bot identity). This suite targets GitLab Self-Managed; GitLab.com does not
 provide the same permanent-deletion behavior. CI requires these
 explicit variables and never reads local credentials. Plain HTTP is intended
 for the loopback-only container; use HTTPS for remote instances. Custom CAs,
@@ -166,3 +167,24 @@ or both. Set the repository variables and matching token secrets from the table
 on the DevIntern GitHub repository. Each job receives only its provider's token,
 and no credentials are exposed to untrusted PR workflows. Missing configuration
 fails the explicit live command before it mutates a remote repository.
+
+## Delivery lifecycle coverage
+
+GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
+an agent producing no changes, and an existing remote feature branch. Failure
+scenarios verify the recorded run is failed, no PR/MR or remote implementation
+branch appears, and the target branch is unchanged. Collision scenarios verify
+the existing commit survives and the new PR/MR uses `-attempt-2`.
+
+Local GitLab additionally covers an actual rejected push using a read-only project
+token, plus a review round trip. A Developer project bot opens an MR, a separate
+human identity posts feedback, and `address-review` edits and pushes to that same
+MR and replies to the discussion. A second CLI invocation must add no commit,
+reply, or agent invocation. GitLab updates MR metadata asynchronously; the suite
+waits for the pushed SHA before asserting the new head. Both project tokens expire
+the next day and are removed with their disposable project.
+
+All four areas run through the existing GitHub/GitLab commands above; no task
+tracker, model credentials, or additional local environment variables are needed.
+These lifecycle scenarios currently run against GitHub and local GitLab; the
+hosted GitLab.com and Bitbucket suites retain their publication smoke tests.

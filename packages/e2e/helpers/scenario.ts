@@ -18,19 +18,21 @@ export class Scenario extends FixtureWorkspace {
   async cleanup(): Promise<void> {
     // Attempt every cleanup even if a preceding operation fails.
     const errors: unknown[] = [];
-    try {
-      const pulls = await this.github.pulls(this.head);
-      for (const pull of pulls.filter((item) => item.state === "open")) {
-        try {
-          await this.github.request(`/pulls/${pull.number}`, "PATCH", { state: "closed" });
-        } catch (error) {
-          errors.push(error);
+    for (const head of [...this.ownedBranches].filter((branch) => branch !== this.base)) {
+      try {
+        const pulls = await this.github.pulls(head);
+        for (const pull of pulls.filter((item) => item.state === "open")) {
+          try {
+            await this.github.request(`/pulls/${pull.number}`, "PATCH", { state: "closed" });
+          } catch (error) {
+            errors.push(error);
+          }
         }
+      } catch (error) {
+        errors.push(error);
       }
-    } catch (error) {
-      errors.push(error);
     }
-    for (const branch of [this.head, this.base]) {
+    for (const branch of this.ownedBranches) {
       try {
         await this.github.deleteBranch(branch);
       } catch (error) {
