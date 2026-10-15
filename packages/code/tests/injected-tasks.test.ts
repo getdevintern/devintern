@@ -94,4 +94,32 @@ describe("InjectedTaskStore", () => {
     expect(store.hasTaskKey(base.taskKey)).toBe(true);
     expect(store.hasTaskKey("local-nope")).toBe(false);
   });
+
+  test("rejects a duplicate task_key without an idempotency key", () => {
+    store.enqueue(base);
+    expect(() => store.enqueue({ ...base, taskFile: "/ws/injected/other-path.md" })).toThrow(
+      /task_key/,
+    );
+    expect(store.list()).toHaveLength(1);
+  });
+
+  test("pruneSettled removes settled rows and spares pending/running ones", () => {
+    const doneTask = store.enqueue(base);
+    store.finish(store.claimNext()!.id, "done");
+
+    store.enqueue({ ...base, taskKey: "local-running", taskFile: "/ws/injected/running.md" });
+    store.claimNext();
+
+    store.enqueue({ ...base, taskKey: "local-pending", taskFile: "/ws/injected/pending.md" });
+
+    const pruned = store.pruneSettled(0, Date.now() + 1_000);
+    expect(pruned).toBe(1);
+    expect(store.getById(doneTask.task.id)).toBeNull();
+    expect(
+      store
+        .list()
+        .map((task) => task.taskKey)
+        .sort(),
+    ).toEqual(["local-pending", "local-running"]);
+  });
 });

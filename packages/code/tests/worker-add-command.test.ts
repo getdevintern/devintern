@@ -12,6 +12,10 @@ import {
 } from "../src/lib/workspace/add-command";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { workspaceDbPath } from "../src/lib/workspace/paths";
+import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
+import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
+import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
 const WORKSPACE_TOML = `[workspace]
 dashboard = false
@@ -156,6 +160,124 @@ describe("runWorkerAdd", () => {
     } finally {
       store.close();
     }
+  });
+
+  test("--json keeps stdout to a single machine-readable object", async () => {
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Pure json", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    // Exactly one line on stdout, and it is the JSON object — the license
+    // notice and other diagnostics are routed to stderr.
+    expect(cap.out).toHaveLength(1);
+    expect(cap.out[0]!.startsWith("{")).toBe(true);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-pure-json",
+      repo: "backend",
+      status: "pending",
+      deduplicated: false,
+    });
+    expect(cap.err.length).toBeGreaterThan(0);
+  });
+
+  test("--wait --json emits exactly one object for the settled run", async () => {
+    // A live worker lock makes `--wait` proceed.
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    // Settle the row shortly after the command enqueues it, so the wait path
+    // observes a transition rather than an already-settled row.
+    const settle = (async () => {
+      const store = new InjectedTaskStore(workspaceDbPath(dir));
+      try {
+        for (let attempt = 0; attempt < 200; attempt++) {
+          if (store.hasPending()) {
+            store.finish(store.claimNext()!.id, "done");
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Wait json", "--wait", "--json"],
+      cap.options,
+    );
+    await settle;
+
+    expect(code).toBe(0);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-json",
+      status: "done",
+      deduplicated: false,
+    });
+  });
+
+  test("enqueue survives restart recovery and is drained by the acquirer", async () => {
+    const dbPath = workspaceDbPath(dir);
+
+    // A task the previous worker had claimed and then died on.
+    const seed = new InjectedTaskStore(dbPath);
+    seed.enqueue({
+      taskKey: "local-running",
+      repo: "backend",
+      title: "Running",
+      body: "",
+      taskFile: join(dir, "injected", "local-running.md"),
+    });
+    seed.claimNext();
+    seed.close();
+
+    // Enqueue the durable pending task through the public command.
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Durable one", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const enqueued = JSON.parse(cap.out.at(-1)!);
+
+    // Restart recovery: pending survives, the dead worker's running row fails.
+    await recoverOrphanedWorkspaceRuns({
+      config: loadWorkspaceConfig(configPath),
+      workspaceDir: dir,
+      dbPath,
+    });
+
+    const after = new InjectedTaskStore(dbPath);
+    try {
+      expect(after.getById(enqueued.id)?.status).toBe("pending");
+      expect(after.list().find((task) => task.taskKey === "local-running")?.status).toBe("failed");
+    } finally {
+      after.close();
+    }
+
+    // A fresh worker's acquirer drains the surviving row from the same DB.
+    const drain = new InjectedTaskStore(dbPath);
+    const calls: string[] = [];
+    const acquirer = new InjectedTaskAcquirer({
+      store: drain,
+      execute: async (task) => {
+        calls.push(task.taskKey);
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+    try {
+      await acquirer.tick();
+    } finally {
+      drain.close();
+    }
+    expect(calls).toEqual([enqueued.taskKey]);
   });
 
   test("reads the body from stdin for --body-file -", async () => {

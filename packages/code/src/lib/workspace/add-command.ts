@@ -12,6 +12,7 @@
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
+import { randomBytes } from "crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
@@ -22,7 +23,7 @@ import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
-import type { InjectedTask } from "../state/injected-tasks";
+import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
   injectedTasksDir,
@@ -317,6 +318,11 @@ export async function runWorkerAdd(
   }
   const { options: add } = parsed;
 
+  // With `--json`, stdout is reserved for the single result object: route every
+  // human/status diagnostic (license line, "Enqueued…", the `--wait` spinner)
+  // to stderr so `devintern worker add … --json | jq .` parses cleanly.
+  const status = add.json ? error : log;
+
   const selectedDir = add.workspacePath
     ? dirname(resolve(add.workspacePath))
     : resolveWorkspaceDir();
@@ -350,7 +356,7 @@ export async function runWorkerAdd(
   if (!bodyResult.ok) return 1;
   const body = bodyResult.body;
 
-  if (!(await checkAutomationAccess(selectedDir, log, error))) return 1;
+  if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
 
   const workerRunning =
     LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
@@ -368,6 +374,7 @@ export async function runWorkerAdd(
         return reportTask(existing, {
           log,
           error,
+          status,
           wait: add.wait,
           json: add.json,
           store,
@@ -381,73 +388,108 @@ export async function runWorkerAdd(
       workerRunning,
       log,
       error,
+      status,
+      wait: add.wait,
+      json: add.json,
     });
   } finally {
     store.close();
   }
 }
 
+/** Shared sinks + task state threaded through the enqueue/report/wait paths. */
+interface TaskContext {
+  log: (message: string) => void;
+  error: (message: string) => void;
+  /** Human/status sink: stderr under `--json`, else stdout. */
+  status: (message: string) => void;
+  wait: boolean;
+  json: boolean;
+  store: InjectedTaskStore;
+  selectedDir: string;
+}
+
+/** A per-invocation filename so concurrent callers never share a prompt path. */
+function injectedTaskFileName(taskKey: string): string {
+  return `${taskKey}-${randomBytes(4).toString("hex")}.md`;
+}
+
+/** Whether an insert failed on the `task_key` unique index (lost a key race). */
+function isTaskKeyConflict(error: unknown): boolean {
+  return /UNIQUE constraint failed: injected_tasks\.task_key/i.test(String(error));
+}
+
+/** Bound the re-derive/retry loop if many callers race the same title. */
+const MAX_TASK_KEY_ATTEMPTS = 50;
+
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
   body: string,
   repo: RepoConfig,
-  ctx: {
-    store: InjectedTaskStore;
-    selectedDir: string;
-    workerRunning: boolean;
-    log: (message: string) => void;
-    error: (message: string) => void;
-  },
+  ctx: TaskContext & { workerRunning: boolean },
 ): Promise<number> {
-  const { store, selectedDir, workerRunning, log, error } = ctx;
-  const taskKey = deriveInjectedTaskKey(add.title, (key) => store.hasTaskKey(key));
+  const { store, selectedDir, workerRunning, log, status } = ctx;
   const dir = injectedTasksDir(selectedDir);
   mkdirSync(dir, { recursive: true });
-  const taskFile = join(dir, `${taskKey}.md`);
-  writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), "utf8");
 
-  const { task, deduplicated } = store.enqueue({
-    taskKey,
-    repo: repo.name,
-    title: add.title.trim(),
-    body,
-    taskFile,
-    idempotencyKey: add.idempotencyKey,
-    actor: "local:add",
-  });
-  if (deduplicated) {
-    // Lost a race with a concurrent caller: drop the file we just wrote and
-    // report the row they created.
+  for (let attempt = 0; ; attempt++) {
+    const taskKey = deriveInjectedTaskKey(add.title, (key) => store.hasTaskKey(key));
+    // Unique per call: if a concurrent caller wins the same key or idempotency
+    // row, unlinking our own file can never delete the winner's prompt.
+    const taskFile = join(dir, injectedTaskFileName(taskKey));
+    writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), "utf8");
+
+    let enqueued: EnqueueInjectedTaskResult;
     try {
-      unlinkSync(taskFile);
-    } catch {
-      // Best-effort cleanup.
+      enqueued = store.enqueue({
+        taskKey,
+        repo: repo.name,
+        title: add.title.trim(),
+        body,
+        taskFile,
+        idempotencyKey: add.idempotencyKey,
+        actor: "local:add",
+      });
+    } catch (enqueueError) {
+      try {
+        unlinkSync(taskFile);
+      } catch {
+        // Best-effort cleanup.
+      }
+      // A concurrent caller claimed this task_key first; re-derive (now seeing
+      // their committed row) and retry with a suffixed key.
+      if (isTaskKeyConflict(enqueueError) && attempt < MAX_TASK_KEY_ATTEMPTS) continue;
+      throw enqueueError;
     }
-    return reportTask(task, {
-      log,
-      error,
-      wait: add.wait,
-      json: add.json,
-      store,
-      selectedDir,
-    });
-  }
 
-  if (add.json) {
-    log(JSON.stringify({ ...serialize(task), deduplicated: false }));
-  } else {
-    log(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
-    log(
-      workerRunning
-        ? "   The worker picks it up on its next poll."
-        : "⚠️  No worker is running; the task stays queued until one starts.",
-    );
-    log(`   Prompt: ${displayPath(task.taskFile)}`);
-  }
+    const { task, deduplicated } = enqueued;
+    if (deduplicated) {
+      // Lost an idempotency race: drop our own file and report their row.
+      try {
+        unlinkSync(taskFile);
+      } catch {
+        // Best-effort cleanup.
+      }
+      return reportTask(task, ctx);
+    }
 
-  if (!add.wait) return 0;
-  return await waitForTask(task.id, { store, selectedDir, log, error, json: add.json });
+    if (!add.json) {
+      status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+      status(
+        workerRunning
+          ? "   The worker picks it up on its next poll."
+          : "⚠️  No worker is running; the task stays queued until one starts.",
+      );
+      status(`   Prompt: ${displayPath(task.taskFile)}`);
+    }
+
+    if (!add.wait) {
+      if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
+      return 0;
+    }
+    return await waitForTask(task.id, { ...ctx, deduplicated: false });
+  }
 }
 
 function serialize(task: InjectedTask): {
@@ -459,67 +501,57 @@ function serialize(task: InjectedTask): {
   return { id: task.id, taskKey: task.taskKey, repo: task.repo, status: task.status };
 }
 
-/** Report an existing (idempotent) task, waiting on it when requested. */
-async function reportTask(
-  task: InjectedTask,
-  ctx: {
-    log: (message: string) => void;
-    error: (message: string) => void;
-    wait: boolean;
-    json: boolean;
-    store: InjectedTaskStore;
-    selectedDir: string;
-  },
-): Promise<number> {
+/**
+ * Emit the single result for a settled task: the JSON object under `--json`,
+ * otherwise a human success/failure line. Returns the process exit code.
+ */
+function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
   if (ctx.json) {
-    ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+    ctx.log(JSON.stringify({ ...serialize(task), deduplicated }));
+  } else if (task.status === "failed") {
+    ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
   } else {
-    ctx.log(
+    ctx.log(`✅ ${task.taskKey} finished.`);
+  }
+  return task.status === "failed" ? 1 : 0;
+}
+
+/** Report an existing (idempotent) task, waiting on it when requested. */
+async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number> {
+  if (!ctx.json) {
+    ctx.status(
       `ℹ️  Idempotency key already used by ${task.taskKey} (task #${task.id}, status: ${task.status}).`,
     );
   }
-  if (!ctx.wait) return 0;
-  if (task.status === "done") return 0;
-  if (task.status === "failed") return 1;
-  return await waitForTask(task.id, {
-    store: ctx.store,
-    selectedDir: ctx.selectedDir,
-    log: ctx.log,
-    error: ctx.error,
-    json: ctx.json,
-  });
+  if (!ctx.wait) {
+    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+    return 0;
+  }
+  if (task.status === "done" || task.status === "failed") {
+    return emitSettled(task, true, ctx);
+  }
+  return await waitForTask(task.id, { ...ctx, deduplicated: true });
 }
 
 /**
- * Poll a task row until it settles. Fails fast when the worker disappears, so
- * `--wait` cannot hang forever after the daemon exits.
+ * Poll a task row until it settles and emit exactly one result. Fails fast when
+ * the worker disappears, so `--wait` cannot hang forever after the daemon exits.
+ * The interim "pending" JSON is intentionally not emitted: with `--wait --json`
+ * stdout carries a single object describing the final state.
  */
 async function waitForTask(
   id: number,
-  ctx: {
-    store: InjectedTaskStore;
-    selectedDir: string;
-    log: (message: string) => void;
-    error: (message: string) => void;
-    json: boolean;
-  },
+  ctx: TaskContext & { deduplicated: boolean },
 ): Promise<number> {
-  ctx.log(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
+  ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
       ctx.error(`❌ Injected task #${id} disappeared while waiting.`);
       return 1;
     }
-    if (task.status === "done") {
-      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: false }));
-      else ctx.log(`✅ ${task.taskKey} finished.`);
-      return 0;
-    }
-    if (task.status === "failed") {
-      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: false }));
-      else ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
-      return 1;
+    if (task.status === "done" || task.status === "failed") {
+      return emitSettled(task, ctx.deduplicated, ctx);
     }
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??

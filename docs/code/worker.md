@@ -290,7 +290,7 @@ records, and the dashboard, and start on a `feature/local-<slug>` branch (the
 | `--body-file <path>`      | Read the description from a file (`-` reads stdin)                        |
 | `--idempotency-key <key>` | Dedupe key; a retried automation reuses the existing task instead of duplicating it |
 | `--wait`                  | Block until the run finishes; exit `0` on success, `1` on failure        |
-| `--json`                  | Emit `{ id, taskKey, repo, status, deduplicated }` on stdout             |
+| `--json`                  | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout |
 | `--workspace <path>`      | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)        |
 
 Behavior to expect:
@@ -301,6 +301,12 @@ Behavior to expect:
 - **Non-interactive.** The command returns after enqueue. `--wait` is the
   scripting hook: it polls the row and exits with the run's status. It fails fast
   if the worker disappears, so it cannot hang forever.
+- **Machine-readable.** With `--json`, stdout carries exactly one JSON object;
+  every human/status line (license notices, "Enqueued…", the `--wait` progress
+  line) goes to stderr, so `devintern worker add … --json | jq .` parses cleanly.
+  `--wait --json` still emits a single object — the settled state — not an
+  interim pending object plus a final one. Without `--json`, diagnostics and the
+  result line print to stdout as usual.
 - **Licensing.** Enqueuing automation work runs the same entitlement check as
   the daemon (paid automation license, or the no-card Worker Pilot).
 - **Quiet hours.** Injected tasks are operator-initiated, so they bypass working

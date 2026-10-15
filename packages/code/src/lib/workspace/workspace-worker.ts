@@ -79,6 +79,24 @@ function orphanMaxAgeMs(): number {
 }
 
 /**
+ * How long settled (`done`/`failed`) injected-task rows are retained before a
+ * startup prune removes them: `WORKER_INJECTED_TASK_RETENTION_DAYS`, default 30.
+ */
+function injectedTaskRetentionMs(): number {
+  return (
+    parseEnvInteger("WORKER_INJECTED_TASK_RETENTION_DAYS", 30, { min: 0 }) * 24 * 60 * 60 * 1000
+  );
+}
+
+/** Startup retention sweep: bound the injected-task table a long-lived daemon fills. */
+function pruneInjectedTasks(store: InjectedTaskStore): void {
+  const pruned = store.pruneSettled(injectedTaskRetentionMs());
+  if (pruned > 0) {
+    console.log(`🧹 [fleet] pruned ${pruned} settled injected task row(s)`);
+  }
+}
+
+/**
  * Recover task runs left in progress by a previous (dead) worker before any
  * acquirer picks up new tickets: reap them and give their tickets the
  * graceful-shutdown feedback (failure comment + move back to To Do). Also
@@ -656,6 +674,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
   // drain through the same fleet executor.
   const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+  pruneInjectedTasks(injectedTasks);
 
   assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
 
@@ -1096,6 +1115,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         autoUpdater.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
+        injectedTasks.close();
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this
         // process is still alive, so a socket still bound here can fail it

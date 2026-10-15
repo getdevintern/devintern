@@ -10,7 +10,9 @@
  * Rows are persisted in the central workspace DB (`state/queue.db`), so an
  * enqueued task survives worker restarts and is picked up on the next poll.
  * An optional `idempotency_key` (unique when set) makes retried automation
- * enqueue at most one task.
+ * enqueue at most one task. `task_key` is unique too (it names the branch and
+ * worktree), and the worker prunes settled rows on startup so the table cannot
+ * grow without bound over a long-lived daemon.
  */
 
 import { Database } from "bun:sqlite";
@@ -126,8 +128,22 @@ export class InjectedTaskStore {
     `);
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
-      "CREATE INDEX IF NOT EXISTS idx_injected_tasks_task_key ON injected_tasks(task_key)",
+      "CREATE INDEX IF NOT EXISTS idx_injected_tasks_finished_at ON injected_tasks(finished_at)",
     );
+    // `task_key` names the worktree/branch, so two rows sharing one key would
+    // race the same checkout. Enforce uniqueness; `enqueueNewTask` re-derives a
+    // suffixed key when a concurrent caller claims the key first.
+    try {
+      this.db.run(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_injected_tasks_task_key ON injected_tasks(task_key)",
+      );
+    } catch {
+      // A DB written before the constraint existed may already hold duplicate
+      // keys; keep the store open (with a plain index) rather than fail closed.
+      this.db.run(
+        "CREATE INDEX IF NOT EXISTS idx_injected_tasks_task_key ON injected_tasks(task_key)",
+      );
+    }
     // A partial unique index lets any number of tasks run without an
     // idempotency key while still deduping the ones that carry one.
     this.db.run(
@@ -268,6 +284,25 @@ export class InjectedTaskStore {
       .query("SELECT 1 AS one FROM injected_tasks WHERE status = 'pending' LIMIT 1")
       .get() as { one: number } | null;
     return row !== null;
+  }
+
+  /**
+   * Delete settled (`done`/`failed`) rows older than `olderThanMs` so a
+   * long-lived worker's `injected_tasks` table cannot grow without bound.
+   * Runs still in flight are never touched.
+   *
+   * @param now Overridable clock (tests).
+   * @returns The number of rows pruned.
+   */
+  pruneSettled(olderThanMs: number, now: number = Date.now()): number {
+    const cutoff = now - olderThanMs;
+    const result = this.ensureDb().run(
+      `DELETE FROM injected_tasks
+       WHERE status IN ('done', 'failed')
+         AND COALESCE(finished_at, created_at) < ?`,
+      [cutoff],
+    );
+    return Number(result.changes ?? 0);
   }
 
   /** List tasks, newest first (dashboard/introspection). */
