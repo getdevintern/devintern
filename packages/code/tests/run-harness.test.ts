@@ -66,6 +66,7 @@ let tracker: {
 let commitResult: { success: boolean; message: string; hookError?: string };
 let commitResults: Array<typeof commitResult>;
 let commitCalls: number;
+let inheritedCommitCount: number;
 let pushResult: { success: boolean; message: string; hookError?: string };
 let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
@@ -135,6 +136,8 @@ mock.module("../src/lib/utils", () => ({
       return commitResults.shift() ?? commitResult;
     },
     getCurrentBranch: async () => "feature/task-1",
+    gitRefExists: async () => true,
+    executeGitCommand: async () => ({ success: true, output: String(inheritedCommitCount) }),
     isProtectedBranch: async () => false,
     remoteBranchExists: async () => true,
     getMainBranchName: async () => "main",
@@ -234,6 +237,7 @@ function baseInput() {
 }
 
 beforeEach(() => {
+  inheritedCommitCount = 0;
   scenario = {};
   commitResult = { success: true, message: "committed" };
   commitResults = [];
@@ -362,6 +366,70 @@ describe("runAgentHarness non-commit outcomes", () => {
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("verifies and publishes inherited commits when pickup needs no new edits", async () => {
+    scenario.stdout = "The inherited implementation is complete and validated.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    await runAgentHarness({
+      ...baseInput(),
+      createPr: true,
+      resumeBranch: "feature/task-1",
+      verify: {},
+    });
+    expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
+    expect(hookCalls).toBeGreaterThan(0);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test.each([undefined, "feature/other"])(
+    "does not publish a no-op without the inherited branch (%s)",
+    async (resumeBranch) => {
+      scenario.stdout = "No additional edits needed.";
+      commitResult = { success: false, message: "No changes to commit" };
+      inheritedCommitCount = 2;
+      await expect(
+        runAgentHarness({ ...baseInput(), createPr: true, resumeBranch }),
+      ).rejects.toThrow("Implementation was not committed");
+      expect(deliveryEvents).not.toContain("push");
+      expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
+    },
+  );
+
+  test("does not publish a resumed branch with no inherited implementation commits", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, resumeBranch: "feature/task-1" }),
+    ).rejects.toThrow("Implementation was not committed");
+    expect(deliveryEvents).not.toContain("push");
+  });
+
+  test("rejects an implementation with no changes before publishing", async () => {
+    scenario.stdout = "done";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("rejects a failed push without posting completion or transitioning the task", async () => {
+    scenario.stdout = "done";
+    pushResult = { success: false, message: "Push rejected" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Push failed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
   test("requests a structured briefing and posts it without progress output", async () => {
     const summary = "## What changed\nImplemented the thing.\n## Verification\nTests passed.";
     scenario.stdout = `Exploring the codebase.\n<!-- devintern:summary:start -->\n${summary}\n<!-- devintern:summary:end -->`;
@@ -450,20 +518,24 @@ describe("runAgentHarness git delivery", () => {
     expect(prCreateOptions?.artifactComment).toBeUndefined();
   });
 
-  test("retries a plan-only run and publishes the committed implementation", async () => {
-    scenario.stdout = "Created a plan";
-    planPath = "PLAN_DETECTED_NO_PATH";
-    commitResults = [{ success: false, message: "No changes to commit" }];
+  test.each([undefined, "feature/task-1"])(
+    "retries a plan-only run before delivering inherited commits (%s)",
+    async (resumeBranch) => {
+      scenario.stdout = "Created a plan";
+      planPath = "PLAN_DETECTED_NO_PATH";
+      commitResults = [{ success: false, message: "No changes to commit" }];
+      inheritedCommitCount = 2;
 
-    await runAgentHarness({ ...baseInput(), createPr: true, autoReview: true });
+      await runAgentHarness({ ...baseInput(), createPr: true, autoReview: true, resumeBranch });
 
-    expect(commitCalls).toBe(2);
-    expect(hookCalls).toBe(1);
-    expect(autoReviewCalls).toBe(0);
-    expect(agentPrompts[1]).toContain("## Final implementation summary");
-    expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
-    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
-  });
+      expect(commitCalls).toBe(2);
+      expect(hookCalls).toBe(1);
+      expect(autoReviewCalls).toBe(0);
+      expect(agentPrompts[1]).toContain("## Final implementation summary");
+      expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
+      expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+    },
+  );
 
   test("validates hooks before and after auto-review", async () => {
     scenario.stdout = "done";
@@ -668,7 +740,9 @@ describe("runAgentHarness git delivery", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     };
 
-    await runAgentHarness({ ...baseInput(), createPr: true });
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Pre-push validation failed",
+    );
 
     expect(hookCalls).toBe(1);
     expect(deliveryEvents).toEqual(["commit"]);

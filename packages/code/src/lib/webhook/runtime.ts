@@ -36,6 +36,16 @@ export const runtime = {
   failover: null as WorkerFailover | null,
 };
 
+/**
+ * Identifies a provider delivery for in-flight/handled dedupe, so the
+ * asynchronous processing pipeline can settle the claim that the HTTP handler
+ * opened.
+ */
+export interface WebhookDeliveryRef {
+  source: string;
+  externalId: string;
+}
+
 setInterval(() => rateLimiter.cleanup(), 60000);
 // Note: We use a single reusable worktree, so no periodic cleanup needed
 

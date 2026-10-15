@@ -19,6 +19,7 @@ import { captureError } from "@devintern/utils";
 
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
+import { classifyWebhookError } from "../webhook/webhook-errors";
 import type { Acquirer } from "../../worker";
 
 export type RelayEventType =
@@ -191,81 +192,27 @@ export class RelayAcquirer implements Acquirer {
     const externalId = [envelope.source, envelope.team, envelope.deliveryId]
       .filter((part): part is string => Boolean(part))
       .join(":");
-    if (this.options.queue.hasProcessed(SOURCE, externalId)) {
+
+    // Split dedupe into in-flight and handled. A redelivery that arrives while
+    // the original is still running must not be acknowledged as done, and a
+    // transient failure must not be recorded as handled so the relay redelivers.
+    const claim = this.options.queue.beginDelivery(SOURCE, externalId);
+    if (claim === "inFlight") {
+      // Another dispatcher owns this delivery. Keep the cursor here until
+      // that run settles; skipping it would acknowledge unfinished work.
+      throw new Error(`Relay delivery ${externalId} is still in flight`);
+    }
+    if (claim === "handled") {
+      if (this.options.verbose) {
+        console.log(`   [relay] ${externalId} already ${claim}; skipping`);
+      }
       return;
     }
-    // Mark before executing (same convention as the polling acquirers): a
-    // failing run must not re-trigger on every subsequent poll.
-    this.options.queue.markProcessed(SOURCE, externalId);
 
-    const { handlers } = this.options;
     try {
-      switch (envelope.eventType) {
-        case "pr.review_submitted": {
-          const { repo } = envelope;
-          const pr = envelope.ref.pr;
-          if (!repo || pr === undefined) {
-            return;
-          }
-          if (!this.options.isAgentPr(repo, pr)) {
-            // Reviews on human PRs act only via @mention comments.
-            if (this.options.verbose) {
-              console.log(`   [relay] ignoring review on non-agent PR ${repo}#${pr}`);
-            }
-            return;
-          }
-          console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
-          const ok = await handlers.addressPr(repo, pr);
-          if (ok === "deferred") {
-            console.log(
-              `⏳ [relay] ${repo}#${pr} deferred; will retry when a harness is available`,
-            );
-          } else {
-            console.log(
-              ok
-                ? `✅ [relay] ${repo}#${pr} feedback addressed`
-                : `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly`,
-            );
-          }
-          return;
-        }
-        case "pr.comment_created": {
-          const { repo } = envelope;
-          const pr = envelope.ref.pr;
-          const commentId = envelope.ref.commentId;
-          if (!repo || pr === undefined || commentId === undefined) {
-            return;
-          }
-          await handlers.handlePrComment(repo, pr, commentId);
-          return;
-        }
-        case "task.changed": {
-          if (envelope.ref.task) {
-            await handlers.evaluateTask(envelope.ref.task, envelope.source, envelope.team);
-          }
-          return;
-        }
-        case "change.feedback":
-        case "change.changed":
-        case "ci.changed": {
-          if (
-            envelope.version !== 2 ||
-            !envelope.codeHost ||
-            envelope.codeHost.provider !== envelope.source ||
-            (!envelope.ref.change && !envelope.ref.branch && !envelope.ref.headSha)
-          ) {
-            return;
-          }
-          await handlers.reconcileCodeHost?.(
-            envelope as RelayEnvelope & { codeHost: RelayCodeHostIdentity },
-          );
-          return;
-        }
-        default:
-          if (this.options.verbose) {
-            console.log(`   [relay] ignoring unknown event type ${envelope.eventType as string}`);
-          }
-      }
+      await this.runHandlers(envelope);
+      // Success and intentional no-ops both count as handled.
+      this.options.queue.completeDelivery(SOURCE, externalId);
     } catch (error) {
       captureError(error, {
         acquirer: this.name,
@@ -277,9 +224,88 @@ export class RelayAcquirer implements Acquirer {
         codeHostProject: envelope.codeHost?.projectPath,
         stage: "dispatch",
       });
+      if (classifyWebhookError(error) === "permanent") {
+        // Terminal errors: acknowledge and record so
+        // the relay stops redelivering.
+        this.options.queue.completeDelivery(SOURCE, externalId);
+        console.warn(
+          `⚠️  [relay] ${externalId} failed permanently and was acknowledged: ${(error as Error).message}`,
+        );
+        return;
+      }
+      // 429/5xx/network: release the claim and rethrow so the poll loop backs
+      // off without advancing the cursor — the relay then redelivers.
+      this.options.queue.abandonDelivery(SOURCE, externalId);
       console.warn(
-        `⚠️  [relay] handler failed for ${envelope.eventType} (${externalId}): ${(error as Error).message}`,
+        `⚠️  [relay] transient failure for ${externalId} (will retry): ${(error as Error).message}`,
       );
+      throw error;
+    }
+  }
+
+  private async runHandlers(envelope: RelayEnvelope): Promise<void> {
+    const { handlers } = this.options;
+    switch (envelope.eventType) {
+      case "pr.review_submitted": {
+        const { repo } = envelope;
+        const pr = envelope.ref.pr;
+        if (!repo || pr === undefined) {
+          return;
+        }
+        if (!this.options.isAgentPr(repo, pr)) {
+          // Reviews on human PRs act only via @mention comments.
+          if (this.options.verbose) {
+            console.log(`   [relay] ignoring review on non-agent PR ${repo}#${pr}`);
+          }
+          return;
+        }
+        console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
+        const ok = await handlers.addressPr(repo, pr);
+        if (ok === "deferred") {
+          throw new Error(`Relay review ${repo}#${pr} deferred until a harness is available`);
+        }
+        if (!ok) {
+          throw new Error(`Relay review ${repo}#${pr} did not complete cleanly`);
+        }
+        console.log(`✅ [relay] ${repo}#${pr} feedback addressed`);
+        return;
+      }
+      case "pr.comment_created": {
+        const { repo } = envelope;
+        const pr = envelope.ref.pr;
+        const commentId = envelope.ref.commentId;
+        if (!repo || pr === undefined || commentId === undefined) {
+          return;
+        }
+        await handlers.handlePrComment(repo, pr, commentId);
+        return;
+      }
+      case "task.changed": {
+        if (envelope.ref.task) {
+          await handlers.evaluateTask(envelope.ref.task, envelope.source, envelope.team);
+        }
+        return;
+      }
+      case "change.feedback":
+      case "change.changed":
+      case "ci.changed": {
+        if (
+          envelope.version !== 2 ||
+          !envelope.codeHost ||
+          envelope.codeHost.provider !== envelope.source ||
+          (!envelope.ref.change && !envelope.ref.branch && !envelope.ref.headSha)
+        ) {
+          return;
+        }
+        await handlers.reconcileCodeHost?.(
+          envelope as RelayEnvelope & { codeHost: RelayCodeHostIdentity },
+        );
+        return;
+      }
+      default:
+        if (this.options.verbose) {
+          console.log(`   [relay] ignoring unknown event type ${envelope.eventType as string}`);
+        }
     }
   }
 

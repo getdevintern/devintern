@@ -3,8 +3,12 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
+import {
+  recoverOrphanedWorkspaceRuns,
+  scheduleOrphanPickups,
+} from "../src/lib/workspace/workspace-worker";
 import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunRecord } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
@@ -139,5 +143,66 @@ describe("recoverOrphanedWorkspaceRuns", () => {
       true,
     );
     retryStore.close();
+  });
+});
+
+describe("scheduleOrphanPickups", () => {
+  let workspaceDir: string;
+  let dbPath: string;
+
+  function run(overrides: Partial<RunRecord>): RunRecord {
+    return {
+      id: 1,
+      origin: "task",
+      taskKey: "PROJ-1",
+      status: "failed",
+      startedAt: Date.now(),
+      ...overrides,
+    } as RunRecord;
+  }
+
+  beforeEach(() => {
+    workspaceDir = join(
+      tmpdir(),
+      `orphan-pickup-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    dbPath = join(workspaceDir, "state", "queue.db");
+  });
+
+  afterEach(() => {
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("queues a retry for each resumable run, preserving routing context", () => {
+    const store = new ScheduledRetryStore(dbPath);
+    const queued = scheduleOrphanPickups(store, [
+      run({ id: 7, taskKey: "PROJ-1", branch: "feature/proj-1", repo: "api", team: "platform" }),
+      run({ id: 8, taskKey: "PROJ-2", branch: "feature/proj-2", repo: "web" }),
+      run({ id: 9, taskKey: undefined }),
+    ]);
+
+    expect(queued).toBe(2);
+    const first = store.claimNext();
+    const second = store.claimNext();
+    expect(first?.taskKey).toBe("PROJ-1");
+    expect(first?.runId).toBe(7);
+    expect(first?.team).toBe("platform");
+    expect(first?.repo).toBe("api");
+    expect(second?.taskKey).toBe("PROJ-2");
+    expect(second?.repo).toBe("web");
+    store.close();
+  });
+
+  test("does not double-queue a task that already has an active retry", () => {
+    const store = new ScheduledRetryStore(dbPath);
+    store.schedule({ taskKey: "PROJ-1", actor: "sup@example.com" });
+
+    const queued = scheduleOrphanPickups(store, [
+      run({ id: 7, taskKey: "PROJ-1", branch: "feature/proj-1" }),
+    ]);
+
+    expect(queued).toBe(0);
+    store.close();
   });
 });

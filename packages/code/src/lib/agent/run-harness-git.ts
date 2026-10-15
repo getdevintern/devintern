@@ -23,6 +23,8 @@ export interface FinalizeContext {
   taskKey?: string;
   taskSummary?: string;
   enableGit: boolean;
+  /** Branch successfully inherited from a prior attempt. */
+  resumeBranch?: string;
   task?: any;
   createPr: boolean;
   prTargetBranch: string;

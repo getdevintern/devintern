@@ -115,4 +115,43 @@ describe("TaskFormatter untrusted-content framing", () => {
       "**Task Key for Reference**: <!-- BEGIN UNTRUSTED EXTERNAL CONTENT: task key -->",
     );
   });
+
+  test("session pickup tells the agent to continue from the resumed branch", () => {
+    const prompt = TaskFormatter.formatTaskForAgent(
+      mockTaskDetails({ comments: [] }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        attempt: 2,
+        resumeBranch: "feature/test-1",
+        previousReport: INJECTION,
+        landedWork: "abc123 add parser",
+      },
+    );
+
+    expect(prompt).toContain("checked out for you");
+    expect(prompt).toContain("feature/test-1");
+    expect(prompt).toContain("continue from the resume point");
+    // Inherited work is untrusted data and stays framed.
+    expect(prompt).toContain(
+      "<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: previous implementation report -->",
+    );
+    expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: already landed work -->");
+    expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
+  });
+
+  test("session pickup omits the report section when no report was inherited", () => {
+    const prompt = TaskFormatter.formatTaskForAgent(
+      mockTaskDetails({ comments: [] }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { attempt: 2, resumeBranch: "feature/test-1" },
+    );
+    expect(prompt).toContain("feature/test-1");
+    expect(prompt).not.toContain("previous implementation report");
+  });
 });

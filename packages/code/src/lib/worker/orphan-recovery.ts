@@ -45,6 +45,8 @@ import type { ProjectSettings } from "../../types/settings";
 import type { FailureAttemptRecorder } from "../task/failure-feedback";
 import { reportTaskFailure } from "../task/failure-feedback";
 import type { RunRecord, RunStore } from "../state/run-recorder";
+import { resolveSessionPickup } from "../state/session-pickup";
+import type { SessionPickupDecision } from "../state/session-pickup";
 import type { TaskTrackerClient } from "../trackers/client";
 
 /** Reason posted on tickets whose run was orphaned by a dead worker. */
@@ -79,6 +81,19 @@ export interface OrphanRecoveryDeps {
   maxAgeMs?: number;
   /** Present tense "now", overridable in tests. */
   now?: number;
+  /**
+   * Session-pickup resolver (injected for tests). Defaults to reconstructing
+   * branch + report from the run store for the orphaned run.
+   */
+  resolvePickup?: (run: RunRecord) => Promise<SessionPickupDecision>;
+  /**
+   * Optional existence probe for a run's recorded branch, letting orphan
+   * recovery classify resume/fresh with the same criteria as the pipeline
+   * (`refs/heads` or `refs/remotes/origin`). The fleet caller supplies a
+   * repo-scoped probe; when absent (non-fleet/simple mode) the record is
+   * trusted. Ignored when `resolvePickup` is injected.
+   */
+  branchExists?: (branch: string, run: RunRecord) => boolean | Promise<boolean>;
   log?: typeof console.log;
   warn?: typeof console.warn;
 }
@@ -90,6 +105,11 @@ export interface OrphanRecoveryResult {
   recovered: number;
   /** Orphaned task runs deliberately left alone (stale, moved on, no key). */
   skipped: number;
+  /**
+   * Orphaned task runs with complete recorded state (branch + prior report)
+   * that should be resumed rather than restarted. The caller schedules them.
+   */
+  resumable: RunRecord[];
 }
 
 /**
@@ -121,14 +141,14 @@ export async function recoverOrphanedTaskRuns(
   }
 
   if (reaped === 0) {
-    return { reaped, recovered: 0, skipped: 0 };
+    return { reaped, recovered: 0, skipped: 0, resumable: [] };
   }
 
   // PR, automation, and error-monitor runs have no tracker ticket to repair.
   // Reaping them is sufficient and must not initialize or warn about a task
   // tracker merely because a non-ticket subprocess was interrupted.
   if (orphans.length === 0) {
-    return { reaped, recovered: 0, skipped: 0 };
+    return { reaped, recovered: 0, skipped: 0, resumable: [] };
   }
 
   if (!deps.tracker) {
@@ -136,7 +156,7 @@ export async function recoverOrphanedTaskRuns(
       `⚠️  ${orphans.length} orphaned task run(s) from the previous worker marked failed, ` +
         "but no tracker client is available to notify their tickets",
     );
-    return { reaped, recovered: 0, skipped: 0 };
+    return { reaped, recovered: 0, skipped: 0, resumable: [] };
   }
 
   log(
@@ -146,7 +166,20 @@ export async function recoverOrphanedTaskRuns(
 
   let recovered = 0;
   let skipped = 0;
+  const resumable: RunRecord[] = [];
   const notified = new Set<string>();
+  const resolvePickup =
+    deps.resolvePickup ??
+    ((run: RunRecord) =>
+      resolveSessionPickup({
+        runStore: deps.runStore,
+        taskKey: run.taskKey ?? "",
+        runId: run.id,
+        scope: run,
+        ...(deps.branchExists
+          ? { branchExists: (branch: string) => deps.branchExists!(branch, run) }
+          : {}),
+      }));
 
   for (const run of orphans) {
     const taskKey = run.taskKey;
@@ -193,6 +226,25 @@ export async function recoverOrphanedTaskRuns(
       continue;
     }
 
+    // Session pickup: when the interrupted run left complete recorded state
+    // (a branch and its own implementation report), resume it instead of
+    // reporting a failure and re-running from scratch. Only the ticket status
+    // guard above still allowing an In Progress ticket reaches this point.
+    let pickup: SessionPickupDecision = { kind: "fresh", reason: "not evaluated" };
+    try {
+      pickup = await resolvePickup(run);
+    } catch (error) {
+      warn(`⚠️  Could not evaluate session pickup for ${taskKey}: ${(error as Error).message}`);
+    }
+    if (pickup.kind === "resume") {
+      log(
+        `♻️  ${taskKey} has resumable state from run #${pickup.session.runId} ` +
+          `(branch '${pickup.session.branch}'); scheduling a pickup instead of a fresh retry`,
+      );
+      resumable.push(run);
+      continue;
+    }
+
     await reportTaskFailure({
       taskKey,
       reason: ORPHANED_RUN_REASON,
@@ -214,7 +266,13 @@ export async function recoverOrphanedTaskRuns(
         "To Do. They re-run when the ticket changes (see the posted comment).",
     );
   }
-  return { reaped, recovered, skipped };
+  if (resumable.length > 0) {
+    log(
+      `♻️  ${resumable.length} orphaned ticket(s) have resumable state and will continue from ` +
+        "their recorded branch and report instead of restarting.",
+    );
+  }
+  return { reaped, recovered, skipped, resumable };
 }
 
 /**

@@ -1,0 +1,36 @@
+name: devintern-e2e-gitlab
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:19.3.5-ce.0
+    hostname: gitlab.localhost
+    ports:
+      - "127.0.0.1:8929:8929"
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://127.0.0.1:8929'
+        letsencrypt['enable'] = false
+        gitlab_rails['gitlab_signup_enabled'] = false
+        gitlab_rails['usage_ping_enabled'] = false
+        gitlab_rails['smtp_enable'] = false
+        prometheus_monitoring['enable'] = false
+        alertmanager['enable'] = false
+        registry['enable'] = false
+        puma['worker_processes'] = 2
+        sidekiq['concurrency'] = 5
+    volumes:
+      - config:/etc/gitlab
+      - logs:/var/log/gitlab
+      - data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8929/-/readiness?all=1"]
+      interval: 15s
+      timeout: 10s
+      retries: 60
+      start_period: 120s
+
+volumes:
+  config:
+  logs:
+  data:

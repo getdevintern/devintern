@@ -1,0 +1,32 @@
+name: GitHub E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  github-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Code CLI
+        run: bun run --filter @getdevintern/code build
+      - name: Check local harness
+        run: bun run --filter @devintern/e2e test
+      - name: Run live GitHub scenarios
+        run: bun run --filter @devintern/e2e test:e2e
+        env:
+          E2E_GITHUB_REPOSITORY: ${{ vars.E2E_GITHUB_REPOSITORY }}
+          E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}

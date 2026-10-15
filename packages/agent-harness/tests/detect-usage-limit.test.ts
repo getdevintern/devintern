@@ -282,6 +282,18 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", source).limited).toBe(false);
   });
 
+  test("ignores app-log lines that merely say 'retrying' with a rate-limit phrase", () => {
+    // devintern's own relay logs surface while the agent runs the test suite;
+    // "retrying" alone must not make them look like a provider diagnostic.
+    const transcript = [
+      "⚠️  [relay] transient failure for github:retry-review (will retry): GitHub API error (403): API rate limit exceeded",
+      "⚠️  [relay] poll failed (retrying in 5s): GitHub API error (403): API rate limit exceeded",
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
+  });
+
   test("ignores TUI limit phrases embedded in source and prose", () => {
     const transcript = [
       'const message = "[API Error: 429 status code (no body)]";',

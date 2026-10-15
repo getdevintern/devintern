@@ -1,0 +1,60 @@
+name: Hosted source-control E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Hosted provider to test
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - bitbucket
+          - gitlab-com
+
+permissions:
+  contents: read
+
+jobs:
+  bitbucket:
+    if: ${{ inputs.provider == 'all' || inputs.provider == 'bitbucket' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Code CLI
+        run: bun run --filter @getdevintern/code build
+      - name: Run Bitbucket Cloud suite
+        run: bun run --filter @devintern/e2e test:e2e:bitbucket
+        env:
+          E2E_BITBUCKET_REPOSITORY: ${{ vars.E2E_BITBUCKET_REPOSITORY }}
+          E2E_BITBUCKET_TOKEN: ${{ secrets.E2E_BITBUCKET_TOKEN }}
+
+  gitlab-com:
+    if: ${{ inputs.provider == 'all' || inputs.provider == 'gitlab-com' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Code CLI
+        run: bun run --filter @getdevintern/code build
+      - name: Run GitLab.com suite
+        run: bun run --filter @devintern/e2e test:e2e:gitlab-com
+        env:
+          E2E_GITLAB_COM_PROJECT: ${{ vars.E2E_GITLAB_COM_PROJECT }}
+          E2E_GITLAB_COM_TOKEN: ${{ secrets.E2E_GITLAB_COM_TOKEN }}

@@ -41,6 +41,7 @@ import {
   sendResponse,
   skipResponse,
 } from "./lib/webhook/runtime";
+import type { WebhookDeliveryRef } from "./lib/webhook/runtime";
 import {
   processIssueCommentAsync,
   processIssueCommentWithPersistence,
@@ -100,9 +101,9 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
 
   debugLog(config, `Event type: ${eventType}`);
 
-  // Dedupe GitHub redeliveries by delivery id. Ids are marked processed at
-  // enqueue time — the queue row is durable from that point, so a redelivery
-  // (manual or automatic) must not enqueue the same work twice.
+  // Fast-path dedupe for deliveries already recorded as handled. Deliveries
+  // that are only in-flight are claimed (and rejected with 409) inside the
+  // handlers once the payload has been validated.
   const deliveryId = request.headers.get("x-github-delivery");
   if (
     deliveryId &&
@@ -197,20 +198,34 @@ async function handlePullRequestReview(
   console.log(`   Repository: ${event.repository.full_name}`);
   console.log(`   Reviewer: ${event.review.user.login}`);
 
-  // Persist event to SQLite before processing (crash resilience)
+  // Persist event to SQLite before processing (crash resilience). The delivery
+  // is claimed in-flight, not handled: a redelivery that arrives before the run
+  // finishes must not be acknowledged as a duplicate.
   let eventId: string | undefined;
+  let delivery: WebhookDeliveryRef | undefined;
   if (runtime.queue) {
-    eventId = runtime.queue.enqueue("pull_request_review", event);
     if (deliveryId) {
-      runtime.queue.markProcessed("github", deliveryId);
+      const claim = runtime.queue.beginDelivery("github", deliveryId);
+      if (claim === "handled") {
+        console.log(`⏭️  Skipping duplicate delivery ${deliveryId}`);
+        return jsonResponse({ success: true, message: "Duplicate delivery", deliveryId });
+      }
+      if (claim === "inFlight") {
+        return jsonResponse(
+          { success: false, message: "Delivery already in progress", deliveryId },
+          409,
+        );
+      }
+      delivery = { source: "github", externalId: deliveryId };
     }
+    eventId = runtime.queue.enqueue("pull_request_review", event);
     debugLog(config, `Persisted event ${eventId} to queue`);
   }
 
   // Add to queue for sequential processing (prevents race conditions)
   // Bot mention check happens inside processReviewAsync after fetching comments
   reviewQueue
-    .add(() => processReviewWithPersistence(eventId, event, config))
+    .add(() => processReviewWithPersistence(eventId, event, config, delivery))
     .catch((error) => {
       console.error("❌ Error processing review:", error);
     });
@@ -263,19 +278,33 @@ async function handleIssueComment(
   console.log(`   Repository: ${event.repository.full_name}`);
   console.log(`   Commenter: ${event.comment.user.login}`);
 
-  // Persist event to SQLite before processing (crash resilience)
+  // Persist event to SQLite before processing (crash resilience). The delivery
+  // is claimed in-flight, not handled: a redelivery that arrives before the run
+  // finishes must not be acknowledged as a duplicate.
   let eventId: string | undefined;
+  let delivery: WebhookDeliveryRef | undefined;
   if (runtime.queue) {
-    eventId = runtime.queue.enqueue("issue_comment", event);
     if (deliveryId) {
-      runtime.queue.markProcessed("github", deliveryId);
+      const claim = runtime.queue.beginDelivery("github", deliveryId);
+      if (claim === "handled") {
+        console.log(`⏭️  Skipping duplicate delivery ${deliveryId}`);
+        return jsonResponse({ success: true, message: "Duplicate delivery", deliveryId });
+      }
+      if (claim === "inFlight") {
+        return jsonResponse(
+          { success: false, message: "Delivery already in progress", deliveryId },
+          409,
+        );
+      }
+      delivery = { source: "github", externalId: deliveryId };
     }
+    eventId = runtime.queue.enqueue("issue_comment", event);
     debugLog(config, `Persisted event ${eventId} to queue`);
   }
 
   // Bot mention check happens inside processReviewAsync after fetching the PR.
   reviewQueue
-    .add(() => processIssueCommentWithPersistence(eventId, event, config))
+    .add(() => processIssueCommentWithPersistence(eventId, event, config, delivery))
     .catch((error) => {
       console.error("❌ Error processing PR comment:", error);
     });
