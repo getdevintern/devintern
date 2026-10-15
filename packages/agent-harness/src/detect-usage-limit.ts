@@ -157,7 +157,7 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
     /^\s*[{"[].*(?:rate_limit|quota|insufficient balance|add credits|payment required|usage balance exhausted).*[}\]]\s*$/i.test(
       trimmed,
     ) ||
-    /\b(?:last error|provider (?:error|response)|response status|returned (?:an? )?(?:error|status)|request failed|retrying)\b/i.test(
+    /\b(?:last error|provider (?:error|response)|response status|returned (?:an? )?(?:error|status)|request failed)\b/i.test(
       trimmed,
     )
   ) {

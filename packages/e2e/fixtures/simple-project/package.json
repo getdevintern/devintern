@@ -1,0 +1,8 @@
+{
+  "name": "devintern-e2e-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  }
+}

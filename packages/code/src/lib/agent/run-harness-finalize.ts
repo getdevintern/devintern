@@ -597,6 +597,10 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
+      if (result.kind === "halted" && ["commit", "auto-review", "publish"].includes(result.step)) {
+        ctx.reject(new Error(result.reason));
+        return;
+      }
       if (
         result.kind === "halted" &&
         result.haltKind !== "stop" &&

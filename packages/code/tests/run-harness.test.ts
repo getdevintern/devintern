@@ -378,7 +378,9 @@ describe("runAgentHarness git delivery", () => {
       scenario.stdout = "No additional edits needed.";
       commitResult = { success: false, message: "No changes to commit" };
       inheritedCommitCount = 2;
-      await runAgentHarness({ ...baseInput(), createPr: true, resumeBranch });
+      await expect(
+        runAgentHarness({ ...baseInput(), createPr: true, resumeBranch }),
+      ).rejects.toThrow("Implementation was not committed");
       expect(deliveryEvents).not.toContain("push");
       expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
     },
@@ -387,8 +389,36 @@ describe("runAgentHarness git delivery", () => {
   test("does not publish a resumed branch with no inherited implementation commits", async () => {
     scenario.stdout = "No additional edits needed.";
     commitResult = { success: false, message: "No changes to commit" };
-    await runAgentHarness({ ...baseInput(), createPr: true, resumeBranch: "feature/task-1" });
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, resumeBranch: "feature/task-1" }),
+    ).rejects.toThrow("Implementation was not committed");
     expect(deliveryEvents).not.toContain("push");
+  });
+
+  test("rejects an implementation with no changes before publishing", async () => {
+    scenario.stdout = "done";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("rejects a failed push without posting completion or transitioning the task", async () => {
+    scenario.stdout = "done";
+    pushResult = { success: false, message: "Push rejected" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Push failed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
   });
 
   test("requests a structured briefing and posts it without progress output", async () => {
@@ -656,7 +686,9 @@ describe("runAgentHarness git delivery", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     };
 
-    await runAgentHarness({ ...baseInput(), createPr: true });
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Pre-push validation failed",
+    );
 
     expect(hookCalls).toBe(1);
     expect(deliveryEvents).toEqual(["commit"]);

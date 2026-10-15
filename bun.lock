@@ -93,6 +93,9 @@
         "vite": "^7.0.0",
       },
     },
+    "packages/e2e": {
+      "name": "@devintern/e2e",
+    },
     "packages/license-check": {
       "name": "@devintern/license-check",
       "version": "0.1.0",
@@ -374,6 +377,8 @@
     "@devintern/auth": ["@devintern/auth@workspace:packages/auth"],
 
     "@devintern/dashboard-ui": ["@devintern/dashboard-ui@workspace:packages/dashboard-ui"],
+
+    "@devintern/e2e": ["@devintern/e2e@workspace:packages/e2e"],
 
     "@devintern/license-check": ["@devintern/license-check@workspace:packages/license-check"],
 

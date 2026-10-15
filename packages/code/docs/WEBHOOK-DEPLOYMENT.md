@@ -465,12 +465,33 @@ curl https://webhooks.yourdomain.com/health
 3. Check response codes and bodies
 4. Use **Redeliver** to test
 
+### Delivery Deduplication & Retries
+
+The server tracks each provider delivery in two states:
+
+- **in flight** — accepted and currently being processed.
+- **handled** — finished (successfully or permanently failed) and durably recorded in the queue database.
+
+A redelivery that arrives while the original is still in flight is answered with `409 Conflict` instead of `200`, so it is never acknowledged as done and lost. Once the run finishes, the delivery becomes `handled` and future redeliveries are answered with `200 Duplicate delivery`.
+
+Handler failures are classified:
+
+- **Permanent** (HTTP `400`/`401`/`404`/`410`/`422`, or an explicit `PermanentWebhookError`) — the delivery is recorded as handled and future duplicates are skipped.
+- **Transient** (HTTP `403`/`429`/`5xx`, timeouts, connection errors) — the delivery is left unhandled and eligible for retry. A bare `403` stays retryable because GitHub also uses it for rate limits; a handler can explicitly mark a confirmed terminal permission failure permanent.
+
+The DevIntern relay retries transient failures by keeping the worker cursor unchanged and backing off before polling again. Deferred or unsuccessful review runs also keep the cursor unchanged. An in-flight delivery holds the cursor until its owning run settles; a handled duplicate can advance it safely.
+
+GitHub does **not** automatically redeliver failed webhooks. Use manual redelivery or a scheduled recovery job that requests redelivery through GitHub's API. Returning `409` alone does not schedule a retry. Direct webhook handlers acknowledge durable queue admission before asynchronous processing finishes, so later processing failures require queue recovery or explicit redelivery. See [Handling failed webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
+
+The durable `handled` record lives in `queue.db`; in-flight state is process-local, so a restart lets an unfinished delivery be reclaimed rather than blocked forever.
+
 ### Common Issues
 
 | Issue               | Solution                                          |
 | ------------------- | ------------------------------------------------- |
 | 401 Unauthorized    | Check `WEBHOOK_SECRET` matches GitHub App config  |
 | 403 Forbidden       | Check IP allowlisting if enabled                  |
+| 409 Conflict        | A previous delivery is still running; retry after it settles |
 | 500 Internal Error  | Check server logs for stack trace                 |
 | Timeout             | Ensure Agent Harness CLI is installed and working |
 | No webhook received | Check GitHub App webhook URL and events           |
