@@ -12,10 +12,16 @@ From the monorepo root:
 ```sh
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
-E2E_GITHUB_REPOSITORY=your-org/devintern-e2e \
-E2E_GITHUB_TOKEN=your-token \
+gh auth login --hostname github.com # once, if not already logged in
 bun run --filter @devintern/e2e test:e2e
 ```
+
+Local runs default to the private `getdevintern/devintern-e2e` repository and read
+credentials from `gh auth token` in memory. Your GitHub account must have write
+access to that repository. No token is written to disk. Override the repository
+with `E2E_GITHUB_REPOSITORY=owner/repo` and/or provide `E2E_GITHUB_TOKEN` explicitly
+to use a different account or fixture repository. CI requires both variables and
+never falls back to a developer's GitHub CLI login.
 
 Use a dedicated GitHub test repository initialized with a README/default branch.
 The token needs read/write Contents and Pull requests permissions on that
