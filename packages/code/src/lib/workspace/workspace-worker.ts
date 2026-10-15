@@ -198,6 +198,12 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         retryStore?.recordIncompleteAttempt(taskKey, type, description),
       maxAgeMs: orphanMaxAgeMs(),
       cleanStopRunIds,
+      // Positive evidence the interrupted child already reported: it records a
+      // retry-gate attempt right after posting the interruption comment. A
+      // clean-stop run whose child crashed before that (or whose tracker call
+      // failed) has no attempt at/after its start, so recovery reports it
+      // rather than stranding the ticket.
+      getAttemptReportedAt: (taskKey) => retryStore?.getRetryState(taskKey)?.reportedAt,
       // Probe the run's repo base worktree so orphan recovery decides
       // resume/fresh with the same ref check the pipeline uses. A missing
       // repo/worktree falls back to trusting the record rather than dropping a

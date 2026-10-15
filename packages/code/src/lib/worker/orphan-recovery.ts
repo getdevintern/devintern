@@ -88,12 +88,23 @@ export interface OrphanRecoveryDeps {
   /** Skip feedback for runs started before `now - maxAgeMs`. */
   maxAgeMs?: number;
   /**
-   * Run ids named by a durable resume note left at a clean worker stop. Their
-   * in-progress child already reported the interruption through its own
-   * SIGTERM handler, so recovery must not post a second crash comment; they
-   * are still eligible for session pickup.
+   * Run ids named by a durable resume note left at a clean worker stop. Used
+   * to label the reaped rows as a clean stop rather than a crash; the decision
+   * to suppress crash feedback is driven by positive per-run evidence (see
+   * {@link getAttemptReportedAt} and {@link RunRecord.cleanStop}), never by
+   * the note alone — the note is a point-in-time snapshot that can miss a run
+   * whose row the child created after the signal.
    */
   cleanStopRunIds?: ReadonlySet<number>;
+  /**
+   * Reported-at timestamp of the last recorded incomplete attempt for a task,
+   * or undefined when none. A recorded attempt at/after `run.startedAt` is
+   * positive evidence that the interrupted child already delivered its
+   * shutdown feedback, so recovery suppresses the crash comment. Absent →
+   * recovery reports the failure, so a tracker hiccup at shutdown can never
+   * strand a ticket silently.
+   */
+  getAttemptReportedAt?: (taskKey: string) => number | undefined;
   /** Present tense "now", overridable in tests. */
   now?: number;
   /**
@@ -144,12 +155,48 @@ function cleanStopReasonById(
   return reasons;
 }
 
-/** Whether a run was interrupted by a deliberate worker stop. */
-function isCleanStopRun(run: RunRecord, cleanStopRunIds: ReadonlySet<number> | undefined): boolean {
-  if (!cleanStopRunIds) {
-    return false;
+/**
+ * Positive evidence that the interrupted child already delivered its clean-stop
+ * feedback, so recovery must not post a duplicate crash comment:
+ *
+ * - the run row carries the child's own durable `clean_stop` marker (covers a
+ *   run whose row was created after the parent's point-in-time snapshot), or
+ * - a retry-gate attempt was recorded at/after the run started (the child
+ *   records one right after a successful comment post; a run whose marker write
+ *   raced the row creation still has this).
+ *
+ * The durable resume note alone is deliberately not sufficient: it cannot tell
+ * a delivered interruption from a tracker hiccup, which would otherwise strand
+ * the ticket.
+ */
+function childDeliveredFeedback(
+  run: RunRecord,
+  getAttemptReportedAt: ((taskKey: string) => number | undefined) | undefined,
+): boolean {
+  if (run.cleanStop === true) {
+    return true;
   }
-  return cleanStopRunIds.has(run.id);
+  const reportedAt = getAttemptReportedAt?.(run.taskKey ?? "");
+  return reportedAt !== undefined && reportedAt >= run.startedAt;
+}
+
+/**
+ * Add clean-stop reap reasons for runs whose child left its own durable
+ * `clean_stop` marker, so those rows are labelled a clean stop even when the
+ * parent's snapshot-time note missed them.
+ */
+function mergeCleanStopMarkerReasons(
+  reasonById: Map<number, string> | undefined,
+  runs: readonly RunRecord[],
+): Map<number, string> | undefined {
+  let reasons = reasonById;
+  for (const run of runs) {
+    if (run.cleanStop) {
+      reasons ??= new Map<number, string>();
+      reasons.set(run.id, CLEAN_STOP_RUN_REASON);
+    }
+  }
+  return reasons;
 }
 
 /** Outcome of checking whether an orphaned ticket is still stranded. */
@@ -201,10 +248,11 @@ export async function recoverOrphanedTaskRuns(
   }
 
   // Reap first (all origins) — the pre-existing behavior this module builds on.
-  // Runs named by a clean-stop resume note are reaped with a distinct reason so
-  // the history does not report a clean stop as a crash.
+  // Runs named by a clean-stop resume note, and runs whose child left its own
+  // durable `clean_stop` marker, are reaped with a distinct reason so the
+  // history does not report a clean stop as a crash.
   const cleanStopRunIds = deps.cleanStopRunIds;
-  const reasonById = cleanStopReasonById(cleanStopRunIds);
+  const reasonById = mergeCleanStopMarkerReasons(cleanStopReasonById(cleanStopRunIds), orphans);
   let reaped = 0;
   try {
     reaped = deps.runStore.reapOrphanedRuns(reasonById ? { reasonById } : {});
@@ -315,9 +363,13 @@ export async function recoverOrphanedTaskRuns(
     }
 
     // A clean stop's in-progress child already posted the interruption comment
-    // through its own SIGTERM handler. Re-posting here would duplicate it and
-    // falsely frame an operator-requested stop as a crash.
-    if (isCleanStopRun(run, cleanStopRunIds)) {
+    // through its own SIGTERM handler. Suppress the crash comment only on
+    // positive evidence the child delivered it (its own `clean_stop` marker, or
+    // a retry attempt recorded at/after the run started). The portable resume
+    // note is only a snapshot and cannot distinguish delivery from a tracker
+    // hiccup at shutdown, so it must never suppress on its own — otherwise a
+    // failed report strands the ticket in In Progress with no comment.
+    if (childDeliveredFeedback(run, deps.getAttemptReportedAt)) {
       log(
         `⏸️  ${taskKey} was interrupted by a clean worker stop (run #${run.id}); ` +
           "its interrupted run already reported the stop, so no crash comment is posted",

@@ -86,6 +86,14 @@ export interface RunRecord extends RunMeta {
   finishedAt?: number;
   /** Markdown snapshot of the ticket description captured at run start. */
   taskDescription?: string;
+  /**
+   * Set by the interrupted child once it has delivered its clean-stop
+   * interruption feedback (posted, or deliberately skipped under
+   * `--skip-comments`). Orphan recovery treats this positive marker as
+   * evidence that no crash comment is needed, so it never has to trust the
+   * parent's point-in-time resume note.
+   */
+  cleanStop?: boolean;
 }
 
 export interface RunStageRecord {
@@ -211,7 +219,8 @@ export class RunStore {
         automation_id TEXT,
         ticket_key TEXT,
         ticket_url TEXT,
-        task_description TEXT
+        task_description TEXT,
+        clean_stop INTEGER NOT NULL DEFAULT 0
       )
     `);
 
@@ -234,6 +243,9 @@ export class RunStore {
     }
     if (!columns.some((c) => c.name === "task_description")) {
       this.db.run("ALTER TABLE runs ADD COLUMN task_description TEXT");
+    }
+    if (!columns.some((c) => c.name === "clean_stop")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN clean_stop INTEGER NOT NULL DEFAULT 0");
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
@@ -384,6 +396,23 @@ export class RunStore {
         runId,
       ],
     );
+  }
+
+  /**
+   * Durably mark an in-progress run as interrupted by a clean worker stop
+   * whose shutdown feedback the child already delivered (posted, or
+   * deliberately skipped). The run row itself carries the marker, so orphan
+   * recovery can trust it regardless of when the parent snapshotted the run —
+   * unlike the point-in-time resume note, which can miss a run row the child
+   * created after the signal.
+   *
+   * Only in-progress rows are marked: a run that finished normally during
+   * shutdown must not be labelled a clean stop.
+   *
+   * @param runId - Run id
+   */
+  markCleanStop(runId: number): void {
+    this.db.run(`UPDATE runs SET clean_stop = 1 WHERE id = ? AND status = 'in_progress'`, [runId]);
   }
 
   /**
@@ -732,6 +761,7 @@ export class RunStore {
       ticketKey: (row.ticket_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
       taskDescription: (row.task_description as string | null) ?? undefined,
+      cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
     };
   }
 
@@ -879,6 +909,30 @@ export function recordRunTicket(ticket: {
     currentStore.setRunTicket(currentRunId, ticket);
   } catch (error) {
     warnOnce("ticket", error);
+  }
+}
+
+/**
+ * Mark a specific run as a clean stop once its interruption feedback has been
+ * handled (no-op when no run has been recorded in this process). Best-effort:
+ * a storage failure is logged and left for orphan recovery to treat as an
+ * unreported crash, which only ever means a duplicate comment — never a
+ * stranded ticket.
+ *
+ * The run id is captured by the caller when the stop signal arrives, so a run
+ * the process starts while shutdown feedback is still being delivered is never
+ * mislabelled.
+ *
+ * @param runId - Run id captured at signal time
+ */
+export function markRunCleanStop(runId: number): void {
+  if (currentStore === null) {
+    return;
+  }
+  try {
+    currentStore.markCleanStop(runId);
+  } catch (error) {
+    warnOnce("clean-stop", error);
   }
 }
 

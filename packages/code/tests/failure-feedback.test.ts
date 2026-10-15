@@ -144,6 +144,19 @@ describe("reportTaskFailure", () => {
       extractDescriptionText: (): string => "",
     } as unknown as TaskTrackerClient;
 
-    await expect(reportTaskFailure(deps({ tracker }))).resolves.toBeUndefined();
+    await expect(reportTaskFailure(deps({ tracker }))).resolves.toBe(false);
+  });
+
+  test("reports true only when the failure comment was delivered", async () => {
+    expect(await reportTaskFailure(deps())).toBe(true);
+
+    const tracker = {
+      ...fakeTracker(),
+      postComment: async () => {
+        throw new Error("tracker down");
+      },
+    } as unknown as TaskTrackerClient;
+
+    expect(await reportTaskFailure(deps({ tracker }))).toBe(false);
   });
 });

@@ -44,6 +44,7 @@ import { AUTOMATION_ACCESS_EXIT_CODE } from "./lib/worker/usage-limit-protocol";
 import { runEstimationBatch, resolveRunTargets, runTaskBatch } from "./lib/cli/run";
 import { processSingleTask } from "./lib/task/pipeline";
 import { reportProcessingFailure } from "./lib/task/processing-failure";
+import { markRunCleanStop, getActiveRunContext } from "./lib/state/run-recorder";
 import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
 import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
@@ -382,13 +383,24 @@ async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number):
   // leaving it silently in "In Progress" with no PR and no feedback.
   const context = runContext.activeTaskContext;
   if (context) {
+    // Pin the run being interrupted now: shutdown feedback below may outlive
+    // this run (and, in batch mode, a later one), so marking "whatever is
+    // active afterwards" could mislabel the wrong run.
+    const interruptedRunId = getActiveRunContext()?.id;
     // Bound the feedback attempt so tracker I/O can never stall shutdown.
     const shutdownTimer = setTimeout(() => process.exit(exitCode), 15_000);
     try {
-      await reportProcessingFailure(
+      const handled = await reportProcessingFailure(
         context.taskKey,
         `Processing was interrupted (${signal}) before a pull request could be created`,
       );
+      // Durably record that this run's interruption feedback was handled, on
+      // the run row itself. Orphan recovery trusts this positive marker, so a
+      // tracker hiccup here (handled = false) leaves the run unmarked and the
+      // next start reports the failure instead of stranding the ticket.
+      if (handled && interruptedRunId !== undefined) {
+        markRunCleanStop(interruptedRunId);
+      }
     } catch {
       /* best-effort: never block shutdown on tracker I/O */
     }

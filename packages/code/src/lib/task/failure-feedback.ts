@@ -44,23 +44,27 @@ export interface FailureFeedbackDeps {
  * status. On successful comment delivery, also persist the attempt so the
  * harness itself posting the comment never counts as "the ticket changed".
  *
- * Never throws.
+ * Never throws. Returns `true` when the failure comment was delivered, so a
+ * caller (the child's SIGTERM handler) can record a durable clean-stop marker
+ * only when recovery genuinely has nothing left to post.
  */
-export async function reportTaskFailure(deps: FailureFeedbackDeps): Promise<void> {
+export async function reportTaskFailure(deps: FailureFeedbackDeps): Promise<boolean> {
   const { taskKey, reason, tracker } = deps;
 
+  let posted = false;
   try {
     await tracker.postComment(taskKey, {
       format: "markdown",
       body: formatProcessingFailureMarkdown(taskKey, reason),
     });
     deps.log?.(`💬 Posted a failure comment to ${taskKey}`);
+    posted = true;
     await recordAttemptForGate(deps);
   } catch (commentError) {
     deps.warn?.(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
   }
 
-  if (!deps.movedToInProgress) return;
+  if (!deps.movedToInProgress) return posted;
   try {
     const todoStatus = deps.getTodoStatus();
     if (todoStatus && todoStatus.trim()) {
@@ -70,6 +74,7 @@ export async function reportTaskFailure(deps: FailureFeedbackDeps): Promise<void
   } catch (transitionError) {
     deps.warn?.(`⚠️  Failed to move ${taskKey} back to To Do: ${transitionError}`);
   }
+  return posted;
 }
 
 /**
