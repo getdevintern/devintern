@@ -24,6 +24,7 @@ import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
+import { InjectedTaskStore } from "../state/injected-tasks";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
@@ -58,6 +59,8 @@ import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
+import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
   createFleetTaskExecutor,
@@ -66,7 +69,7 @@ import {
   fleetTaskArgs,
   resolveActionedSource,
 } from "./fleet-executor";
-import type { RepoManagerLike } from "./fleet-executor";
+import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
 import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
@@ -189,6 +192,22 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     } finally {
       retryQueue.close();
     }
+
+    // Ad-hoc injected tasks claimed by the previous worker: fail the rows so
+    // `worker add --wait` (or a retried automation) settles instead of
+    // hanging on a run that will never finish.
+    const injectedTasks = new InjectedTaskStore(dbPath);
+    try {
+      for (const orphan of injectedTasks.failRunning(
+        "worker restarted while this task was running",
+      )) {
+        console.warn(
+          `⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`,
+        );
+      }
+    } finally {
+      injectedTasks.close();
+    }
   } finally {
     retryStore?.close();
     runStore.close();
@@ -291,6 +310,32 @@ async function withSupervisorSlot(
     if (error instanceof JobNotStartedError) return null;
     throw error;
   }
+}
+
+/**
+ * Build the `worker add` drain acquirer: claims durable injected rows and runs
+ * each through the fleet executor, pinned to the repo the row names.
+ */
+function buildInjectedTaskAcquirer(
+  deps: FleetExecutorDeps,
+  store: InjectedTaskStore,
+  verbose?: boolean,
+): InjectedTaskAcquirer {
+  return new InjectedTaskAcquirer({
+    store,
+    execute: (task) =>
+      createFleetTaskExecutor(deps, {
+        extraArgs: () => fleetTaskArgs(deps.config),
+        repo: task.repo,
+        source: INJECTED_TASK_SOURCE,
+        runOrigin: "local",
+        // The CLI resolves the local markdown file; the key still names the
+        // worktree and supervisor label.
+        taskRef: task.taskFile,
+      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
+    intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
+    verbose,
+  });
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -608,7 +653,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  assertWorkspaceHasWork(config, retryQueue, multiTeam, initialQuery);
+  // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
+  // drain through the same fleet executor.
+  const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+
+  assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   startWorkerFailover({
@@ -689,6 +738,17 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
     }),
+  );
+
+  // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
+  // pinned to their explicit repo, and run through the normal pipeline (which
+  // inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
+  acquirers.push(
+    buildInjectedTaskAcquirer(
+      { config, workspaceDir, skips: state.skips, repoManager, supervisor },
+      injectedTasks,
+      options.verbose,
+    ),
   );
 
   // Always assembled (even with no automations yet): a live reload can add
@@ -1086,12 +1146,13 @@ function applyWorkspaceEnv(
 /**
  * Exit when workspace mode has no work configured.
  *
- * Scheduled dashboard retries are the one exception: the worker can still run
- * to drain them.
+ * Scheduled dashboard retries and queued injected tasks are the exceptions:
+ * the worker can still run to drain them.
  */
 function assertWorkspaceHasWork(
   config: WorkspaceConfig,
   retryQueue: ScheduledRetryStore,
+  injectedPending: boolean,
   multiTeam: boolean,
   initialQuery: string | undefined,
 ): void {
@@ -1103,9 +1164,9 @@ function assertWorkspaceHasWork(
     config.errorMonitors.some((source) => source.enabled);
   if (hasWork) return;
 
-  if (retryQueue.hasPending()) {
+  if (retryQueue.hasPending() || injectedPending) {
     console.warn(
-      "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+      "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
     );
     return;
   }

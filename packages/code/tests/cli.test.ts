@@ -177,6 +177,12 @@ describe.concurrent("CLI Argument Handling", () => {
     const addRepo = await runCLI(["worker", "add-repo", "--help"]);
     expect(addRepo.exitCode).toBe(0);
     expect(addRepo.stdout).toContain("Usage: devintern worker add-repo");
+
+    const add = await runCLI(["worker", "add", "--help"]);
+    expect(add.exitCode).toBe(0);
+    expect(add.stdout).toContain("Usage: devintern worker add");
+    expect(add.stdout).toContain("--idempotency-key");
+    expect(add.stdout).toContain("--body-file");
   });
 
   test("should show workspace-only worker connect help", async () => {

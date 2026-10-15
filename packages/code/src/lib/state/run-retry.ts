@@ -56,6 +56,12 @@ export interface RetryEligibility {
 export function isRunRetriable(
   run: Pick<RunRecord, "status" | "taskKey" | "automationId"> & { origin?: RunRecord["origin"] },
 ): RetryEligibility {
+  if (run.origin === "local") {
+    return {
+      eligible: false,
+      reason: "re-dispatch ad-hoc tasks with `devintern worker add` (optionally --idempotency-key)",
+    };
+  }
   if (run.automationId) {
     if (run.origin === "estimate") {
       return { eligible: false, reason: "estimation sweeps re-run on their schedule" };

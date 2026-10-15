@@ -69,6 +69,17 @@ export function reposDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "repos");
 }
 
+/**
+ * Directory holding ad-hoc task prompt files written by `devintern worker add`.
+ *
+ * Kept in the workspace home (next to `repos/`, `worktrees/`, and the central
+ * DB) so an enqueued task survives worker restarts and never depends on a
+ * repo checkout being present.
+ */
+export function injectedTasksDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "injected");
+}
+
 /** Directory holding per-task worktrees (`worktrees/<repo>/<task>`). */
 export function worktreesDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "worktrees");

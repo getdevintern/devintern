@@ -9,6 +9,7 @@ export const RUN_ORIGIN_LABELS = {
   scheduled: "Scheduled automation",
   estimate: "Estimate run",
   manual: "Manual run",
+  local: "Local add",
 } satisfies Record<RunOrigin, string>;
 
 export function formatRunOrigin(origin: RunOrigin): string {

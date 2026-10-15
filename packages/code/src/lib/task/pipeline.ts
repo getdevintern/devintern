@@ -473,6 +473,7 @@ async function prepareTask(input: {
   const isManualAutomationRun =
     scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
   const isErrorMonitorRun = process.env[RUN_ORIGIN_ENV] === "error_monitor";
+  const isLocalInjectedRun = process.env[RUN_ORIGIN_ENV] === "local";
   beginRun({
     origin: scheduledAutomationId
       ? isManualAutomationRun
@@ -480,9 +481,11 @@ async function prepareTask(input: {
         : "scheduled"
       : isErrorMonitorRun
         ? "error_monitor"
-        : "task",
+        : isLocalInjectedRun
+          ? "local"
+          : "task",
     taskKey: workflowKey,
-    tracker: isErrorMonitorRun ? "sentry" : trackerName,
+    tracker: isErrorMonitorRun ? "sentry" : isLocalInjectedRun ? "local" : trackerName,
     team: process.env.DEVINTERN_WORKSPACE_TEAM,
     repo: process.env.DEVINTERN_WORKSPACE_REPO,
     // The harness that will implement this run (resolved at startup).

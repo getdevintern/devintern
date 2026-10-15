@@ -41,6 +41,7 @@ const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "scheduled",
   "estimate",
   "manual",
+  "local",
 ];
 
 /** Paginated, filterable list of worker runs. */

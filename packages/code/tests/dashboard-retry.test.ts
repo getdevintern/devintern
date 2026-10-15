@@ -106,6 +106,16 @@ describe("isRunRetriable", () => {
     expect(result.eligible).toBe(false);
     expect(result.reason).toContain("estimation");
   });
+
+  test("local injected runs are re-dispatched with worker add, not hand-retried", () => {
+    const result = isRunRetriable({
+      status: "failed",
+      taskKey: "local-fix-flaky-test",
+      origin: "local",
+    });
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toContain("worker add");
+  });
 });
 
 describe("handleRetryRun", () => {

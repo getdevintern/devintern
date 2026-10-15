@@ -104,6 +104,15 @@ async function runWorkerAddRepoSubcommand(args: string[]): Promise<never> {
 }
 
 /**
+ * `devintern worker add` — enqueue a one-off task for a workspace repo
+ * without a tracker ticket.
+ */
+async function runWorkerAddSubcommand(args: string[]): Promise<never> {
+  const { runWorkerAdd } = await import("../workspace/add-command");
+  process.exit(await runWorkerAdd(args));
+}
+
+/**
  * `devintern worker run-now` — ask a running workspace worker for one immediate
  * drain, bypassing working windows without editing them.
  */
@@ -220,7 +229,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     } else if (arg === "-v" || arg === "--verbose") {
       verbose = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: devintern worker [init|login|scaffold|add-repo|run-now] [options]");
+      console.log("Usage: devintern worker [init|login|scaffold|add-repo|add|run-now] [options]");
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log("");
       console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
@@ -242,6 +251,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  login               Sign in for this worker workspace");
       console.log("  scaffold            Create workspace.toml and the shared .env only");
       console.log("  add-repo            Add the current repository to the worker workspace");
+      console.log("  add                 Enqueue a one-off task for a workspace repo");
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
       console.log("");
@@ -332,6 +342,7 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "connect") return runWorkerConnectSubcommand(rest);
   if (subcommand === "scaffold") return runWorkerScaffoldSubcommand(rest);
   if (subcommand === "add-repo") return runWorkerAddRepoSubcommand(rest);
+  if (subcommand === "add") return runWorkerAddSubcommand(rest);
   if (subcommand === "run-now") return runWorkerRunNowSubcommand(rest);
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
