@@ -67,6 +67,7 @@ describe("recoverOrphanedTaskRuns", () => {
     now?: number;
     maxAgeMs?: number;
     branchExists?: (branch: string, run: RunRecord) => boolean;
+    cleanStopRunIds?: ReadonlySet<number>;
   }
 
   function recover({
@@ -76,6 +77,7 @@ describe("recoverOrphanedTaskRuns", () => {
     now = Date.now(),
     maxAgeMs = DEFAULT_ORPHAN_MAX_AGE_MS,
     branchExists,
+    cleanStopRunIds,
   }: RecoveryOptions = {}) {
     return recoverOrphanedTaskRuns({
       runStore: store,
@@ -88,6 +90,7 @@ describe("recoverOrphanedTaskRuns", () => {
       maxAgeMs,
       now,
       ...(branchExists ? { branchExists } : {}),
+      ...(cleanStopRunIds ? { cleanStopRunIds } : {}),
       log: () => {},
       warn: () => {},
     });
@@ -167,6 +170,48 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(posted).toHaveLength(0);
     expect(transitions).toHaveLength(0);
     expect(retryStore.getRetryState("PROJ-11")).toBeNull();
+  });
+
+  test("clean stop: reaps with a distinct reason and posts no crash comment", async () => {
+    // The run is in progress because the worker was asked to stop (SIGTERM).
+    // Its child already reported the interruption, so recovery must not post a
+    // second, crash-framed comment.
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-14" });
+
+    const result = await recover({ cleanStopRunIds: new Set([runId]) });
+
+    expect(result.reaped).toBe(1);
+    expect(result.recovered).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+    expect(retryStore.getRetryState("PROJ-14")).toBeNull();
+
+    const run = store.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.outcomeReason).toContain("cleanly");
+    expect(run?.outcomeReason).not.toContain("exited unexpectedly");
+  });
+
+  test("clean stop with resumable state still schedules a pickup", async () => {
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-15",
+      branch: "feature/proj-15",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+
+    const result = await recover({ cleanStopRunIds: new Set([runId]) });
+
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
   });
 
   test("falls back to failure feedback when the recorded state is incomplete", async () => {

@@ -22,6 +22,12 @@ import {
 } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import {
+  buildResumeNote,
+  consumeResumeNote,
+  resumeNoteRunIds,
+  writeResumeNote,
+} from "../state/resume-note";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { createTaskActionedGate } from "../task/actioned-state";
@@ -39,6 +45,7 @@ import {
   resolveWorkspaceDir,
   workspaceConfigPath,
   workspaceDbPath,
+  workspaceResumeNotePath,
   worktreesDir,
   workspaceRunNowPath,
 } from "./paths";
@@ -76,6 +83,43 @@ function orphanMaxAgeMs(): number {
 }
 
 /**
+ * Write the durable resume note for the runs still in progress at a clean
+ * worker stop. Only a metadata file is touched: the run rows are left exactly
+ * as the interrupted children wrote them, so nothing irreversible happens on
+ * the signal path.
+ *
+ * Best-effort — a storage failure is logged and never aborts shutdown.
+ *
+ * @returns True when the note was persisted.
+ */
+export function writeWorkspaceResumeNote(options: {
+  dbPath: string;
+  path: string;
+  signal: string;
+}): boolean {
+  const { dbPath, path, signal } = options;
+  let runStore: RunStore | null = null;
+  try {
+    runStore = new RunStore(dbPath);
+    const runs = runStore.listRuns({ status: "in_progress", limit: 1000 });
+    if (runs.length === 0) return false;
+    const note = buildResumeNote(runs, { signal });
+    const written = writeResumeNote(path, note);
+    if (written) {
+      console.log(`📝 Recorded a resume note for ${note.runs.length} in-flight run(s) at ${path}`);
+    } else {
+      console.warn(`⚠️  Could not persist the resume note at ${path}`);
+    }
+    return written;
+  } catch (error) {
+    console.warn(`⚠️  Could not build the resume note: ${(error as Error).message}`);
+    return false;
+  } finally {
+    runStore?.close();
+  }
+}
+
+/**
  * Recover task runs left in progress by a previous (dead) worker before any
  * acquirer picks up new tickets: reap them and give their tickets the
  * graceful-shutdown feedback (failure comment + move back to To Do). Also
@@ -91,6 +135,20 @@ export async function recoverOrphanedWorkspaceRuns(options: {
 }): Promise<void> {
   const { config, workspaceDir, dbPath } = options;
   const runStore = new RunStore(dbPath);
+  // A resume note written at the previous clean stop names the runs that were
+  // in flight. Consume it once: those runs already delivered their own
+  // interruption feedback through the child's SIGTERM handler, so recovery
+  // must not repeat it, and their recorded branch/report stay eligible for
+  // pickup. A note from a crash (if any) cannot exist, so this only ever
+  // narrows the crash path, never widens it.
+  const cleanStopRunIds = resumeNoteRunIds(
+    consumeResumeNote(workspaceResumeNotePath(workspaceDir)),
+  );
+  if (cleanStopRunIds.size > 0) {
+    console.log(
+      `📝 Consumed a resume note from a clean worker stop (${cleanStopRunIds.size} in-flight run(s))`,
+    );
+  }
   let retryStore: RetryStateStore | null = null;
   try {
     const hasTaskOrphans =
@@ -139,6 +197,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       recordAttempt: (taskKey, type, description) =>
         retryStore?.recordIncompleteAttempt(taskKey, type, description),
       maxAgeMs: orphanMaxAgeMs(),
+      cleanStopRunIds,
       // Probe the run's repo base worktree so orphan recovery decides
       // resume/fresh with the same ref check the pipeline uses. A missing
       // repo/worktree falls back to trusting the record rather than dropping a
@@ -1031,6 +1090,16 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       beforeAcquirersStart: options.beforeAcquirersStart,
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
+      // Snapshot in-flight runs into a durable resume note on SIGTERM/drain so
+      // the next start can tell a clean stop from a crash and resume rather
+      // than re-report. Only metadata is written here.
+      writeResumeNote: (signal) => {
+        writeWorkspaceResumeNote({
+          dbPath: state.dbPath,
+          path: workspaceResumeNotePath(workspaceDir),
+          signal,
+        });
+      },
       onShutdown: () => {
         reloader.stop();
         autoUpdater.stop();

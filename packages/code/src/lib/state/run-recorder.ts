@@ -451,9 +451,12 @@ export class RunStore {
    * stage are one transaction, and the sweep only touches rows that are still
    * `in_progress`, so repeated calls are no-ops.
    *
+   * @param options - Optional per-run outcome reasons (e.g. a clean worker
+   *                  stop recorded in a durable resume note). Runs without an
+   *                  override keep the crash reason.
    * @returns Number of reaped runs
    */
-  reapOrphanedRuns(): number {
+  reapOrphanedRuns(options: { reasonById?: ReadonlyMap<number, string> } = {}): number {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
     return this.db
@@ -471,13 +474,14 @@ export class RunStore {
           .all() as Array<{ id: number }>;
         let reaped = 0;
         for (const orphan of orphans) {
+          const orphanReason = options.reasonById?.get(orphan.id) ?? reason;
           const result = this.db.run(
             `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
              WHERE id = ? AND status = 'in_progress'`,
-            [reason, now, orphan.id],
+            [orphanReason, now, orphan.id],
           );
           if (result.changes === 1) {
-            this.replaceOutcomeStage(orphan.id, "failed", reason);
+            this.replaceOutcomeStage(orphan.id, "failed", orphanReason);
             reaped += 1;
           }
         }

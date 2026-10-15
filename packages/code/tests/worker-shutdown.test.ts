@@ -175,6 +175,58 @@ describe("createWorkerShutdownHandler", () => {
     expect(order).toEqual(["begin", "stop", "hook", "lock", "exit:0"]);
   });
 
+  test("persists the resume note after the drain starts and before acquirers stop", async () => {
+    const order: string[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [
+        {
+          name: "scheduled",
+          stop: () => {
+            order.push("stop");
+          },
+        },
+      ],
+      beginShutdown: () => {
+        order.push("begin");
+      },
+      writeResumeNote: (signal) => {
+        order.push(`note:${signal}`);
+      },
+      lock: { release: () => order.push("lock") },
+      flush: async () => undefined,
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    expect(order).toEqual(["begin", "note:SIGTERM", "stop", "lock", "exit:0"]);
+  });
+
+  test("a failing resume note hook never aborts shutdown", async () => {
+    const order: string[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [
+        {
+          name: "scheduled",
+          stop: () => {
+            order.push("stop");
+          },
+        },
+      ],
+      writeResumeNote: () => {
+        order.push("note");
+        throw new Error("disk full");
+      },
+      lock: { release: () => order.push("lock") },
+      flush: async () => undefined,
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    expect(order).toEqual(["note", "stop", "lock", "exit:0"]);
+  });
+
   test("continues cleanup when an acquirer and shutdown hook fail", async () => {
     const order: string[] = [];
     const handler = createWorkerShutdownHandler({

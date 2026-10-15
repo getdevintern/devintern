@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
   recoverOrphanedWorkspaceRuns,
   scheduleOrphanPickups,
+  writeWorkspaceResumeNote,
 } from "../src/lib/workspace/workspace-worker";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
+import { buildResumeNote, readResumeNote, writeResumeNote } from "../src/lib/state/resume-note";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { workspaceResumeNotePath } from "../src/lib/workspace/paths";
 import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
 
@@ -72,6 +75,53 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.outcomeReason).toContain("orphaned");
+  });
+
+  test("writeWorkspaceResumeNote captures in-flight runs without mutating run rows", () => {
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-31",
+      branch: "feature/proj-31",
+    });
+    const notePath = workspaceResumeNotePath(workspaceDir);
+
+    const written = writeWorkspaceResumeNote({ dbPath, path: notePath, signal: "SIGTERM" });
+
+    expect(written).toBe(true);
+    const note = readResumeNote(notePath);
+    expect(note?.signal).toBe("SIGTERM");
+    expect(note?.runs.map((entry) => entry.runId)).toContain(runId);
+    // No irreversible state on the signal path: the run row is untouched.
+    expect(store.getRun(runId)?.status).toBe("in_progress");
+    expect(store.getRun(runId)?.finishedAt).toBeUndefined();
+  });
+
+  test("writeWorkspaceResumeNote does nothing when no run is in flight", () => {
+    const notePath = workspaceResumeNotePath(workspaceDir);
+
+    expect(writeWorkspaceResumeNote({ dbPath, path: notePath, signal: "SIGTERM" })).toBe(false);
+    expect(existsSync(notePath)).toBe(false);
+  });
+
+  test("consumes a clean-stop resume note and labels its runs as a clean stop", async () => {
+    process.env.TASK_TRACKER = "jira";
+    delete process.env.JIRA_BASE_URL;
+    delete process.env.JIRA_EMAIL;
+    delete process.env.JIRA_API_TOKEN;
+
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-30" });
+    const run = store.getRun(runId);
+    const notePath = workspaceResumeNotePath(workspaceDir);
+    writeResumeNote(notePath, buildResumeNote([run!], { signal: "SIGTERM" }));
+
+    await recoverOrphanedWorkspaceRuns({ config: workspaceConfig(), workspaceDir, dbPath });
+
+    // The note is consumed exactly once.
+    expect(existsSync(notePath)).toBe(false);
+    const reaped = store.getRun(runId);
+    expect(reaped?.status).toBe("failed");
+    expect(reaped?.outcomeReason).toContain("cleanly");
+    expect(reaped?.outcomeReason).not.toContain("exited unexpectedly");
   });
 
   test("leaves terminal history untouched", async () => {

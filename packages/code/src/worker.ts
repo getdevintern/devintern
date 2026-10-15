@@ -41,6 +41,13 @@ export interface WorkerOptions {
    */
   beginShutdown?: () => Promise<void> | void;
   /**
+   * Persist a durable resume note before in-flight work is torn down. Called
+   * once per shutdown with the triggering signal, after the admission drain
+   * starts and before acquirers stop, so it observes the runs still in
+   * progress. Best-effort: a failure is logged and never aborts shutdown.
+   */
+  writeResumeNote?: (signal: string) => Promise<void> | void;
+  /**
    * Mode-specific cleanup awaited after acquirers stop and before the worker
    * lock is released. A future execution supervisor uses this to settle jobs,
    * destroy sandboxes, and close its durable stores.
@@ -61,6 +68,8 @@ export interface WorkerOptions {
 /** Default bound for mode-specific graceful shutdown work. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 export const DEFAULT_ACCESS_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+/** Default bound for persisting the durable resume note during shutdown. */
+export const DEFAULT_RESUME_NOTE_TIMEOUT_MS = 5_000;
 
 /**
  * An event acquirer turns "something changed at the source" into queued work.
@@ -146,6 +155,11 @@ export interface WorkerShutdownDependencies {
   lock: Pick<LockManager, "release">;
   capture?: Pick<WorkerCaptureHandle, "stop"> | null;
   beginShutdown?: () => Promise<void> | void;
+  /**
+   * Persist a durable resume note derived from the run record. Invoked once
+   * per shutdown with the triggering signal, before acquirers stop.
+   */
+  writeResumeNote?: (signal: string) => Promise<void> | void;
   onShutdown?: () => Promise<void> | void;
   shutdownTimeoutMs?: number;
   finalExitCode?: () => number | Promise<number | undefined> | undefined;
@@ -216,6 +230,20 @@ export function createWorkerShutdownHandler(
       // unhandled while an acquirer is still stopping. The original promise
       // remains rejected and is reported by the bounded hook below.
       void beginningShutdown.catch(() => undefined);
+    }
+
+    // Snapshot the runs still in flight into a durable resume note before the
+    // acquirers stop. This is the only write on the signal path, and it is an
+    // idempotent metadata file — the run rows are never mutated here.
+    if (dependencies.writeResumeNote) {
+      try {
+        await runShutdownHook(
+          () => dependencies.writeResumeNote!(signal),
+          DEFAULT_RESUME_NOTE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        console.warn(`⚠️  Failed to persist resume note: ${(error as Error).message}`);
+      }
     }
 
     for (const acquirer of dependencies.acquirers) {
@@ -364,6 +392,7 @@ export async function startWorker(
     lock,
     capture,
     beginShutdown: options.beginShutdown,
+    writeResumeNote: options.writeResumeNote,
     onShutdown: async () => {
       accessMonitor?.stop();
       await options.onShutdown?.();
