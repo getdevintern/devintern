@@ -1,8 +1,8 @@
 # End-to-end tests
 
-Private Bun workspace for workflows against real services. The first suite runs
-the built Code CLI against GitHub.com using a local Markdown task and a
-deterministic agent. Git operations and GitHub API calls are real; no AI account
+Private Bun workspace for workflows against real services. The suites run the built
+Code CLI against GitHub.com and GitLab Self-Managed using a local Markdown task
+and a deterministic agent. Git operations and GitHub API calls are real; no AI account
 or task tracker is needed.
 
 ## Run locally
@@ -62,3 +62,51 @@ workflow is manual (`workflow_dispatch`): configure the repository variable
 `E2E_GITHUB_REPOSITORY` and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
+
+## Local GitLab Self-Managed
+
+Docker Engine and Docker Compose must be installed and accessible to your user.
+The setup pins GitLab CE 19.3.5 and binds HTTP to **127.0.0.1:8929** only. It
+uses named Docker volumes for GitLab configuration, logs and repository data;
+first startup downloads the image and can take several minutes. Budget roughly
+8 GB of available RAM and 15 GB of disk space for this development service.
+
+```sh
+# From the monorepo root:
+bun run --filter @devintern/e2e gitlab:up
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:gitlab
+bun run --filter @devintern/e2e gitlab:status
+bun run --filter @devintern/e2e gitlab:down
+```
+
+`gitlab:up` waits for readiness, then creates a 30-day API token for the local
+container's root account. This token is for this isolated development instance
+only. It is saved in ignored `packages/e2e/.local/gitlab.json` with mode 0600 and
+never printed. Subsequent starts reuse valid credentials; rerun `gitlab:up` to
+replace expired credentials. `gitlab:down` stops the service and preserves data;
+it does not delete Docker volumes. There is no automatic system startup.
+
+Each scenario creates a private project from the canonical fixture, then permanently
+deletes that project in cleanup and waits for it to disappear. This bypasses
+the Self-Managed instance's delayed-deletion retention for generated fixtures. Tests
+cover MR creation against an explicit branch, a nonstandard default branch when
+no target is supplied, and rejected MR API credentials after a successful push.
+They verify the remote commit and exact diff. CI pipelines in fixture projects
+are disabled. The CLI's experimental GitLab code-host flag is set only inside
+test subprocesses. No task-tracker or real AI-agent credentials are needed.
+
+To use another test instance, set **both** `E2E_GITLAB_URL` and
+`E2E_GITLAB_TOKEN`. The token needs `api` scope and permission to create/delete
+private projects in its own namespace, permanently remove those projects, and
+push branches. This suite targets GitLab Self-Managed; GitLab.com does not
+provide the same permanent-deletion behavior. CI requires these
+explicit variables and never reads local credentials. Plain HTTP is intended
+for the loopback-only container; use HTTPS for remote instances. Custom CAs,
+SSH aliases and proxies are not covered by this initial suite.
+
+Normal `bun run test` runs only local harness/configuration checks. The live
+GitLab suite requires `test:e2e:gitlab`; `test:e2e` remains the GitHub suite.
+
+Infrastructure references: [GitLab Docker installation](https://docs.gitlab.com/install/docker/installation/),
+[19.3.5 patch release](https://docs.gitlab.com/releases/patches/patch-release-gitlab-19-4-2-released/).

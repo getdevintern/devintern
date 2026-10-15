@@ -6,16 +6,19 @@ const config = await resolveGitHubConfig();
 if (!existsSync(resolve(import.meta.dir, "../../code/dist/index.js"))) {
   throw new Error("Build the CLI first: bun run --filter @getdevintern/code build");
 }
-const child = Bun.spawn([process.execPath, "test", "./tests/code", "--timeout", "240000"], {
-  cwd: resolve(import.meta.dir, ".."),
-  env: {
-    ...process.env,
-    E2E_GITHUB_REPOSITORY: config.repository,
-    E2E_GITHUB_TOKEN: config.token,
-    DEVINTERN_E2E_GITHUB: "1",
+const child = Bun.spawn(
+  [process.execPath, "test", "./tests/code/github.test.ts", "--timeout", "240000"],
+  {
+    cwd: resolve(import.meta.dir, ".."),
+    env: {
+      ...process.env,
+      E2E_GITHUB_REPOSITORY: config.repository,
+      E2E_GITHUB_TOKEN: config.token,
+      DEVINTERN_E2E_GITHUB: "1",
+    },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
   },
-  stdin: "inherit",
-  stdout: "inherit",
-  stderr: "inherit",
-});
+);
 process.exit(await child.exited);
