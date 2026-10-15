@@ -17,6 +17,8 @@ export type {
   AgentRunMode,
   AgentRunOptions,
   AgentRunResult,
+  HarnessInvocation,
+  HarnessProbe,
   ResolvedHarness,
   StructuredOutputResult,
 } from "./types.js";
@@ -63,6 +65,15 @@ export {
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
+
+// Harness capability probing (version-dependent flags, e.g. Opencode v1/v2)
+export {
+  buildHarnessInvocation,
+  parseMajorVersion,
+  probeHarness,
+  readCliVersion,
+  resetHarnessProbeCache,
+} from "./probe.js";
 
 // Attachment helpers (path injection + native image args)
 export {

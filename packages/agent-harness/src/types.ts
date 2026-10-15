@@ -115,6 +115,32 @@ export interface AgentRunResult {
 }
 
 /**
+ * Best-effort capability snapshot of an installed harness CLI, produced by
+ * {@link AgentHarness.probe} before {@link AgentHarness.buildArgs} runs.
+ *
+ * Missing fields mean "unknown": callers must treat the CLI as its baseline
+ * version rather than failing, so a probe error never aborts a run.
+ */
+export interface HarnessProbe {
+  /** Raw version string reported by the CLI, when detected (e.g. `"2.0.23"`). */
+  version?: string;
+  /** Parsed major version (e.g. `2` for `"2.0.23"`). */
+  major?: number;
+}
+
+/** Complete invocation for a harness run: argv plus spawn-environment overlays. */
+export interface HarnessInvocation {
+  /** Argument vector passed to the harness executable (excluding the prompt). */
+  args: string[];
+  /**
+   * Environment variables the CLI needs on top of the inherited environment
+   * (e.g. Opencode v2 reads its working directory and log level from `$PWD`
+   * and `OPENCODE_*`). Absent when the harness needs no overrides.
+   */
+  env?: Record<string, string>;
+}
+
+/**
  * Outcome of parsing structured (JSON) agent output requested via
  * {@link AgentRunOptions.structuredOutput}.
  */
@@ -189,15 +215,41 @@ export interface AgentHarness {
    */
   readonly constrainedModeAllowsExternalTools?: boolean;
   /**
+   * Best-effort probe of the installed CLI (typically its version), run once
+   * per executable before {@link buildArgs} so version-dependent flags can be
+   * chosen. Implementations must not throw; return `{}` when the version is
+   * unknown so callers fall back to baseline behavior.
+   *
+   * @param executablePath - Resolved path/command of the CLI to probe.
+   * @returns Capability snapshot, or `{}` when nothing could be determined.
+   */
+  probe?(executablePath: string): Promise<HarnessProbe> | HarnessProbe;
+  /**
    * Build CLI arguments for the given run options.
    *
    * Does not include the prompt; runners append the prompt separately.
    * When `options.mode` is plan/readonly, must not emit write/YOLO flags.
    *
    * @param options - Per-run flags (model, permissions, turns, mode, etc.).
+   * @param probe - Capability snapshot from {@link probe} when available. A
+   *   harness with version-dependent flags uses this to pick the right shape;
+   *   when omitted it must assume the baseline (pre-probe) CLI contract.
    * @returns Argument vector passed to the agent executable before the prompt.
    */
-  buildArgs(options: AgentRunOptions): string[];
+  buildArgs(options: AgentRunOptions, probe?: HarnessProbe): string[];
+  /**
+   * Environment overrides the CLI needs on top of the inherited environment.
+   *
+   * Some harnesses locate their working directory or log level from the
+   * environment rather than a CLI flag. Only the keys returned here are
+   * overlaid (the runner keeps the rest of the parent environment); omit the
+   * method when no overrides are needed.
+   *
+   * @param options - Per-run options (working directory, etc.).
+   * @param probe - Capability snapshot from {@link probe} when available.
+   * @returns Environment overlay, or `undefined` for none.
+   */
+  buildEnv?(options: AgentRunOptions, probe?: HarnessProbe): Record<string, string> | undefined;
   /**
    * If set, the runner passes the prompt as this flag instead of as a
    * positional argument (e.g. `--prompt "text"` rather than just `"text"`).

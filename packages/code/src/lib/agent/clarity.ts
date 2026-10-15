@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectMaxTurnsReached,
   detectUsageLimit,
@@ -15,6 +16,7 @@ import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "./analysis-mode";
 import { parseAgentJsonObject } from "./json";
 import { getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import { resolveOutputDir } from "../config/output-dir";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -72,7 +74,11 @@ export async function runClarityCheck(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const clarityArgs = harness.buildArgs(runOptions);
+      const { args: clarityArgs, env: clarityEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        runOptions,
+      );
       console.log(`🔍 Running feasibility assessment with ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${clarityArgs.join(" ")}`);
       console.log(`   Input: ${clarityFile}`);
@@ -87,7 +93,7 @@ export async function runClarityCheck(
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(clarityEnv) },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,
