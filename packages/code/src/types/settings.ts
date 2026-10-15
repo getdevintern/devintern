@@ -90,6 +90,8 @@ export interface PipelineConfig {
   steps?: PipelineStepConfig[];
   /** Project-relative paths or installed package names exporting step definitions. */
   plugins?: string[];
+  /** Local capture is automatic for registered artifacts; publication is explicit. */
+  artifacts?: import("../lib/artifacts/types").ArtifactPolicy;
 }
 
 /**

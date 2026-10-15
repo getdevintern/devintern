@@ -14,6 +14,8 @@ export interface PipelineContext {
   taskFile: string;
   workingDir: string;
   outputDir: string;
+  /** Explicit immutable outputs, independent of plugin names and step data. */
+  artifacts: import("../artifacts/types").ArtifactRegistry;
   output: string;
   committed: boolean;
   prTargetBranch: string;

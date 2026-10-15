@@ -1,112 +1,185 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { dirname, join } from "path";
-
 import {
-  listTaskArtifacts,
-  readTaskArtifact,
-  TASK_ARTIFACT_MAX_FILES,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { ArtifactStore } from "../src/lib/artifacts/store";
+import { RunArtifactRegistry } from "../src/lib/artifacts/registry";
+import { runTaskSteps } from "../src/lib/task/step-runner";
+import {
+  listRunArtifacts,
+  readRunArtifact,
+  readRunArtifactFile,
 } from "../src/lib/observability/task-artifacts";
 
-describe("task artifacts", () => {
-  let base: string;
-  let savedOutputDir: string | undefined;
+let dir: string;
+let store: ArtifactStore;
+let dbPath: string;
+const input = (path: string) => ({
+  key: "verification",
+  path,
+  title: "Verification",
+  kind: "verification" as const,
+  mediaType: "text/markdown",
+});
+const owner = (runId: number, iteration = 1) => ({
+  scope: `run-${runId}`,
+  runId,
+  step: "verify",
+  iteration,
+  commitSha: "abc123",
+});
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "artifacts-"));
+  dbPath = join(dir, "queue.db");
+  store = new ArtifactStore(dbPath);
+});
+afterEach(() => {
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
 
-  beforeEach(() => {
-    base = mkdtempSync(join(tmpdir(), "task-artifacts-"));
-    savedOutputDir = process.env.DEVINTERN_OUTPUT_DIR;
-    process.env.DEVINTERN_OUTPUT_DIR = base;
+describe("registered artifacts", () => {
+  test("snapshots files independently for each run and execution", () => {
+    const path = join(dir, "report.md");
+    writeFileSync(path, "failed");
+    const failed = store.add(input(path), owner(1), [dir]);
+    writeFileSync(path, "passed");
+    const passed = store.add(input(path), owner(1, 2), [dir]);
+    const anotherRun = store.add(input(path), owner(2), [dir]);
+    expect(store.read(failed)?.toString()).toBe("failed");
+    expect(store.read(passed)?.toString()).toBe("passed");
+    expect(store.list(1).map((artifact) => artifact.iteration)).toEqual([1, 2]);
+    expect(readRunArtifact(dbPath, 1, anotherRun.id)).toBeNull();
+    expect(failed.checksum).not.toBe(passed.checksum);
   });
 
-  afterEach(() => {
-    if (savedOutputDir === undefined) delete process.env.DEVINTERN_OUTPUT_DIR;
-    else process.env.DEVINTERN_OUTPUT_DIR = savedOutputDir;
-    rmSync(base, { recursive: true, force: true });
+  test("resolves registration paths against the worktree and records publication independently", async () => {
+    writeFileSync(join(dir, "report.md"), "report");
+    const registry = new RunArtifactRegistry(dir, dir, dbPath);
+    const artifact = (await registry.addFile(input("report.md")))!;
+    expect(registry.readText(artifact.id)).toBe("report");
+    registry.recordPublication([artifact.id], { status: "failed", message: "Forbidden" });
+    expect(registry.list()[0]?.publication?.status).toBe("failed");
+    expect(registry.list()[0]?.available).toBe(true);
   });
 
-  function write(rel: string, content: string): void {
-    const path = join(base, "dev-1", rel);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content);
-  }
-
-  test("returns [] for a missing task directory", () => {
-    expect(listTaskArtifacts("DEV-1")).toEqual([]);
+  test("rejects oversized captures before reading their bytes", () => {
+    const path = join(dir, "large.bin");
+    writeFileSync(path, "");
+    truncateSync(path, 32 * 1024 * 1024 + 1);
+    expect(() => store.add(input(path), owner(1), [dir])).toThrow("32 MiB");
   });
 
-  test("lists artifacts recursively, sorted by relative path", () => {
-    write("verify-prompt.txt", "prompt");
-    write("verify-feedback.json", "{}");
-    write("iteration-1/feedback.json", "{}");
-    write("pr-explanation.md", "# hi");
-
-    expect(listTaskArtifacts("DEV-1").map((file) => file.name)).toEqual([
-      "iteration-1/feedback.json",
-      "pr-explanation.md",
-      "verify-feedback.json",
-      "verify-prompt.txt",
+  test("resolves references within the same run and commit", () => {
+    const path = join(dir, "report.md");
+    writeFileSync(path, "![Screen](artifact:screen)");
+    const report = store.add(input(path), owner(1), [dir]);
+    const image = join(dir, "image.png");
+    writeFileSync(image, "image");
+    const screen = store.add({ ...input(image), key: "screen", mediaType: "image/png" }, owner(1), [
+      dir,
     ]);
-  });
-
-  test("reads artifact content stripped of ANSI codes and redacted", () => {
-    write("verify-prompt.txt", "\u001b[31mtoken\u001b[0m=ghp_abcdefghijklmnopqrstuvwxyz\n");
-    const content = readTaskArtifact("DEV-1", "verify-prompt.txt");
-    expect(content?.content).toContain("token=");
-    expect(content?.content).not.toContain("\u001b[31m");
-    expect(content?.content).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
-    expect(content?.content).toContain("[redacted]");
-    expect(content?.truncated).toBe(false);
-  });
-
-  test("reads nested artifacts and reports truncation", () => {
-    write("iteration-1/review-prompt.txt", "x".repeat(100));
-    expect(readTaskArtifact("DEV-1", "iteration-1/review-prompt.txt")?.content).toBe(
-      "x".repeat(100),
+    expect(readRunArtifact(dbPath, 1, report.id)?.content).toContain(
+      `/artifacts/${screen.id}/file`,
     );
-
-    const truncated = readTaskArtifact("DEV-1", "iteration-1/review-prompt.txt", { maxBytes: 10 });
-    expect(truncated?.truncated).toBe(true);
-    expect(truncated?.content).toBe("x".repeat(10));
-    expect(truncated?.totalBytes).toBe(100);
+    const other = store.add(
+      { ...input(path), key: "other" },
+      { ...owner(1), commitSha: "def456" },
+      [dir],
+    );
+    expect(readRunArtifact(dbPath, 1, other.id)?.content).toBe("Screen (artifact unavailable)");
   });
 
-  test("rejects path traversal and unsafe names", () => {
-    write("verify-prompt.txt", "ok");
-    expect(readTaskArtifact("DEV-1", "../verify-prompt.txt")).toBeNull();
-    expect(readTaskArtifact("DEV-1", "/etc/passwd")).toBeNull();
-    expect(readTaskArtifact("DEV-1", "a/../../b")).toBeNull();
-    expect(readTaskArtifact("DEV-1", "a\\b")).toBeNull();
-    expect(readTaskArtifact("DEV-1", "")).toBeNull();
+  test("redacts text before storing or downloading it", async () => {
+    const path = join(dir, "report.md");
+    writeFileSync(path, "\u001b[31msecret=ghp_abcdefghijklmnopqrstuvwxyz\u001b[0m");
+    const artifact = store.add(input(path), owner(1), [dir]);
+    expect(store.read(artifact)?.toString()).toContain("[redacted]");
+    expect(store.read(artifact)?.toString()).not.toContain("\u001b");
+    const response = readRunArtifactFile(dbPath, 1, artifact.id, true);
+    expect(await response.text()).not.toContain("ghp_");
   });
 
-  test("returns null for a missing artifact", () => {
-    expect(readTaskArtifact("DEV-1", "nope.md")).toBeNull();
+  test("does not discover unregistered files and retains missing-file metadata", () => {
+    const path = join(dir, "report.md");
+    writeFileSync(path, "hi");
+    expect(listRunArtifacts(dbPath, 1)).toEqual([]);
+    const artifact = store.add(input(path), owner(1), [dir]);
+    unlinkSync(join(store.root, artifact.id));
+    expect(listRunArtifacts(dbPath, 1)[0]?.available).toBe(false);
+    expect(readRunArtifact(dbPath, 1, artifact.id)).toBeNull();
   });
 
-  test("honors a directory override", () => {
-    const dir = join(base, "custom");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "a.txt"), "hi");
-
-    expect(listTaskArtifacts("ignored", { dir }).map((file) => file.name)).toEqual(["a.txt"]);
-    expect(readTaskArtifact("ignored", "a.txt", { dir })?.content).toBe("hi");
+  test("rejects escaped source paths, symlinks outside allowed roots, and tampered blobs", () => {
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const outside = join(dir, "outside.md");
+    writeFileSync(outside, "outside");
+    expect(() => store.add(input(outside), owner(1), [allowed])).toThrow("outside");
+    symlinkSync(outside, join(allowed, "link.md"));
+    expect(() => store.add(input(join(allowed, "link.md")), owner(1), [allowed])).toThrow(
+      "outside",
+    );
+    const artifact = store.add(input(outside), owner(1), [dir]);
+    writeFileSync(join(store.root, artifact.id), "tampered");
+    expect(store.read(artifact)).toBeNull();
   });
 
-  test("caps the number of listed files", () => {
-    for (let i = 0; i < 5; i++) write(`f-${i}.txt`, "x");
-    expect(listTaskArtifacts("DEV-1", { limit: 3 })).toHaveLength(3);
+  test("preserves binaries and forces active formats to download", async () => {
+    const path = join(dir, "image.png");
+    const bytes = Buffer.from([137, 80, 78, 71, 0, 255]);
+    writeFileSync(path, bytes);
+    const artifact = store.add(
+      { ...input(path), kind: "image", mediaType: "image/png" },
+      owner(1),
+      [dir],
+    );
+    expect(readRunArtifact(dbPath, 1, artifact.id)?.content).toBeNull();
+    const response = readRunArtifactFile(dbPath, 1, artifact.id, false);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+    const html = join(dir, "report.html");
+    writeFileSync(html, "<script>alert(1)</script>");
+    const active = store.add({ ...input(html), mediaType: "text/html" }, owner(1), [dir]);
+    expect(
+      readRunArtifactFile(dbPath, 1, active.id, false).headers.get("content-disposition"),
+    ).toStartWith("attachment");
+    expect(readRunArtifactFile(dbPath, 2, artifact.id, false).status).toBe(404);
   });
 
-  test("skips symlinks", () => {
-    if (process.platform === "win32") return;
-    write("real.txt", "real");
-    symlinkSync(join(base, "dev-1", "real.txt"), join(base, "dev-1", "link.txt"));
-
-    expect(listTaskArtifacts("DEV-1").map((file) => file.name)).toEqual(["real.txt"]);
-  });
-
-  test("exports a positive listing cap", () => {
-    expect(TASK_ARTIFACT_MAX_FILES).toBeGreaterThan(0);
+  test("preserves captures from halted steps and tracks loopback executions", async () => {
+    const registry = new RunArtifactRegistry(dir, dir, dbPath);
+    const path = join(dir, "report.md");
+    let calls = 0;
+    await runTaskSteps(
+      [
+        { name: "implement", run: async () => {} },
+        {
+          name: "verify",
+          run: async () => {
+            calls++;
+            writeFileSync(path, `attempt ${calls}`);
+            await registry.addFile(input(path));
+            return calls === 1
+              ? { kind: "repeat" as const, from: "implement", maxRepeats: 1 }
+              : { kind: "halt" as const, reason: "failed" };
+          },
+        },
+      ],
+      { artifacts: registry, results: [] },
+    );
+    expect(registry.list().map((artifact) => [artifact.step, artifact.iteration])).toEqual([
+      ["verify", 1],
+      ["verify", 2],
+    ]);
+    expect(registry.readText(registry.list()[0]!.id)).toBe("attempt 1");
   });
 });

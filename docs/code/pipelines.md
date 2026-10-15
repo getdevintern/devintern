@@ -250,7 +250,8 @@ The `context` passed to `run` is the same object across all steps and carries:
 | `taskContent` | The formatted task prompt the agent received. |
 | `taskFile` | Path to the formatted task file. |
 | `workingDir` | The repository worktree the task runs in. |
-| `outputDir` | The task artifact directory. |
+| `outputDir` | The task debug output directory. |
+| `artifacts` | Register immutable outputs and read registered evidence. |
 | `output` | The implementation output (agent stdout). |
 | `committed` | Whether the implementation has been committed. |
 | `prTargetBranch` | Base branch for the PR/diff. |
@@ -304,19 +305,16 @@ mutating steps **before** `commit` when possible.
 
 ### Surfacing artifacts in the PR and dashboard
 
-A step can write files under `context.outputDir` (the task output directory,
-default `/tmp/devintern-tasks/<task-key>/`). These are the artifacts the local
-dashboard lists under a run's **Artifacts** card, alongside the built-in
-`verify-prompt.txt` / `verify-feedback.json` and auto-review `iteration-N/`
-files. `devintern dashboard` reads them from the same `DEVINTERN_OUTPUT_DIR`, so
-a dashboard on another host (or after `/tmp` cleanup) will not see them.
+Register intended outputs with `context.artifacts.addFile({ key, path, title,
+kind, mediaType })`. The runtime snapshots each file and attributes it to this
+run and step execution. The dashboard reads the same registry; later attempts
+cannot overwrite earlier evidence.
 
-A step named with the **`pr-explainer-` prefix** can additionally contribute to
-the PR body: when it returns `{ kind: "continue", data: { content } }`, the CLI
-appends `content` as an `Explanation` section to any PR it creates for the task.
-The built-in `pr-explainer-narrative` and `pr-explainer-visual` examples use
-this convention. Contributions are advisory — a `warn` (or a missing
-explanation) is ignored and never blocks publication.
+Publication is explicit through `pipeline.artifacts.publish`: select artifact
+keys and render them inline, collapsed, embedded, or linked in one managed
+GitHub PR comment. Plugin names and `data.content` do not control publication.
+See [Pipeline artifacts](./artifacts.md) for the contract, configuration,
+uploader adapters, reference resolution, and migration instructions.
 
 ### Transient retries with `StepExecutionError`
 
@@ -451,7 +449,7 @@ Complete, runnable examples live under
 | `verify-artifacts` | Require a generated artifact and expose it through `context.results`. |
 | `transient-retry` | `StepExecutionError` single-retry vs a permanent halt. |
 | `agent-review` | `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority` with a bounded repeat. |
-| `pr-explainer-narrative`, `pr-explainer-visual` | Diff-grounded explanations written before `finalize`; surfaced in the PR body and the dashboard. |
+| `pr-explainer-narrative`, `pr-explainer-visual` | Diff-grounded explanations written before `finalize`; registered for the dashboard and optional PR-comment publication. |
 
 Run the whole suite with `bun run examples/pipeline-plugins/run-tests.ts`.
 
@@ -469,5 +467,5 @@ These files implement the behavior described above:
 
 The explainer examples' prompt guidance is adapted from public skill
 repositories; pinned revisions and attribution are in the example `CREDITS.md`
-files. A `pr-explainer-*` step's explanation is appended to the PR body, and
-task artifacts are listed in the local dashboard's run detail view.
+files. Explainer outputs are registered artifacts; pipeline policy selects what
+appears in the managed PR comment. See [Pipeline artifacts](./artifacts.md).

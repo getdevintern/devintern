@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import definition from "../plugin";
@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("pr-explainer-narrative", () => {
-  test("writes the narrative artifact and returns its path and content", async () => {
+  test("registers the narrative artifact and returns its path", async () => {
     const context = createTestContext({
       workingDir: workdir,
       outputDir: workdir,
@@ -40,7 +40,9 @@ describe("pr-explainer-narrative", () => {
     expect(artifact).toContain("Validation actually performed");
     const data = context.results.at(-1)?.result.data as { path?: string; content?: string };
     expect(data.path).toBe(join(workdir, "pr-explanation.md"));
-    expect(data.content).toContain("Where reviewers should focus");
+    const registered = context.artifacts.list().at(-1)!;
+    expect(registered.key).toBe("explanation-narrative");
+    expect(context.artifacts.readText(registered.id)).toContain("Where reviewers should focus");
   });
 
   test("grounds the prompt in step evidence and frames the diff as untrusted", async () => {
@@ -63,6 +65,34 @@ describe("pr-explainer-narrative", () => {
     expect(captured).toContain("verify: kind=continue");
     expect(captured).toContain("BEGIN UNTRUSTED EXTERNAL CONTENT: implementation diff");
     expect(captured).toContain("Never invent passing tests");
+  });
+
+  test("includes functional verification and auto-review evidence together", async () => {
+    let captured = "";
+    const context = createTestContext({
+      workingDir: workdir,
+      agentOutput: (prompt) => {
+        captured = prompt;
+        return expected;
+      },
+    });
+    for (const [key, summary] of [
+      ["verification", "acceptance criteria checked"],
+      ["auto-review", "review completed"],
+    ]) {
+      const path = join(workdir, `${key}.json`);
+      writeFileSync(path, JSON.stringify({ summary }));
+      await context.artifacts.addFile({
+        key: key!,
+        path,
+        title: key!,
+        kind: "verification",
+        mediaType: "application/json",
+      });
+    }
+    await runDefinition(definition, context, { config: { promptFile } });
+    expect(captured).toContain("acceptance criteria checked");
+    expect(captured).toContain("review completed");
   });
 
   test("degrades to an advisory warning when the prompt file is missing", async () => {

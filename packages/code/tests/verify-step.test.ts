@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RunArtifactRegistry } from "../src/lib/artifacts/registry";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
@@ -22,6 +23,7 @@ const feedback: ReviewFeedback = {
 
 function state(verify: FinalizeContext["verify"]): DeliveryState {
   return {
+    artifacts: new RunArtifactRegistry(outputDir, outputDir, join(outputDir, "artifacts.db")),
     taskContent: "Implement the feature",
     taskFile: join(outputDir, "task.md"),
     workingDir: process.cwd(),

@@ -1,3 +1,4 @@
+import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -603,6 +604,20 @@ describe("dashboard server", () => {
     const id = store.createRun({ origin: "task", taskKey: "PROJ-2" });
     store.close();
 
+    const artifacts = new ArtifactStore(dbPath);
+    const artifact = artifacts.add(
+      {
+        key: "verify",
+        path: join(outputDir, "proj-2", "verify-prompt.txt"),
+        title: "Verification",
+        kind: "verification",
+        mediaType: "text/plain",
+      },
+      { scope: `run-${id}`, runId: id, step: "verify", iteration: 1 },
+      [outputDir],
+    );
+    artifacts.close();
+
     const server = startDashboardServer({ port: 0, dbPath, workingDir: dir });
     try {
       const base = `http://127.0.0.1:${server.port}`;
@@ -617,9 +632,7 @@ describe("dashboard server", () => {
       };
       expect(detail.artifacts.map((file) => file.name)).toEqual(["verify-prompt.txt"]);
 
-      const contentRes = await fetch(
-        `${base}/api/runs/${id}/artifacts/${encodeURIComponent("verify-prompt.txt")}`,
-      );
+      const contentRes = await fetch(`${base}/api/runs/${id}/artifacts/${artifact.id}`);
       expect(contentRes.status).toBe(200);
       const content = (await contentRes.json()) as { content: string };
       expect(content.content).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");

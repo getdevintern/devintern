@@ -127,11 +127,9 @@ each variant's `CREDITS.md`. The visual guidance originates in Humanlayer's
 
 ## Where the explainer output goes
 
-A `pr-explainer-*` step records `{ path, content }` in `context.results`. The
-CLI's PR-body builder appends `content` as an `Explanation` section for any
-configured step whose name starts with `pr-explainer-`, so a PR opened by such a
-step includes the explanation. The step also writes the Markdown artifact under
-the task output directory, where the local dashboard (`devintern dashboard`)
-lists it under the run's **Artifacts** card alongside the built-in `verify` and
-auto-review artifacts. Both paths are advisory: a failed explainer emits a
-`warn` result and never blocks publication.
+Explainers register immutable outputs through `context.artifacts.addFile`.
+The narrative key is `explanation-narrative`; the visual key is
+`explanation-visual`. Their `settings.json` files explicitly select publication
+in one managed PR comment. Plugin names and `data.content` have no publishing
+semantics. The same artifacts appear in the dashboard, scoped to the exact run.
+See [Pipeline artifacts](../../docs/code/artifacts.md) for the full contract.

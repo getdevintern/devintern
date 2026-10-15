@@ -14,10 +14,6 @@ import { extractImplementationSummary } from "../agent/implementation-summary";
  * verbatim. Several recognized headings that map to the same section (such as
  * `In scope` and `Out of scope`) are merged, not dropped. Otherwise the
  * summary as a whole becomes "What changed".
- *
- * A pipeline plugin (`pr-explainer-*`) may additionally contribute an
- * `Explanation` section through {@link PrBodyInput.explanation}; it is
- * appended after the canonical sections and omitted when absent.
  */
 
 /** Canonical section keys in template order. */
@@ -90,53 +86,6 @@ export interface PrBodyInput {
   taskSummary: string;
   /** Agent implementation summary; parsed for template sections when present. */
   implementationSummary?: string;
-  /**
-   * Reviewer-facing explanation contributed by a pipeline plugin (the
-   * `pr-explainer-*` examples). Rendered verbatim as an extra `Explanation`
-   * section; omitted entirely when absent so the canonical template is
-   * unchanged. Advisory: never required for a PR to be created.
-   */
-  explanation?: string;
-}
-
-/** Step-name prefix whose `data.content` contributes a PR explanation. */
-export const PR_EXPLAINER_STEP_PREFIX = "pr-explainer-";
-
-/** Upper bound on the assembled explanation so a runaway plugin cannot bloat a PR body. */
-const MAX_PR_EXPLANATION_CHARS = 60_000;
-
-/**
- * Minimal structural shape of a recorded pipeline step, used by
- * {@link extractPrExplanation}. Kept local so the PR-body builder does not
- * depend on the task-pipeline module.
- */
-export interface PrExplanationStepRecord {
-  step: string;
-  result: { data?: Record<string, unknown> };
-}
-
-/**
- * Collect the reviewer explanation a `pr-explainer-*` plugin step recorded in
- * `context.results`. A step contributes its `data.content` when it is a
- * non-empty string; steps that failed (and so produce no data) are skipped.
- */
-export function extractPrExplanation(
-  results: readonly PrExplanationStepRecord[],
-): string | undefined {
-  const parts: string[] = [];
-  for (const record of results) {
-    if (!record.step.startsWith(PR_EXPLAINER_STEP_PREFIX)) continue;
-    const content = record.result?.data?.content;
-    if (typeof content === "string" && content.trim()) {
-      parts.push(content.trim());
-    }
-    if (parts.join("\n\n").length >= MAX_PR_EXPLANATION_CHARS) break;
-  }
-  if (parts.length === 0) return undefined;
-  const combined = parts.join("\n\n");
-  return combined.length > MAX_PR_EXPLANATION_CHARS
-    ? `${combined.slice(0, MAX_PR_EXPLANATION_CHARS)}\n\n_(explanation truncated)_`
-    : combined;
 }
 
 /** Normalize a heading so aliases match regardless of case or punctuation. */
@@ -277,14 +226,12 @@ export function parsePrBodySections(
  * Build the PR body from task metadata and the agent's implementation summary.
  *
  * Every canonical section is emitted in order; missing content is marked
- * `N/A`. When an {@link PrBodyInput.explanation} is supplied, it is appended
- * as an extra `Explanation` section before the footer.
+ * `N/A`.
  *
- * @param input - Task identity, the optional agent summary, and an optional
- *   plugin explanation
+ * @param input - Task identity plus the optional agent summary
  */
 export function buildPrBody(input: PrBodyInput): string {
-  const { taskKey, taskSummary, implementationSummary, explanation } = input;
+  const { taskKey, taskSummary, implementationSummary } = input;
   const { sections: parsed, preamble } = parsePrBody(
     implementationSummary === undefined
       ? undefined
@@ -311,15 +258,6 @@ export function buildPrBody(input: PrBodyInput): string {
     lines.push(content[key] || NOT_APPLICABLE);
     lines.push("");
   }
-
-  const explanationText = explanation?.trim();
-  if (explanationText) {
-    lines.push("## Explanation");
-    lines.push("");
-    lines.push(explanationText);
-    lines.push("");
-  }
-
   lines.push("---");
   lines.push("");
   lines.push("*This PR was automatically created by @devintern/code*");

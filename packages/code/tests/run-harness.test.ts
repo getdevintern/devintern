@@ -78,7 +78,7 @@ let agentPrompts: string[];
 let autoReviewOptions: Array<{ maxIterations?: number; minPriority?: string }>;
 let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
-let prCreateOptions: { explanation?: string } | undefined;
+let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
 
 class FakeChild extends EventEmitter {
@@ -149,7 +149,7 @@ mock.module("../src/lib/code-host", () => ({
       _sourceBranch: string,
       _targetBranch: string,
       _implementationSummary: string,
-      options?: { explanation?: string },
+      options?: { artifactComment?: string },
     ) {
       prCreateOptions = options;
       return prResult;
@@ -405,35 +405,49 @@ describe("runAgentHarness git delivery", () => {
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 
-  test("forwards a pr-explainer plugin's content as the PR explanation", async () => {
+  test("publishes explicitly selected artifacts independently of the plugin name", async () => {
     scenario.stdout = "done";
-    const name = `pr-explainer-${randomUUID()}`;
+    const name = `report-${randomUUID()}`;
     registerStep({
       name,
       create: () => ({
         name,
-        run: async () => ({
-          kind: "continue",
-          data: { content: "Reviewers: focus on the undo stack." },
-        }),
+        run: async (context) => {
+          const path = join(context.outputDir, "explanation.md");
+          writeFileSync(path, "Reviewers: focus on the undo stack.");
+          await context.artifacts.addFile({
+            key: "explanation",
+            path,
+            title: "Explanation",
+            kind: "explanation",
+            mediaType: "text/markdown",
+          });
+          return { kind: "continue" };
+        },
       }),
     });
     pipelineConfig = {
+      artifacts: {
+        publish: {
+          destination: "pr-comment",
+          select: [{ key: "explanation", presentation: "inline" }],
+        },
+      },
       steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
     };
 
     await runAgentHarness({ ...baseInput(), createPr: true });
 
-    expect(prCreateOptions?.explanation).toBe("Reviewers: focus on the undo stack.");
+    expect(prCreateOptions?.artifactComment).toContain("Reviewers: focus on the undo stack.");
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 
-  test("omits the PR explanation when no pr-explainer plugin ran", async () => {
+  test("does not publish artifacts without an explicit publication policy", async () => {
     scenario.stdout = "done";
 
     await runAgentHarness({ ...baseInput(), createPr: true });
 
-    expect(prCreateOptions?.explanation).toBeUndefined();
+    expect(prCreateOptions?.artifactComment).toBeUndefined();
   });
 
   test("retries a plan-only run and publishes the committed implementation", async () => {

@@ -6,11 +6,8 @@
  * prior step results, framing task/diff as untrusted data, writing an artifact,
  * and degrading to an advisory warning on failure — live here.
  *
- * The returned `data.content` is picked up by the CLI's PR-body builder for any
- * step whose name starts with `pr-explainer-`: when a PR is created, the
- * explanation is appended as an `Explanation` section. The artifact is still
- * written for the local dashboard, and a failure remains advisory — it never
- * blocks publication. See the example README for details.
+ * Registers explanation artifacts; publication is selected explicitly through
+ * pipeline.artifacts.publish rather than inferred from the plugin's name.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -38,12 +35,12 @@ export function evidenceFromResults(results: TaskStepRecord[]): string {
   if (results.length === 0) return "(no prior step results recorded)";
   return results
     .map(({ step, result }) => {
-      const data = result.data ? ` data=${JSON.stringify(result.data)}` : "";
+      const data = result.data ? ` data=${JSON.stringify(result.data).slice(0, 500)}` : "";
       const detail = `kind=${result.kind}${data}`;
       return `- ${step}: ${detail}`;
     })
     .join("\n")
-    .slice(0, MAX_EVIDENCE_CHARS);
+    .slice(-MAX_EVIDENCE_CHARS);
 }
 
 function readPrompt(options: ExplainerOptions, workingDir: string): string | undefined {
@@ -78,7 +75,28 @@ export function createExplainerDefinition(name: string): StepDefinition {
               };
             }
 
-            const evidence = evidenceFromResults(context.results);
+            const latest = [
+              ...new Map(
+                context.artifacts.list().map((artifact) => [artifact.key, artifact]),
+              ).values(),
+            ];
+            const verification = latest.filter((artifact) => artifact.kind === "verification");
+            const priority = (key: string) =>
+              key === "verification" ? 0 : key === "auto-review" ? 1 : 2;
+            verification.sort(
+              (left, right) =>
+                priority(left.key) - priority(right.key) || right.createdAt - left.createdAt,
+            );
+            const registeredEvidence = verification
+              .slice(0, 4)
+              .map(
+                (artifact) =>
+                  `Artifact ${artifact.key}, step ${artifact.step}, execution ${artifact.iteration}:\n${context.artifacts.readText(artifact.id)?.slice(0, 2_000) ?? "(preview unavailable)"}`,
+              )
+              .join("\n\n");
+            const evidence = [evidenceFromResults(context.results), registeredEvidence]
+              .filter(Boolean)
+              .join("\n\n");
             const prompt = [
               instructions.trim(),
               "",
@@ -101,8 +119,15 @@ export function createExplainerDefinition(name: string): StepDefinition {
             const content = (await context.runAgentPrompt(prompt)).trim();
             mkdirSync(dirname(resultPath), { recursive: true });
             writeFileSync(resultPath, `${content}\n`, "utf8");
+            await context.artifacts.addFile({
+              key: name.replace(/^pr-explainer-/, "explanation-"),
+              path: resultPath,
+              title: name.endsWith("visual") ? "Visual explanation" : "Change explanation",
+              kind: "explanation",
+              mediaType: "text/markdown",
+            });
             console.log(`📝 ${name}: wrote explanation to ${resultPath}`);
-            return { kind: "continue", data: { path: resultPath, content } };
+            return { kind: "continue", data: { path: resultPath } };
           } catch (error) {
             return {
               kind: "warn",

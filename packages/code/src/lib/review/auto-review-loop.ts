@@ -689,6 +689,26 @@ export async function runAutoReviewLoop(
 
     // Save iteration artifacts
     saveIterationArtifacts(outputDir, iteration, currentFeedback, reviewPrompt);
+    if (options.onArtifact) {
+      try {
+        await options.onArtifact({
+          key: `auto-review-feedback-${iteration}`,
+          path: join(outputDir, `iteration-${iteration}`, "feedback.json"),
+          title: `Auto-review feedback, iteration ${iteration}`,
+          kind: "verification",
+          mediaType: "application/json",
+        });
+        await options.onArtifact({
+          key: `auto-review-prompt-${iteration}`,
+          path: join(outputDir, `iteration-${iteration}`, "review-prompt.txt"),
+          title: `Auto-review prompt, iteration ${iteration}`,
+          kind: "debug",
+          mediaType: "text/plain",
+        });
+      } catch (error) {
+        console.warn(`⚠️ Auto-review artifact capture failed: ${(error as Error).message}`);
+      }
+    }
 
     reportIterationFeedback(iteration, currentFeedback, history);
 

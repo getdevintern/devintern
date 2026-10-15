@@ -8,7 +8,9 @@ import {
 } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
-import { extractPrExplanation } from "../code-host/pr-body";
+import { uploadSelectedArtifacts } from "../artifacts/upload";
+import { RunArtifactRegistry } from "../artifacts/registry";
+import { buildArtifactComment } from "../artifacts/publication";
 import { resolveOutputDir } from "../config/output-dir";
 import { getTodoStatusForProject, resolveProjectKey } from "../config/project-settings";
 import {
@@ -252,10 +254,20 @@ export async function reviewImplementation(
       minPriority: config.minSeverity ?? "medium",
       workingDir: process.cwd(),
       outputDir: taskDir,
+      onArtifact: async (artifact) => {
+        await state.artifacts.addFile(artifact);
+      },
       skipPush: true,
     });
     const summaryPath = join(taskDir, "auto-review-summary.json");
     writeFileSync(summaryPath, JSON.stringify(result, null, 2));
+    await state.artifacts.addFile({
+      key: "auto-review",
+      path: summaryPath,
+      title: "Auto-review summary",
+      kind: "verification",
+      mediaType: "application/json",
+    });
     console.log(`\n📄 Auto-review summary saved to: ${summaryPath}`);
     recordRunStage("auto_review", {
       status: result.success ? "succeeded" : "failed",
@@ -285,6 +297,32 @@ export async function reviewImplementation(
     console.log("   Continuing with push and PR creation...");
   }
   return true;
+}
+
+/** Prepare optional evidence without coupling its failures to PR creation. */
+async function prepareArtifactPublication(
+  state: DeliveryState,
+): Promise<ReturnType<typeof buildArtifactComment>> {
+  try {
+    const urls =
+      state.artifacts instanceof RunArtifactRegistry
+        ? await uploadSelectedArtifacts(
+            state.artifacts,
+            state.context.artifactPolicy,
+            state.context.artifactUploader,
+          )
+        : new Map<string, string>();
+    return buildArtifactComment(state.artifacts, state.context.artifactPolicy, urls);
+  } catch (error) {
+    console.warn(`⚠️ Artifact publication preparation failed: ${(error as Error).message}`);
+    if (state.artifacts instanceof RunArtifactRegistry) {
+      state.artifacts.recordPublication(
+        state.artifacts.list().map((artifact) => artifact.id),
+        { status: "failed", message: "Artifact publication preparation failed" },
+      );
+    }
+  }
+  return undefined;
 }
 
 /** Push, comment, and create a PR after the commit/review phases. */
@@ -338,11 +376,21 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
     console.log("\n⏭️  Skipping task tracker comment posting (--skip-comments)");
   }
   if (ctx.createPr && ctx.task) {
-    await state.helpers.createPrAndTransition(
+    const comment = await prepareArtifactPublication(state);
+    const result = await state.helpers.createPrAndTransition(
       state.output,
       state.autoReviewRan,
-      extractPrExplanation(state.results),
+      comment?.body,
     );
+    if (comment && state.artifacts instanceof RunArtifactRegistry) {
+      state.artifacts.recordPublication(
+        comment.ids,
+        result?.artifactPublication ?? {
+          status: "failed",
+          message: "Pull request or artifact publication did not complete",
+        },
+      );
+    }
   }
 }
 
@@ -514,7 +562,11 @@ function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[]
 
 /** Run the existing commit, review, and publish flow as separate steps. */
 export function finalizeAgentRun(ctx: FinalizeContext): void {
+  const outputDir = ctx.taskKey
+    ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
+    : dirname(ctx.taskFile);
   const state: DeliveryState = {
+    artifacts: new RunArtifactRegistry(process.cwd(), outputDir),
     context: ctx,
     helpers: createGitHelpers(ctx),
     taskKey: ctx.taskKey,

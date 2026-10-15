@@ -45,7 +45,7 @@ import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
 import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
-import { listTaskArtifacts, readTaskArtifact } from "./task-artifacts";
+import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
 import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
 import { resolveWorkspaceDir } from "../workspace/paths";
@@ -359,38 +359,14 @@ export class DashboardData {
     return readHarnessLogContent(name);
   }
 
-  /**
-   * Task artifacts written under the run's output directory: explainer
-   * markdown, `verify-*` files, and auto-review `iteration-N/` artifacts.
-   * Sorted by relative path; empty when the run has no task key or the
-   * directory is unavailable.
-   *
-   * @param runId - Run id
-   */
+  /** Registered immutable outputs belonging to this exact attempt. */
   listRunArtifacts(runId: number): TaskArtifactFile[] {
-    const run = this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(runId));
-    if (!run?.taskKey) {
-      return [];
-    }
-    return listTaskArtifacts(run.taskKey);
+    return listRunArtifacts(this.dbPath, runId);
   }
 
-  /**
-   * Read one task artifact, only when it belongs to the given run.
-   *
-   * @param runId - Run id
-   * @param name - Artifact relative path (path traversal is rejected)
-   */
-  readRunArtifact(runId: number, name: string): TaskArtifactContent | null {
-    const run = this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(runId));
-    if (!run?.taskKey) {
-      return null;
-    }
-    const match = this.listRunArtifacts(runId).find((file) => file.name === name);
-    if (!match) {
-      return null;
-    }
-    return readTaskArtifact(run.taskKey, name);
+  /** Artifact IDs are scoped to their recorded run, including runs without a task key. */
+  readRunArtifact(runId: number, id: string): TaskArtifactContent | null {
+    return readRunArtifact(this.dbPath, runId, id);
   }
 
   /** Eligibility plus audit history for a run's retry action. */
@@ -1129,6 +1105,7 @@ export function handleRunArtifacts(data: DashboardData, idParam: string): ApiRes
   if (!Number.isFinite(id) || String(id) !== idParam) {
     return badRequest("run id must be an integer");
   }
+  if (!data.getRunDetail(id)) return { status: 404, body: { error: "run not found" } };
   return { status: 200, body: { artifacts: data.listRunArtifacts(id) } };
 }
 

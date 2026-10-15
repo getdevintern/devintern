@@ -455,12 +455,12 @@ This covers every agent execution, including task implementation, plan retries, 
 
 ## Task Artifacts in the Dashboard
 
-The local dashboard's run detail page also lists a run's **task artifacts** — the files written under `{output-dir}/{task-key}/` (implementation and feasibility summaries, `verify-prompt.txt` / `verify-feedback.json`, `iteration-{N}/`, the `pr-explainer-*` output, and attachments). The dashboard process must resolve the same `DEVINTERN_OUTPUT_DIR` as the run, and since the default path is under `/tmp`, artifacts are ephemeral and host-local. The same data is available as JSON:
-
-- `GET /api/runs/:id/artifacts` — the run's artifact list (relative paths), sorted.
-- `GET /api/runs/:id/artifacts/:name` — the redacted tail of one artifact; nested paths (`iteration-1/feedback.json`) are URL-encoded.
-
-Artifact reads are bounded and secret-redacted like harness logs.
+The dashboard lists explicitly registered **run artifacts**, stored separately
+from this disposable debug output. Snapshots survive worktree and `/tmp`
+cleanup and retain their exact run/step attribution. PR publication uses an
+explicit artifact selection and one managed comment. See
+[Pipeline artifacts](./artifacts.md) for registration, API endpoints, uploads,
+storage, and migration from `data.content` explainer plugins.
 
 ## Prompt Catalog
 

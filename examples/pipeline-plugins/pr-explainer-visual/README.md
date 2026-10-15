@@ -51,12 +51,15 @@ grounding, untrusted framing, advisory failure) identical.
 
 ## Result
 
-The step writes `pr-explanation.md` under `context.outputDir` and returns
-`{ kind: "continue", data: { path, content } }`. As with the narrative variant,
-the CLI's PR-body builder appends `content` as an `Explanation` section for any
-configured `pr-explainer-*` step, and the artifact is listed under the run's
-**Artifacts** card in the local dashboard. Generation failure returns
-`{ kind: "warn" }` and publication continues.
+The step writes `pr-explanation.md` and registers an immutable artifact with key
+`explanation-visual` through `context.artifacts.addFile`. The returned
+`data` contains the source `path`; report bodies live in the artifact registry.
+
+The example settings explicitly select this key for one managed GitHub PR
+comment. The dashboard displays the same registered output for this run.
+Generation, capture, and publication failures remain advisory.
+See [Pipeline artifacts](../../../docs/code/artifacts.md) for the full contract,
+upload adapters, and migration instructions.
 
 ## Validate
 

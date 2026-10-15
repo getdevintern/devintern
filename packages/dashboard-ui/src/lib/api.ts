@@ -98,18 +98,31 @@ export interface HarnessLogContent {
   totalBytes: number;
 }
 
-/** One file under a task's output directory (explainer, verify, iterations). */
+/** One immutable registered output, owned by a run and a step execution. */
 export interface TaskArtifactFile {
-  /** POSIX-relative path within the task output directory. */
+  id: string;
+  key: string;
   name: string;
+  title: string;
+  kind: string;
+  mediaType: string;
+  step: string;
+  iteration: number;
+  commitSha?: string;
+  createdAt: number;
   size: number;
-  modifiedAt: number;
+  available: boolean;
+  publication?: {
+    status: "published" | "failed" | "skipped";
+    commentUrl?: string;
+    message?: string;
+  };
+  upload?: { status: "uploaded" | "failed"; message?: string };
 }
 
-/** Redacted tail of a task artifact. */
 export interface TaskArtifactContent {
   name: string;
-  content: string;
+  content: string | null;
   truncated: boolean;
   totalBytes: number;
 }

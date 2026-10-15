@@ -1,3 +1,4 @@
+import { readRunArtifactFile } from "./lib/observability/task-artifacts";
 /**
  * Dashboard Server
  *
@@ -148,6 +149,7 @@ export function startDashboardServer(
   const runHarnessLogsPattern = /^\/api\/runs\/([^/]+)\/harness-logs$/;
   const runHarnessLogPattern = /^\/api\/runs\/([^/]+)\/harness-logs\/([^/]+)$/;
   const runArtifactsPattern = /^\/api\/runs\/([^/]+)\/artifacts$/;
+  const runArtifactFilePattern = /^\/api\/runs\/([1-9][0-9]*)\/artifacts\/([a-f0-9-]{36})\/file$/;
   const runArtifactPattern = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
@@ -193,6 +195,14 @@ export function startDashboardServer(
         if (artifacts) {
           return json(handleRunArtifacts(data, artifacts[1]));
         }
+        const artifactFile = pathname.match(runArtifactFilePattern);
+        if (artifactFile)
+          return readRunArtifactFile(
+            data.dbPath,
+            Number(artifactFile[1]),
+            artifactFile[2],
+            url.searchParams.has("download"),
+          );
         const artifact = pathname.match(runArtifactPattern);
         if (artifact) {
           return json(handleRunArtifact(data, artifact[1], artifact[2]));

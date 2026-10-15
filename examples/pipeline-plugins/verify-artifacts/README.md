@@ -50,7 +50,9 @@ without re-reading the file.
 ## Walkthrough
 
 Valid — generate a compliant artifact and the step continues, exposing
-`data: { path, artifact }`.
+`data: { path, artifact }`. The source file is also registered as
+`verified-artifact` before parsing, so failed validation retains the evidence
+in the dashboard. Publishing it requires an explicit artifact selection.
 
 Invalid — generate without `checks`, or point `path` at a missing file:
 

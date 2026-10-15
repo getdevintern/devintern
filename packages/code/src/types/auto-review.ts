@@ -105,6 +105,8 @@ export interface AutoReviewLoopOptions {
    * Useful when running local hook validation before a single final push.
    */
   skipPush?: boolean;
+  /** Capture freshly written outputs before a later iteration can overwrite them. */
+  onArtifact?: (artifact: import("../lib/artifacts/types").ArtifactInput) => Promise<void>;
 }
 
 export interface AutoReviewLoopResult {

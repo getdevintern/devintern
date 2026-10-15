@@ -41,19 +41,15 @@ Adjust the import in the copied `plugin.ts` to point at
 
 ## Result
 
-The step writes `pr-explanation.md` under `context.outputDir` and returns
-structured data:
+The step writes `pr-explanation.md` and registers an immutable artifact with key
+`explanation-narrative` through `context.artifacts.addFile`. The returned
+`data` contains the source `path`; report bodies live in the artifact registry.
 
-```ts
-{ kind: "continue", data: { path: "<outputDir>/pr-explanation.md", content: "..." } }
-```
-
-**PR body integration.** The CLI's PR-body builder picks up the `content` a
-`pr-explainer-*` step records in `context.results` and appends it as an
-`Explanation` section on the PR. The artifact is also listed under the run's
-**Artifacts** card in the local dashboard (`devintern dashboard`). Both paths
-are advisory: if generation fails, the step returns `{ kind: "warn" }` and
-publication continues.
+The example settings explicitly select this key for one managed GitHub PR
+comment. The dashboard displays the same registered output for this run.
+Generation, capture, and publication failures remain advisory.
+See [Pipeline artifacts](../../../docs/code/artifacts.md) for the full contract,
+upload adapters, and migration instructions.
 
 ## Validate
 

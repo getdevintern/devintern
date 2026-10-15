@@ -23,6 +23,8 @@ import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolvePipelineSteps } from "../task/pipeline-config";
 import { describePipelineSelection, selectPipelineConfig } from "../task/pipeline-selection";
+import { loadArtifactUploader } from "../artifacts/upload";
+import type { LoadedArtifactUploader } from "../artifacts/upload";
 import type { PipelineConfig } from "../../types/settings";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
@@ -483,11 +485,13 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
     : undefined;
   let selection!: ReturnType<typeof selectPipelineConfig>;
   let configuredPipeline: PipelineConfig | undefined;
+  let artifactUploader: LoadedArtifactUploader | undefined;
   let pipelineSteps: Awaited<ReturnType<typeof resolvePipelineSteps>>;
   try {
     selection = selectPipelineConfig({ settings: loadProjectSettings(), cwd: process.cwd() });
     configuredPipeline = selection.config ?? verifyFallback;
     pipelineSteps = await resolvePipelineSteps(configuredPipeline, selection.baseDir);
+    artifactUploader = await loadArtifactUploader(configuredPipeline?.artifacts, selection.baseDir);
   } catch (error) {
     const repo = process.env[WORKSPACE_REPO_ENV];
     const source = selection
@@ -505,6 +509,8 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
     finalizeAgentRun({
       ...session.context,
       pipelineSteps,
+      artifactPolicy: configuredPipeline?.artifacts,
+      artifactUploader,
       runRepair: async (prompt) => {
         const repair = await runAgentSession(input, prompt);
         return repair.kind === "complete"
