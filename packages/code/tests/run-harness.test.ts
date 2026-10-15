@@ -353,6 +353,32 @@ describe("runAgentHarness non-commit outcomes", () => {
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("rejects an implementation with no changes before publishing", async () => {
+    scenario.stdout = "done";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("rejects a failed push without posting completion or transitioning the task", async () => {
+    scenario.stdout = "done";
+    pushResult = { success: false, message: "Push rejected" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Push failed",
+    );
+
+    expect(deliveryEvents).toEqual(["commit", "push"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
   test("requests a structured briefing and posts it without progress output", async () => {
     const summary = "## What changed\nImplemented the thing.\n## Verification\nTests passed.";
     scenario.stdout = `Exploring the codebase.\n<!-- devintern:summary:start -->\n${summary}\n<!-- devintern:summary:end -->`;
@@ -614,7 +640,9 @@ describe("runAgentHarness git delivery", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     };
 
-    await runAgentHarness({ ...baseInput(), createPr: true });
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Pre-push validation failed",
+    );
 
     expect(hookCalls).toBe(1);
     expect(deliveryEvents).toEqual(["commit"]);

@@ -4,7 +4,7 @@ sidebarLabel: "Reliability Audit"
 description: "Audit of multi-step workers that must converge when interrupted, and the guarantees that keep them idempotent"
 section: "Automation"
 order: 6
-dateModified: 2026-10-14
+dateModified: 2026-10-15
 ---
 
 # Reliability: Idempotent State Mutations
@@ -59,3 +59,12 @@ Interruption/re-run behavior is locked in by tests:
 ```bash
 bun run --filter @getdevintern/code test
 ```
+
+## Delivery failures
+
+A run that cannot commit its implementation (including an agent that produces no
+changes), fails pre-push validation, or cannot push its branch is recorded as
+failed. It does not proceed to PR/MR creation or mark the task as completed.
+Agent process failures also stop delivery, even if the agent left local edits.
+Batch CLI exit status alone is not a per-task success signal; inspect the recorded
+run outcome and delivery output.

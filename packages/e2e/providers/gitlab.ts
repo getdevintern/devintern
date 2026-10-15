@@ -74,12 +74,17 @@ export class GitLab {
     );
   }
 
-  async waitForMergeRequest(projectId: number, head: string): Promise<MergeRequest> {
+  async waitForMergeRequest(
+    projectId: number,
+    head: string,
+    expectedSha?: string,
+  ): Promise<MergeRequest> {
     const deadline = Date.now() + 30_000;
     do {
       const changes = await this.mergeRequests(projectId, head);
       if (changes.length > 1) throw new Error(`Duplicate merge requests for ${head}`);
-      if (changes.length === 1) return changes[0];
+      if (changes.length === 1 && (expectedSha === undefined || changes[0].sha === expectedSha))
+        return changes[0];
       await Bun.sleep(1000);
     } while (Date.now() < deadline);
     throw new Error(`No merge request appeared for ${head}`);
