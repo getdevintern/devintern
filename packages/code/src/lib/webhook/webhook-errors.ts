@@ -4,12 +4,12 @@
  * A webhook relay must distinguish two failures that look identical to a
  * generic `catch`:
  *
- * - **permanent** — the referenced resource is gone or forbidden (an HTTP 4xx
- *   such as 404/403). Retrying can never succeed, so the delivery is
+ * - **permanent** — the referenced resource is gone (e.g. HTTP 404) or a
+ *   handler explicitly identifies a terminal failure. The delivery is
  *   acknowledged and recorded instead of being redelivered forever.
  * - **transient** — the platform or network is momentarily unavailable (an
- *   HTTP 429/5xx, a timeout, a connection failure). The delivery must *not* be
- *   acknowledged so the platform retries it later.
+ *   HTTP 429/5xx, a timeout, a connection failure). HTTP 403 is ambiguous:
+ *   GitHub also uses it for rate limits. The delivery stays retryable.
  *
  * Anything unrecognized defaults to `transient`: losing an event is worse than
  * retrying one. Handlers that know a failure is terminal can throw
@@ -42,7 +42,9 @@ export class PermanentWebhookError extends Error {
 }
 
 /** HTTP statuses that indicate the request can never succeed as-is. */
-const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 410, 422]);
+// A bare 403 can mean throttling, even when the client drops response headers.
+// Confirmed terminal permission failures can use PermanentWebhookError.
+const PERMANENT_STATUSES = new Set([400, 401, 404, 410, 422]);
 
 /**
  * Read an HTTP status from an error's properties or its message. GitHub API

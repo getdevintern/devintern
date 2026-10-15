@@ -197,7 +197,12 @@ export class RelayAcquirer implements Acquirer {
     // the original is still running must not be acknowledged as done, and a
     // transient failure must not be recorded as handled so the relay redelivers.
     const claim = this.options.queue.beginDelivery(SOURCE, externalId);
-    if (claim !== "started") {
+    if (claim === "inFlight") {
+      // Another dispatcher owns this delivery. Keep the cursor here until
+      // that run settles; skipping it would acknowledge unfinished work.
+      throw new Error(`Relay delivery ${externalId} is still in flight`);
+    }
+    if (claim === "handled") {
       if (this.options.verbose) {
         console.log(`   [relay] ${externalId} already ${claim}; skipping`);
       }
@@ -220,7 +225,7 @@ export class RelayAcquirer implements Acquirer {
         stage: "dispatch",
       });
       if (classifyWebhookError(error) === "permanent") {
-        // 404/403/etc.: retrying can never succeed. Acknowledge and record so
+        // Terminal errors: acknowledge and record so
         // the relay stops redelivering.
         this.options.queue.completeDelivery(SOURCE, externalId);
         console.warn(
@@ -257,14 +262,12 @@ export class RelayAcquirer implements Acquirer {
         console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
         const ok = await handlers.addressPr(repo, pr);
         if (ok === "deferred") {
-          console.log(`⏳ [relay] ${repo}#${pr} deferred; will retry when a harness is available`);
-        } else {
-          console.log(
-            ok
-              ? `✅ [relay] ${repo}#${pr} feedback addressed`
-              : `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly`,
-          );
+          throw new Error(`Relay review ${repo}#${pr} deferred until a harness is available`);
         }
+        if (!ok) {
+          throw new Error(`Relay review ${repo}#${pr} did not complete cleanly`);
+        }
+        console.log(`✅ [relay] ${repo}#${pr} feedback addressed`);
         return;
       }
       case "pr.comment_created": {

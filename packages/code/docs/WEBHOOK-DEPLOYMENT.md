@@ -476,8 +476,12 @@ A redelivery that arrives while the original is still in flight is answered with
 
 Handler failures are classified:
 
-- **Permanent** (HTTP 4xx such as `403`/`404`) — retrying cannot succeed, so the delivery is acknowledged and recorded and is not redelivered again.
-- **Transient** (HTTP `429`/`5xx`, timeouts, connection errors) — the delivery is left unhandled so the platform redelivers it (GitHub, GitLab, or the DevIntern relay).
+- **Permanent** (HTTP `400`/`401`/`404`/`410`/`422`, or an explicit `PermanentWebhookError`) — the delivery is recorded as handled and future duplicates are skipped.
+- **Transient** (HTTP `403`/`429`/`5xx`, timeouts, connection errors) — the delivery is left unhandled and eligible for retry. A bare `403` stays retryable because GitHub also uses it for rate limits; a handler can explicitly mark a confirmed terminal permission failure permanent.
+
+The DevIntern relay retries transient failures by keeping the worker cursor unchanged and backing off before polling again. Deferred or unsuccessful review runs also keep the cursor unchanged. An in-flight delivery holds the cursor until its owning run settles; a handled duplicate can advance it safely.
+
+GitHub does **not** automatically redeliver failed webhooks. Use manual redelivery or a scheduled recovery job that requests redelivery through GitHub's API. Returning `409` alone does not schedule a retry. Direct webhook handlers acknowledge durable queue admission before asynchronous processing finishes, so later processing failures require queue recovery or explicit redelivery. See [Handling failed webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
 
 The durable `handled` record lives in `queue.db`; in-flight state is process-local, so a restart lets an unfinished delivery be reclaimed rather than blocked forever.
 
@@ -487,7 +491,7 @@ The durable `handled` record lives in `queue.db`; in-flight state is process-loc
 | ------------------- | ------------------------------------------------- |
 | 401 Unauthorized    | Check `WEBHOOK_SECRET` matches GitHub App config  |
 | 403 Forbidden       | Check IP allowlisting if enabled                  |
-| 409 Conflict        | A previous delivery is still running; GitHub will redeliver |
+| 409 Conflict        | A previous delivery is still running; retry after it settles |
 | 500 Internal Error  | Check server logs for stack trace                 |
 | Timeout             | Ensure Agent Harness CLI is installed and working |
 | No webhook received | Check GitHub App webhook URL and events           |
