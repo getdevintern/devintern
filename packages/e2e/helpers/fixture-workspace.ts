@@ -21,6 +21,7 @@ export class FixtureWorkspace {
     remoteUrl: string,
     token: string,
     providerEnv: Record<string, string>,
+    gitUsername = "x-access-token",
   ): Promise<void> {
     cpSync(join(packageRoot, "fixtures/simple-project"), this.cwd, { recursive: true });
     mkdirSync(join(this.root, "bin"));
@@ -32,11 +33,12 @@ export class FixtureWorkspace {
     const askpass = join(this.root, "bin/askpass.sh");
     writeFileSync(
       askpass,
-      '#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "x-access-token" ;;\n  *Password*) printf "%s\\n" "$E2E_GIT_TOKEN" ;;\n  *) exit 1 ;;\nesac\n',
+      '#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "$E2E_GIT_USERNAME" ;;\n  *Password*) printf "%s\\n" "$E2E_GIT_TOKEN" ;;\n  *) exit 1 ;;\nesac\n',
       { mode: 0o700 },
     );
     Object.assign(this.env, {
       E2E_GIT_TOKEN: token,
+      E2E_GIT_USERNAME: gitUsername,
       ...providerEnv,
       GIT_ASKPASS: askpass,
       GIT_CONFIG_COUNT: "3",
@@ -87,6 +89,25 @@ export class FixtureWorkspace {
       throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
     }
     return result;
+  }
+
+  async deleteRemoteBranch(branch: string): Promise<void> {
+    if (![this.head, this.base].includes(branch))
+      throw new Error("Refusing to delete a branch not owned by this scenario");
+    const check = () =>
+      command(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`],
+        this.cwd,
+        this.env,
+      );
+    const before = await check();
+    if (before.exitCode === 2) return;
+    if (before.exitCode !== 0)
+      throw new Error(`Could not check remote branch ${branch}: ${before.stderr}`);
+    await this.git("push", "origin", "--delete", branch);
+    const after = await check();
+    if (after.exitCode !== 2)
+      throw new Error(`Remote branch cleanup failed for ${branch}: ${after.stderr}`);
   }
 
   dispose(): void {
