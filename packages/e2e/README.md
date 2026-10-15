@@ -1,7 +1,8 @@
 # End-to-end tests
 
 Private Bun workspace for workflows against real services. The suites run the built
-Code CLI against GitHub.com and GitLab Self-Managed using a local Markdown task
+Code CLI against GitHub.com, Bitbucket Cloud, GitLab.com and GitLab Self-Managed
+using a local Markdown task
 and a deterministic agent. Git operations and GitHub API calls are real; no AI account
 or task tracker is needed.
 
@@ -110,3 +111,58 @@ GitLab suite requires `test:e2e:gitlab`; `test:e2e` remains the GitHub suite.
 
 Infrastructure references: [GitLab Docker installation](https://docs.gitlab.com/install/docker/installation/),
 [19.3.5 patch release](https://docs.gitlab.com/releases/patches/patch-release-gitlab-19-4-2-released/).
+
+## Bitbucket Cloud and GitLab.com
+
+Create a **dedicated fixture repository/project** on each hosted provider and
+initialize it with a README/default branch. The suites use unique target and
+feature branches populated from the canonical fixture. They preserve the
+repository, its default branch, and its files; cleanup closes/declines the
+scenario's PR/MR and deletes only its exact branches. Closed PRs/MRs remain as
+history. Existing pipelines and hooks must permit the fixture branches. Disable
+unnecessary pipelines on these dedicated repositories.
+
+Copy `packages/e2e/.env.example` to `packages/e2e/.env.local` and fill in the
+provider configuration. `.env.local` is ignored by Git; Bun loads it when the
+package script runs. Keep tokens out of shell history and committed files.
+
+| Provider        | Repository variable                             | Token variable         |
+| --------------- | ----------------------------------------------- | ---------------------- |
+| Bitbucket Cloud | `E2E_BITBUCKET_REPOSITORY=workspace/repo`       | `E2E_BITBUCKET_TOKEN`  |
+| GitLab.com      | `E2E_GITLAB_COM_PROJECT=group/subgroup/project` | `E2E_GITLAB_COM_TOKEN` |
+
+Bitbucket currently uses the CLI's existing **Bearer** authentication: provide a
+repository/workspace access token or OAuth access token with repository read/write
+and pull-request read/write permissions, including permission to delete fixture
+branches. Git authentication uses `x-token-auth`. Atlassian email/API tokens
+requiring Basic auth are not supported by this suite or the current PR client.
+See [Bitbucket authentication](https://developer.atlassian.com/cloud/bitbucket/rest/intro/).
+
+The GitLab.com token needs `api` scope, Git push permissions (including
+`write_repository` if using a token type that requires it), and permission to
+create/close MRs and delete branches on the dedicated project. The hosted suite
+uses `https://gitlab.com` and never reuses the Self-Managed instance's credentials.
+It does not create or delete cloud projects: GitLab.com retains deleted projects
+for 30 days and does not offer the local suite's permanent-deletion behavior.
+See [GitLab project deletion](https://docs.gitlab.com/api/projects/#delete-a-project).
+
+From the monorepo root:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:bitbucket
+bun run --filter @devintern/e2e test:e2e:gitlab-com
+```
+
+Each suite covers task implementation, push, exact remote commit/diff, PR/MR
+metadata and an explicit target branch, followed by invalid API credentials
+after a successful push. Git credentials remain valid in that negative scenario
+so the API error is tested independently. Self-Managed's nonstandard-default-
+branch scenario remains in `test:e2e:gitlab`. Existing `test:e2e` still selects
+GitHub only. Ordinary `test` never runs live cloud suites.
+
+The manual **Hosted source-control E2E** Actions workflow can run either provider
+or both. Set the repository variables and matching token secrets from the table
+on the DevIntern GitHub repository. Each job receives only its provider's token,
+and no credentials are exposed to untrusted PR workflows. Missing configuration
+fails the explicit live command before it mutates a remote repository.
