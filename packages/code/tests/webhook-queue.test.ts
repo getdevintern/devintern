@@ -179,6 +179,52 @@ describe("WebhookQueue", () => {
     });
   });
 
+  describe("delivery claims (in-flight vs handled)", () => {
+    test("a claimed delivery is in flight, not handled", () => {
+      expect(queue.beginDelivery("github", "d1")).toBe("started");
+      expect(queue.isInFlight("github", "d1")).toBe(true);
+      expect(queue.hasProcessed("github", "d1")).toBe(false);
+      // A redelivery while the original runs is neither handled nor runnable.
+      expect(queue.beginDelivery("github", "d1")).toBe("inFlight");
+    });
+
+    test("completing a claim records it handled and releases the claim", () => {
+      queue.beginDelivery("github", "d1");
+      queue.completeDelivery("github", "d1");
+      expect(queue.hasProcessed("github", "d1")).toBe(true);
+      expect(queue.isInFlight("github", "d1")).toBe(false);
+      expect(queue.beginDelivery("github", "d1")).toBe("handled");
+    });
+
+    test("abandoning a claim leaves it unhandled and reclaimable", () => {
+      queue.beginDelivery("github", "d1");
+      queue.abandonDelivery("github", "d1");
+      expect(queue.hasProcessed("github", "d1")).toBe(false);
+      expect(queue.isInFlight("github", "d1")).toBe(false);
+      expect(queue.beginDelivery("github", "d1")).toBe("started");
+    });
+
+    test("handled state is durable; in-flight state is not", () => {
+      queue.beginDelivery("github", "done");
+      queue.completeDelivery("github", "done");
+      queue.beginDelivery("github", "running");
+
+      const reopened = new WebhookQueue({ dbPath });
+      // The handled record survived the restart; the dropped in-flight claim
+      // can be reprocessed instead of blocking the delivery forever.
+      expect(reopened.beginDelivery("github", "done")).toBe("handled");
+      expect(reopened.beginDelivery("github", "running")).toBe("started");
+      reopened.close();
+    });
+
+    test("claims are scoped per source", () => {
+      expect(queue.beginDelivery("github", "shared")).toBe("started");
+      expect(queue.beginDelivery("gitlab:webhook", "shared")).toBe("started");
+      expect(queue.isInFlight("github", "shared")).toBe(true);
+      expect(queue.isInFlight("gitlab:webhook", "shared")).toBe(true);
+    });
+  });
+
   describe("malformed rows", () => {
     test("getEvent rejects an unknown status", () => {
       insertRawRow(

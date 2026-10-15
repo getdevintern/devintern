@@ -22,6 +22,7 @@ import {
 import type { WebhookServerConfig } from "../../types/github-webhooks";
 
 import { handleUsageLimit, jsonResponse, rateLimiter, reviewQueue, runtime } from "./runtime";
+import { classifyWebhookError } from "./webhook-errors";
 
 export interface QueuedGitLabWebhook {
   event: GitLabWebhookEvent;
@@ -75,12 +76,21 @@ export async function handleGitLabWebhook(
   if (!event) return jsonResponse({ error: "Unsupported GitLab event type" }, 400);
 
   const deliveryId = gitLabWebhookDeliveryId(request.headers, rawBody, event.eventName);
-  if (queue.hasProcessed("gitlab:webhook", deliveryId)) {
+  const delivery = { source: "gitlab:webhook", externalId: deliveryId };
+  const claim = queue.beginDelivery(delivery.source, delivery.externalId);
+  if (claim === "handled") {
     return jsonResponse({ success: true, message: "Duplicate delivery", deliveryId });
+  }
+  if (claim === "inFlight") {
+    // Do not acknowledge a redelivery as done while the original is running.
+    return jsonResponse(
+      { success: false, message: "Delivery already in progress", deliveryId },
+      409,
+    );
   }
 
   if (event.kind === "ignored") {
-    queue.markProcessed("gitlab:webhook", deliveryId);
+    queue.completeDelivery(delivery.source, delivery.externalId);
     return jsonResponse({ success: true, message: "GitLab event does not require processing" });
   }
 
@@ -88,7 +98,12 @@ export async function handleGitLabWebhook(
     process.env.GITLAB_CODE_HOST_URL || "https://gitlab.com",
   );
   const resolved = resolveGitLabCodeHostConfig(configuredInstanceUrl);
-  if (!resolved.ok) return jsonResponse({ error: resolved.message }, 503);
+  if (!resolved.ok) {
+    // Missing credentials are transient: release the claim so a redelivery can
+    // process the event once configuration is fixed.
+    queue.abandonDelivery(delivery.source, delivery.externalId);
+    return jsonResponse({ error: resolved.message }, 503);
+  }
   const instanceUrl = normalizeCodeHostUrl(resolved.instanceUrl);
   const state = new WorkerState();
   let targets: AgentPr[];
@@ -96,25 +111,43 @@ export async function handleGitLabWebhook(
     targets = state
       .listOpenAgentChangeRequests()
       .filter((change) => matchesRegisteredGitLabChange(event, change, instanceUrl));
+  } catch (error) {
+    queue.abandonDelivery(delivery.source, delivery.externalId);
+    throw error;
   } finally {
     state.close();
   }
   if (targets.length === 0) {
-    queue.markProcessed("gitlab:webhook", deliveryId);
+    queue.completeDelivery(delivery.source, delivery.externalId);
     return jsonResponse({ success: true, message: "No registered GitLab MR matched" });
   }
+
+  // One delivery can fan out to several target rows. Settle the delivery only
+  // once every queued target has finished, and leave it abandoned (retryable)
+  // if any of them failed transiently.
+  let outstanding = targets.length;
+  let anyTransient = false;
+  const settle = (outcome: "handled" | "transient"): void => {
+    if (outcome === "transient") anyTransient = true;
+    outstanding -= 1;
+    if (outstanding > 0) return;
+    if (anyTransient) {
+      queue.abandonDelivery(delivery.source, delivery.externalId);
+    } else {
+      queue.completeDelivery(delivery.source, delivery.externalId);
+    }
+  };
 
   const eventIds = targets.map((target) => {
     const queued: QueuedGitLabWebhook = { event, target };
     const eventId = queue.enqueue(`gitlab:${event.kind}`, queued);
     reviewQueue
-      .add(() => processGitLabWithPersistence(eventId, queued))
+      .add(() => processGitLabWithPersistence(eventId, queued, settle))
       .catch((error) => {
         console.error("❌ Error processing GitLab webhook:", error);
       });
     return eventId;
   });
-  queue.markProcessed("gitlab:webhook", deliveryId);
   return jsonResponse({
     success: true,
     message: "GitLab event processing started",
@@ -126,23 +159,33 @@ export async function handleGitLabWebhook(
 export async function processGitLabWithPersistence(
   eventId: string | undefined,
   queued: QueuedGitLabWebhook,
+  settle?: (outcome: "handled" | "transient") => void,
 ): Promise<void> {
   if (eventId && runtime.queue) runtime.queue.markProcessing(eventId);
   try {
     await processGitLabEvent(queued);
     if (eventId && runtime.queue) runtime.queue.markCompleted(eventId);
+    settle?.("handled");
   } catch (error) {
     if (error instanceof UsageLimitError) {
       handleUsageLimit(error.resetHint);
       if (eventId && runtime.queue) runtime.queue.requeuePending(eventId);
       reviewQueue
-        .add(() => processGitLabWithPersistence(eventId, queued))
+        .add(() => processGitLabWithPersistence(eventId, queued, settle))
         .catch((cause) => {
           console.error("❌ Error reprocessing deferred GitLab webhook:", cause);
         });
       return;
     }
-    if (eventId && runtime.queue) runtime.queue.markFailed(eventId, (error as Error).message);
+    const permanent = classifyWebhookError(error) === "permanent";
+    if (eventId && runtime.queue) {
+      if (permanent) {
+        runtime.queue.markCompleted(eventId);
+      } else {
+        runtime.queue.markFailed(eventId, (error as Error).message);
+      }
+    }
+    settle?.(permanent ? "handled" : "transient");
     throw error;
   }
 }
