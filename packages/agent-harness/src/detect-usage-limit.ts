@@ -30,9 +30,12 @@
  *   https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/retry.ts
  *
  * OpenCode may keep `run` alive after a provider error and only expose the
- * diagnostic through `--print-logs`, as a timestamped line containing an
- * `error.error="AI_APICallError: ..."` field. Callers should scan output while
- * it streams and terminate the child as soon as this detector reports a limit.
+ * diagnostic through its logs. On v1 that is a `--print-logs --log-level ERROR`
+ * line with an `error.error="AI_APICallError: ..."` field; on v2 the structured
+ * log line carries the message under `message`/`cause`, and `--format json`
+ * emits a `{"type":"error","error":{"message":...}}` envelope on stdout. Callers
+ * should scan output while it streams and terminate the child as soon as this
+ * detector reports a limit.
  */
 
 import type { OutputLine } from "./output-lines.js";
@@ -196,22 +199,18 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
   // Check stderr first because it is the conventional diagnostic channel, then
   // inspect stdout for explicit subscription-limit and structured SDK errors.
   const lines = [...outputLines(stderr), ...outputLines(stdout)].flatMap((line) => {
-    // `opencode run --print-logs --log-level ERROR` mirrors its structured log
-    // line to stderr. Match the provider error value without weakening the
-    // source/diff safeguards for ordinary agent transcript lines.
-    if (/\blevel=ERROR\b/.test(line.normalized)) {
-      const match = line.normalized.match(/\berror\.error="((?:\\.|[^"\\])*)"/);
-      if (match?.[1]) {
-        return [
-          line,
-          {
-            raw: line.raw,
-            normalized: match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n"),
-          },
-        ];
-      }
+    // Structured diagnostics hide the provider message inside a wrapper:
+    //   v1 opencode  → `... level=ERROR ... error.error="AI_APICallError: ..."`
+    //   v2 opencode  → `... level=ERROR ... message="..."`
+    //   v2 --format json → `{"type":"error","error":{"message":"..."}}`
+    // Surface the extracted message as its own candidate line so the anchored
+    // subscription patterns can match it without weakening the source/diff
+    // safeguards for ordinary agent transcript lines.
+    const candidates = structuredLogCandidates(line.normalized);
+    if (candidates.length === 0) {
+      return [line];
     }
-    return [line];
+    return [line, ...candidates.map((value) => ({ raw: line.raw, normalized: value }))];
   });
 
   return lines.find((line) => {
@@ -235,6 +234,78 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
       isLikelyProviderDiagnostic(line)
     );
   });
+}
+
+/** Structured-log keys that carry the provider diagnostic message. */
+const STRUCTURED_LOG_KEYS = ["error.error", "error.message", "message", "cause"] as const;
+
+/**
+ * Extract candidate diagnostic strings from a structured harness log line.
+ *
+ * Handles both the v1 opencode `error.error="..."` field and the v2 field set
+ * (`message`/`cause`/`error.message`), plus the v2 `--format json` error
+ * envelope. Returns an empty array when the line carries no diagnostic value.
+ *
+ * @param line - A single normalized output line.
+ * @returns Extracted, unescaped diagnostic strings (possibly empty).
+ */
+function structuredLogCandidates(line: string): string[] {
+  const candidates: string[] = [];
+
+  if (/\blevel=ERROR\b/.test(line)) {
+    for (const key of STRUCTURED_LOG_KEYS) {
+      const pattern = new RegExp(`\\b${key.replace(/\./g, "\\.")}="((?:\\\\.|[^"\\\\])*)"`);
+      const match = line.match(pattern);
+      if (match?.[1]) {
+        candidates.push(unescapeStructuredValue(match[1]));
+      }
+    }
+  }
+
+  const json = jsonErrorCandidate(line);
+  if (json) {
+    candidates.push(json);
+  }
+
+  return candidates;
+}
+
+/**
+ * Extract the message from an Opencode v2 `--format json` error envelope
+ * (`{"type":"error",...,"error":{"type":"unknown","message":"..."}}`).
+ *
+ * Gated on `type === "error"` so arbitrary JSON the agent prints is not treated
+ * as a diagnostic.
+ *
+ * @param line - A single normalized output line.
+ * @returns The error message, or `undefined`.
+ */
+function jsonErrorCandidate(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      type?: unknown;
+      error?: { message?: unknown };
+    };
+    if (parsed.type !== "error" || typeof parsed.error?.message !== "string") {
+      return undefined;
+    }
+    return parsed.error.message;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Unescape a value captured from a structured log line.
+ *
+ * @param value - Quoted field contents with JSON-style escapes.
+ */
+function unescapeStructuredValue(value: string): string {
+  return value.replace(/\\"/g, '"').replace(/\\n/g, "\n");
 }
 
 /**

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
@@ -32,6 +33,7 @@ import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
 
@@ -114,13 +116,17 @@ export async function runAgentSession(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = harness.buildArgs({
-        maxTurns,
-        skipPermissions: true,
-        workingDir: process.cwd(),
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        {
+          maxTurns,
+          skipPermissions: true,
+          workingDir: process.cwd(),
+          model: resolveAgentModel(),
+          effort: resolveAgentEffort(),
+        },
+      );
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
@@ -144,7 +150,7 @@ export async function runAgentSession(
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,

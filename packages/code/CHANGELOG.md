@@ -6,6 +6,10 @@
 
 - **Structured PR bodies (DEV-145)**: every created pull request now uses a fixed body template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Sections the agent's implementation summary already provides under a recognized heading are reused (matching aliases and hyphenated spellings, and merging several headings that map to one section such as `In scope` and `Out of scope`); a section it did not supply is marked `N/A`, so a reviewer can tell "nothing to say" apart from "forgot"
 
+### Fixed
+
+- **OpenCode v2 support via version probing**: the `opencode` harness now probes the installed CLI (`opencode --version`) once per executable and picks the flag surface that matches its major version, so users on v2 are no longer broken by flags v2 removed. v2 dropped `--log-level`, `--dir`, and `--variant`, read the working directory from `$PWD`, and went server-backed, so on v2 headless runs now enable logs through `OPENCODE_PRINT_LOGS`/`OPENCODE_LOG_LEVEL`, pin the working directory with `PWD`, fold reasoning effort into the model reference (`--model provider/model#variant`, requiring `AGENT_MODEL`), and pass `--standalone` to avoid the user's shared background service. v1 keeps its existing `--print-logs --log-level ERROR --dir` / `--variant` invocation. A missing or unparseable version falls back to the v1 baseline instead of failing, and usage-limit detection now also reads the v2 structured log fields and `--format json` error envelope
+
 ## [2.17.0] - 2026-10-14
 
 Observability and prompt-governance release: every agent execution leaves a durable transcript you can read from the dashboard, role prompts become a versioned and overridable Markdown catalog, the clarity check names its assumptions and exclusions, work sources that cannot be read are no longer mistaken for quiet ones, and DevIntern stops stacking kernel sandboxes on itself.
