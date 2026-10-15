@@ -56,6 +56,8 @@ interface RunAgentHarnessOptions {
   prTargetBranchExplicit?: boolean;
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
+  /** Branch successfully inherited from a prior attempt. */
+  resumeBranch?: string;
 }
 
 export type AgentSessionResult =

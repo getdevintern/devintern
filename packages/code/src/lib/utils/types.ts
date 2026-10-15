@@ -106,6 +106,15 @@ export interface UtilsSurface {
     baseBranch?: string,
     options?: { cwd?: string },
   ): Promise<{ success: boolean; branchName: string; message: string }>;
+  continueFeatureBranch(
+    branch: string,
+    options?: { cwd?: string; ownedWorktreeRoot?: string },
+  ): Promise<{ success: boolean; branchName: string; message: string }>;
+  collectLandedWork(
+    branch: string,
+    baseBranch: string,
+    options?: { cwd?: string },
+  ): Promise<string | undefined>;
   removeReviewWorktree(
     worktreePath: string,
     options?: { verbose?: boolean; cwd?: string },

@@ -25,6 +25,7 @@ import {
   recordTaskActioned,
 } from "../src/lib/task/actioned-state";
 import { ACTIONED_SOURCE_ENV } from "../src/lib/workspace/env";
+import { PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
@@ -644,6 +645,46 @@ remote = "git@github.com:acme/backend.git"
 
     await executor("T-RETRY", toRoutableTask({ key: "T-RETRY", labels: [], components: [] }));
     expect(observed?.[ACTIONED_SOURCE_ENV]).toBe(retryActionedSource);
+  });
+
+  test("threads the retry's pickup run id into the subprocess env", async () => {
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend", source: "retry", pickupRunId: 42 },
+    );
+
+    await executor("T-PICK", toRoutableTask({ key: "T-PICK", labels: [], components: [] }));
+    expect(observed?.[PICKUP_RUN_ID_ENV]).toBe("42");
+  });
+
+  test("omits the pickup run id when the retry has none", async () => {
+    let observed: Record<string, string | undefined> | undefined;
+    const executor = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async (_taskKey, _args, options) => {
+          observed = options.env;
+          return true;
+        },
+      },
+      { repo: "backend", source: "retry" },
+    );
+
+    await executor("T-NOP", toRoutableTask({ key: "T-NOP", labels: [], components: [] }));
+    expect(observed?.[PICKUP_RUN_ID_ENV]).toBeUndefined();
   });
 });
 

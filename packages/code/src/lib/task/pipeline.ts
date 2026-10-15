@@ -31,10 +31,13 @@ import { WorkerState } from "../state/worker-state";
 import {
   RunStore,
   beginRun,
+  getActiveRunContext,
   recordRunBranch,
   recordRunStage,
   recordRunTicket,
 } from "../state/run-recorder";
+import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
+import type { SessionPickupDecision } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
 import { TaskFormatter } from "../task/formatter";
 import type { RetryPromptContext } from "../task/formatter";
@@ -50,6 +53,7 @@ import {
   writeUsageLimitHint,
 } from "../worker/usage-limit-protocol";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
+import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
 import { reportProcessingFailure } from "./processing-failure";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
@@ -158,6 +162,7 @@ interface ImplementationInput {
   task: Awaited<ReturnType<TaskTrackerClient["getTask"]>>;
   taskDetails: ReturnType<TaskTrackerClient["formatTaskDetails"]>;
   effectiveTargetBranch: string;
+  resumeBranch?: string;
 }
 
 /**
@@ -220,6 +225,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     isPlanRetry: false,
     prTargetBranchExplicit: options.prTargetBranchExplicit,
     requestedPrTargetBranch: options.requestedPrTargetBranch,
+    resumeBranch: input.resumeBranch,
   });
 
   // An incomplete-summary file written during this run means the agent
@@ -717,6 +723,48 @@ async function resolveEffectiveTargetBranch(descriptionText: string | undefined)
 }
 
 /**
+ * Build the retry/prompt context handed to the formatter, or undefined when
+ * there is nothing to tell the agent.
+ *
+ * The resume branch, prior report, and landed-work summary are only claimed
+ * when git delivery is enabled: {@link ensureFeatureBranch} skips the checkout
+ * under `--no-git`, so the prompt must not tell the agent a branch was resumed
+ * when it will not be.
+ *
+ * @param input.pickup - Session pickup decision from the run store
+ * @param input.priorRetryState - Prior incomplete-attempt state, when retrying
+ * @param input.gitEnabled - Whether the feature branch will be checked out
+ * @param input.lastFailureSummary - Fallback failure summary for a plain retry
+ */
+export function buildRetryPromptContext(input: {
+  pickup: SessionPickupDecision;
+  priorRetryState: ReturnType<typeof getRetryState>;
+  gitEnabled: boolean;
+  lastFailureSummary?: string;
+}): RetryPromptContext | undefined {
+  const { pickup, priorRetryState, gitEnabled, lastFailureSummary } = input;
+  if (!priorRetryState && pickup.kind !== "resume") {
+    return undefined;
+  }
+  const priorAttempt = pickup.kind === "resume" ? pickup.session.attempt : undefined;
+  const retryContext: RetryPromptContext = {
+    attempt: priorRetryState ? priorRetryState.attemptCount + 1 : (priorAttempt ?? 1) + 1,
+    newSinceMs: priorRetryState?.reportedAt,
+  };
+  if (pickup.kind === "resume") {
+    if (gitEnabled) {
+      retryContext.resumeBranch = pickup.session.branch;
+      retryContext.previousReport = pickup.session.report;
+      retryContext.landedWork = pickup.session.landed;
+    }
+    retryContext.previousFailureSummary = pickup.session.outcomeReason;
+  } else {
+    retryContext.previousFailureSummary = lastFailureSummary;
+  }
+  return retryContext;
+}
+
+/**
  * Create the task output directory, download direct and embedded attachments,
  * and write the agent prompt file (including retry context when applicable).
  */
@@ -727,8 +775,9 @@ async function materializeTaskPrompt(input: {
   relatedIssues: Awaited<ReturnType<TaskTrackerClient["getRelatedWorkItems"]>>;
   workflowKey: string;
   priorRetryState: ReturnType<typeof getRetryState>;
+  pickup: SessionPickupDecision;
 }): Promise<{ taskDir: string; outputFile: string; attachmentMap: Map<string, string> }> {
-  const { task, taskDetails, tracker, relatedIssues, workflowKey, priorRetryState } = input;
+  const { task, taskDetails, tracker, relatedIssues, workflowKey, priorRetryState, pickup } = input;
 
   // Create unified task-specific directory structure
   const baseOutputDir = resolveOutputDir();
@@ -796,21 +845,28 @@ async function materializeTaskPrompt(input: {
     console.log(`\n💾 Saving formatted task details to: ${outputFile}`);
 
     // On a retry, tell the agent it is a retry, why the last attempt
-    // stopped, and which comments arrived since.
+    // stopped, and which comments arrived since. When the prior attempt left
+    // resumable state (a branch and its own report), session pickup hands that
+    // to the agent so it continues instead of re-deriving it.
     let retryContext: RetryPromptContext | undefined;
-    if (priorRetryState) {
-      retryContext = {
-        attempt: priorRetryState.attemptCount + 1,
-        newSinceMs: priorRetryState.reportedAt,
-      };
-      try {
-        const lastRun = new RunStore()
-          .listRuns({ taskKey: workflowKey, limit: 10 })
-          .find((run) => run.status === "escalated" || run.status === "failed");
-        retryContext.previousFailureSummary = lastRun?.outcomeReason;
-      } catch {
-        // Prompt context only — proceed without it.
+    if (priorRetryState || pickup.kind === "resume") {
+      let lastFailureSummary: string | undefined;
+      if (pickup.kind !== "resume") {
+        try {
+          const lastRun = new RunStore()
+            .listRuns({ taskKey: workflowKey, limit: 10 })
+            .find((run) => run.status === "escalated" || run.status === "failed");
+          lastFailureSummary = lastRun?.outcomeReason;
+        } catch {
+          // Prompt context only — proceed without it.
+        }
       }
+      retryContext = buildRetryPromptContext({
+        pickup,
+        priorRetryState,
+        gitEnabled: Boolean(runContext.options.git),
+        lastFailureSummary,
+      });
     }
 
     TaskFormatter.saveFormattedTask(
@@ -829,16 +885,37 @@ async function materializeTaskPrompt(input: {
  * Create (or resume) the feature branch before the agent runs, and prepare the
  * fleet worktree when one is configured. Exits when branch creation fails.
  */
-async function ensureFeatureBranch(input: {
+export async function ensureFeatureBranch(input: {
   taskKey: string;
   workflowKey: string;
   effectiveTargetBranch: string;
-}): Promise<void> {
-  const { taskKey, workflowKey, effectiveTargetBranch } = input;
+  resumeBranch?: string;
+}): Promise<boolean> {
+  const { taskKey, workflowKey, effectiveTargetBranch, resumeBranch } = input;
   const options = runContext.options;
 
   // Create feature branch before running Agent (unless disabled)
   if (options.git) {
+    // Session pickup: a prior attempt's branch is inherited when it still
+    // exists, so already-landed work survives. A missing branch falls back to
+    // the normal fresh-branch path below.
+    if (resumeBranch) {
+      console.log(`\n♻️  Resuming prior attempt's branch '${resumeBranch}'...`);
+      const repo = process.env[WORKSPACE_REPO_ENV];
+      const resumed = await Utils.continueFeatureBranch(resumeBranch, {
+        ownedWorktreeRoot: repo ? join(worktreesDir(resolveWorkspaceDir()), repo) : undefined,
+      });
+      if (resumed.success) {
+        console.log(`✅ ${resumed.message}`);
+        recordRunBranch(resumed.branchName);
+        if (process.env[WORKSPACE_REPO_ENV]) {
+          await Utils.prepareWorktreeForAgent(process.cwd());
+        }
+        return true;
+      }
+      console.warn(`⚠️  ${resumed.message}; starting a fresh branch instead`);
+    }
+
     console.log("\n🌿 Creating feature branch...");
     const branchResult = await Utils.createFeatureBranch(workflowKey, effectiveTargetBranch);
 
@@ -883,6 +960,7 @@ async function ensureFeatureBranch(input: {
   if (process.env[WORKSPACE_REPO_ENV]) {
     await Utils.prepareWorktreeForAgent(process.cwd());
   }
+  return false;
 }
 
 /** Move the task to its In Progress status now that implementation is starting. */
@@ -937,13 +1015,34 @@ interface TaskExecutionContext extends ImplementationInput {
   attachmentMap: Map<string, string>;
   projectSettings: ReturnType<typeof loadProjectSettings>;
   projectKey: string;
+  /** Recorded branch to inherit via session pickup, when resuming. */
+  resumeBranch?: string;
+  relatedIssues: Awaited<ReturnType<TaskTrackerClient["getRelatedWorkItems"]>>;
+  priorRetryState: ReturnType<typeof getRetryState>;
+  pickup: SessionPickupDecision;
 }
 
-const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
+export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
   {
     name: "prepare-branch",
-    run: async ({ taskKey, workflowKey, effectiveTargetBranch }) =>
-      ensureFeatureBranch({ taskKey, workflowKey, effectiveTargetBranch }),
+    run: async (context) => {
+      const resumed = await ensureFeatureBranch(context);
+      if (!resumed) {
+        context.resumeBranch = undefined;
+        if (runContext.options.git && context.pickup?.kind === "resume") {
+          context.pickup = { kind: "fresh", reason: "recorded branch could not be resumed" };
+        }
+      }
+    },
+  },
+  {
+    name: "prepare-prompt",
+    run: async (context) => {
+      // Branch preparation can fall back to a fresh branch. Generate guidance
+      // only after that decision, so the prompt never claims discarded work
+      // has been inherited.
+      Object.assign(context, await materializeTaskPrompt(context));
+    },
   },
   {
     name: "feasibility",
@@ -975,6 +1074,7 @@ const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
       task,
       taskDetails,
       effectiveTargetBranch,
+      resumeBranch,
     }) =>
       runImplementation({
         outputFile,
@@ -984,6 +1084,7 @@ const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
         task,
         taskDetails,
         effectiveTargetBranch,
+        resumeBranch,
       }),
   },
 ];
@@ -1022,29 +1123,64 @@ export async function processSingleTask(
 
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(descriptionText);
 
-    const { taskDir, outputFile, attachmentMap } = await materializeTaskPrompt({
-      task,
-      taskDetails,
-      tracker,
-      relatedIssues,
-      workflowKey,
-      priorRetryState,
-    });
+    // Session pickup: reconstruct branch + prior report from the run store so a
+    // restart or dashboard retry resumes instead of redoing the work. Falls
+    // back to a fresh run when the recorded state is incomplete.
+    // A dashboard/orphan retry pins the run it targets via env; otherwise the
+    // run `prepareTask` just opened is excluded so the prior terminal attempt
+    // (branch + report) is selected instead of the current in_progress run.
+    const currentRunId = getActiveRunContext()?.id;
+    const pickupStore = new RunStore();
+    let pickup: SessionPickupDecision;
+    try {
+      pickup = await resolveSessionPickup({
+        runStore: pickupStore,
+        taskKey: workflowKey,
+        scope:
+          currentRunId !== undefined
+            ? (pickupStore.getRun(currentRunId) ?? {})
+            : {
+                tracker: process.env.TASK_TRACKER || "jira",
+                team: process.env.DEVINTERN_WORKSPACE_TEAM,
+                repo: process.env.DEVINTERN_WORKSPACE_REPO,
+              },
+        ...pickupSelection(currentRunId),
+        branchExists: async (branch) =>
+          (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
+          (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),
+        describeLanded: ({ branch }) =>
+          Utils.collectLandedWork(branch, effectiveTargetBranch, { cwd: process.cwd() }),
+      });
+    } finally {
+      pickupStore.close();
+    }
+    if (pickup.kind === "resume") {
+      console.log(
+        `\n♻️  Session pickup: resuming ${workflowKey} from run #${pickup.session.runId} ` +
+          `(branch '${pickup.session.branch}')`,
+      );
+    } else if (priorRetryState) {
+      console.log(`\n🆕 Session pickup unavailable (${pickup.reason}); starting fresh`);
+    }
 
     const result = await runTaskSteps(taskSteps, {
       taskKey,
       totalTasks,
       skipClarityCheck,
-      outputFile,
-      taskDir,
+      outputFile: "",
+      taskDir: "",
       workflowKey,
       tracker,
       task,
       taskDetails,
       effectiveTargetBranch,
-      attachmentMap,
+      attachmentMap: new Map<string, string>(),
+      relatedIssues,
+      priorRetryState,
+      pickup,
       projectSettings,
       projectKey,
+      resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
     });
     if (result.kind === "halted") {
       await finishTaskRun("escalated", result.reason);

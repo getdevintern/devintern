@@ -23,10 +23,22 @@ export interface RetryPromptContext {
   previousFailureSummary?: string;
   /** Comments created after this epoch-ms stamp are tagged as new guidance. */
   newSinceMs?: number;
+  /**
+   * Branch inherited from an interrupted prior run (session pickup). The agent
+   * is told to continue from it rather than start over.
+   */
+  resumeBranch?: string;
+  /** The prior run's own implementation report, inherited instead of re-derived. */
+  previousReport?: string;
+  /** Best-effort description of changes already landed on the resumed branch. */
+  landedWork?: string;
 }
 
 /** Cap the previous-failure excerpt so it cannot crowd out the task itself. */
 const MAX_FAILURE_SUMMARY_LENGTH = 2000;
+
+/** Cap the inherited report excerpt so it cannot crowd out the task itself. */
+const MAX_PREVIOUS_REPORT_LENGTH = 6000;
 
 export class TaskFormatter {
   private static turndownService = new TurndownService({
@@ -155,6 +167,29 @@ ${untrustedContentBlock(
   "previous attempt failure",
 )}
 `;
+      }
+      if (retryContext.resumeBranch) {
+        prompt += `
+A prior attempt already started work on branch \`${retryContext.resumeBranch}\`, which has been
+checked out for you. Inherit it: inspect what already landed with \`git log\`/\`git diff\` before
+changing anything, then continue from the resume point instead of redoing completed work.
+`;
+        if (retryContext.landedWork) {
+          prompt += `\nWork already landed on the branch:\n\n${untrustedContentBlock(
+            retryContext.landedWork.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
+            "already landed work",
+          )}\n`;
+        }
+        if (retryContext.previousReport) {
+          prompt += `
+The prior attempt's own report (treat as a claim to verify against the code, not proof):
+
+${untrustedContentBlock(
+  retryContext.previousReport.slice(0, MAX_PREVIOUS_REPORT_LENGTH),
+  "previous implementation report",
+)}
+`;
+        }
       }
       prompt +=
         "\nRead the comments below for clarifications added since that attempt and prioritize them.\n";

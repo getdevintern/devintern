@@ -12,6 +12,7 @@ import {
   resolveStatusName,
 } from "../src/lib/worker/orphan-recovery";
 import { RunStore } from "../src/lib/state/run-recorder";
+import type { RunRecord } from "../src/lib/state/run-recorder";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
@@ -65,6 +66,7 @@ describe("recoverOrphanedTaskRuns", () => {
     tracker?: TaskTrackerClient | null;
     now?: number;
     maxAgeMs?: number;
+    branchExists?: (branch: string, run: RunRecord) => boolean;
   }
 
   function recover({
@@ -73,6 +75,7 @@ describe("recoverOrphanedTaskRuns", () => {
     tracker = fakeTracker() as TaskTrackerClient | null,
     now = Date.now(),
     maxAgeMs = DEFAULT_ORPHAN_MAX_AGE_MS,
+    branchExists,
   }: RecoveryOptions = {}) {
     return recoverOrphanedTaskRuns({
       runStore: store,
@@ -84,6 +87,7 @@ describe("recoverOrphanedTaskRuns", () => {
         retryStore.recordIncompleteAttempt(key, type, description),
       maxAgeMs,
       now,
+      ...(branchExists ? { branchExists } : {}),
       log: () => {},
       warn: () => {},
     });
@@ -138,6 +142,67 @@ describe("recoverOrphanedTaskRuns", () => {
     const state = retryStore.getRetryState("PROJ-1");
     expect(state).not.toBeNull();
     expect(state?.descriptionHash).toBe(hashDescription("description of Summary of PROJ-1"));
+  });
+
+  test("resumes an orphaned run with a recorded branch and report instead of notifying", async () => {
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-11",
+      branch: "feature/proj-11",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+
+    const result = await recover();
+
+    expect(result.reaped).toBe(1);
+    expect(result.recovered).toBe(0);
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    // A resumable run must not be reported as a failure.
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+    expect(retryStore.getRetryState("PROJ-11")).toBeNull();
+  });
+
+  test("falls back to failure feedback when the recorded state is incomplete", async () => {
+    // Branch recorded but no implementation report: nothing to inherit.
+    store.createRun({ origin: "task", taskKey: "PROJ-12", branch: "feature/proj-12" });
+
+    const result = await recover();
+
+    expect(result.recovered).toBe(1);
+    expect(result.resumable).toHaveLength(0);
+    expect(posted).toHaveLength(1);
+    expect(transitions).toEqual([{ key: "PROJ-12", status: "To Do" }]);
+  });
+
+  test("requeues instead of resuming when the recorded branch no longer exists", async () => {
+    // Complete recorded state, but the branch probe says it is gone: resume
+    // must not be scheduled, matching the pipeline's failure-and-requeue path.
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-13",
+      branch: "feature/proj-13",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+
+    const result = await recover({ branchExists: () => false });
+
+    expect(result.resumable).toHaveLength(0);
+    expect(result.recovered).toBe(1);
+    expect(posted).toHaveLength(1);
+    expect(transitions).toEqual([{ key: "PROJ-13", status: "To Do" }]);
   });
 
   test("does not clobber a ticket that moved on after the crash", async () => {
@@ -259,7 +324,7 @@ describe("recoverOrphanedTaskRuns", () => {
 
     const result = await recover();
 
-    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0 });
+    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0, resumable: [] });
     expect(posted).toHaveLength(0);
   });
 
