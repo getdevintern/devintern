@@ -363,6 +363,38 @@ describe("createFleetTaskEvaluator", () => {
     expect(ran).toEqual(["T-1"]);
   });
 
+  test("threads taskRef to the CLI subprocess while the worktree uses the task key", async () => {
+    const refs: string[] = [];
+    const worktreeKeys: string[] = [];
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const createWorktree = repoManager.createTaskWorktree.bind(repoManager);
+    repoManager.createTaskWorktree = async (repo, taskKey) => {
+      worktreeKeys.push(taskKey);
+      return createWorktree(repo, taskKey);
+    };
+    const taskFile = "/ws/injected/local-bump-deps-ab12cd34.md";
+    const execute = createFleetTaskExecutor(
+      {
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async (taskRef) => {
+          refs.push(taskRef);
+          return true;
+        },
+      },
+      { repo: "backend", taskRef: taskFile },
+    );
+
+    await execute("local-bump-deps", { key: "local-bump-deps", components: [], labels: [] });
+
+    // The injected task's CLI receives the markdown file path, while the
+    // worktree/supervisor label still use the (unique) task key.
+    expect(refs).toEqual([taskFile]);
+    expect(worktreeKeys).toEqual(["local-bump-deps"]);
+  });
+
   test("a relayed change for an already-actioned ticket is not re-implemented", async () => {
     const ran: string[] = [];
     const repoManager = new FakeRepoManager(workspaceDir);

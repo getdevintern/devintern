@@ -288,9 +288,10 @@ records, and the dashboard, and start on a `feature/local-<slug>` branch (the
 | `--title <text>`          | Task title (required)                                                     |
 | `--body <text>`           | Task description                                                          |
 | `--body-file <path>`      | Read the description from a file (`-` reads stdin)                        |
-| `--idempotency-key <key>` | Dedupe key; a retried automation reuses the existing task instead of duplicating it |
+| `--idempotency-key <key>` | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
 | `--wait`                  | Block until the run finishes; exit `0` on success, `1` on failure        |
-| `--json`                  | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout |
+| `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit) |
+| `--json`                  | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field) |
 | `--workspace <path>`      | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)        |
 
 Behavior to expect:
@@ -300,13 +301,24 @@ Behavior to expect:
   `worker add` says so — and `--wait` refuses to block.
 - **Non-interactive.** The command returns after enqueue. `--wait` is the
   scripting hook: it polls the row and exits with the run's status. It fails fast
-  if the worker disappears, so it cannot hang forever.
+  if the worker disappears, and exits non-zero with a clear message once
+  `--wait-timeout` (default 6 hours) elapses without the task settling — a live
+  worker that keeps deferring the task (a usage-limit pause, a permanently
+  saturated repo) can no longer make `--wait` hang forever. Pass
+  `--wait-timeout 0` to wait without a limit.
 - **Machine-readable.** With `--json`, stdout carries exactly one JSON object;
   every human/status line (license notices, "Enqueued…", the `--wait` progress
   line) goes to stderr, so `devintern worker add … --json | jq .` parses cleanly.
-  `--wait --json` still emits a single object — the settled state — not an
-  interim pending object plus a final one. Without `--json`, diagnostics and the
-  result line print to stdout as usual.
+  `--wait --json` still emits a single object — the settled state, or a
+  `status: "failed"` object with an `error` on a timeout/worker-stop/inconclusive
+  wait — not an interim pending object plus a final one. Without `--json`,
+  diagnostics and the result line print to stdout as usual.
+- **Idempotency.** A task carrying `--idempotency-key` is reused (reported as
+  `deduplicated`) only while an earlier task with that key is still pending or
+  running, so a retried automation cannot create a duplicate. Once that task
+  settles, enqueuing the same key starts a new task — a fixed key like
+  `--idempotency-key nightly-docs` therefore drives a recurring job without
+  changing the key each run.
 - **Licensing.** Enqueuing automation work runs the same entitlement check as
   the daemon (paid automation license, or the no-card Worker Pilot).
 - **Quiet hours.** Injected tasks are operator-initiated, so they bypass working

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -11,9 +11,14 @@ import {
   slugifyTitle,
 } from "../src/lib/workspace/add-command";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { LockManager } from "../src/lib/lock-manager";
 import { workspaceDbPath } from "../src/lib/workspace/paths";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
+import {
+  recoverOrphanedInjectedTasks,
+  recoverOrphanedWorkspaceRuns,
+} from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
@@ -77,6 +82,19 @@ describe("worker add argument parsing", () => {
   test("accepts '-' as the --body-file stdin sentinel", () => {
     const parsed = parseWorkerAddArgs(["--title", "x", "--body-file", "-"]);
     expect(parsed).toMatchObject({ kind: "ok", options: { bodyFile: "-" } });
+  });
+
+  test("parses --wait-timeout and rejects non-numeric values", () => {
+    expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "30"])).toMatchObject({
+      kind: "ok",
+      options: { waitTimeoutSeconds: 30 },
+    });
+    expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "0"])).toMatchObject({
+      kind: "ok",
+      options: { waitTimeoutSeconds: 0 },
+    });
+    expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "soon"]).kind).toBe("error");
+    expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "-1"]).kind).toBe("error");
   });
 });
 
@@ -162,6 +180,25 @@ describe("runWorkerAdd", () => {
     }
   });
 
+  test("writes the prompt owner-only in an owner-only injected directory", async () => {
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Private prompt", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const result = JSON.parse(cap.out.at(-1)!);
+
+    const store = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      const task = store.getById(result.id)!;
+      expect(statSync(task.taskFile).mode & 0o777).toBe(0o600);
+      expect(statSync(join(dir, "injected")).mode & 0o777).toBe(0o700);
+    } finally {
+      store.close();
+    }
+  });
+
   test("--json keeps stdout to a single machine-readable object", async () => {
     const cap = capture();
     const code = await runWorkerAdd(
@@ -222,6 +259,280 @@ describe("runWorkerAdd", () => {
     });
   });
 
+  test("dedup with --wait keeps the store open until the task settles", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    // An active row under the idempotency key, so `runWorkerAdd` takes the
+    // dedup branch and waits on it.
+    const seed = new InjectedTaskStore(dbPath);
+    seed.enqueue({
+      taskKey: "local-dedup-wait",
+      repo: "backend",
+      title: "Dedup wait",
+      body: "",
+      taskFile: join(dir, "injected", "local-dedup-wait.md"),
+      idempotencyKey: "dup-wait",
+    });
+    seed.close();
+
+    // Record the order of `getById`/`close` on the shared prototype, so a
+    // premature close (the missing-`await` bug) is observable as a `getById`
+    // after the first `close`.
+    const events: string[] = [];
+    const originalGet = InjectedTaskStore.prototype.getById;
+    const originalClose = InjectedTaskStore.prototype.close;
+    const getSpy = spyOn(InjectedTaskStore.prototype, "getById").mockImplementation(function (
+      this: InjectedTaskStore,
+      id: number,
+    ) {
+      events.push("getById");
+      return originalGet.call(this, id);
+    });
+    const closeSpy = spyOn(InjectedTaskStore.prototype, "close").mockImplementation(
+      function (this: InjectedTaskStore) {
+        events.push("close");
+        return originalClose.call(this);
+      },
+    );
+
+    let settleStore: InjectedTaskStore | null = null;
+    const settle = (async () => {
+      settleStore = new InjectedTaskStore(dbPath);
+      // Wait until the dedup wait has polled the seeded row before finishing
+      // it, so `findActiveByIdempotencyKey` has definitely matched it.
+      for (let attempt = 0; attempt < 500 && !events.includes("getById"); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const claimed = settleStore.claimNext();
+      if (claimed) settleStore.finish(claimed.id, "done");
+    })();
+
+    const cap = capture();
+    let code: number;
+    try {
+      code = await runWorkerAdd(
+        [
+          "--workspace",
+          configPath,
+          "--repo",
+          "backend",
+          "--title",
+          "Dedup wait",
+          "--idempotency-key",
+          "dup-wait",
+          "--wait",
+          "--json",
+        ],
+        cap.options,
+      );
+    } finally {
+      await settle;
+      getSpy.mockRestore();
+      closeSpy.mockRestore();
+      (settleStore as InjectedTaskStore | null)?.close();
+    }
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({
+      taskKey: "local-dedup-wait",
+      status: "done",
+      deduplicated: true,
+    });
+
+    const firstClose = events.indexOf("close");
+    expect(firstClose).toBeGreaterThanOrEqual(0);
+    // Sibling of the bug: the store must not be used after it is closed.
+    expect(events.slice(firstClose).every((event) => event === "close")).toBe(true);
+  });
+
+  test("--wait recovers a settled run pruned by the retention sweep", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    // The durable run record the worker writes before finishing the row.
+    const runStore = new RunStore(dbPath);
+    const runId = runStore.createRun({ origin: "local", taskKey: "local-pruned-run" });
+    runStore.finishRun(runId, "succeeded");
+    runStore.close();
+
+    // Settle the injected row, then prune it as the retention sweeper would
+    // with WORKER_INJECTED_TASK_RETENTION_DAYS=0, so the waiter's next poll
+    // finds it gone.
+    const prune = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if (store.hasPending()) {
+            const claimed = store.claimNext()!;
+            store.finish(claimed.id, "done");
+            store.pruneSettled(0, Date.now() + 1_000);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Pruned run", "--wait", "--json"],
+      cap.options,
+    );
+    await prune;
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({
+      taskKey: "local-pruned-run",
+      status: "done",
+      deduplicated: false,
+    });
+  });
+
+  test("--wait-timeout bounds a wait the live worker never settles", async () => {
+    // The worker lock is present, but nothing ever claims/settles the row — the
+    // exact shape of a usage-limit pause or a permanently saturated repo.
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Stuck",
+        "--wait",
+        "--wait-timeout",
+        "1",
+      ],
+      cap.options,
+    );
+
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("Timed out after 1s");
+    expect(cap.err.join("\n")).toContain("--wait-timeout");
+  });
+
+  test("--wait-timeout --json still emits a single terminal error object", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Stuck json",
+        "--wait",
+        "--wait-timeout",
+        "1",
+        "--json",
+      ],
+      cap.options,
+    );
+
+    expect(code).toBe(1);
+    // Exactly one object on stdout, so `… --wait --json | jq .` still parses.
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-stuck-json",
+      repo: "backend",
+      status: "failed",
+      deduplicated: false,
+    });
+    expect(JSON.parse(cap.out[0]!).error).toContain("Timed out after 1s");
+    expect(cap.err.join("\n")).toContain("Timed out after 1s");
+  });
+
+  test("--wait --json emits a terminal error object when the worker stops", async () => {
+    // The pre-flight check sees a live worker; every poll after that sees it
+    // gone, so the waiter must report the failure as one JSON object.
+    const lockSpy = spyOn(LockManager, "readLockStatus").mockReturnValue({ running: false });
+    lockSpy.mockReturnValueOnce({ running: true });
+
+    const cap = capture();
+    let code: number;
+    try {
+      code = await runWorkerAdd(
+        ["--workspace", configPath, "--repo", "backend", "--title", "Stopped", "--wait", "--json"],
+        cap.options,
+      );
+    } finally {
+      lockSpy.mockRestore();
+    }
+
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-stopped",
+      repo: "backend",
+      status: "failed",
+      deduplicated: false,
+    });
+    expect(JSON.parse(cap.out[0]!).error).toContain("worker stopped");
+    expect(cap.err.join("\n")).toContain("worker stopped");
+  });
+
+  test("--wait --json emits a terminal error object when the row disappears", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    // Settle then prune the row with no run record, so the waiter's next poll
+    // finds it gone and the outcome is genuinely inconclusive.
+    const wipe = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if (seed.hasPending()) {
+            seed.finish(seed.claimNext()!.id, "done");
+            seed.pruneSettled(0, Date.now() + 1_000);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Vanished", "--wait", "--json"],
+      cap.options,
+    );
+    await wipe;
+
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-vanished",
+      status: "failed",
+      deduplicated: false,
+    });
+    expect(JSON.parse(cap.out[0]!).error).toContain("disappeared");
+  });
+
   test("enqueue survives restart recovery and is drained by the acquirer", async () => {
     const dbPath = workspaceDbPath(dir);
 
@@ -252,6 +563,13 @@ describe("runWorkerAdd", () => {
       workspaceDir: dir,
       dbPath,
     });
+    // Injected-row recovery runs post-lock in the real startup path.
+    const recovery = new InjectedTaskStore(dbPath);
+    try {
+      recoverOrphanedInjectedTasks(recovery);
+    } finally {
+      recovery.close();
+    }
 
     const after = new InjectedTaskStore(dbPath);
     try {
@@ -335,6 +653,45 @@ describe("runWorkerAdd", () => {
       expect(store.list()).toHaveLength(1);
     } finally {
       store.close();
+    }
+  });
+
+  test("re-enqueues a fixed idempotency key once the previous task settled", async () => {
+    const args = [
+      "--workspace",
+      configPath,
+      "--repo",
+      "backend",
+      "--title",
+      "Nightly docs",
+      "--idempotency-key",
+      "nightly-docs",
+      "--json",
+    ];
+
+    const first = capture();
+    await runWorkerAdd(args, first.options);
+    const firstResult = JSON.parse(first.out.at(-1)!);
+
+    const settle = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      settle.finish(settle.claimNext()!.id, "done");
+    } finally {
+      settle.close();
+    }
+
+    const second = capture();
+    const code = await runWorkerAdd(args, second.options);
+    expect(code).toBe(0);
+    const secondResult = JSON.parse(second.out.at(-1)!);
+    expect(secondResult.deduplicated).toBe(false);
+    expect(secondResult.id).not.toBe(firstResult.id);
+
+    const verify = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      expect(verify.list()).toHaveLength(2);
+    } finally {
+      verify.close();
     }
   });
 

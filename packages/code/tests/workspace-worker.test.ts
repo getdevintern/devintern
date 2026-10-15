@@ -9,6 +9,7 @@ import type { RepoConfig } from "../src/lib/workspace/config";
 import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
   buildFleetEventAcquirers,
+  buildInjectedTaskAcquirer,
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
@@ -19,6 +20,8 @@ import {
   sweepAllWorktrees,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
 import {
   actionedSourceKey,
   createTaskActionedGate,
@@ -685,6 +688,70 @@ remote = "git@github.com:acme/backend.git"
 
     await executor("T-NOP", toRoutableTask({ key: "T-NOP", labels: [], components: [] }));
     expect(observed?.[PICKUP_RUN_ID_ENV]).toBeUndefined();
+  });
+});
+
+describe("buildInjectedTaskAcquirer", () => {
+  let workspaceDir: string;
+  let state: WorkspaceState;
+
+  beforeEach(() => {
+    workspaceDir = join(
+      tmpdir(),
+      `ws-injected-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("carries the markdown task ref and local run origin into the subprocess", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const taskFile = join(workspaceDir, "injected", "local-bump-deps-ab12cd34.md");
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-bump-deps",
+        repo: "backend",
+        title: "Bump deps",
+        body: "",
+        taskFile,
+      });
+
+      let observed:
+        | { taskRef: string; args: string[]; env: Record<string, string | undefined> }
+        | undefined;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async (taskRef, args, options) => {
+            observed = { taskRef, args, env: options.env };
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      // The CLI receives the local markdown path (so it resolves the markdown
+      // tracker from the file), while the worktree/supervisor label still use
+      // the task key, and the subprocess is marked as a `local` origin run.
+      expect(observed?.taskRef).toBe(taskFile);
+      expect(observed?.env[RUN_ORIGIN_ENV]).toBe("local");
+      expect(observed?.args).toEqual(["--create-pr", "--auto-review"]);
+      expect(repoManager.calls).toContain("worktree:backend:local-bump-deps");
+      expect(store.getById(task.id)?.status).toBe("done");
+    } finally {
+      store.close();
+    }
   });
 });
 

@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  makeBeforeAcquirersStart,
   recoverOrphanedWorkspaceRuns,
   scheduleOrphanPickups,
+  startInjectedTaskSweeper,
 } from "../src/lib/workspace/workspace-worker";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
 import type { WorkspaceConfig } from "../src/lib/workspace/config";
 
@@ -143,6 +146,80 @@ describe("recoverOrphanedWorkspaceRuns", () => {
       true,
     );
     retryStore.close();
+  });
+
+  test("does not settle injected running rows before the singleton lock is held", async () => {
+    process.env.TASK_TRACKER = "jira";
+    delete process.env.JIRA_BASE_URL;
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: "local-race",
+      repo: "web-app",
+      title: "race",
+      body: "",
+      taskFile: join(workspaceDir, "injected", "local-race.md"),
+    });
+    const claimed = injected.claimNext()!;
+    injected.close();
+
+    // `recoverOrphanedWorkspaceRuns` runs before lock acquisition; a second
+    // worker losing the lock race must not touch the live worker's rows.
+    await recoverOrphanedWorkspaceRuns({ config: workspaceConfig(), workspaceDir, dbPath });
+
+    const after = new InjectedTaskStore(dbPath);
+    try {
+      expect(after.getById(claimed.id)?.status).toBe("running");
+    } finally {
+      after.close();
+    }
+  });
+
+  test("makeBeforeAcquirersStart fails injected running rows and chains the caller hook", async () => {
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: "local-post-lock",
+      repo: "web-app",
+      title: "post-lock",
+      body: "",
+      taskFile: join(workspaceDir, "injected", "local-post-lock.md"),
+    });
+    const claimed = injected.claimNext()!;
+
+    const order: string[] = [];
+    await makeBeforeAcquirersStart(injected, () => {
+      order.push("caller");
+    })();
+
+    expect(order).toEqual(["caller"]);
+    expect(injected.getById(claimed.id)?.status).toBe("failed");
+    injected.close();
+  });
+
+  test("the periodic sweeper prunes settled rows and their prompt files", async () => {
+    const injected = new InjectedTaskStore(dbPath);
+    const promptFile = join(workspaceDir, "injected", "sweep.md");
+    mkdirSync(join(workspaceDir, "injected"), { recursive: true });
+    writeFileSync(promptFile, "sensitive");
+    injected.enqueue({
+      taskKey: "local-sweep",
+      repo: "web-app",
+      title: "sweep",
+      body: "",
+      taskFile: promptFile,
+    });
+    injected.finish(injected.claimNext()!.id, "done");
+
+    const timer = startInjectedTaskSweeper(injected, 0, 10);
+    try {
+      for (let attempt = 0; attempt < 100 && injected.list().length > 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(injected.list()).toHaveLength(0);
+      expect(existsSync(promptFile)).toBe(false);
+    } finally {
+      clearInterval(timer);
+      injected.close();
+    }
   });
 });
 

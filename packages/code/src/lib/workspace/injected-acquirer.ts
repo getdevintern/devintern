@@ -58,23 +58,32 @@ export class InjectedTaskAcquirer implements Acquirer {
   }
 
   /**
-   * Claim and run every pending task, oldest first, sequentially. Stops at
-   * the first deferred row (it is back in the queue for the next tick), so a
-   * requeued row is never re-claimed by the same drain.
+   * Claim and run every pending task, oldest first, sequentially. A deferred
+   * row (busy repo) is requeued but skipped for the rest of this drain — its id
+   * is excluded from `claimNext` so a blocked repo cannot starve independent
+   * repos behind it. It is retried on the next tick.
    */
   async tick(): Promise<void> {
-    if (this.busy) {
+    if (this.busy || this.options.store.isClosed()) {
       return;
     }
     this.busy = true;
     try {
+      const deferredIds: number[] = [];
       for (;;) {
-        const task = this.options.store.claimNext();
+        // `stop()` closes the store immediately after returning, but an
+        // in-flight `execute` may resolve later; writing then would reopen the
+        // connection the successor worker has taken over. Leave the row
+        // `running` for that successor's orphan recovery instead.
+        if (this.options.store.isClosed()) {
+          return;
+        }
+        const task = this.options.store.claimNext(deferredIds);
         if (!task) {
           return;
         }
         if (!(await this.runOne(task))) {
-          return;
+          deferredIds.push(task.id);
         }
       }
     } finally {
@@ -82,17 +91,21 @@ export class InjectedTaskAcquirer implements Acquirer {
     }
   }
 
-  /** Run one claimed task; false when it was requeued for the next tick. */
+  /** Run one claimed task; false when it was requeued (skip rest of drain). */
   private async runOne(task: InjectedTask): Promise<boolean> {
     const { store, execute, verbose } = this.options;
     console.log(`📥 [${this.name}] running ${task.taskKey} → ${task.repo}`);
     try {
       const result = await execute(task);
+      if (store.isClosed()) {
+        return true;
+      }
       if (result === true) {
         store.finish(task.id, "done");
       } else if (result === "deferred") {
-        // Repo busy (or otherwise not started): back to the queue; stop this
-        // drain so the row is not re-claimed until the next tick.
+        // Repo busy (or otherwise not started): back to the queue for the next
+        // tick. The caller excludes this id for the rest of the drain so it is
+        // not re-claimed ahead of tasks for free repos.
         store.requeue(task.id);
         console.log(`⏳ [${this.name}] ${task.taskKey} deferred; will retry next tick`);
         return false;
@@ -100,6 +113,9 @@ export class InjectedTaskAcquirer implements Acquirer {
         store.finish(task.id, "failed", "task pipeline did not complete cleanly");
       }
     } catch (error) {
+      if (store.isClosed()) {
+        return true;
+      }
       const message = error instanceof Error ? error.message : String(error);
       store.finish(task.id, "failed", message);
       console.error(`❌ [${this.name}] ${task.taskKey} failed: ${message}`);

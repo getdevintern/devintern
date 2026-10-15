@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -55,6 +55,28 @@ describe("InjectedTaskStore", () => {
     expect(second.deduplicated).toBe(true);
     expect(second.task.id).toBe(first.task.id);
     expect(store.list()).toHaveLength(1);
+  });
+
+  test("reuses a settled idempotency key for a new occurrence", () => {
+    const first = store.enqueue({ ...base, idempotencyKey: "nightly-docs" });
+    const claimed = store.claimNext()!;
+    expect(store.findActiveByIdempotencyKey("nightly-docs")?.id).toBe(first.task.id);
+    store.finish(claimed.id, "done");
+    // Settled rows no longer hold the key, so a fixed key can run again.
+    expect(store.findActiveByIdempotencyKey("nightly-docs")).toBeNull();
+
+    const second = store.enqueue({
+      ...base,
+      taskKey: "local-next-night",
+      taskFile: "/ws/injected/next-night.md",
+      idempotencyKey: "nightly-docs",
+    });
+    expect(second.deduplicated).toBe(false);
+    expect(second.task.id).not.toBe(first.task.id);
+    expect(second.task.status).toBe("pending");
+    expect(second.task.idempotencyKey).toBe("nightly-docs");
+    expect(store.findActiveByIdempotencyKey("nightly-docs")?.id).toBe(second.task.id);
+    expect(store.list()).toHaveLength(2);
   });
 
   test("tasks without an idempotency key never dedupe", () => {
@@ -121,5 +143,37 @@ describe("InjectedTaskStore", () => {
         .map((task) => task.taskKey)
         .sort(),
     ).toEqual(["local-pending", "local-running"]);
+  });
+
+  test("pruneSettled unlinks each pruned row's prompt file", () => {
+    const promptFile = join(dir, "prompt-done.md");
+    writeFileSync(promptFile, "sensitive operator context");
+    store.enqueue({ ...base, taskFile: promptFile });
+    store.finish(store.claimNext()!.id, "done");
+    expect(existsSync(promptFile)).toBe(true);
+
+    expect(store.pruneSettled(0, Date.now() + 1_000)).toBe(1);
+    expect(existsSync(promptFile)).toBe(false);
+  });
+
+  test("pruneSettled tolerates a missing prompt file", () => {
+    store.enqueue({ ...base, taskFile: join(dir, "already-gone.md") });
+    store.finish(store.claimNext()!.id, "done");
+
+    expect(store.pruneSettled(0, Date.now() + 1_000)).toBe(1);
+  });
+
+  test("a closed store never reopens: use after close throws", () => {
+    store.enqueue(base);
+    store.close();
+    expect(store.isClosed()).toBe(true);
+
+    // Before the guard these calls silently reopened the SQLite file (the
+    // shutdown race the acquirer now avoids); they must fail loudly instead.
+    expect(() => store.getById(1)).toThrow(/closed/i);
+    expect(() => store.hasPending()).toThrow(/closed/i);
+    expect(() => store.enqueue(base)).toThrow(/closed/i);
+    // The one expected post-close caller stays a no-op rather than throwing.
+    expect(store.pruneSettled(0)).toBe(0);
   });
 });

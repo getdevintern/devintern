@@ -75,6 +75,30 @@ describe("InjectedTaskAcquirer", () => {
     expect(store.hasPending()).toBe(false);
   });
 
+  test("a deferred repo does not starve tasks for other repos", async () => {
+    enqueue("local-a", "r1");
+    enqueue("local-b", "r2");
+
+    const calls: string[] = [];
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async (task) => {
+        calls.push(task.taskKey);
+        return task.repo === "r1" ? "deferred" : true;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+
+    // local-a is blocked on r1, but local-b on a free repo still runs in the
+    // same drain instead of waiting behind it.
+    expect(calls).toEqual(["local-a", "local-b"]);
+    const byKey = Object.fromEntries(store.list().map((task) => [task.taskKey, task.status]));
+    expect(byKey["local-b"]).toBe("done");
+    expect(byKey["local-a"]).toBe("pending");
+    expect(store.hasPending()).toBe(true);
+  });
+
   test("marks failed rows when the pipeline fails or throws", async () => {
     enqueue("local-a");
     const failed = new InjectedTaskAcquirer({
@@ -121,5 +145,48 @@ describe("InjectedTaskAcquirer", () => {
     await first;
 
     expect(calls).toEqual(["local-a"]);
+  });
+
+  test("does not settle a row through a closed store during shutdown", async () => {
+    enqueue("local-a");
+    const dbPath = join(dir, "queue.db");
+
+    let signalStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => {
+        signalStarted();
+        await gate;
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+
+    const tick = acquirer.tick();
+    // The row is now claimed `running` and `execute` is in flight.
+    await started;
+    // Shutdown order: the worker stops the acquirer, then closes the store,
+    // while the in-flight execute has not resolved yet.
+    acquirer.stop();
+    store.close();
+    release();
+    // Must resolve cleanly (no unhandled throw) and must not reopen the DB.
+    await tick;
+
+    const verify = new InjectedTaskStore(dbPath);
+    try {
+      // Left `running` for the successor's orphan recovery, not settled `done`
+      // through a resurrected connection.
+      expect(verify.getById(1)?.status).toBe("running");
+    } finally {
+      verify.close();
+    }
   });
 });

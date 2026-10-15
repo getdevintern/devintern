@@ -24,6 +24,8 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
+import { RunStore } from "../state/run-recorder";
+import type { RunRecord } from "../state/run-recorder";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
   injectedTasksDir,
@@ -38,6 +40,17 @@ export const MAX_INJECTED_BODY_CHARS = 20_000;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * Default `--wait` deadline (`--wait-timeout`), in seconds.
+ *
+ * A settled row and a disappeared worker are the fast exits, but a live worker
+ * can keep deferring a row forever — a usage-limit pause or a permanently
+ * saturated repo requeues the task every tick without progress. The deadline
+ * bounds `--wait` so it cannot hang indefinitely; `--wait-timeout 0` opts back
+ * into waiting without a limit.
+ */
+export const DEFAULT_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60;
 
 export interface WorkerAddOptions {
   /** Human-readable status sink (defaults to stdout). */
@@ -57,6 +70,8 @@ export interface AddOptions {
   idempotencyKey?: string;
   wait: boolean;
   json: boolean;
+  /** `--wait` deadline in seconds; `0` waits without a limit (default 6h). */
+  waitTimeoutSeconds?: number;
 }
 
 export type ParsedAddArgs =
@@ -79,6 +94,7 @@ function usage(): string {
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
     "  --wait                    Block until the run finishes; exit with its status",
+    "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
     "  --json                    Emit a machine-readable result on stdout",
     "  --workspace <path>        Use this workspace.toml (default: ~/.devintern/)",
     "  -h, --help                Show this help",
@@ -93,6 +109,7 @@ const VALUE_FLAGS = new Set([
   "--body",
   "--body-file",
   "--idempotency-key",
+  "--wait-timeout",
 ]);
 
 /**
@@ -141,6 +158,17 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
         case "--idempotency-key":
           options.idempotencyKey = value;
           break;
+        case "--wait-timeout": {
+          const seconds = Number(value);
+          if (!Number.isInteger(seconds) || seconds < 0) {
+            return {
+              kind: "error",
+              message: "--wait-timeout requires a non-negative integer number of seconds.",
+            };
+          }
+          options.waitTimeoutSeconds = seconds;
+          break;
+        }
       }
       continue;
     }
@@ -369,14 +397,19 @@ export async function runWorkerAdd(
   const store = new InjectedTaskStore(workspaceDbPath(selectedDir));
   try {
     if (add.idempotencyKey) {
-      const existing = store.findByIdempotencyKey(add.idempotencyKey);
+      // Only an active (pending/running) task dedupes; a settled one under the
+      // same key is history and a new occurrence is enqueued below.
+      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
       if (existing) {
-        return reportTask(existing, {
+        // `await` is load-bearing: without it the surrounding `finally` would
+        // `store.close()` while `reportTask`/`waitForTask` is still polling.
+        return await reportTask(existing, {
           log,
           error,
           status,
           wait: add.wait,
           json: add.json,
+          waitTimeoutSeconds: add.waitTimeoutSeconds,
           store,
           selectedDir,
         });
@@ -391,6 +424,7 @@ export async function runWorkerAdd(
       status,
       wait: add.wait,
       json: add.json,
+      waitTimeoutSeconds: add.waitTimeoutSeconds,
     });
   } finally {
     store.close();
@@ -405,6 +439,8 @@ interface TaskContext {
   status: (message: string) => void;
   wait: boolean;
   json: boolean;
+  /** `--wait` deadline in seconds; `0` = no limit, undefined = the default. */
+  waitTimeoutSeconds?: number;
   store: InjectedTaskStore;
   selectedDir: string;
 }
@@ -431,14 +467,19 @@ async function enqueueNewTask(
 ): Promise<number> {
   const { store, selectedDir, workerRunning, log, status } = ctx;
   const dir = injectedTasksDir(selectedDir);
-  mkdirSync(dir, { recursive: true });
+  // Prompts hold arbitrary operator context, so keep them owner-only like the
+  // workspace .env. `mode` only applies to newly created paths.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   for (let attempt = 0; ; attempt++) {
     const taskKey = deriveInjectedTaskKey(add.title, (key) => store.hasTaskKey(key));
     // Unique per call: if a concurrent caller wins the same key or idempotency
     // row, unlinking our own file can never delete the winner's prompt.
     const taskFile = join(dir, injectedTaskFileName(taskKey));
-    writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), "utf8");
+    writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
 
     let enqueued: EnqueueInjectedTaskResult;
     try {
@@ -488,7 +529,7 @@ async function enqueueNewTask(
       if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false });
+    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey });
   }
 }
 
@@ -530,38 +571,142 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true });
+  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+}
+
+/**
+ * Emit the terminal result for a `--wait` failure that never observed a settled
+ * row (timeout, worker stopped, or an inconclusive pruned row). Under `--json`
+ * stdout still carries exactly one object — the documented `… | jq .` contract
+ * holds on failures too — with `status: "failed"`; the human diagnostics stay
+ * on stderr. Returns the failure exit code.
+ */
+function failWait(
+  ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  result: { id: number; repo?: string; error: string },
+  errorLines: readonly string[],
+): number {
+  for (const line of errorLines) {
+    ctx.error(line);
+  }
+  if (ctx.json) {
+    ctx.log(
+      JSON.stringify({
+        id: result.id,
+        taskKey: ctx.taskKey,
+        repo: result.repo ?? "",
+        status: "failed",
+        deduplicated: ctx.deduplicated,
+        error: result.error,
+      }),
+    );
+  }
+  return 1;
 }
 
 /**
  * Poll a task row until it settles and emit exactly one result. Fails fast when
- * the worker disappears, so `--wait` cannot hang forever after the daemon exits.
- * The interim "pending" JSON is intentionally not emitted: with `--wait --json`
- * stdout carries a single object describing the final state.
+ * the worker disappears, and again when the `--wait-timeout` deadline elapses
+ * with the row still unsettled, so `--wait` cannot hang forever. The interim
+ * "pending" JSON is intentionally not emitted: with `--wait --json` stdout
+ * carries a single object describing the final state (including these
+ * failures, which are reported as a terminal `status: "failed"` object).
  */
 async function waitForTask(
   id: number,
-  ctx: TaskContext & { deduplicated: boolean },
+  ctx: TaskContext & { deduplicated: boolean; taskKey: string },
 ): Promise<number> {
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
+  const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
+  const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      ctx.error(`❌ Injected task #${id} disappeared while waiting.`);
-      return 1;
+      return reportPrunedTask(id, ctx);
     }
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
+    }
+    if (Date.now() >= deadline) {
+      return failWait(
+        ctx,
+        {
+          id,
+          repo: task.repo,
+          error: `Timed out after ${timeoutSeconds}s waiting for task #${id} (still ${task.status}).`,
+        },
+        [
+          `❌ Timed out after ${timeoutSeconds}s waiting for task #${id} (still ${task.status}).`,
+          "   It remains queued/running; check the worker dashboard, or raise --wait-timeout (0 disables it).",
+        ],
+      );
     }
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
     if (!workerRunning) {
-      ctx.error("❌ The worker stopped before the task finished; it remains queued/failed.");
-      ctx.error("   Start the worker again and inspect the dashboard run history.");
-      return 1;
+      return failWait(
+        ctx,
+        { id, repo: task.repo, error: "The worker stopped before the task finished." },
+        [
+          "❌ The worker stopped before the task finished; it remains queued/failed.",
+          "   Start the worker again and inspect the dashboard run history.",
+        ],
+      );
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
+  }
+}
+
+/**
+ * Report a task whose injected row was pruned by the worker's retention sweep
+ * before `--wait` observed its terminal status.
+ *
+ * `pruneSettled` only removes settled (`done`/`failed`) rows, so a row that
+ * vanished after the CLI enqueued it settled; its outcome is durably mirrored
+ * in the run record (same DB, keyed by the task key) written before the row is
+ * finished. Read that instead of reporting a spurious "disappeared" failure
+ * for a successful run. A missing or non-terminal run (e.g. the DB was edited
+ * out from under us) is genuinely inconclusive and still fails.
+ */
+function reportPrunedTask(
+  id: number,
+  ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+): number {
+  const run = readLatestRun(ctx.selectedDir, ctx.taskKey);
+  if (!run || run.status === "in_progress" || run.status === "deferred") {
+    return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
+      `❌ Injected task #${id} disappeared while waiting.`,
+    ]);
+  }
+  const settled: InjectedTask = {
+    id,
+    taskKey: ctx.taskKey,
+    repo: run.repo ?? "",
+    title: "",
+    body: "",
+    taskFile: "",
+    actor: "",
+    status: run.status === "succeeded" ? "done" : "failed",
+    message: run.outcomeReason,
+    createdAt: run.startedAt,
+  };
+  if (!ctx.json) {
+    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its run outcome.`);
+  }
+  return emitSettled(settled, ctx.deduplicated, ctx);
+}
+
+/** Latest run record for a task key (read-only; null when absent/unreadable). */
+function readLatestRun(selectedDir: string, taskKey: string): RunRecord | null {
+  let store: RunStore | null = null;
+  try {
+    store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
+    return store.latestRunByTaskKey([taskKey]).get(taskKey) ?? null;
+  } catch {
+    return null;
+  } finally {
+    store?.close();
   }
 }
 

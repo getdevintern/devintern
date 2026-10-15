@@ -9,13 +9,17 @@
  *
  * Rows are persisted in the central workspace DB (`state/queue.db`), so an
  * enqueued task survives worker restarts and is picked up on the next poll.
- * An optional `idempotency_key` (unique when set) makes retried automation
- * enqueue at most one task. `task_key` is unique too (it names the branch and
- * worktree), and the worker prunes settled rows on startup so the table cannot
- * grow without bound over a long-lived daemon.
+ * An optional `idempotency_key` makes retried automation enqueue at most one
+ * *active* task: while a task with the key is `pending`/`running` a retry
+ * reuses it, and once it settles a later enqueue with the same key starts a new
+ * occurrence (so a fixed key still drives a recurring job). `task_key` is
+ * unique too (it names the branch and worktree), and the worker periodically
+ * prunes settled rows and their prompt files, so neither the table nor the
+ * injected directory grows without bound over a long-lived daemon.
  */
 
 import { Database } from "bun:sqlite";
+import { unlinkSync } from "fs";
 
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
@@ -99,10 +103,24 @@ export interface EnqueueInjectedTaskResult {
  */
 export class InjectedTaskStore {
   private db: Database | null = null;
+  private closed = false;
 
   constructor(private dbPath: string) {}
 
+  /** Whether `close()` has released this store's connection. */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
   private ensureDb(): Database {
+    // `close()` released the SQLite file. Reopening it here would resurrect the
+    // connection after shutdown (e.g. an in-flight task settling through a
+    // handle the successor worker already took over), so fail loudly instead of
+    // silently recreating the file. `pruneSettled` is the one expected
+    // post-close caller and guards against this itself.
+    if (this.closed) {
+      throw new Error("InjectedTaskStore is closed");
+    }
     if (this.db) {
       return this.db;
     }
@@ -154,21 +172,33 @@ export class InjectedTaskStore {
   }
 
   /**
-   * Insert a task as `pending` (idempotent on an existing key).
+   * Insert a task as `pending` (idempotent while an earlier task with the same
+   * key is still active).
    *
-   * When `idempotencyKey` matches a previously enqueued task — in any status —
-   * the existing row is returned and nothing is inserted, so a retried
-   * automation cannot create a duplicate.
+   * When `idempotencyKey` matches a `pending`/`running` task, that row is
+   * returned and nothing is inserted, so a retried automation cannot create a
+   * duplicate. A settled (`done`/`failed`) row only retains the key as history;
+   * it is released so the key can drive a new occurrence (e.g. a nightly job
+   * that must run every night even though the key is fixed).
    */
   enqueue(input: EnqueueInjectedTaskInput): EnqueueInjectedTaskResult {
     const db = this.ensureDb();
     if (input.idempotencyKey) {
-      const existing = this.findByIdempotencyKey(input.idempotencyKey);
+      const existing = this.findActiveByIdempotencyKey(input.idempotencyKey);
       if (existing) {
         return { task: existing, deduplicated: true };
       }
     }
     try {
+      if (input.idempotencyKey) {
+        // Release the key from any settled row so the partial unique index
+        // admits this new occurrence. A still-active row was handled above.
+        db.run(
+          `UPDATE injected_tasks SET idempotency_key = NULL
+           WHERE idempotency_key = ? AND status IN ('done', 'failed')`,
+          [input.idempotencyKey],
+        );
+      }
       db.query(
         `INSERT INTO injected_tasks
            (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at)
@@ -187,7 +217,7 @@ export class InjectedTaskStore {
       // A concurrent caller claimed the same idempotency key between the read
       // above and this insert: resolve to their row instead of failing.
       if (input.idempotencyKey) {
-        const existing = this.findByIdempotencyKey(input.idempotencyKey);
+        const existing = this.findActiveByIdempotencyKey(input.idempotencyKey);
         if (existing) return { task: existing, deduplicated: true };
       }
       throw error;
@@ -198,10 +228,15 @@ export class InjectedTaskStore {
     return { task: rowToInjectedTask(row), deduplicated: false };
   }
 
-  /** Look up a task by its idempotency/correlation key. */
-  findByIdempotencyKey(key: string): InjectedTask | null {
+  /**
+   * Look up a `pending`/`running` task by its idempotency key. Settled rows are
+   * excluded: they no longer block a new enqueue under the same key.
+   */
+  findActiveByIdempotencyKey(key: string): InjectedTask | null {
     const row = this.ensureDb()
-      .query("SELECT * FROM injected_tasks WHERE idempotency_key = ?")
+      .query(
+        "SELECT * FROM injected_tasks WHERE idempotency_key = ? AND status IN ('pending', 'running')",
+      )
       .get(key) as InjectedTaskRow | null;
     return row ? rowToInjectedTask(row) : null;
   }
@@ -225,19 +260,29 @@ export class InjectedTaskStore {
   /**
    * Claim the oldest pending task atomically (safe against concurrent
    * claimers): the subquery only matches a still-pending row.
+   *
+   * @param excludeIds Rows to skip for this drain. A deferred (busy-repo) row
+   *   is requeued but must not be re-claimed immediately, or it would starve
+   *   newer pending tasks for other repos; callers pass the ids already seen.
    */
-  claimNext(): InjectedTask | null {
+  claimNext(excludeIds: readonly number[] = []): InjectedTask | null {
+    const params: number[] = [Date.now()];
+    let exclusion = "";
+    if (excludeIds.length > 0) {
+      exclusion = ` AND id NOT IN (${excludeIds.map(() => "?").join(", ")})`;
+      params.push(...excludeIds);
+    }
     const row = this.ensureDb()
       .query(
         `UPDATE injected_tasks
          SET status = 'running', started_at = ?
          WHERE id = (
-           SELECT id FROM injected_tasks WHERE status = 'pending'
+           SELECT id FROM injected_tasks WHERE status = 'pending'${exclusion}
            ORDER BY created_at ASC, id ASC LIMIT 1
          )
          RETURNING *`,
       )
-      .get(Date.now()) as InjectedTaskRow | null;
+      .get(...params) as InjectedTaskRow | null;
     return row ? rowToInjectedTask(row) : null;
   }
 
@@ -291,17 +336,44 @@ export class InjectedTaskStore {
    * long-lived worker's `injected_tasks` table cannot grow without bound.
    * Runs still in flight are never touched.
    *
+   * Each pruned row's `task_file` (the operator's plaintext prompt context) is
+   * unlinked too, so disk usage is bounded alongside the table. File names are
+   * unique per enqueue, so removing one row's file can never delete a live
+   * row's prompt.
+   *
    * @param now Overridable clock (tests).
    * @returns The number of rows pruned.
    */
   pruneSettled(olderThanMs: number, now: number = Date.now()): number {
+    // The worker's unref'd sweep timer may fire after `close()` during
+    // shutdown; reopening the DB then would resurrect the file we just
+    // released. Settled rows are already gone, so a closed store is a no-op.
+    if (this.closed) return 0;
+    const db = this.ensureDb();
     const cutoff = now - olderThanMs;
-    const result = this.ensureDb().run(
+    // Read the file paths before deleting the rows: after the DELETE the paths
+    // are gone and the files would leak forever.
+    const settled = db
+      .query(
+        `SELECT task_file FROM injected_tasks
+         WHERE status IN ('done', 'failed')
+           AND COALESCE(finished_at, created_at) < ?`,
+      )
+      .all(cutoff) as Array<{ task_file: string }>;
+    if (settled.length === 0) return 0;
+    const result = db.run(
       `DELETE FROM injected_tasks
        WHERE status IN ('done', 'failed')
          AND COALESCE(finished_at, created_at) < ?`,
       [cutoff],
     );
+    for (const { task_file } of settled) {
+      try {
+        unlinkSync(task_file);
+      } catch {
+        // Best-effort: a missing or already-removed file is not an error.
+      }
+    }
     return Number(result.changes ?? 0);
   }
 
@@ -314,6 +386,7 @@ export class InjectedTaskStore {
   }
 
   close(): void {
+    this.closed = true;
     this.db?.close();
     this.db = null;
   }
