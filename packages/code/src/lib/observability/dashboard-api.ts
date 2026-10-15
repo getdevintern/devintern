@@ -45,6 +45,8 @@ import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
 import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
 import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
+import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
+import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
 import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
 import { resolveWorkspaceDir } from "../workspace/paths";
 import { WorkerState } from "../state/worker-state";
@@ -355,6 +357,16 @@ export class DashboardData {
       return null;
     }
     return readHarnessLogContent(name);
+  }
+
+  /** Registered immutable outputs belonging to this exact attempt. */
+  listRunArtifacts(runId: number): TaskArtifactFile[] {
+    return listRunArtifacts(this.dbPath, runId);
+  }
+
+  /** Artifact IDs are scoped to their recorded run, including runs without a task key. */
+  readRunArtifact(runId: number, id: string): TaskArtifactContent | null {
+    return readRunArtifact(this.dbPath, runId, id);
   }
 
   /** Eligibility plus audit history for a run's retry action. */
@@ -1031,6 +1043,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
       stages: detail.stages,
       retry,
       harnessLogs: data.listRunHarnessLogs(id),
+      artifacts: data.listRunArtifacts(id),
     },
   };
 }
@@ -1076,6 +1089,52 @@ export function handleRunHarnessLog(
   const content = data.readRunHarnessLog(id, name);
   if (!content) {
     return { status: 404, body: { error: "harness log not found" } };
+  }
+  return { status: 200, body: content };
+}
+
+/**
+ * `GET /api/runs/:id/artifacts` — the task artifact list for a run, sorted by
+ * relative path. Same data the run-detail response embeds in `artifacts`.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Raw run id path segment
+ */
+export function handleRunArtifacts(data: DashboardData, idParam: string): ApiResponse {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+  if (!data.getRunDetail(id)) return { status: 404, body: { error: "run not found" } };
+  return { status: 200, body: { artifacts: data.listRunArtifacts(id) } };
+}
+
+/**
+ * `GET /api/runs/:id/artifacts/:name` — the redacted content of one task
+ * artifact, scoped to the run it belongs to.
+ *
+ * @param data - Dashboard data source
+ * @param idParam - Raw run id path segment
+ * @param nameParam - Artifact relative path (path traversal is rejected)
+ */
+export function handleRunArtifact(
+  data: DashboardData,
+  idParam: string,
+  nameParam: string,
+): ApiResponse {
+  const id = parseInt(idParam, 10);
+  if (!Number.isFinite(id) || String(id) !== idParam) {
+    return badRequest("run id must be an integer");
+  }
+  let name: string;
+  try {
+    name = decodeURIComponent(nameParam);
+  } catch {
+    return badRequest("invalid artifact name");
+  }
+  const content = data.readRunArtifact(id, name);
+  if (!content) {
+    return { status: 404, body: { error: "artifact not found" } };
   }
   return { status: 200, body: content };
 }

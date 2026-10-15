@@ -122,8 +122,14 @@ each variant's `CREDITS.md`. The visual guidance originates in Humanlayer's
 
 ## Follow-ups
 
-- **PR-body integration.** The CLI builds the PR body from the implementation
-  output and exposes no public API for a plugin to contribute to it. The
-  explainer examples write an artifact instead and record this as a follow-up.
 - **Official plugin repository.** Revisit a maintained, installable plugin
   repository after the public API stabilizes and there is demand for it.
+
+## Where the explainer output goes
+
+Explainers register immutable outputs through `context.artifacts.addFile`.
+The narrative key is `explanation-narrative`; the visual key is
+`explanation-visual`. Their `settings.json` files explicitly select publication
+in one managed PR comment. The same artifacts appear in the dashboard, scoped
+to the exact run.
+See [Pipeline artifacts](../../docs/code/artifacts.md) for the full contract.

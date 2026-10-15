@@ -1,5 +1,11 @@
 {
   "pipeline": {
+    "artifacts": {
+      "publish": {
+        "destination": "pr-comment",
+        "select": [{ "key": "explanation-visual", "presentation": "collapsed" }]
+      }
+    },
     "plugins": ["./.devintern-code/steps/pr-explainer-visual.ts"],
     "steps": [
       { "use": "implement" },

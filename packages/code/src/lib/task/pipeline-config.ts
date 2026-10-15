@@ -1,3 +1,4 @@
+import { validateArtifactPolicy } from "../artifacts/publication";
 import { isAbsolute, resolve } from "path";
 import { pathToFileURL } from "url";
 import type { PipelineConfig, PipelineStepConfig } from "../../types/settings";
@@ -130,6 +131,7 @@ export async function resolvePipelineSteps(
   config: PipelineConfig | undefined,
   projectRoot: string,
 ): Promise<ResolvedPipelineStep[]> {
+  validateArtifactPolicy(config?.artifacts);
   await loadPipelinePlugins(config?.plugins, projectRoot);
   const entries = config?.steps ?? DEFAULT_PIPELINE;
   if (!Array.isArray(entries) || entries.length === 0) {

@@ -1,3 +1,4 @@
+import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -585,6 +586,63 @@ describe("dashboard server", () => {
       expect(post.status).toBe(405);
     } finally {
       server.stop(true);
+    }
+  });
+
+  test("serves task artifacts end-to-end", async () => {
+    const outputDir = join(dir, "output");
+    const savedOutputDir = process.env.DEVINTERN_OUTPUT_DIR;
+    process.env.DEVINTERN_OUTPUT_DIR = outputDir;
+
+    mkdirSync(join(outputDir, "proj-2"), { recursive: true });
+    writeFileSync(
+      join(outputDir, "proj-2", "verify-prompt.txt"),
+      "token=ghp_abcdefghijklmnopqrstuvwxyz\n",
+    );
+
+    const store = new RunStore(dbPath);
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-2" });
+    store.close();
+
+    const artifacts = new ArtifactStore(dbPath);
+    const artifact = artifacts.add(
+      {
+        key: "verify",
+        path: join(outputDir, "proj-2", "verify-prompt.txt"),
+        title: "Verification",
+        kind: "verification",
+        mediaType: "text/plain",
+      },
+      { scope: `run-${id}`, runId: id, step: "verify", iteration: 1 },
+      [outputDir],
+    );
+    artifacts.close();
+
+    const server = startDashboardServer({ port: 0, dbPath, workingDir: dir });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+
+      const listRes = await fetch(`${base}/api/runs/${id}/artifacts`);
+      expect(listRes.status).toBe(200);
+      const list = (await listRes.json()) as { artifacts: { name: string }[] };
+      expect(list.artifacts.map((file) => file.name)).toEqual(["verify-prompt.txt"]);
+
+      const detail = (await (await fetch(`${base}/api/runs/${id}`)).json()) as {
+        artifacts: { name: string }[];
+      };
+      expect(detail.artifacts.map((file) => file.name)).toEqual(["verify-prompt.txt"]);
+
+      const contentRes = await fetch(`${base}/api/runs/${id}/artifacts/${artifact.id}`);
+      expect(contentRes.status).toBe(200);
+      const content = (await contentRes.json()) as { content: string };
+      expect(content.content).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
+
+      const missing = await fetch(`${base}/api/runs/${id}/artifacts/nope.txt`);
+      expect(missing.status).toBe(404);
+    } finally {
+      server.stop(true);
+      if (savedOutputDir === undefined) delete process.env.DEVINTERN_OUTPUT_DIR;
+      else process.env.DEVINTERN_OUTPUT_DIR = savedOutputDir;
     }
   });
 

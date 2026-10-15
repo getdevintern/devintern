@@ -79,6 +79,7 @@ let agentPrompts: string[];
 let autoReviewOptions: Array<{ maxIterations?: number; minPriority?: string }>;
 let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
+let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
 
 class FakeChild extends EventEmitter {
@@ -146,7 +147,14 @@ mock.module("../src/lib/utils", () => ({
 mock.module("../src/lib/code-host", () => ({
   ...realCodeHost,
   PRManager: class {
-    async createPullRequest() {
+    async createPullRequest(
+      _task: unknown,
+      _sourceBranch: string,
+      _targetBranch: string,
+      _implementationSummary: string,
+      options?: { artifactComment?: string },
+    ) {
+      prCreateOptions = options;
       return prResult;
     }
   },
@@ -246,6 +254,7 @@ beforeEach(() => {
   autoReviewOptions = [];
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
+  prCreateOptions = undefined;
   postImplementationCommentMock = mock(async () => {});
   outDir = mkdtempSync(join(tmpdir(), "run-harness-"));
   mkdirSync(join(outDir, "task-1"), { recursive: true });
@@ -462,6 +471,51 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("publishes explicitly selected artifacts independently of the plugin name", async () => {
+    scenario.stdout = "done";
+    const name = `report-${randomUUID()}`;
+    registerStep({
+      name,
+      create: () => ({
+        name,
+        run: async (context) => {
+          const path = join(context.outputDir, "explanation.md");
+          writeFileSync(path, "Reviewers: focus on the undo stack.");
+          await context.artifacts.addFile({
+            key: "explanation",
+            path,
+            title: "Explanation",
+            kind: "explanation",
+            mediaType: "text/markdown",
+          });
+          return { kind: "continue" };
+        },
+      }),
+    });
+    pipelineConfig = {
+      artifacts: {
+        publish: {
+          destination: "pr-comment",
+          select: [{ key: "explanation", presentation: "inline" }],
+        },
+      },
+      steps: [{ use: "implement" }, { use: "commit" }, { use: name }, { use: "finalize" }],
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(prCreateOptions?.artifactComment).toContain("Reviewers: focus on the undo stack.");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not publish artifacts without an explicit publication policy", async () => {
+    scenario.stdout = "done";
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(prCreateOptions?.artifactComment).toBeUndefined();
   });
 
   test.each([undefined, "feature/task-1"])(

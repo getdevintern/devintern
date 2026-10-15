@@ -41,19 +41,15 @@ Adjust the import in the copied `plugin.ts` to point at
 
 ## Result
 
-The step writes `pr-explanation.md` under `context.outputDir` and returns
-structured data:
+The step writes `pr-explanation.md` and registers an immutable artifact with key
+`explanation-narrative` through `context.artifacts.addFile`. The returned
+`data` contains the source `path`; report bodies live in the artifact registry.
 
-```ts
-{ kind: "continue", data: { path: "<outputDir>/pr-explanation.md", content: "..." } }
-```
-
-**PR body integration.** The CLI builds the PR body from the implementation
-output (`buildPrBody`) and exposes no public API for a plugin to inject text
-into it. This example therefore produces an **explanation artifact**, not a PR
-body change. Feeding it into the PR body is recorded as a follow-up; see the
-root examples README. If generation fails, the step returns
-`{ kind: "warn" }` and publication continues.
+The example settings explicitly select this key for one managed GitHub PR
+comment. The dashboard displays the same registered output for this run.
+Generation, capture, and publication failures remain advisory.
+See [Pipeline artifacts](../../../docs/code/artifacts.md) for the full contract,
+upload adapters, and plugin configuration.
 
 ## Validate
 

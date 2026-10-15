@@ -76,8 +76,9 @@ export class PRManager {
    * @param implementationSummary - Optional summary appended to PR body
    * @param options - PR metadata: `labels` (defaults to the comma-separated
    *   `PR_LABELS` environment variable), `targetBranchExplicit` (whether the
-   *   user supplied --pr-target-branch), and `requestedTargetBranch` (original
-   *   explicit target before Git fallback resolution)
+   *   user supplied --pr-target-branch), `requestedTargetBranch` (original
+   *   explicit target before Git fallback resolution), and `artifactComment`
+   *   (explicitly selected run artifacts published separately from the PR body)
    */
   async createPullRequest(
     task: Task | JiraIssue,
@@ -88,6 +89,7 @@ export class PRManager {
       labels?: string[];
       targetBranchExplicit?: boolean;
       requestedTargetBranch?: string;
+      artifactComment?: string;
     } = {},
   ): Promise<PRResult> {
     const labels = options.labels ?? parsePrLabels(process.env.PR_LABELS);
@@ -109,6 +111,7 @@ export class PRManager {
       title: this.createPRTitle(taskKey, taskSummary),
       body: this.createPRBody(task, implementationSummary),
       sourceBranch,
+      artifactComment: options.artifactComment,
       targetBranch:
         repoInfo.platform === "gitlab"
           ? targetBranchExplicit
@@ -131,6 +134,13 @@ export class PRManager {
     };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       result = await this.dispatchCreatePullRequest(prInfo, repoInfo);
+      if (result.success && options.artifactComment && repoInfo.platform !== "github") {
+        result.artifactPublication = {
+          status: "skipped",
+          message: `Artifact comments are not supported for ${repoInfo.platform} yet`,
+        };
+        result.warnings = [...(result.warnings ?? []), result.artifactPublication.message!];
+      }
       if (result.success || !isTransientPrFailure(result.message)) {
         return result;
       }
@@ -171,7 +181,10 @@ export class PRManager {
         try {
           const [owner, repo] = repoInfo.repository.split("/");
           const token = await this.githubAppAuth.getTokenForRepository(owner, repo);
-          const client = new GitHubPRClient(token);
+          const app = prInfo.artifactComment
+            ? await this.githubAppAuth.getAppInfo().catch(() => undefined)
+            : undefined;
+          const client = new GitHubPRClient(token, undefined, app ? `${app.slug}[bot]` : undefined);
           return await client.createPullRequest(prInfo);
         } catch (error) {
           return {

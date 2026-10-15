@@ -1,3 +1,4 @@
+import { upsertArtifactComment } from "./artifact-comment";
 import { Utils } from "../../utils";
 import { PRClient } from "../base-client";
 import { prNumberFromUrl } from "../shared";
@@ -8,7 +9,11 @@ export class GitHubPRClient extends PRClient {
    * @param token - GitHub personal access token or installation token
    * @param baseUrl - GitHub API base URL
    */
-  constructor(token: string, baseUrl = "https://api.github.com") {
+  constructor(
+    token: string,
+    baseUrl = "https://api.github.com",
+    private authorLogin?: string,
+  ) {
     super(token, baseUrl);
   }
 
@@ -51,6 +56,7 @@ export class GitHubPRClient extends PRClient {
             await this.applyLabels(owner, repo, prNumberFromUrl(existingUrl), prInfo.labels);
             return {
               success: true,
+              ...(await this.publishArtifacts(prInfo, number)),
               url: existingUrl,
               message: `Pull request already exists: ${existingUrl}`,
               ...(number
@@ -78,6 +84,7 @@ export class GitHubPRClient extends PRClient {
       await this.applyLabels(owner, repo, data.number, prInfo.labels);
       return {
         success: true,
+        ...(await this.publishArtifacts(prInfo, data.number)),
         url: data.html_url,
         message: `Pull request created successfully: ${data.html_url}`,
         ...(data.number
@@ -110,6 +117,24 @@ export class GitHubPRClient extends PRClient {
    * @param prNumber - PR number
    * @param labels - Label names to apply
    */
+  private async publishArtifacts(info: PRInfo, number?: number): Promise<Partial<PRResult>> {
+    if (!info.artifactComment || !number) return {};
+    const artifactPublication = await upsertArtifactComment({
+      token: this.token,
+      baseUrl: this.baseUrl,
+      repository: info.repository,
+      number,
+      body: info.artifactComment,
+      authorLogin: this.authorLogin,
+    });
+    return {
+      artifactPublication,
+      ...(artifactPublication.status === "failed"
+        ? { warnings: [artifactPublication.message ?? "Artifact publication failed"] }
+        : {}),
+    };
+  }
+
   private async applyLabels(
     owner: string,
     repo: string,

@@ -47,10 +47,15 @@ export async function runTaskSteps<Context>(
     warnings?: string[];
     loopbackFeedback?: ReviewFeedback;
     loopbackReason?: string;
+    artifacts?: { beginStep?(step: string, iteration: number): void };
   };
+  const executions = new Map<string, number>();
   let index = 0;
   while (index < steps.length) {
     const step = steps[index]!;
+    const execution = (executions.get(step.name) ?? 0) + 1;
+    executions.set(step.name, execution);
+    shared.artifacts?.beginStep?.(step.name, execution);
     let result: TaskStepResult | void;
     try {
       result = await step.run(context);

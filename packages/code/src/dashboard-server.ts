@@ -1,3 +1,4 @@
+import { readRunArtifactFile } from "./lib/observability/task-artifacts";
 /**
  * Dashboard Server
  *
@@ -19,6 +20,8 @@ import {
   handleAutomations,
   handleLogs,
   handleRetryRun,
+  handleRunArtifact,
+  handleRunArtifacts,
   handleRunAutomation,
   handleRunHarnessLog,
   handleRunHarnessLogs,
@@ -145,6 +148,9 @@ export function startDashboardServer(
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
   const runHarnessLogsPattern = /^\/api\/runs\/([^/]+)\/harness-logs$/;
   const runHarnessLogPattern = /^\/api\/runs\/([^/]+)\/harness-logs\/([^/]+)$/;
+  const runArtifactsPattern = /^\/api\/runs\/([^/]+)\/artifacts$/;
+  const runArtifactFilePattern = /^\/api\/runs\/([1-9][0-9]*)\/artifacts\/([a-f0-9-]{36})\/file$/;
+  const runArtifactPattern = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
@@ -184,6 +190,22 @@ export function startDashboardServer(
         const harnessLog = pathname.match(runHarnessLogPattern);
         if (harnessLog) {
           return json(handleRunHarnessLog(data, harnessLog[1], harnessLog[2]));
+        }
+        const artifacts = pathname.match(runArtifactsPattern);
+        if (artifacts) {
+          return json(handleRunArtifacts(data, artifacts[1]));
+        }
+        const artifactFile = pathname.match(runArtifactFilePattern);
+        if (artifactFile)
+          return readRunArtifactFile(
+            data.dbPath,
+            Number(artifactFile[1]),
+            artifactFile[2],
+            url.searchParams.has("download"),
+          );
+        const artifact = pathname.match(runArtifactPattern);
+        if (artifact) {
+          return json(handleRunArtifact(data, artifact[1], artifact[2]));
         }
         const runDetail = pathname.match(runDetailPattern);
         if (runDetail) {

@@ -9,6 +9,8 @@ export interface PRInfo {
   repository: string;
   /** Labels to apply (GitHub; existing project labels only on GitLab). */
   labels?: string[];
+  /** Selected artifact summary for a managed comment, separate from the PR body. */
+  artifactComment?: string;
 }
 
 /**
@@ -37,6 +39,7 @@ export interface PRResult {
   /** Additive provider-neutral identity for durable state and dashboards. */
   changeRequest?: ChangeRequestIdentity;
   warnings?: string[];
+  artifactPublication?: import("../artifacts/types").ArtifactPublication;
 }
 
 export const VALIDATED_GITLAB_VERSION = "19.3";

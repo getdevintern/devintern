@@ -39,6 +39,8 @@ export interface FinalizeContext {
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
   pipelineSteps?: ResolvedPipelineStep[];
+  artifactPolicy?: import("../artifacts/types").ArtifactPolicy;
+  artifactUploader?: import("../artifacts/upload").LoadedArtifactUploader;
   runRepair?: (
     prompt: string,
   ) => Promise<{ kind: "complete"; stdout: string } | { kind: "halted" }>;
@@ -153,7 +155,11 @@ export function createGitHelpers(ctx: FinalizeContext) {
     };
   };
 
-  const createPrAndTransition = async (implementationOutput: string, autoReviewRan = false) => {
+  const createPrAndTransition = async (
+    implementationOutput: string,
+    autoReviewRan = false,
+    artifactComment?: string,
+  ) => {
     console.log("\n🔀 Creating pull request...");
     try {
       const prManager = new PRManager();
@@ -196,6 +202,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
         {
           targetBranchExplicit: prTargetBranchExplicit,
           requestedTargetBranch: requestedPrTargetBranch,
+          artifactComment,
         },
       );
 
@@ -237,6 +244,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
         if (autoReviewRan) {
           console.log("\n✅ Auto-review was completed before push (see summary file for details)");
         }
+        return prResult;
       } else {
         console.log(`⚠️  PR creation failed: ${prResult.message}`);
         // The run "succeeds" without a PR — a silent user-visible
@@ -251,6 +259,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
       console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
       captureError(prError, { taskKey, stage: "create-pr" });
     }
+    return undefined;
   };
   // --- End shared helpers ---
 

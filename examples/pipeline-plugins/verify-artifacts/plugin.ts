@@ -56,6 +56,13 @@ const definition: StepDefinition = {
           );
         }
 
+        await context.artifacts.addFile({
+          key: "verified-artifact",
+          path: file,
+          title: "Generated artifact under verification",
+          kind: "verification",
+          mediaType: "application/json",
+        });
         let parsed: unknown;
         try {
           parsed = JSON.parse(readFileSync(file, "utf8"));

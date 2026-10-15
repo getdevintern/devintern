@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { resolveOutputDir } from "../config/output-dir";
@@ -68,14 +68,33 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
   return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${taskContent.trimEnd()}\n\nDo not commit or push; the task runner handles delivery.`;
 }
 
-function saveVerification(state: DeliveryState, prompt: string, feedback: ReviewFeedback): void {
+async function saveVerification(
+  state: DeliveryState,
+  prompt: string,
+  feedback: ReviewFeedback,
+): Promise<void> {
   const ctx = state.context;
   const taskDir = ctx.taskKey
     ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
     : dirname(ctx.taskFile);
   try {
+    mkdirSync(taskDir, { recursive: true });
     writeFileSync(join(taskDir, "verify-prompt.txt"), prompt);
     writeFileSync(join(taskDir, "verify-feedback.json"), JSON.stringify(feedback, null, 2));
+    await state.artifacts.addFile({
+      key: "verification",
+      path: join(taskDir, "verify-feedback.json"),
+      title: "Verification report",
+      kind: "verification",
+      mediaType: "application/json",
+    });
+    await state.artifacts.addFile({
+      key: "verification-prompt",
+      path: join(taskDir, "verify-prompt.txt"),
+      title: "Verification prompt",
+      kind: "debug",
+      mediaType: "text/plain",
+    });
   } catch (error) {
     console.warn(`⚠️  Failed to save verification artifacts: ${error}`);
   }
@@ -132,7 +151,7 @@ export async function verifyImplementation(
     }
   }
   if (!feedback) return { kind: "halt", reason: "Verification returned no verdict" };
-  saveVerification(state, prompt, feedback);
+  await saveVerification(state, prompt, feedback);
   const blocking = deps.filterItems(feedback.items, minSeverity);
   console.log(`\n🔎 Verification: ${feedback.summary}`);
   if (blocking.length === 0) return;

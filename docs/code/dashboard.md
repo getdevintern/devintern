@@ -61,3 +61,10 @@ To disable the dashboard or change its port, edit the workspace settings:
 dashboard = false
 # dashboard_port = 4400
 ```
+
+## Artifacts
+
+Run detail shows registered outputs with producing step, execution, commit, and
+capture time. Preview text/Markdown and raster images, or download complete
+files. Each attempt retains its own snapshots; unavailable files remain listed.
+See [Pipeline artifacts](./artifacts.md) for capture and PR-comment publication.

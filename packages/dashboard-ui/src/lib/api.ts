@@ -74,6 +74,8 @@ export interface RunDetailResponse {
   retry: RetryInfo;
   /** Per-execution harness transcripts attributed to this run, newest first. */
   harnessLogs: HarnessLogFile[];
+  /** Task artifacts under the run's output directory, sorted by path. */
+  artifacts: TaskArtifactFile[];
 }
 
 /** One durable agent-harness execution transcript under `logs/harness/`. */
@@ -92,6 +94,35 @@ export interface HarnessLogFile {
 export interface HarnessLogContent {
   name: string;
   content: string;
+  truncated: boolean;
+  totalBytes: number;
+}
+
+/** One immutable registered output, owned by a run and a step execution. */
+export interface TaskArtifactFile {
+  id: string;
+  key: string;
+  name: string;
+  title: string;
+  kind: string;
+  mediaType: string;
+  step: string;
+  iteration: number;
+  commitSha?: string;
+  createdAt: number;
+  size: number;
+  available: boolean;
+  publication?: {
+    status: "published" | "failed" | "skipped";
+    commentUrl?: string;
+    message?: string;
+  };
+  upload?: { status: "uploaded" | "failed"; message?: string };
+}
+
+export interface TaskArtifactContent {
+  name: string;
+  content: string | null;
   truncated: boolean;
   totalBytes: number;
 }

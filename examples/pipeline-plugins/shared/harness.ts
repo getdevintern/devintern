@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { RunArtifactRegistry } from "../../../packages/code/src/lib/artifacts/registry";
 import { runTaskSteps } from "@getdevintern/code/pipeline";
 import type {
   PipelineContext,
@@ -86,6 +87,11 @@ export function createTestContext(options: TestContextOptions): TestContext {
   const respond = responderFor(options.agentOutput);
   let calls = 0;
   return {
+    artifacts: new RunArtifactRegistry(
+      options.workingDir,
+      options.outputDir ?? options.workingDir,
+      join(options.workingDir, "artifacts-test.db"),
+    ),
     taskKey: options.taskKey ?? "DEMO-1",
     taskSummary: options.taskSummary ?? "Example task",
     projectSettings: null,

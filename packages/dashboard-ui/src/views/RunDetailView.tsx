@@ -16,6 +16,8 @@ import type {
   RetryAuditEntry,
   RunDetailResponse,
   RunStageRecord,
+  TaskArtifactContent,
+  TaskArtifactFile,
 } from "@/lib/api";
 import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
 import { runWorkLink } from "@/lib/run-work";
@@ -276,7 +278,7 @@ function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }
             <>
               {content.truncated ? (
                 <p className="mb-2 text-xs text-muted-foreground">
-                  Showing the tail of {formatBytes(content.totalBytes)} on disk.
+                  Showing the first 512 KiB of {formatBytes(content.totalBytes)}.
                 </p>
               ) : null}
               <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
@@ -305,6 +307,142 @@ function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[
       <CardContent className="space-y-2">
         {logs.map((file) => (
           <HarnessLogItem key={file.name} runId={runId} file={file} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** One task artifact (explainer, verify output, review iteration): lazily loads content. */
+function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }) {
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<TaskArtifactContent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function toggle(): Promise<void> {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (content || loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/runs/${runId}/artifacts/${file.id}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      setContent((await response.json()) as TaskArtifactContent);
+      setError(null);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const markdown = file.mediaType === "text/markdown";
+  const image = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.mediaType);
+  const fileUrl = `/api/runs/${runId}/artifacts/${file.id}/file`;
+  return (
+    <div className="rounded-md border">
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        aria-expanded={open}
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span className="text-xs">{file.title}</span>
+        <span className="text-xs text-muted-foreground">
+          {file.step} · execution {file.iteration}
+          {file.commitSha ? ` · ${file.commitSha.slice(0, 7)}` : ""}
+        </span>
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          {formatTime(file.createdAt)} · {formatBytes(file.size)}
+          {!file.available ? " · expired or missing" : ""}
+        </span>
+      </button>
+      {open ? (
+        <div className="border-t px-3 py-2">
+          {file.available ? (
+            <a href={`${fileUrl}?download=1`} className="text-xs underline">
+              Download {file.name}
+            </a>
+          ) : (
+            <p className="text-xs text-muted-foreground">Artifact expired or missing.</p>
+          )}
+          {file.publication ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              PR publication: {file.publication.status}
+              {file.publication.message ? ` — ${file.publication.message}` : ""}
+              {file.publication.commentUrl ? (
+                <>
+                  {" "}
+                  ·{" "}
+                  <a
+                    href={file.publication.commentUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    View comment
+                  </a>
+                </>
+              ) : null}
+            </p>
+          ) : null}
+          {file.upload?.status === "failed" ? (
+            <p className="text-xs text-destructive">Upload failed: {file.upload.message}</p>
+          ) : null}
+          {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+          {content ? (
+            <>
+              {content.truncated ? (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Showing the first 512 KiB of {formatBytes(content.totalBytes)}.
+                </p>
+              ) : null}
+              {image ? (
+                <img
+                  src={fileUrl}
+                  alt={file.title}
+                  className="max-h-96 max-w-full object-contain"
+                />
+              ) : markdown && content.content !== null ? (
+                <Markdown>{content.content}</Markdown>
+              ) : (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
+                  {content.content ?? "Binary artifact. Download to inspect."}
+                </pre>
+              )}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Task artifacts written under the run's output directory. */
+function ArtifactsCard({ runId, artifacts }: { runId: number; artifacts: TaskArtifactFile[] }) {
+  if (artifacts.length === 0) {
+    return null;
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          Artifacts ({artifacts.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {artifacts.map((file) => (
+          <ArtifactItem key={file.id} runId={runId} file={file} />
         ))}
       </CardContent>
     </Card>
@@ -462,6 +600,8 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
           <RetryAuditList entries={data.retry.audit} />
 
           <HarnessLogsCard runId={data.run.id} logs={data.harnessLogs ?? []} />
+
+          <ArtifactsCard runId={data.run.id} artifacts={data.artifacts ?? []} />
 
           <div className="space-y-0">
             {data.stages.map((stage, index) => (

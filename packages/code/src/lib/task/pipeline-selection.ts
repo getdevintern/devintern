@@ -107,6 +107,18 @@ export function resolveWorkspaceRelativePaths(
   });
   return {
     ...config,
+    ...(typeof config.artifacts?.publish?.uploader === "string" &&
+    config.artifacts.publish.uploader.startsWith(".")
+      ? {
+          artifacts: {
+            ...config.artifacts,
+            publish: {
+              ...config.artifacts.publish,
+              uploader: resolve(baseDir, config.artifacts.publish.uploader),
+            },
+          },
+        }
+      : {}),
     ...(plugins ? { plugins } : {}),
     ...(steps ? { steps } : {}),
   };
