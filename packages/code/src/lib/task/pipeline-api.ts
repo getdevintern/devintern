@@ -8,6 +8,7 @@ export type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../t
 export type { PipelineConfig, PipelineStepConfig } from "../../types/settings";
 export { createFilesArtifactUploader } from "../artifacts/files-sdk-uploader";
 export type { FilesArtifactUploaderOptions } from "../artifacts/files-sdk-uploader";
+export { loadFilesArtifactUploader } from "../artifacts/files-sdk-env";
 
 export type {
   ArtifactInput,

@@ -3,7 +3,7 @@
     "artifacts": {
       "publish": {
         "destination": "pr-comment",
-        "uploader": "./.devintern-code/adapters/artifact-storage.ts",
+        "uploader": "files-sdk",
         "select": [{ "key": "explanation-image", "presentation": "embed" }]
       }
     },

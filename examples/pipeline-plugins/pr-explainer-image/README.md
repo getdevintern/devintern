@@ -18,8 +18,7 @@ failures remain advisory. No asset branch or extra repository commit is needed.
 - An existing storage bucket and a durable public HTTP(S) URL serving its root.
   Configure bucket/CDN read access yourself; the uploader does not make a bucket
   public. The supplied adapter supports S3 and compatible services such as R2.
-- Storage credentials in the worker's environment. Bun reads
-  `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` or the corresponding AWS variables.
+- Artifact-specific credentials in the worker's environment, as shown below.
 
 ## Setup
 
@@ -30,35 +29,57 @@ cp examples/pipeline-plugins/pr-explainer-image/prompts/image.md .devintern-code
 cp examples/pipeline-plugins/pr-explainer-image/artifact-storage.ts .devintern-code/adapters/artifact-storage.ts
 cp examples/pipeline-plugins/pr-explainer-image/check-upload.ts .devintern-code/adapters/check-upload.ts
 bun add -d @getdevintern/code
-# The copied storage module imports Files SDK directly; declare it in your project too.
-bun add files-sdk@3.1.1
 ```
+
+The pipeline uses the built-in `"uploader": "files-sdk"` target. The two files
+copied into `adapters/` are only for the manual upload probe, not plugin loading.
+Files SDK ships with DevIntern; R2/S3 use requires no extra package install.
 
 Set the following in the worker environment, then merge `settings.json`'s
 `pipeline` block into the repository's settings:
 
 ```dotenv
 DEVINTERN_ARTIFACT_BUCKET=review-artifacts
+DEVINTERN_ARTIFACT_PROVIDER=s3
 DEVINTERN_ARTIFACT_REGION=us-east-1
 DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
 DEVINTERN_ARTIFACT_KEY_PREFIX=devintern/artifacts
-# For R2, also set region=auto and endpoint=https://<account-id>.r2.cloudflarestorage.com
-# DEVINTERN_ARTIFACT_ENDPOINT=...
+DEVINTERN_ARTIFACT_ACCESS_KEY_ID=<storage-access-key-id>
+DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY=<storage-secret-access-key>
+# For R2 use provider=r2 plus DEVINTERN_ARTIFACT_ACCOUNT_ID instead of an endpoint.
 ```
 
-`artifact-storage.ts` default-exports an `ArtifactUploader`. It uses the public
-`createFilesArtifactUploader({ files, publicBaseUrl, keyPrefix })` factory.
-Swap `bunS3(...)` for another [Files SDK adapter](https://files-sdk.dev/docs/adapters)
-to change providers. Keep the Files instance's own `prefix` empty; `keyPrefix`
-is applied by the uploader and included in the returned URL. The base URL must
-serve the same storage root, including any path prefix in that URL.
+`artifact-storage.ts` uses `loadFilesArtifactUploader().adapter`, the same
+environment-configured target selected by the pipeline. Built-in providers are
+`r2` and `s3`; other Files SDK providers can use a custom uploader module and
+`createFilesArtifactUploader({ files, publicBaseUrl, keyPrefix })`.
+
+### Where to put environment variables
+
+- **Workspace worker:** use the shared `~/.devintern/.env`, or `.env` next to a
+  custom `workspace.toml`. Put both target settings and credentials there for a
+  shared upload destination. Restart the worker after changing its environment.
+- **Per-repository target:** set `env_file = "env/backend.env"` on that repo's
+  `[[repos]]` entry. This path is relative to the workspace home; those values
+  override shared workspace values. Inline `[repos.env]` overrides the file,
+  but keep secret keys in the uncommitted environment file.
+- **Direct repository CLI:** use `.devintern-code/.env` in the checkout or
+  exported shell variables. Workspace worker runs do **not** load that file.
+- **Manual probe:** use the same environment file explicitly, for example
+  `bun --env-file=$HOME/.devintern/.env .devintern-code/adapters/check-upload.ts`.
+
+Keep credentials out of `settings.json`, plugin source, and committed TOML.
+Use file mode `0600` on environment files. The non-secret pipeline selection
+(`"uploader": "files-sdk"`) can be committed in repository settings, or set in
+the workspace pipeline file. See [workspace environment layers](../../../docs/code/workspaces.md#environment).
 
 ### Example: configure Cloudflare R2
 
 1. Create a bucket such as `review-artifacts` in Cloudflare R2.
 2. Create R2 S3 credentials with **Object Read & Write** permission scoped to
    this bucket. Save the Access Key ID and Secret Access Key in the worker's
-   environment as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. These are the
+   environment as `DEVINTERN_ARTIFACT_ACCESS_KEY_ID` and
+   `DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY`. These are the
    S3 credentials, not the Cloudflare API bearer token.
 3. In the bucket's **Settings → Custom Domains**, connect a domain such as
    `artifacts.example.com` and wait until it is active. Use a dedicated bucket:
@@ -69,12 +90,12 @@ serve the same storage root, including any path prefix in that URL.
 
    ```dotenv
    DEVINTERN_ARTIFACT_BUCKET=review-artifacts
-   DEVINTERN_ARTIFACT_REGION=auto
-   DEVINTERN_ARTIFACT_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+   DEVINTERN_ARTIFACT_PROVIDER=r2
+   DEVINTERN_ARTIFACT_ACCOUNT_ID=<32-character-cloudflare-account-id>
    DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
    DEVINTERN_ARTIFACT_KEY_PREFIX=devintern/artifacts
-   S3_ACCESS_KEY_ID=<r2-access-key-id>
-   S3_SECRET_ACCESS_KEY=<r2-secret-access-key>
+   DEVINTERN_ARTIFACT_ACCESS_KEY_ID=<r2-access-key-id>
+   DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY=<r2-secret-access-key>
    ```
 
 5. Check the target before enabling unattended publication:
@@ -89,7 +110,8 @@ serve the same storage root, including any path prefix in that URL.
    running the probe (for example `bun --env-file=/path/to/worker.env ...`).
    Restart the worker after changing its service environment.
 
-The upload endpoint is the S3 API address. The public base URL is the custom
+R2 automatically uses region `auto` and derives the S3 endpoint from the account
+ID. It ignores S3 region/endpoint overrides. The public base URL is the custom
 domain serving object bytes; they are different endpoints. Cloudflare's
 `r2.dev` URL can be used for a development check, but it is rate-limited and
 intended for non-production use. Keep published objects available for as long
@@ -100,12 +122,13 @@ and [public bucket setup](https://developers.cloudflare.com/r2/buckets/public-bu
 
 ### Other upload targets
 
-For AWS S3, set the bucket and its AWS region, omit `DEVINTERN_ARTIFACT_ENDPOINT`,
+For AWS S3, set `DEVINTERN_ARTIFACT_PROVIDER=s3`, the bucket and its AWS region, omit `DEVINTERN_ARTIFACT_ENDPOINT`,
 and point the public base URL at a working object endpoint or CDN serving that
 bucket. For other S3-compatible services, supply their endpoint and region.
 Run the same upload probe to check credentials and the public URL mapping.
-Non-S3 providers need a different Files SDK adapter in `artifact-storage.ts`;
-the pipeline step and uploader factory stay the same.
+Non-S3 providers need a custom module that wraps their Files SDK adapter with
+`createFilesArtifactUploader`; point `publish.uploader` at that module instead
+of `"files-sdk"`. The pipeline step and uploader factory stay the same.
 
 The factory handles arbitrary artifact bytes, not just images. It preserves the
 artifact MIME type, builds stable object keys from the bytes, MIME type, and

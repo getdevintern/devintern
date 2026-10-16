@@ -117,7 +117,8 @@ status; local capture and dashboard access still work.
 ## Upload files
 
 GitHub comments contain Markdown; binary upload is a separate operation.
-Configure a trusted module implementing `ArtifactUploader`:
+Select the built-in `"files-sdk"` uploader for R2/S3 (see below), or configure
+a trusted module implementing `ArtifactUploader`:
 
 ```json
 {
@@ -147,8 +148,8 @@ interface ArtifactUploader {
 
 Relative module paths resolve next to a workspace pipeline file, or against the
 repository for repository settings. Installed package names are supported too.
-Uploader exports are validated before implementation starts. No storage backend
-or hosting credentials are bundled. The adapter owns access control, retention,
+Uploader exports are validated before implementation starts. Hosting credentials
+are never bundled. The adapter owns access control, retention,
 and URL lifetime, and should use the artifact checksum or ID for idempotent
 object naming. Return a durable HTTP(S) URL that intended reviewers can access;
 short-lived signed URLs will eventually expire in existing comments.
@@ -160,7 +161,55 @@ them. Upload failures are recorded independently and do not block PR creation.
 ### Files SDK uploader
 
 `@getdevintern/code` includes `files-sdk` as a runtime dependency. The public
-pipeline API exports a reusable factory for any configured Files SDK backend:
+pipeline configuration can select its built-in R2/S3 uploader without a module:
+
+```json
+{
+  "artifacts": {
+    "publish": {
+      "destination": "pr-comment",
+      "uploader": "files-sdk",
+      "select": [{ "key": "explanation-image", "presentation": "embed" }]
+    }
+  }
+}
+```
+
+For Cloudflare R2, set the following in the workspace `.env` (default
+`~/.devintern/.env`) or a repository `env_file`:
+
+```dotenv
+DEVINTERN_ARTIFACT_PROVIDER=r2
+DEVINTERN_ARTIFACT_ACCOUNT_ID=<32-character-cloudflare-account-id>
+DEVINTERN_ARTIFACT_BUCKET=review-artifacts
+DEVINTERN_ARTIFACT_ACCESS_KEY_ID=<r2-access-key-id>
+DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY=<r2-secret-access-key>
+DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
+# Optional; defaults to devintern/artifacts
+DEVINTERN_ARTIFACT_KEY_PREFIX=devintern/artifacts
+```
+
+The R2 target derives its endpoint from the account ID and uses region `auto`.
+It requires artifact-specific S3 credentials, not a Cloudflare bearer token;
+ambient AWS/S3 credentials are never substituted. Create the bucket and enable
+a public custom domain yourself. No user module or additional SDK installation
+is needed for R2/S3.
+
+For AWS S3, use provider `s3` and `DEVINTERN_ARTIFACT_REGION` (default
+`us-east-1`). `DEVINTERN_ARTIFACT_ENDPOINT` optionally selects another
+S3-compatible service. The bucket, artifact-specific credentials, and public
+base URL are required for both providers. Missing/invalid settings fail pipeline
+resolution before implementation; connection/upload failures remain advisory
+at publication time. SDK initialization is lazy and uses Bun's S3 adapter.
+Changing the destination produces a new upload-cache identity.
+
+Workspace values apply across repositories; repo `env_file` and `[repos.env]`
+can override them. Worker tasks do not load checkout `.devintern-code/.env`.
+Direct CLI users can use that project-local file or shell variables. Keep
+secret environment files uncommitted and restart the worker after changes.
+
+For other providers, the public pipeline API exports a reusable factory for
+any configured Files SDK backend:
 
 ```ts
 import { Files } from "files-sdk";
