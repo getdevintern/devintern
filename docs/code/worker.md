@@ -54,6 +54,8 @@ worker can safely serve multiple teams, repositories, and credentials. See
 
 Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
 
+To configure this through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." The skill covers prompt writing, schedule and PR settings, validation, and checking that the running worker accepted the change.
+
 ```toml
 [[automations]]
 id = "dependency-health"

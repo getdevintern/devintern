@@ -1,6 +1,6 @@
 ---
 name: devintern-workspace
-description: Set up, inspect, or edit DevIntern worker workspaces, including repository registration, tracker routing, environment layers, and configuration reloads. Use for workspace.toml and multi-repository worker configuration, rather than dispatching individual tasks or configuring DevIntern PM.
+description: Set up, inspect, or edit DevIntern worker workspaces, including recurring automations, repository registration, tracker routing, environment layers, and configuration reloads. Use to add or change scheduled agent work in workspace.toml, rather than dispatching individual tasks or configuring DevIntern PM.
 ---
 
 # Configure a DevIntern workspace
@@ -39,7 +39,7 @@ For custom workspace locations, inspect the installed setup commands' help. If t
 - `[[teams]]` creates isolated tracker sources and replaces the separate defaults poller. Each team needs its own query or the defaults fallback. A team dedicated to one codebase can set `repo` to a registered name; it cannot also have team-scoped routing rules.
 - A team spanning repositories omits `repo` and uses applicable `[[routing.rules]]`. Criteria within a rule combine with AND; list values match any member. Matching rules must agree on one repo. Unmatched or ambiguous tasks are skipped, rather than routed by first match. Rules for other teams do not apply.
 - A one-repo workspace needs no routing rules. Explicitly targeted ad-hoc tasks also need none. Do not create tracker configuration solely to dispatch one ad-hoc task; verify the installed worker's startup requirements before promising that a source-free workspace can run.
-- Recurring automations require `repo` in a multi-repo workspace and exactly one of `cron` or `interval`. `open_pr = true` opts into PR creation; it defaults to false and is independent of `worker_task_args`. Read the [worker guide](https://devintern.com/docs/code/worker) when configuring schedules or task pickup windows.
+- For recurring agent work, read [Configure recurring automations](references/automations.md). It covers turning a request into a bounded prompt, selecting the repository and schedule, choosing PR behavior, and verifying activation. Automations do not require tracker tickets or tracker credentials.
 
 ## Keep environment scopes correct
 
