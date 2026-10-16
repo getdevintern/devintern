@@ -165,6 +165,8 @@ export class FixtureWorkspace {
       gitToken?: string;
       /** Task reference passed to the CLI; defaults to the Markdown fixture. */
       taskRef?: string;
+      /** Select tasks through the production tracker search instead of a positional key. */
+      query?: string;
       /** Skip tracker comments/transitions; defaults to true for Markdown. */
       skipComments?: boolean;
     } = {},
@@ -173,7 +175,9 @@ export class FixtureWorkspace {
       [
         process.execPath,
         cliPath,
-        options.taskRef ?? join(this.root, `${this.id}.md`),
+        ...(options.query === undefined
+          ? [options.taskRef ?? join(this.root, `${this.id}.md`)]
+          : ["--query", options.query]),
         "--agent-path",
         join(this.root, "bin/agent.ts"),
         "--skip-clarity-check",
@@ -229,7 +233,7 @@ export class FixtureWorkspace {
     return { existingSha, attemptHead };
   }
 
-  runRecords(): Array<{
+  runRecords(options: { allTasks?: boolean } = {}): Array<{
     task_key: string | null;
     tracker: string | null;
     status: string;
@@ -240,9 +244,9 @@ export class FixtureWorkspace {
     try {
       return db
         .query(
-          "SELECT task_key, tracker, status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id",
+          `SELECT task_key, tracker, status, pr_url, outcome_reason FROM runs${options.allTasks ? "" : " WHERE task_key = ?"} ORDER BY id`,
         )
-        .all(this.taskKey) as Array<{
+        .all(...(options.allTasks ? [] : [this.taskKey])) as Array<{
         task_key: string | null;
         tracker: string | null;
         status: string;

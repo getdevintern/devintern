@@ -121,7 +121,7 @@ test("syncRecordedBranch releases the derived head when the run recorded no bran
   }
 });
 
-test("waitForSelectedTickets re-confirms every hit body and returns only the matching ticket", async () => {
+test("waitForSelectedTickets confirms indexing without hiding an extra search hit", async () => {
   const reads: string[] = [];
   // Read at call time so the scenario's real random marker is used.
   let selector = "";
@@ -144,10 +144,13 @@ test("waitForSelectedTickets re-confirms every hit body and returns only the mat
   selector = scenario.descriptionMarker;
   try {
     expect(await scenario.waitForSelectedTickets({ deadlineMs: 0, sleep: async () => {} })).toEqual(
-      [{ key: "2", url: "u2" }],
+      [
+        { key: "2", url: "u2" },
+        { key: "3", url: "u3" },
+      ],
     );
-    // Every hit is re-read client-side; the decoy is dropped from the result.
-    expect(reads).toEqual(["2", "3"]);
+    // The expected body confirms indexing; raw results expose extra matches.
+    expect(reads).toEqual(["2"]);
   } finally {
     scenario.dispose();
   }

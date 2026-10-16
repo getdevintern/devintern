@@ -184,9 +184,11 @@ the same built CLI against a real remote tracker ticket through the reusable
 No model or AI-agent credentials are needed: the deterministic fixture agent
 verifies that unique markers seeded into the ticket description and a seeded
 comment reached its actual input before it edits `src/greeting.ts`. The scenario
-also scopes a provider-native search to the fixture and proves the expected
-ticket is selected while a decoy ticket without the marker is left untouched
-(bounded polling absorbs search-index eventual consistency).
+runs both explicit-key and `--query` scenarios. The latter passes the unique
+description marker to the built CLI so its production tracker client performs
+search and task selection. Fixture API polling only waits for search indexing;
+it does not supply task keys or filter the CLI results. Assertions inspect all
+run records and prove the decoy has no run, comment, status change, or PR.
 
 Each scenario provisions one fresh ticket in the explicitly configured tracker,
 runs the CLI with comments enabled against the ticket's real key

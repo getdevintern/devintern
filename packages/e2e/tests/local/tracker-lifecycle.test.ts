@@ -145,10 +145,13 @@ function fakeScenario(decoyPulls: PullRequest[]): TrackerScenario {
       key === "2"
         ? { state: "opened", labels: [statuses.prStatus, "e2e: keep"], body: descriptionMarker }
         : { state: "opened", labels: [], body: decoyMarker },
-    listComments: async () => [
-      { id: "1", body: implementationBody },
-      { id: "2", body: commentMarker },
-    ],
+    listComments: async (key: string) =>
+      key === "1"
+        ? []
+        : [
+            { id: "1", body: implementationBody },
+            { id: "2", body: commentMarker },
+          ],
     runRecords: () => [
       { task_key: "2", tracker: "gitlab", status: "succeeded", pr_url: "u", outcome_reason: null },
     ],
@@ -178,4 +181,19 @@ test("assertTrackerLifecycle still fails when this run created a decoy PR", asyn
   await expect(
     assertTrackerLifecycle(fakeScenario([foreignDecoyPull(scenarioBase)])),
   ).rejects.toThrow();
+});
+
+test("assertTrackerLifecycle rejects an extra run even when the expected ticket succeeded", async () => {
+  const scenario = fakeScenario([]);
+  const expected = scenario.runRecords()[0]!;
+  scenario.runRecords = () => [expected, { ...expected, task_key: "1", status: "failed" }];
+  await expect(assertTrackerLifecycle(scenario)).rejects.toThrow();
+});
+
+test("assertTrackerLifecycle rejects a comment posted to the decoy", async () => {
+  const scenario = fakeScenario([]);
+  const listComments = scenario.listComments;
+  scenario.listComments = async (key) =>
+    key === "1" ? [{ id: "3", body: "unexpected feedback" }] : listComments(key);
+  await expect(assertTrackerLifecycle(scenario)).rejects.toThrow();
 });

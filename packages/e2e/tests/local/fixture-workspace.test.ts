@@ -145,3 +145,22 @@ test("prepare exposes a leftover remote-only feature branch so the CLI can avoid
     run.dispose();
   }
 });
+
+test("all-task run records expose an accidentally processed decoy", () => {
+  const run = new ExposedWorkspace();
+  try {
+    run.pointAt("2");
+    const db = new Database(run.env.WEBHOOK_QUEUE_DB);
+    db.run(
+      "CREATE TABLE runs (id INTEGER PRIMARY KEY, task_key TEXT, tracker TEXT, status TEXT, pr_url TEXT, outcome_reason TEXT)",
+    );
+    db.run(
+      "INSERT INTO runs (task_key, tracker, status) VALUES ('2', 'gitlab', 'succeeded'), ('1', 'gitlab', 'failed')",
+    );
+    db.close();
+    expect(run.runRecords().map((record) => record.task_key)).toEqual(["2"]);
+    expect(run.runRecords({ allTasks: true }).map((record) => record.task_key)).toEqual(["2", "1"]);
+  } finally {
+    run.dispose();
+  }
+});

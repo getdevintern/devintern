@@ -57,7 +57,8 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
   );
 
   // 3. The recorded run is attributed to the real tracker and task key.
-  const records = scenario.runRecords();
+  // Inspect every run, including any accidentally selected decoy.
+  const records = scenario.runRecords({ allTasks: true });
   expect(records).toHaveLength(1);
   expect(records[0].status).toBe("succeeded");
   expect(records[0].tracker).toBe(scenario.tracker.type);
@@ -94,6 +95,8 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
     expect(decoyState.state).toBe(scenario.tracker.openState);
     expect(decoyState.body).toContain(scenario.decoyMarker);
     expect(decoyState.body).not.toContain(scenario.descriptionMarker);
+    expect(decoyState.labels).toEqual([]);
+    expect(await scenario.listComments(decoy.key)).toEqual([]);
     // Scope the decoy PR check to this run: a foreign run on the shared code
     // host can hold a `feature/<decoy-key>` PR (deterministic keys), but only a
     // PR this run created targets this scenario's unique base ref.

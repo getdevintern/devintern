@@ -221,18 +221,31 @@ export class TrackerScenario extends FixtureWorkspace {
     this.writeSettings();
   }
 
-  /** Run the CLI against the actual tracker key with comments enabled. */
+  /** Run the CLI by tracker key or query, with comments enabled. */
   async runTrackerTask(
-    options: { agentMode?: "implement" | "fail" | "no-change"; implicitTarget?: boolean } = {},
+    options: {
+      agentMode?: "implement" | "fail" | "no-change";
+      implicitTarget?: boolean;
+      query?: boolean;
+    } = {},
   ) {
     if (!this.ticket) throw new Error("Tracker ticket has not been provisioned");
-    const result = await this.runTask({
-      taskRef: this.ticket.key,
-      skipComments: false,
-      ...options,
-    });
-    this.syncRecordedBranch();
-    return result;
+    const { query, ...taskOptions } = options;
+    try {
+      if (query) {
+        // Wait only for remote indexing. Selection itself happens in the built
+        // CLI via --query and its production TaskTrackerClient.searchTasks.
+        await this.waitForSelectedTickets();
+      }
+      return await this.runTask({
+        ...(query ? { query: `is:open ${this.descriptionMarker}` } : { taskRef: this.ticket.key }),
+        skipComments: false,
+        ...taskOptions,
+      });
+    } finally {
+      // A failed indexing wait must also release the uncreated derived branch.
+      this.syncRecordedBranch();
+    }
   }
 
   /**
@@ -257,7 +270,11 @@ export class TrackerScenario extends FixtureWorkspace {
 
   /** Run the CLI and fail the scenario when it exits non-zero. */
   async runTrackerCli(
-    options: { agentMode?: "implement" | "fail" | "no-change"; implicitTarget?: boolean } = {},
+    options: {
+      agentMode?: "implement" | "fail" | "no-change";
+      implicitTarget?: boolean;
+      query?: boolean;
+    } = {},
   ) {
     const result = await this.runTrackerTask(options);
     if (result.exitCode !== 0) {
@@ -286,10 +303,9 @@ export class TrackerScenario extends FixtureWorkspace {
    * never does.
    *
    * Search engines may tokenize the marker differently or match fuzzily, so
-   * every hit is confirmed client-side by re-reading the ticket body and
-   * requiring the raw marker substring. The expected ticket is only reported
-   * once its body actually contains the selector, which keeps a fuzzy index
-   * match from being mistaken for a correct result.
+   * the expected hit is confirmed by re-reading its body for the raw marker.
+   * Once indexed, all raw search hits are returned so assertions can detect
+   * an incorrect extra match rather than silently filtering it out.
    *
    * Polling backs off exponentially (capped) because provider search endpoints
    * are rate-limited far below their core APIs; a tight one-second loop can
@@ -314,12 +330,10 @@ export class TrackerScenario extends FixtureWorkspace {
     do {
       const hits = await this.tracker.findTickets(this.descriptionMarker);
       if (hits.some((ticket) => ticket.key === expected)) {
-        const confirmed: TrackerTicket[] = [];
-        for (const ticket of hits) {
-          const detail = await this.tracker.getTicket(ticket.key);
-          if (detail.body.includes(this.descriptionMarker)) confirmed.push(ticket);
-        }
-        if (confirmed.some((ticket) => ticket.key === expected)) return confirmed;
+        const detail = await this.tracker.getTicket(expected);
+        // Return raw search results so the test cannot hide an incorrectly
+        // selected decoy behind its own body filtering.
+        if (detail.body.includes(this.descriptionMarker)) return hits;
       }
       await sleep(delayMs);
       delayMs = Math.min(delayMs * 2, maxDelayMs);
