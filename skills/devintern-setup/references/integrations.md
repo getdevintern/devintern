@@ -6,7 +6,7 @@ Read only the provider guide relevant to the requested setup. The links below wo
 
 1. **Git transport:** the worker must fetch the registered remote and push when delivery requires it. A successful `git ls-remote` from the intended host/identity proves read access, not push permission. Check credential availability in the service environment; a terminal-only SSH agent or keychain session may not be available to an unattended service. Do not push a probe branch merely to validate setup.
 2. **Code-host API:** local credentials read PR/MR data and perform requested API writes. Standard GitHub workspaces use local `GITHUB_TOKEN`; installing an App does not supply that token. Check access to the actual repository and permissions required by the requested features using provider APIs or an authenticated provider CLI. A CLI's own login does not prove DevIntern received the same credential. Inspect remote URLs without exposing embedded credentials.
-3. **Event delivery:** the optional hosted relay delivers reference envelopes; the worker fetches content with its own local credentials. Polling remains a supported fallback. Do not require webhook/App setup for an explicitly polling-only installation.
+3. **Event delivery:** recommend the hosted relay for new supported integrations. Provider webhooks terminate at DevIntern's ingest and the worker connects outbound to receive reference envelopes, so no public worker endpoint, inbound port, or tunnel is needed. The worker fetches content with its own local credentials. Keep polling as fallback; use polling-only when explicitly chosen or relay is unavailable, and preserve existing delivery choices during unrelated changes.
 
 For GitHub, follow [GitHub authentication](https://devintern.com/docs/code/configuration#github-authentication) and the [relay guide](https://devintern.com/docs/code/relay). Standard setup uses the central DevIntern AI App and local `GITHUB_TOKEN`; customer-owned App IDs/private keys and `devintern webhook serve` are advanced no-relay/custom-identity paths, not normal prerequisites. PR/content permissions depend on the requested operations; automatic CI repair additionally needs the documented Actions and commit-status read permissions.
 
@@ -31,7 +31,9 @@ Choose the tracker independently from the code host. Configure API access, the i
 
 In multi-team workspaces, credentials belong to the acquiring team, while code-host access belongs to the destination repo. Preserve separate credentials even when two sources use the same provider. Team `env_file` paths are relative to the workspace home; inline team env overrides that file. The worker pins `TASK_TRACKER` to the acquiring team. Shared env may also contain namespaced `<TRACKER>_<TEAM>_<SETTING>` credentials; use the workspace guide's exact mapping rather than renaming existing secrets speculatively.
 
-## Pair the relay when requested
+## Pair the relay as the standard worker setup
+
+For a new supported integration, include relay pairing after local account access is configured. It simplifies event delivery without exposing the worker to inbound webhooks. Do not steer users toward running `devintern webhook serve`, opening ports, or creating tunnels for the standard path. Use direct webhook hosting/customer-owned Apps only for an explicitly requested advanced deployment; honor polling-only or no-relay constraints. Local-only work needs no relay.
 
 Check `devintern worker connect --help`. Commands support `--workspace /path/to/workspace.toml`; tracker targets also support `--team <name>`. Use worker-scoped sign-in when needed. Bare `worker connect` handles GitHub/GitLab code hosts, not every tracker.
 

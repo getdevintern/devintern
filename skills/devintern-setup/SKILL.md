@@ -17,6 +17,8 @@ The default worker config is `~/.devintern/workspace.toml`. Honor `DEVINTERN_WOR
 
 Read [Integrations](references/integrations.md) when configuring source control, tracker credentials, provider authorization, or relay connections. Code-host access, task-tracker access, DevIntern sign-in, and agent authentication are separate checks.
 
+For a new worker with supported code-host/tracker integrations, recommend the hosted relay as the standard setup. Provider webhooks reach DevIntern's relay and the worker connects outbound, so the worker needs no public webhook endpoint, inbound port, tunnel, or customer-owned GitHub App. Include relay pairing in the normal integration setup and retain polling as fallback. Honor an explicit polling-only, no-relay, or air-gapped choice and preserve existing delivery choices when making unrelated changes. Standalone CLI tasks and local-only automations do not need relay pairing.
+
 ## Prepare the runtime and configuration
 
 - Check Bun, Git, `devintern`, and the selected agent CLI on the execution host. If installation is requested and DevIntern is absent, use `bun install -g @getdevintern/code`. Follow the runtime or selected agent's official instructions when those prerequisites are absent; preserve the user's agent choice. Configure `AGENT_HARNESS` in the environment used by the worker. Finding the executable alone does not prove the agent is authenticated.
