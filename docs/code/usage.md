@@ -2,9 +2,9 @@
 title: "@devintern/code Usage Guide"
 sidebarLabel: "CLI Reference"
 description: "Commands, flags, batch runs, and outputs for working with @devintern/code."
-section: "Automation"
-order: 3
-dateModified: 2026-07-23
+section: "Automation Reference"
+order: 1
+dateModified: 2026-10-16
 ---
 
 # @devintern/code Usage Guide

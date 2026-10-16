@@ -4,6 +4,7 @@ sidebarLabel: "Artifacts"
 description: "Capture, inspect, and publish files produced by DevIntern pipeline steps."
 section: "Automation"
 order: 6
+sidebarHidden: true
 dateModified: 2026-10-16
 ---
 

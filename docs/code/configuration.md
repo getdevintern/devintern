@@ -2,9 +2,9 @@
 title: "@devintern/code Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
-section: "Automation"
-order: 4
-dateModified: 2026-09-01
+section: "Automation Reference"
+order: 0
+dateModified: 2026-10-16
 ---
 
 # @devintern/code Configuration

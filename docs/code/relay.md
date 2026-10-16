@@ -1,10 +1,10 @@
 ---
 title: "Relay (Instant Events)"
+sidebarLabel: "Relay & Connections"
 description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
-section: "Server Automation"
-order: 3
-sidebarHidden: true
-dateModified: 2026-09-10
+section: "Automation"
+order: 5
+dateModified: 2026-10-16
 ---
 
 # Relay (Instant Events)

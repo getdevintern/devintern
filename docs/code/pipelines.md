@@ -2,9 +2,9 @@
 title: "Customizing the Task Pipeline"
 sidebarLabel: "Pipelines"
 description: "Add verification and project-local TypeScript steps to task delivery, and customize the pipeline per repository or across a fleet."
-section: "Automation"
-order: 5
-dateModified: 2026-10-14
+section: "Automation Reference"
+order: 2
+dateModified: 2026-10-16
 ---
 
 # Customizing the Task Pipeline
