@@ -87,6 +87,7 @@ bun run --filter @getdevintern/pm build
 - Root `.oxlintrc.json` is the shared baseline; nested config discovery applies it to every package's `oxlint .`. Plugins: `typescript`, `unicorn`, `oxc`, `react`, `jsdoc`, `import`, `promise`. `categories.correctness` stays at `warn`; all configured `react/*` rules (including hooks) and enabled import hygiene rules (`import/no-cycle`, `no-duplicates`, `first`, etc.) are `error`. Export-layout rules (`import/group-exports`, `import/exports-last`) stay `off` — they ban the monorepo's inline `export function`/`export type` style. CommonJS is allowed only in `*.{cjs,cts}` via override. Noisy JSDoc `require-*` rules for typed codebases (`require-param-type`, `require-returns-type`, etc.) are off. Side-effect imports (CSS, `dotenv/config`) use `oxlint-disable-next-line import/no-unassigned-import` with a reason.
 - Strict TypeScript with `bun-types`, `moduleResolution: bundler`, `allowImportingTsExtensions: true`
 - `packages/code` has `noUncheckedIndexedAccess: false` (differs from `packages/pm` which enables it)
+- TypeScript standard: [docs/standards/typescript.md](docs/standards/typescript.md) — parse external data into a named domain type where it crosses the boundary. `.oxlintrc.json` enforces `typescript/no-explicit-any` and `typescript/ban-types`; tests are exempt, and a ratchet-baseline override lists files with pre-existing `any` to shrink over time
 
 ## Documentation
 

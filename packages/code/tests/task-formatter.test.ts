@@ -154,4 +154,12 @@ describe("TaskFormatter untrusted-content framing", () => {
     expect(prompt).toContain("feature/test-1");
     expect(prompt).not.toContain("previous implementation report");
   });
+
+  test("implementation prompt directs boundary parsing of external data", () => {
+    const prompt = TaskFormatter.formatTaskForAgent(mockTaskDetails());
+
+    expect(prompt).toContain("**Parse at the boundary**");
+    expect(prompt).toContain("named domain type");
+    expect(prompt).toContain("only use `as` casts after the value has been validated");
+  });
 });

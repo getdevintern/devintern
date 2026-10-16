@@ -369,6 +369,7 @@ Please analyze the above task and implement the requested functionality. Conside
 3. **Dependencies**: Check if any external resources (Figma designs, documentation) provide additional context
 4. **Testing**: Include appropriate tests for the implementation
 5. **Documentation**: Update relevant documentation if needed
+6. **Parse at the boundary**: External data is untyped until you parse it — tracker/API payloads, JSON and HTTP responses, config files, environment variables, CLI arguments, and database rows. Convert it into a named domain type exactly where it enters the code (the boundary), using the project's existing schema/validation library when one exists, and trust that type inward. Do not let raw \`any\`/\`unknown\` flow past the boundary, and only use \`as\` casts after the value has been validated.
 
 If you need clarification on any requirements or if the task description is unclear, please ask specific questions.
 
