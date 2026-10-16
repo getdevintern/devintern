@@ -186,10 +186,7 @@ Markdown key), then closes the ticket, deletes only the seeded comment, closes
 the scenario's PR and deletes only its branches. Ownership is recorded the moment
 a resource is created; cleanup attempts every operation even after a failure and
 reports the ids of anything it could not remove. The suite never creates or
-deletes the containing repository and never touches pre-existing tickets. Tracker
-scenarios may also pass per-project `inProgressStatus`, `todoStatus` and
-`prStatus` values, which the harness writes to `.devintern-code/settings.json`
-scoped to the tracker's project key.
+deletes the containing repository and never touches pre-existing tickets.
 
 Configure a dedicated tracker repository in `packages/e2e/.env.local` (ignored by
 Git) and run:

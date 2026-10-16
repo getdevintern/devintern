@@ -1,10 +1,7 @@
 import { expect, test } from "bun:test";
 import type { TrackerFixture } from "../../providers/tracker";
 import { throwCleanupFailures } from "../../helpers/cleanup";
-import {
-  buildTrackerSettings,
-  collectTrackerCleanupFailures,
-} from "../../helpers/tracker-scenario";
+import { collectTrackerCleanupFailures } from "../../helpers/tracker-scenario";
 
 function stubTracker(fail: (operation: string, id: string) => boolean = () => false) {
   const closed: string[] = [];
@@ -68,17 +65,4 @@ test("cleanup failure message names the failed resource ids", () => {
     ]),
   ).toThrow(/comment:9, ticket:42/);
   expect(() => throwCleanupFailures("clean", [])).not.toThrow();
-});
-
-test("per-project status settings are scoped to the tracker and project key", () => {
-  expect(
-    buildTrackerSettings("github", "org/fixture", {
-      inProgressStatus: "In Progress",
-      prStatus: "In Review",
-    }),
-  ).toEqual({
-    github: {
-      projects: { "org/fixture": { inProgressStatus: "In Progress", prStatus: "In Review" } },
-    },
-  });
 });

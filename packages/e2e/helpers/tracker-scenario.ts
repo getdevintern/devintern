@@ -1,17 +1,8 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { GitHub } from "../providers/github";
 import type { TrackerFixture, TrackerTicket } from "../providers/tracker";
 import { collectGitHubCleanupFailures, throwCleanupFailures } from "./cleanup";
 import type { CleanupFailure } from "./cleanup";
 import { FixtureWorkspace } from "./fixture-workspace";
-
-/** Per-project status names written into `.devintern-code/settings.json`. */
-export interface TrackerStatusSettings {
-  inProgressStatus?: string;
-  todoStatus?: string;
-  prStatus?: string;
-}
 
 export interface TrackerScenarioOptions {
   /** Ticket title; the created PR title becomes `[<key>] <title>`. */
@@ -21,22 +12,6 @@ export interface TrackerScenarioOptions {
    * Set false for scenarios that only need the description marker.
    */
   seedComment?: boolean;
-  /** Tracker project status settings the CLI should apply. */
-  statuses?: TrackerStatusSettings;
-}
-
-/**
- * Build the tracker-scoped `.devintern-code/settings.json` body.
- *
- * The project key mirrors what `resolveProjectKey` derives for the tracker so
- * the CLI finds the configured per-project statuses.
- */
-export function buildTrackerSettings(
-  trackerType: string,
-  projectKey: string,
-  statuses: TrackerStatusSettings,
-): Record<string, unknown> {
-  return { [trackerType]: { projects: { [projectKey]: statuses } } };
 }
 
 /**
@@ -115,7 +90,6 @@ export class TrackerScenario extends FixtureWorkspace {
     }
 
     await this.prepare(`https://github.com/${this.github.repository}.git`, token, providerEnv);
-    this.writeSettings();
   }
 
   /** Run the CLI against the actual tracker key with comments enabled. */
@@ -153,16 +127,6 @@ export class TrackerScenario extends FixtureWorkspace {
     throwCleanupFailures(
       `Tracker cleanup failed for ${this.id}; ticket ${this.ticket?.key ?? "not created"}`,
       failures,
-    );
-  }
-
-  private writeSettings(): void {
-    const statuses = this.options.statuses;
-    if (!statuses) return;
-    mkdirSync(join(this.cwd, ".devintern-code"), { recursive: true });
-    writeFileSync(
-      join(this.cwd, ".devintern-code", "settings.json"),
-      `${JSON.stringify(buildTrackerSettings(this.tracker.type, this.tracker.projectKey(), statuses), null, 2)}\n`,
     );
   }
 }
