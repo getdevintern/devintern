@@ -204,8 +204,14 @@ export function createFleetTaskExecutor(
   options: {
     extraArgs?: string[] | (() => string[]);
     repo?: string;
-    runOrigin?: "worker" | "error_monitor";
+    runOrigin?: "worker" | "error_monitor" | "local";
     source?: string;
+    /**
+     * Task reference passed to the CLI subprocess when it differs from the
+     * task key (e.g. an injected task's markdown file path). The key still
+     * names the worktree and supervisor label.
+     */
+    taskRef?: string;
     /**
      * Run a retry targets (persisted on the scheduled-retry row). Threaded to
      * the task subprocess as `DEVINTERN_PICKUP_RUN_ID` so session pickup
@@ -296,7 +302,7 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
-          const ok = await runTask(taskKey, extraArgs, {
+          const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
             cwd: worktree,
             env: {
               ...env,

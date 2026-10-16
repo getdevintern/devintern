@@ -13,7 +13,8 @@ export type RunOrigin =
   | "conflict_resolution"
   | "scheduled"
   | "estimate"
-  | "manual";
+  | "manual"
+  | "local";
 
 export type RunStatus =
   | "in_progress"

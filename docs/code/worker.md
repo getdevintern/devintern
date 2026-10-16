@@ -259,6 +259,78 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 
 One exception: an edit that arrives while that ticket's run is still in flight advances the cursor but is remembered durably in `.devintern-code/queue.db` and re-admitted once the run settles — including after a worker crash or restart — so the edit is not lost. A task deferred because its repository was busy is tracked the same way and retried on the next poll.
 
+## Ad-hoc tasks (`worker add`)
+
+Not every task comes from a tracker. `devintern worker add` enqueues a one-off
+task against a specific workspace repo, so dependency bumps, post-deploy fixes,
+generated docs, and CI/cron/agent follow-ups run through the full pipeline
+(checkout, agent, PR, retries) without polluting a tracker or driving the CLI by
+hand:
+
+```bash
+devintern worker add --repo backend --title "Bump the lockfile"
+devintern worker add --repo backend --title "Fix flaky checkout test" \
+  --body-file - < context.md
+devintern worker add --repo web --title "Regenerate API docs" \
+  --idempotency-key nightly-docs --json
+```
+
+The task is materialized as a local markdown prompt in `~/.devintern/injected/`
+and a durable row in the central DB, then picked up by the running worker on its
+next poll — no `[[routing.rules]]` entry is needed because the row names its repo
+explicitly. Tasks are attributed to the `local:add` source in worker logs, run
+records, and the dashboard, and start on a `feature/local-<slug>` branch (the
+`local-` prefix cannot collide with a tracker key).
+
+| Option                    | Description                                                              |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `--repo <name>`           | `[[repos]]` name to target (default: the only repo, else required)       |
+| `--title <text>`          | Task title (required)                                                     |
+| `--body <text>`           | Task description                                                          |
+| `--body-file <path>`      | Read the description from a file (`-` reads stdin)                        |
+| `--idempotency-key <key>` | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
+| `--wait`                  | Block until the run finishes; exit `0` on success, `1` on failure        |
+| `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit) |
+| `--json`                  | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field) |
+| `--workspace <path>`      | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)        |
+
+Behavior to expect:
+
+- **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
+  and runs on the next poll. If no worker is running the task is still queued —
+  `worker add` says so — and `--wait` refuses to block.
+- **Non-interactive.** The command returns after enqueue. `--wait` is the
+  scripting hook: it polls the row and exits with the run's status. It fails fast
+  if the worker disappears, and exits non-zero with a clear message once
+  `--wait-timeout` (default 6 hours) elapses without the task settling — a live
+  worker that keeps deferring the task (a usage-limit pause, a permanently
+  saturated repo) can no longer make `--wait` hang forever. Pass
+  `--wait-timeout 0` to wait without a limit.
+- **Machine-readable.** With `--json`, stdout carries exactly one JSON object;
+  every human/status line (license notices, "Enqueued…", the `--wait` progress
+  line) goes to stderr, so `devintern worker add … --json | jq .` parses cleanly.
+  `--wait --json` still emits a single object — the settled state, or a
+  `status: "failed"` object with an `error` on a timeout/worker-stop/inconclusive
+  wait — not an interim pending object plus a final one. Without `--json`,
+  diagnostics and the result line print to stdout as usual.
+- **Idempotency.** A task carrying `--idempotency-key` is reused (reported as
+  `deduplicated`) only while an earlier task with that key is still pending or
+  running, so a retried automation cannot create a duplicate. Once that task
+  settles, enqueuing the same key starts a new task — a fixed key like
+  `--idempotency-key nightly-docs` therefore drives a recurring job without
+  changing the key each run.
+- **Licensing.** Enqueuing automation work runs the same entitlement check as
+  the daemon (paid automation license, or the no-card Worker Pilot).
+- **Quiet hours.** Injected tasks are operator-initiated, so they bypass working
+  windows like `devintern worker run-now`; no extra `run-now` is required.
+- **PR behavior.** Injected runs inherit `[defaults].worker_task_args` (default
+  `--create-pr`), so they open a pull request just like tracker tasks.
+
+`--repo` is optional only in a one-repo workspace. With several repos, omitting
+it fails and lists the valid names; an unknown `--repo` fails the same way. An
+empty title, a body over 20,000 characters, and a missing `--body-file` are
+rejected before anything is written.
+
 ## Working windows (quiet hours)
 
 The drain of ready tasks can be limited to wall-clock windows — nights only is the classic case — using `[worker.schedule]` in `workspace.toml`:

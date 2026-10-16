@@ -24,6 +24,7 @@ import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
+import { InjectedTaskStore } from "../state/injected-tasks";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
@@ -58,6 +59,8 @@ import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
+import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
   createFleetTaskExecutor,
@@ -66,13 +69,62 @@ import {
   fleetTaskArgs,
   resolveActionedSource,
 } from "./fleet-executor";
-import type { RepoManagerLike } from "./fleet-executor";
+import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
 import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
 function orphanMaxAgeMs(): number {
   return parseEnvInteger("WORKER_ORPHAN_MAX_AGE_HOURS", 24 * 7, { min: 0 }) * 60 * 60 * 1000;
+}
+
+/**
+ * How long settled (`done`/`failed`) injected-task rows are retained before a
+ * startup prune removes them: `WORKER_INJECTED_TASK_RETENTION_DAYS`, default 30.
+ */
+function injectedTaskRetentionMs(): number {
+  return (
+    parseEnvInteger("WORKER_INJECTED_TASK_RETENTION_DAYS", 30, { min: 0 }) * 24 * 60 * 60 * 1000
+  );
+}
+
+/** Startup/periodic retention sweep: bound the injected-task table and files a long-lived daemon fills. */
+function pruneInjectedTasks(
+  store: InjectedTaskStore,
+  retentionMs: number = injectedTaskRetentionMs(),
+): void {
+  const pruned = store.pruneSettled(retentionMs);
+  if (pruned > 0) {
+    console.log(`🧹 [fleet] pruned ${pruned} settled injected task row(s)`);
+  }
+}
+
+/** Interval between periodic injected-task prunes (1 hour). */
+export const INJECTED_TASK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Keep pruning settled injected tasks (and their prompt files) while the
+ * worker runs.
+ *
+ * The startup sweep alone misses rows that settle while the worker stays up,
+ * so a long-lived daemon would accumulate rows and prompt files until the next
+ * restart. The returned timer is unref'd so it never keeps the process alive.
+ */
+export function startInjectedTaskSweeper(
+  store: InjectedTaskStore,
+  retentionMs: number | (() => number) = injectedTaskRetentionMs,
+  intervalMs: number = INJECTED_TASK_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    const activeRetention = typeof retentionMs === "function" ? retentionMs() : retentionMs;
+    try {
+      pruneInjectedTasks(store, activeRetention);
+    } catch (error) {
+      console.warn(`⚠️  [fleet] periodic injected-task prune failed: ${(error as Error).message}`);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
 }
 
 /**
@@ -196,6 +248,38 @@ export async function recoverOrphanedWorkspaceRuns(options: {
 }
 
 /**
+ * Fail injected rows left `running` by a dead worker so `worker add --wait`
+ * (or a retried automation) settles instead of hanging on a run that will
+ * never finish.
+ *
+ * Call this only while holding the workspace singleton lock (the worker's
+ * post-lock `beforeAcquirersStart` hook). A second `devintern worker` that has
+ * not yet acquired the lock would otherwise fail the still-live worker's
+ * `running` rows before exiting; the live worker's later `finish` is guarded
+ * by `WHERE status = 'running'`, so the successful task would be recorded
+ * `failed`.
+ */
+export function recoverOrphanedInjectedTasks(store: InjectedTaskStore): void {
+  for (const orphan of store.failRunning("worker restarted while this task was running")) {
+    console.warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
+  }
+}
+
+/**
+ * Compose the post-lock startup hook: recover injected orphans (safe now that
+ * this process owns the workspace lock), then run the caller's own hook.
+ */
+export function makeBeforeAcquirersStart(
+  store: InjectedTaskStore,
+  next?: () => Promise<void> | void,
+): () => Promise<void> {
+  return async () => {
+    recoverOrphanedInjectedTasks(store);
+    await next?.();
+  };
+}
+
+/**
  * Enqueue a dashboard retry for every orphaned run whose recorded state can be
  * resumed. The retry acquirer drains these with `--force`, and the pipeline
  * reconstructs the branch and prior report (session pickup) instead of
@@ -291,6 +375,32 @@ async function withSupervisorSlot(
     if (error instanceof JobNotStartedError) return null;
     throw error;
   }
+}
+
+/**
+ * Build the `worker add` drain acquirer: claims durable injected rows and runs
+ * each through the fleet executor, pinned to the repo the row names.
+ */
+export function buildInjectedTaskAcquirer(
+  deps: FleetExecutorDeps,
+  store: InjectedTaskStore,
+  verbose?: boolean,
+): InjectedTaskAcquirer {
+  return new InjectedTaskAcquirer({
+    store,
+    execute: (task) =>
+      createFleetTaskExecutor(deps, {
+        extraArgs: () => fleetTaskArgs(deps.config),
+        repo: task.repo,
+        source: INJECTED_TASK_SOURCE,
+        runOrigin: "local",
+        // The CLI resolves the local markdown file; the key still names the
+        // worktree and supervisor label.
+        taskRef: task.taskFile,
+      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
+    intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
+    verbose,
+  });
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -608,7 +718,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // pending row, this worker drains it through the fleet executor below.
   const retryQueue = new ScheduledRetryStore(workspaceDbPath(workspaceDir));
 
-  assertWorkspaceHasWork(config, retryQueue, multiTeam, initialQuery);
+  // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
+  // drain through the same fleet executor.
+  const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+  pruneInjectedTasks(injectedTasks);
+  startInjectedTaskSweeper(injectedTasks);
+
+  assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   startWorkerFailover({
@@ -689,6 +805,17 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
       verbose: options.verbose,
     }),
+  );
+
+  // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
+  // pinned to their explicit repo, and run through the normal pipeline (which
+  // inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
+  acquirers.push(
+    buildInjectedTaskAcquirer(
+      { config, workspaceDir, skips: state.skips, repoManager, supervisor },
+      injectedTasks,
+      options.verbose,
+    ),
   );
 
   // Always assembled (even with no automations yet): a live reload can add
@@ -1028,7 +1155,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
-      beforeAcquirersStart: options.beforeAcquirersStart,
+      beforeAcquirersStart: makeBeforeAcquirersStart(injectedTasks, options.beforeAcquirersStart),
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
@@ -1036,6 +1163,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         autoUpdater.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
+        injectedTasks.close();
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this
         // process is still alive, so a socket still bound here can fail it
@@ -1086,12 +1214,13 @@ function applyWorkspaceEnv(
 /**
  * Exit when workspace mode has no work configured.
  *
- * Scheduled dashboard retries are the one exception: the worker can still run
- * to drain them.
+ * Scheduled dashboard retries and queued injected tasks are the exceptions:
+ * the worker can still run to drain them.
  */
 function assertWorkspaceHasWork(
   config: WorkspaceConfig,
   retryQueue: ScheduledRetryStore,
+  injectedPending: boolean,
   multiTeam: boolean,
   initialQuery: string | undefined,
 ): void {
@@ -1103,9 +1232,9 @@ function assertWorkspaceHasWork(
     config.errorMonitors.some((source) => source.enabled);
   if (hasWork) return;
 
-  if (retryQueue.hasPending()) {
+  if (retryQueue.hasPending() || injectedPending) {
     console.warn(
-      "⚠️  No task query or automations configured; the worker will only drain scheduled dashboard retries.",
+      "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
     );
     return;
   }

@@ -33,6 +33,7 @@ export function isWorkerTaskProcess(): boolean {
     origin === "error_monitor" ||
     origin === "scheduled" ||
     origin === "estimate" ||
-    origin === "manual"
+    origin === "manual" ||
+    origin === "local"
   );
 }

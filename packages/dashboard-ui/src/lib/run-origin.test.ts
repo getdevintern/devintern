@@ -11,6 +11,7 @@ test.each([
   ["conflict_resolution", "Conflict resolution"],
   ["scheduled", "Scheduled automation"],
   ["estimate", "Estimate run"],
+  ["local", "Local add"],
 ] satisfies [RunOrigin, string][])("labels the %s run origin", (origin, label) => {
   expect(formatRunOrigin(origin)).toBe(label);
 });

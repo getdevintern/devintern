@@ -24,7 +24,8 @@ export type RunOrigin =
   | "conflict_resolution"
   | "scheduled"
   | "estimate"
-  | "manual";
+  | "manual"
+  | "local";
 
 export type RunStatus =
   | "in_progress"
@@ -629,6 +630,7 @@ export class RunStore {
       scheduled: 0,
       estimate: 0,
       manual: 0,
+      local: 0,
     };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<

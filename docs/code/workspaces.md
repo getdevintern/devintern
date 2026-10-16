@@ -310,6 +310,8 @@ devintern worker connect sentry # add a Sentry auto-fix project
 - Re-running `add-repo` for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
 - `.devintern-code/settings.json` needs no migration: it travels with the repo and applies inside each task worktree.
 
+Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Ad-hoc tasks](./worker.md#ad-hoc-tasks-worker-add).
+
 ## Environment
 
 Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Worker setup and repository imports enforce mode `0600`. Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:

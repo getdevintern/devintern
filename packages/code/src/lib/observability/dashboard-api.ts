@@ -69,6 +69,7 @@ const RUN_ORIGINS: RunOrigin[] = [
   "scheduled",
   "estimate",
   "manual",
+  "local",
 ];
 
 const STATS_WINDOWS: Record<string, number | null> = {
