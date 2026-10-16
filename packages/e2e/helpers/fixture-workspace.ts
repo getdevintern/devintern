@@ -22,11 +22,36 @@ export class FixtureWorkspace {
   readonly cwd = join(this.root, "repo");
   readonly id = `e2e-${crypto.randomUUID()}`;
   readonly base = `e2e/base-${this.id}`;
-  readonly head = `feature/${this.id}`;
+  private taskKeyValue = this.id;
   readonly env = isolatedEnvironment(this.root);
-  readonly ownedBranches = new Set([this.head, this.base]);
+  readonly ownedBranches = new Set([this.base, this.head]);
 
   constructor(private readonly apiTokenVariable = "GITHUB_TOKEN") {}
+
+  /** Task key driving branch naming and run-record lookups. */
+  get taskKey(): string {
+    return this.taskKeyValue;
+  }
+
+  /** `feature/<task-key>` derived from the active task key. */
+  get head(): string {
+    return `feature/${this.taskKeyValue.toLowerCase()}`;
+  }
+
+  /**
+   * Point branch naming and run-record lookups at a remote tracker key.
+   * Registers the derived feature branch as owned as soon as the ticket exists.
+   *
+   * @param taskKey - Actual tracker key (e.g. a GitHub issue number)
+   */
+  protected useTaskKey(taskKey: string): void {
+    if (!taskKey.trim()) throw new Error("Task key must not be empty");
+    // Drop the previous derived head so a tracker scenario owns only the
+    // branch its real ticket key produces.
+    this.ownedBranches.delete(this.head);
+    this.taskKeyValue = taskKey;
+    this.ownedBranches.add(this.head);
+  }
 
   async prepare(
     remoteUrl: string,
@@ -85,17 +110,21 @@ export class FixtureWorkspace {
       implicitTarget?: boolean;
       agentMode?: "implement" | "fail" | "no-change";
       gitToken?: string;
+      /** Task reference passed to the CLI; defaults to the Markdown fixture. */
+      taskRef?: string;
+      /** Skip tracker comments/transitions; defaults to true for Markdown. */
+      skipComments?: boolean;
     } = {},
   ) {
     return command(
       [
         process.execPath,
         cliPath,
-        join(this.root, `${this.id}.md`),
+        options.taskRef ?? join(this.root, `${this.id}.md`),
         "--agent-path",
         join(this.root, "bin/agent.ts"),
         "--skip-clarity-check",
-        "--skip-comments",
+        ...(options.skipComments === false ? [] : ["--skip-comments"]),
         "--create-pr",
         ...(options.implicitTarget ? [] : ["--pr-target-branch", this.base]),
         "--hook-retries",
@@ -152,7 +181,7 @@ export class FixtureWorkspace {
     try {
       return db
         .query("SELECT status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id")
-        .all(this.id) as Array<{
+        .all(this.taskKey) as Array<{
         status: string;
         pr_url: string | null;
         outcome_reason: string | null;

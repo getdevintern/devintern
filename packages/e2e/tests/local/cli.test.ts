@@ -3,8 +3,29 @@ import { chmodSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isolatedEnvironment } from "../../helpers/environment";
+import { FixtureWorkspace } from "../../helpers/fixture-workspace";
 import { checkedCommand } from "../../helpers/process";
 import { cliPath } from "../../helpers/scenario";
+
+test.skipIf(!existsSync(cliPath))(
+  "FixtureWorkspace runs the Markdown fixture and derives the branch from its task key",
+  async () => {
+    const run = new FixtureWorkspace();
+    const remote = join(run.root, "remote.git");
+    try {
+      await checkedCommand(["git", "init", "--bare", remote], run.root, run.env);
+      await run.prepare(remote, "test-token", {});
+      expect(run.taskKey).toBe(run.id);
+      await run.runCli();
+      expect(await run.git("branch", "--show-current")).toBe(run.head);
+      expect(await run.git("diff", "--name-only", `${run.base}...HEAD`)).toBe("src/greeting.ts");
+      expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+    } finally {
+      run.dispose();
+    }
+  },
+  60_000,
+);
 
 test.skipIf(!existsSync(cliPath))(
   "built CLI implements, commits and pushes the fixture task using local Git",
