@@ -323,6 +323,9 @@ The workspace worker uses this shared `.env` even when started inside a reposito
 3. Inline `[repos.env]` values (highest precedence)
 
 For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL.
+Artifact upload targets use the same layers: set `DEVINTERN_ARTIFACT_*` in the
+shared `.env` or a repo `env_file`. Select the built-in Files SDK uploader in
+the pipeline to use Cloudflare R2 or S3; see [upload configuration](./artifacts.md#files-sdk-uploader).
 GitHub review, CI, mention, and relay requests use the matching repo's `GITHUB_TOKEN` layers.
 When a fixed GitHub team targets that repo, its `env_file` and `[teams.env]` can override the
 token. Without a repo or team override, those requests use the workspace token.

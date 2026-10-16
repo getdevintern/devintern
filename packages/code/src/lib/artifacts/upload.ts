@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from "path";
 import { pathToFileURL } from "url";
 import { selectPublishedArtifacts } from "./publication";
+import { loadFilesArtifactUploader } from "./files-sdk-env";
 import type { RunArtifactRegistry } from "./registry";
 import type { ArtifactPolicy, ArtifactUploader } from "./types";
 
@@ -16,6 +17,7 @@ export async function loadArtifactUploader(
 ): Promise<LoadedArtifactUploader | undefined> {
   const specifier = policy?.publish?.uploader;
   if (!specifier) return undefined;
+  if (specifier === "files-sdk") return loadFilesArtifactUploader();
   const id =
     specifier.startsWith(".") || isAbsolute(specifier)
       ? resolve(baseDir, specifier)
