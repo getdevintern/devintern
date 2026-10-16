@@ -3,8 +3,8 @@ title: "@devintern/pm Usage Guide"
 sidebarLabel: "Using DevIntern PM"
 description: "Interactive drafting, source inputs, and posting flows for @devintern/pm."
 section: "Create Tasks"
-order: 3
-dateModified: 2026-08-23
+order: 1
+dateModified: 2026-10-16
 ---
 
 # @devintern/pm Usage Guide

@@ -3,7 +3,7 @@ title: "Worker Daemon"
 sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
-order: 1
+order: 2
 dateModified: 2026-10-16
 ---
 
@@ -198,6 +198,10 @@ How a poll cycle works:
 Cursors persist in `.devintern-code/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
 Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
+
+### Delivery failures
+
+A run that cannot commit its implementation (including an agent that produces no changes), fails pre-push validation, or cannot push its branch is recorded as failed. It does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
 
 ### Re-running a task
 

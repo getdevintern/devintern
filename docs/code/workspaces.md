@@ -3,8 +3,8 @@ title: "Workspaces (Multi-Repo Fleet)"
 sidebarLabel: "Multiple Repositories"
 description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
 section: "Automation"
-order: 2
-dateModified: 2026-09-09
+order: 3
+dateModified: 2026-10-16
 ---
 
 # Workspaces (Multi-Repo Fleet)

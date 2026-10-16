@@ -3,9 +3,8 @@ title: "Worker Dashboard"
 sidebarLabel: "Dashboard"
 description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
 section: "Automation"
-order: 2
-sidebarHidden: true
-dateModified: 2026-09-08
+order: 4
+dateModified: 2026-10-16
 ---
 
 # Worker Dashboard

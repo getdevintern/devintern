@@ -2,9 +2,9 @@
 title: "Sentry Auto-fixes"
 sidebarLabel: "Sentry Auto-fixes"
 description: "Turn Sentry error groups into repo-routed fixes from the workspace worker"
-section: "Automation"
-order: 4
-dateModified: 2026-09-07
+section: "Automation Reference"
+order: 3
+dateModified: 2026-10-16
 ---
 
 # Sentry Auto-fixes
