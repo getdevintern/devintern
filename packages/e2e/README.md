@@ -168,6 +168,46 @@ on the DevIntern GitHub repository. Each job receives only its provider's token,
 and no credentials are exposed to untrusted PR workflows. Missing configuration
 fails the explicit live command before it mutates a remote repository.
 
+## Remote tracker fixtures
+
+The Markdown suites above need no task tracker. A separate opt-in suite exercises
+the same built CLI against a real remote tracker ticket through the reusable
+`TrackerScenario` fixture. GitHub Issues is the initial tracker and GitHub remains
+the common code host for every tracker, so there is no tracker-by-code-host
+matrix to configure. No model or AI-agent credentials are needed: the
+deterministic fixture agent verifies that unique markers seeded into the ticket
+description and a seeded comment reached its actual input before it edits
+`src/greeting.ts`.
+
+Each scenario provisions one fresh ticket in the explicitly configured tracker
+repository, runs the CLI with comments enabled against the ticket's real key
+(`feature/<key>` and run-record lookups derive from that key, not the synthetic
+Markdown key), then closes the ticket, deletes only the seeded comment, closes
+the scenario's PR and deletes only its branches. Ownership is recorded the moment
+a resource is created; cleanup attempts every operation even after a failure and
+reports the ids of anything it could not remove. The suite never creates or
+deletes the containing repository and never touches pre-existing tickets.
+
+Configure a dedicated tracker repository in `packages/e2e/.env.local` (ignored by
+Git) and run:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:tracker
+```
+
+| Variable                    | Meaning                                                |
+| --------------------------- | ------------------------------------------------------ |
+| `E2E_TRACKER_REPOSITORY`    | Existing `owner/repo` that will host test tickets      |
+| `E2E_TRACKER_TOKEN`         | Token with issues read/write on that repository        |
+| `E2E_TRACKER_STATUS_LABELS` | Optional comma-separated status labels for transitions |
+
+The tracker repository is also the GitHub code host in this initial suite, so the
+token needs repository contents and pull-request write access too. Missing
+`E2E_TRACKER_REPOSITORY` or `E2E_TRACKER_TOKEN` fails the opt-in command before
+any remote mutation. Ordinary `test` runs only local harness checks and never the
+live tracker suite.
+
 ## Delivery lifecycle coverage
 
 GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
