@@ -92,22 +92,35 @@ devintern worker init
 
 For a one-off task instead, run `devintern init` followed by `devintern ./tasks/my-task.md --create-pr` (or `devintern PROJ-123 --create-pr`). Interactive CLI runs are free and need no signup. The worker keeps picking up ready tickets and turns review comments on its pull requests into commits.
 
-For coding agents, the repository includes three focused skills:
+## Agent skills
 
-| Skill | Use it for |
-| --- | --- |
-| [devintern-setup](skills/devintern-setup/SKILL.md) | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
-| [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies. |
-| [devintern-delegate](skills/devintern-delegate/SKILL.md) | Hand one-off implementation tasks to a configured worker. |
+Install the DevIntern skills into your project for Codex:
+
+```bash
+bunx skills add getdevintern/devintern \
+  --skill devintern-setup devintern-workspace devintern-delegate --agent codex
+```
+
+Use `--agent claude-code` for Claude Code, or add `--global` for user-wide availability. Install only the skills you need by selecting their names with `--skill`.
+
+| Skill                                                      | Use it for                                                                                                 |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [devintern-setup](skills/devintern-setup/SKILL.md)         | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
+| [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies.    |
+| [devintern-delegate](skills/devintern-delegate/SKILL.md)   | Hand one-off implementation tasks to a configured worker.                                                  |
+
+Skills provide instructions for your agent. The setup skill helps install and configure DevIntern; installing the skills alone does not install the CLI, connect accounts, or start a worker. Workspace changes require an existing workspace; delegation requires a registered repository and a running worker with automation access (Worker Pilot or paid license).
+
+See the [agent skills guide](docs/code/agent-skills.md) for prerequisites, example prompts, and updates.
 
 ## Why teams use it
 
-|                     |                                                                                                                                   |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Worker**          | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                         |
-| **Your stack**      | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent.        |
-| **Quality gates**   | Vague tickets get questions on the tracker instead of a wrong PR. The agent reviews its own diff before a human sees it.          |
-| **Self-hosted**     | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.                  |
+|                   |                                                                                                                            |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Worker**        | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                   |
+| **Your stack**    | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent. |
+| **Quality gates** | Vague tickets get questions on the tracker instead of a wrong PR. The agent reviews its own diff before a human sees it.   |
+| **Self-hosted**   | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.           |
 
 ## The worker
 

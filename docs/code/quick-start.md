@@ -4,7 +4,7 @@ sidebarLabel: "Quick Start"
 description: "Install @devintern/code and turn a markdown task or tracker ticket into working code."
 section: "Automation"
 order: 0
-dateModified: 2026-09-01
+dateModified: 2026-10-16
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
@@ -13,6 +13,8 @@ tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 **@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
 For agent-assisted setup, use the [devintern-setup skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-setup). It covers prerequisites, source-control and tracker credentials, browser authorization when needed, and verifying worker activation. For changes to an existing worker's repositories, routing, automations, and policies, use [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace).
+
+See [Agent Skills](agent-skills.md) for installation commands for Codex and Claude Code, prerequisites, and example prompts for setup, workspace changes, and delegation.
 
 **Recommended for ongoing use:** set up a [workspace worker](./worker.md#quick-start), even for one repository, with relay-backed integrations. Start with `devintern worker init`; it includes tracker setup when needed and can install/start the service. The standalone CLI walkthrough below remains useful for an explicitly one-off task or trial run.
 

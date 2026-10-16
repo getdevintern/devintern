@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
 section: "Automation"
 order: 1
-dateModified: 2026-09-08
+dateModified: 2026-10-16
 ---
 
 # Worker Daemon
@@ -229,7 +229,7 @@ A ticket re-arms when any field the marker records changes:
 - **Re-open** a closed ticket (status/state change), or
 - **Add or remove a label**.
 
-The marker is captured *after* the worker's own comment and status transition, so those never re-trigger a run. A ticket that still matches the query but is skipped is logged as `⏭️ skipping KEY (already actioned; no change since the PR)`.
+The marker is captured _after_ the worker's own comment and status transition, so those never re-trigger a run. A ticket that still matches the query but is skipped is logged as `⏭️ skipping KEY (already actioned; no change since the PR)`.
 
 ### Interrupted runs are recovered on startup
 
@@ -265,6 +265,8 @@ One exception: an edit that arrives while that ticket's run is still in flight a
 
 ## Ad-hoc tasks (`worker add`)
 
+To dispatch work from a coding agent, install the [devintern-delegate skill](agent-skills.md). It guides repository selection, self-contained task briefs, idempotent submission, and bounded waiting for results.
+
 Not every task comes from a tracker. `devintern worker add` enqueues a one-off
 task against a specific workspace repo, so dependency bumps, post-deploy fixes,
 generated docs, and CI/cron/agent follow-ups run through the full pipeline
@@ -286,17 +288,17 @@ explicitly. Tasks are attributed to the `local:add` source in worker logs, run
 records, and the dashboard, and start on a `feature/local-<slug>` branch (the
 `local-` prefix cannot collide with a tracker key).
 
-| Option                    | Description                                                              |
-| ------------------------- | ------------------------------------------------------------------------ |
-| `--repo <name>`           | `[[repos]]` name to target (default: the only repo, else required)       |
-| `--title <text>`          | Task title (required)                                                     |
-| `--body <text>`           | Task description                                                          |
-| `--body-file <path>`      | Read the description from a file (`-` reads stdin)                        |
-| `--idempotency-key <key>` | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
-| `--wait`                  | Block until the run finishes; exit `0` on success, `1` on failure        |
-| `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit) |
-| `--json`                  | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field) |
-| `--workspace <path>`      | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)        |
+| Option                     | Description                                                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--repo <name>`            | `[[repos]]` name to target (default: the only repo, else required)                                                              |
+| `--title <text>`           | Task title (required)                                                                                                           |
+| `--body <text>`            | Task description                                                                                                                |
+| `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
+| `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
+| `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
+| `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
+| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
+| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)                                                               |
 
 Behavior to expect:
 
