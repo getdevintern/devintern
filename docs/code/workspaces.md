@@ -100,13 +100,13 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
-- `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
+- `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. An `[[automations]].pipeline_file` is the most specific scope and applies to that automation's occurrences alone. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
 - Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
-- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
+- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics. Install a bundled recipe with `devintern automations add <pack> --repo <name>` — see [Automation Packs](./automation-packs.md).
 - `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
@@ -247,10 +247,11 @@ The referenced file is a JSON document with the same pipeline schema as `setting
 
 **Precedence.** Exactly one complete pipeline runs for a task; ordered step arrays are never merged across scopes. From highest to lowest:
 
-1. The routed repo's `[[repos]].pipeline_file` (workspace per-repository override).
-2. The repository's checked-in `.devintern-code/settings.json` `pipeline` block.
-3. `[defaults].pipeline_file` (workspace default).
-4. The built-in default (`implement → commit → auto-review → finalize`).
+1. The `[[automations]].pipeline_file` of the occurrence that is running (automation override).
+2. The routed repo's `[[repos]].pipeline_file` (workspace per-repository override).
+3. The repository's checked-in `.devintern-code/settings.json` `pipeline` block.
+4. `[defaults].pipeline_file` (workspace default).
+5. The built-in default (`implement → commit → auto-review → finalize`).
 
 Two repositories served by one worker can therefore run entirely different pipelines, and a repository that customizes nothing keeps the current flow.
 

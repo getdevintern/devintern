@@ -19,6 +19,7 @@ function baseDeps() {
       installed: true,
       alternatives: [],
     }),
+    probeCatalog: () => ({ packCount: 4, errors: [], warnings: [] }),
     env: {
       TASK_TRACKER: "jira",
       JIRA_BASE_URL: "https://acme.atlassian.net",
@@ -102,6 +103,42 @@ describe("collectReadinessChecks", () => {
     const agent = checks.find((c) => c.id === "agent");
     expect(agent?.status).toBe("fail");
     expect(agent?.hint).toContain("AGENT_CLI_PATH");
+  });
+
+  test("a clean catalog reports ok", async () => {
+    const checks = await collectReadinessChecks(baseDeps());
+    const catalog = checks.find((c) => c.id === "catalog");
+    expect(catalog?.status).toBe("ok");
+    expect(catalog?.detail).toBe("4 pack(s)");
+  });
+
+  test("broken catalog entries fail with a hint", async () => {
+    const checks = await collectReadinessChecks({
+      ...baseDeps(),
+      probeCatalog: () => ({
+        packCount: 3,
+        errors: ['Pack "alpha": prompt file "prompt.md" does not exist.'],
+        warnings: [],
+      }),
+    });
+    const catalog = checks.find((c) => c.id === "catalog");
+    expect(catalog?.status).toBe("fail");
+    expect(catalog?.detail).toContain("broken");
+    expect(catalog?.hint).toContain("automations list");
+  });
+
+  test("orphaned catalog directories warn", async () => {
+    const checks = await collectReadinessChecks({
+      ...baseDeps(),
+      probeCatalog: () => ({
+        packCount: 4,
+        errors: [],
+        warnings: ['Pack directory "stale" is not listed (orphaned).'],
+      }),
+    });
+    const catalog = checks.find((c) => c.id === "catalog");
+    expect(catalog?.status).toBe("warn");
+    expect(catalog?.detail).toContain("orphaned");
   });
 
   test("missing git and bun fail", async () => {

@@ -18,6 +18,13 @@ export interface AutomationConfig {
    * omitting it (workspace `worker_task_args` included) never creates PRs.
    */
   openPr?: boolean;
+  /**
+   * Workspace-relative JSON file holding this automation's pipeline override.
+   * Takes precedence over every other pipeline scope for this automation's
+   * occurrences only, so installing a pack pipeline never re-routes unrelated
+   * tasks. See {@link selectPipelineConfig}.
+   */
+  pipelineFile?: string;
 }
 
 /** A cron-or-interval schedule using the `[[automations]]` format. */
@@ -181,6 +188,8 @@ export function parseAutomationEntries(
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
 
+    const pipelineFile = stringValue("pipeline_file");
+
     if (id && typeof enabledValue === "boolean" && prompt && schedule) {
       automations.push({
         id,
@@ -191,6 +200,7 @@ export function parseAutomationEntries(
         intervalMs: schedule.intervalMs,
         repo,
         openPr,
+        pipelineFile,
       });
     }
   }

@@ -413,6 +413,12 @@ export async function resolveWorkspaceAutomationContext(
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
   const taskFileDir = join(workspaceDir, "automations");
+  // An automation-scoped `pipeline_file` applies to this automation's runs
+  // only, and at the highest precedence, so a repo's own pipeline cannot
+  // silently bypass a pipeline bundled with the pack.
+  const pipelineAutomationFile = automation.pipelineFile
+    ? resolveWorkspacePipelinePath(workspaceDir, automation.pipelineFile)
+    : undefined;
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
@@ -421,7 +427,7 @@ export async function resolveWorkspaceAutomationContext(
   if (!repo)
     return {
       cwd: workspaceDir,
-      env: buildWorkspaceContextEnv(workspaceDir),
+      env: buildWorkspaceContextEnv(workspaceDir, { pipelineAutomationFile }),
       taskFileDir,
       release() {},
     };
@@ -435,6 +441,7 @@ export async function resolveWorkspaceAutomationContext(
       pipelineDefaultFile: config.defaults.pipelineFile
         ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
         : undefined,
+      pipelineAutomationFile,
     }),
     repo: repo.name,
     taskFileDir,

@@ -33,6 +33,16 @@ export const WORKSPACE_PIPELINE_REPO_ENV = "DEVINTERN_WORKSPACE_PIPELINE_REPO";
 export const WORKSPACE_PIPELINE_DEFAULT_ENV = "DEVINTERN_WORKSPACE_PIPELINE_DEFAULT";
 
 /**
+ * Absolute path of one automation's own pipeline definition.
+ *
+ * Pinned only for an automation occurrence whose `[[automations]]` entry sets
+ * `pipeline_file`. It is the most specific scope, so it wins over the
+ * per-repository, checked-in, and workspace-default pipelines and applies to
+ * that automation's runs alone (see {@link selectPipelineConfig}).
+ */
+export const WORKSPACE_PIPELINE_AUTOMATION_ENV = "DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION";
+
+/**
  * Explicit actioned-ticket source key pinned into a task subprocess.
  *
  * The workspace gate is built from `[defaults].tracker`/team identity, while
@@ -123,12 +133,20 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *                                 {@link ACTIONED_SOURCE_ENV}).
  * @param options.pipelineDefaultFile - Absolute path of the workspace default
  *                                      pipeline file, if one is configured.
+ * @param options.pipelineAutomationFile - Absolute path of the occurrence's
+ *                                         automation-scoped pipeline file, if
+ *                                         the `[[automations]]` entry sets
+ *                                         `pipeline_file`.
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    pipelineAutomationFile?: string;
+  } = {},
 ): Record<string, string | undefined> {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -174,18 +192,20 @@ export function buildRepoEnv(
  *
  * A task subprocess inherits the worker's process env (and, for a team task,
  * the team credential layers), so stale `DEVINTERN_WORKSPACE_PIPELINE_REPO` /
- * `DEVINTERN_WORKSPACE_PIPELINE_DEFAULT` values must be cleared before pinning
- * this repo's selection. Callers re-run this after every later layer so no
- * team `env_file` or inline `[teams.env]` value can re-route the pipeline.
+ * `DEVINTERN_WORKSPACE_PIPELINE_DEFAULT` / `..._AUTOMATION` values must be
+ * cleared before pinning this repo's selection. Callers re-run this after every
+ * later layer so no team `env_file` or inline `[teams.env]` value can re-route
+ * the pipeline.
  */
 function pinPipelineEnv(
   env: Record<string, string | undefined>,
   repo: RepoConfig,
   workspaceDir: string,
-  options: { pipelineDefaultFile?: string },
+  options: { pipelineDefaultFile?: string; pipelineAutomationFile?: string },
 ): void {
   delete env[WORKSPACE_PIPELINE_REPO_ENV];
   delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
+  delete env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
   if (repo.pipelineFile) {
     env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
       ? repo.pipelineFile
@@ -193,6 +213,9 @@ function pinPipelineEnv(
   }
   if (options.pipelineDefaultFile) {
     env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;
+  }
+  if (options.pipelineAutomationFile) {
+    env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = options.pipelineAutomationFile;
   }
 }
 
@@ -277,7 +300,11 @@ export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    pipelineAutomationFile?: string;
+  } = {},
 ): Record<string, string | undefined> {
   const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
@@ -319,12 +346,20 @@ export function buildErrorMonitorEnv(
  * paths pinned, so the child resolves auth and license state in the workspace.
  *
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.pipelineAutomationFile - Absolute path of an automation-scoped
+ *                                         pipeline to pin (see
+ *                                         {@link WORKSPACE_PIPELINE_AUTOMATION_ENV}).
  */
 export function buildWorkspaceContextEnv(
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { pipelineAutomationFile?: string } = {},
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   pinWorkerRuntimeEnv(env, workspaceDir);
+  delete env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+  if (options.pipelineAutomationFile) {
+    env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = options.pipelineAutomationFile;
+  }
   return env;
 }
 
