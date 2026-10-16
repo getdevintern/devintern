@@ -11,6 +11,7 @@ import {
   recoverOrphanedTaskRuns,
   resolveStatusName,
 } from "../src/lib/worker/orphan-recovery";
+import { reportTaskFailure } from "../src/lib/task/failure-feedback";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
@@ -67,7 +68,6 @@ describe("recoverOrphanedTaskRuns", () => {
     now?: number;
     maxAgeMs?: number;
     branchExists?: (branch: string, run: RunRecord) => boolean;
-    cleanStopRunIds?: ReadonlySet<number>;
   }
 
   function recover({
@@ -77,7 +77,6 @@ describe("recoverOrphanedTaskRuns", () => {
     now = Date.now(),
     maxAgeMs = DEFAULT_ORPHAN_MAX_AGE_MS,
     branchExists,
-    cleanStopRunIds,
   }: RecoveryOptions = {}) {
     return recoverOrphanedTaskRuns({
       runStore: store,
@@ -87,11 +86,9 @@ describe("recoverOrphanedTaskRuns", () => {
       getTodoStatus: () => todoStatus,
       recordAttempt: (key, type, description) =>
         retryStore.recordIncompleteAttempt(key, type, description),
-      getAttemptReportedAt: (key) => retryStore.getRetryState(key)?.reportedAt,
       maxAgeMs,
       now,
       ...(branchExists ? { branchExists } : {}),
-      ...(cleanStopRunIds ? { cleanStopRunIds } : {}),
       log: () => {},
       warn: () => {},
     });
@@ -173,80 +170,41 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(retryStore.getRetryState("PROJ-11")).toBeNull();
   });
 
-  test("clean stop: reaps with a distinct reason and posts no crash comment", async () => {
-    // The run is in progress because the worker was asked to stop (SIGTERM).
-    // Its child already reported the interruption, so recovery must not post a
-    // second, crash-framed comment.
+  test("retries a failed shutdown transition without duplicating the delivered comment", async () => {
     const runId = store.createRun({ origin: "task", taskKey: "PROJ-14" });
-    // The child durably marks its own run once its interruption feedback was
-    // handled; recovery trusts that marker, not a point-in-time snapshot.
+    const tracker = fakeTracker();
+    const handled = await reportTaskFailure({
+      taskKey: "PROJ-14",
+      reason: "Processing was interrupted (SIGTERM)",
+      tracker: {
+        ...tracker,
+        transitionStatus: async () => {
+          throw new Error("tracker unavailable");
+        },
+      } as TaskTrackerClient,
+      trackerType: "jira",
+      projectKey: "PROJ",
+      movedToInProgress: true,
+      getTodoStatus: () => "To Do",
+      recordAttempt: (key, type, description) =>
+        retryStore.recordIncompleteAttempt(key, type, description),
+    });
+    expect(handled).toBe(true);
     store.markCleanStop(runId);
+    const attempt = retryStore.getRetryState("PROJ-14");
 
-    const result = await recover();
-
-    expect(result.reaped).toBe(1);
-    expect(result.recovered).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(posted).toHaveLength(0);
-    expect(transitions).toHaveLength(0);
-    expect(retryStore.getRetryState("PROJ-14")).toBeNull();
-
-    const run = store.getRun(runId);
-    expect(run?.status).toBe("failed");
-    expect(run?.outcomeReason).toContain("cleanly");
-    expect(run?.outcomeReason).not.toContain("exited unexpectedly");
-  });
-
-  test("clean stop: a run missed by the resume note is still suppressed via its own marker", async () => {
-    // Regression: the child created its run row after the parent's signal-time
-    // snapshot, so the note does not name it. Its own clean_stop marker is
-    // decoupled from snapshot timing, so recovery still avoids a duplicate.
-    const runId = store.createRun({ origin: "task", taskKey: "PROJ-16" });
-    store.markCleanStop(runId);
-
-    const result = await recover({ cleanStopRunIds: new Set() });
-
-    expect(result.reaped).toBe(1);
-    expect(result.recovered).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(posted).toHaveLength(0);
-    expect(store.getRun(runId)?.outcomeReason).toContain("cleanly");
-  });
-
-  test("clean stop: a child that recorded a delivered attempt is suppressed without a marker", async () => {
-    // The child posted its interruption comment (which records the retry-gate
-    // attempt) but its marker write raced the run-row creation. The recorded
-    // attempt at/after the run's start is the positive evidence recovery needs.
-    const runId = store.createRun({ origin: "task", taskKey: "PROJ-17" });
-    retryStore.recordIncompleteAttempt("PROJ-17", "jira", "description");
-
-    const result = await recover();
-
-    expect(result.recovered).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(posted).toHaveLength(0);
-    expect(store.getRun(runId)?.cleanStop).toBeUndefined();
-  });
-
-  test("clean stop: a note without delivered feedback is reported, not stranded", async () => {
-    // Regression: the parent wrote a resume note naming the run, but the
-    // child's tracker call failed at shutdown (no comment, no recorded
-    // attempt). The note alone must not suppress recovery, or the ticket stays
-    // In Progress with no feedback forever.
-    const runId = store.createRun({ origin: "task", taskKey: "PROJ-18" });
-
-    const result = await recover({ cleanStopRunIds: new Set([runId]) });
+    const result = await recover({ tracker });
 
     expect(result.reaped).toBe(1);
     expect(result.recovered).toBe(1);
-    expect(result.skipped).toBe(0);
     expect(posted).toHaveLength(1);
-    expect(posted[0]?.body).toContain("exited unexpectedly");
-    expect(transitions).toEqual([{ key: "PROJ-18", status: "To Do" }]);
-    expect(retryStore.getRetryState("PROJ-18")).not.toBeNull();
+    expect(posted[0]?.body).toContain("SIGTERM");
+    expect(transitions).toEqual([{ key: "PROJ-14", status: "To Do" }]);
+    expect(retryStore.getRetryState("PROJ-14")).toEqual(attempt);
+    expect(store.getRun(runId)?.outcomeReason).toContain("cleanly");
   });
 
-  test("clean stop with resumable state still schedules a pickup", async () => {
+  test("a clean stop with resumable state still schedules a pickup", async () => {
     const runId = store.createRun({
       origin: "task",
       taskKey: "PROJ-15",
@@ -261,11 +219,34 @@ describe("recoverOrphanedTaskRuns", () => {
     );
     store.markCleanStop(runId);
 
-    const result = await recover({ cleanStopRunIds: new Set([runId]) });
+    const result = await recover();
 
     expect(result.resumable.map((run) => run.id)).toEqual([runId]);
     expect(posted).toHaveLength(0);
     expect(transitions).toHaveLength(0);
+  });
+
+  test("clean-stop feedback respects tickets that already moved on", async () => {
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-16" });
+    store.markCleanStop(runId);
+    tasksByKey["PROJ-16"] = ticket("PROJ-16", "To Do");
+
+    const result = await recover();
+
+    expect(result.skipped).toBe(1);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+  });
+
+  test("task-level retry state alone does not suppress crash recovery", async () => {
+    store.createRun({ origin: "task", taskKey: "PROJ-17" });
+    retryStore.recordIncompleteAttempt("PROJ-17", "jira", "description");
+
+    await recover();
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toContain("exited unexpectedly");
+    expect(transitions).toEqual([{ key: "PROJ-17", status: "To Do" }]);
   });
 
   test("falls back to failure feedback when the recorded state is incomplete", async () => {

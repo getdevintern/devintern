@@ -25,6 +25,8 @@ export interface FailureAttemptRecorder {
 export interface FailureFeedbackDeps {
   taskKey: string;
   reason: string;
+  /** Interruption feedback was already handled by this run; retry only the status transition. */
+  skipComment?: boolean;
   tracker: TaskTrackerClient;
   /** Tracker identifier stored with the retry state (`TASK_TRACKER`). */
   trackerType: string;
@@ -44,24 +46,26 @@ export interface FailureFeedbackDeps {
  * status. On successful comment delivery, also persist the attempt so the
  * harness itself posting the comment never counts as "the ticket changed".
  *
- * Never throws. Returns `true` when the failure comment was delivered, so a
+ * Never throws. Returns `true` when the comment was delivered or skipped, so a
  * caller (the child's SIGTERM handler) can record a durable clean-stop marker
  * only when recovery genuinely has nothing left to post.
  */
 export async function reportTaskFailure(deps: FailureFeedbackDeps): Promise<boolean> {
   const { taskKey, reason, tracker } = deps;
 
-  let posted = false;
-  try {
-    await tracker.postComment(taskKey, {
-      format: "markdown",
-      body: formatProcessingFailureMarkdown(taskKey, reason),
-    });
-    deps.log?.(`💬 Posted a failure comment to ${taskKey}`);
-    posted = true;
-    await recordAttemptForGate(deps);
-  } catch (commentError) {
-    deps.warn?.(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
+  let posted = Boolean(deps.skipComment);
+  if (!deps.skipComment) {
+    try {
+      await tracker.postComment(taskKey, {
+        format: "markdown",
+        body: formatProcessingFailureMarkdown(taskKey, reason),
+      });
+      deps.log?.(`💬 Posted a failure comment to ${taskKey}`);
+      posted = true;
+      await recordAttemptForGate(deps);
+    } catch (commentError) {
+      deps.warn?.(`⚠️  Failed to post failure comment to task tracker: ${commentError}`);
+    }
   }
 
   if (!deps.movedToInProgress) return posted;

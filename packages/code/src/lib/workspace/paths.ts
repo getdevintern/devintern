@@ -56,15 +56,6 @@ export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): s
 }
 
 /**
- * Path of the durable resume note written when the worker stops cleanly and
- * consumed on the next start. Lives next to the queue database so it travels
- * with the rest of the workspace's durable state.
- */
-export function workspaceResumeNotePath(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "state", "resume-note.json");
-}
-
-/**
  * Path of the "run now" sentinel. `devintern worker run-now` creates this
  * file; a running worker consumes it on its next poll tick and drains once,
  * ignoring working windows.

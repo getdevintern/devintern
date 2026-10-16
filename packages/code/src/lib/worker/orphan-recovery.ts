@@ -54,14 +54,6 @@ export const ORPHANED_RUN_REASON =
   "The worker exited unexpectedly (crash or power loss) while this task was in progress, " +
   "before a pull request could be created";
 
-/**
- * Outcome recorded for a run that was in progress during a deliberate worker
- * stop (SIGTERM/drain). Distinguishes a clean stop from a crash so the run
- * history — and any later diagnostics — can tell them apart.
- */
-export const CLEAN_STOP_RUN_REASON =
-  "worker stopped cleanly while this run was in progress; state preserved for resume";
-
 /** Orphans older than this are reaped silently (likely handled manually). */
 export const DEFAULT_ORPHAN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -87,24 +79,6 @@ export interface OrphanRecoveryDeps {
   recordAttempt?: FailureAttemptRecorder;
   /** Skip feedback for runs started before `now - maxAgeMs`. */
   maxAgeMs?: number;
-  /**
-   * Run ids named by a durable resume note left at a clean worker stop. Used
-   * to label the reaped rows as a clean stop rather than a crash; the decision
-   * to suppress crash feedback is driven by positive per-run evidence (see
-   * {@link getAttemptReportedAt} and {@link RunRecord.cleanStop}), never by
-   * the note alone — the note is a point-in-time snapshot that can miss a run
-   * whose row the child created after the signal.
-   */
-  cleanStopRunIds?: ReadonlySet<number>;
-  /**
-   * Reported-at timestamp of the last recorded incomplete attempt for a task,
-   * or undefined when none. A recorded attempt at/after `run.startedAt` is
-   * positive evidence that the interrupted child already delivered its
-   * shutdown feedback, so recovery suppresses the crash comment. Absent →
-   * recovery reports the failure, so a tracker hiccup at shutdown can never
-   * strand a ticket silently.
-   */
-  getAttemptReportedAt?: (taskKey: string) => number | undefined;
   /** Present tense "now", overridable in tests. */
   now?: number;
   /**
@@ -139,95 +113,6 @@ export interface OrphanRecoveryResult {
 }
 
 /**
- * Per-run reap reason overrides for the run ids named by a clean-stop resume
- * note, or undefined when there are none.
- */
-function cleanStopReasonById(
-  cleanStopRunIds: ReadonlySet<number> | undefined,
-): Map<number, string> | undefined {
-  if (!cleanStopRunIds || cleanStopRunIds.size === 0) {
-    return undefined;
-  }
-  const reasons = new Map<number, string>();
-  for (const id of cleanStopRunIds) {
-    reasons.set(id, CLEAN_STOP_RUN_REASON);
-  }
-  return reasons;
-}
-
-/**
- * Positive evidence that the interrupted child already delivered its clean-stop
- * feedback, so recovery must not post a duplicate crash comment:
- *
- * - the run row carries the child's own durable `clean_stop` marker (covers a
- *   run whose row was created after the parent's point-in-time snapshot), or
- * - a retry-gate attempt was recorded at/after the run started (the child
- *   records one right after a successful comment post; a run whose marker write
- *   raced the row creation still has this).
- *
- * The durable resume note alone is deliberately not sufficient: it cannot tell
- * a delivered interruption from a tracker hiccup, which would otherwise strand
- * the ticket.
- */
-function childDeliveredFeedback(
-  run: RunRecord,
-  getAttemptReportedAt: ((taskKey: string) => number | undefined) | undefined,
-): boolean {
-  if (run.cleanStop === true) {
-    return true;
-  }
-  const reportedAt = getAttemptReportedAt?.(run.taskKey ?? "");
-  return reportedAt !== undefined && reportedAt >= run.startedAt;
-}
-
-/**
- * Add clean-stop reap reasons for runs whose child left its own durable
- * `clean_stop` marker, so those rows are labelled a clean stop even when the
- * parent's snapshot-time note missed them.
- */
-function mergeCleanStopMarkerReasons(
-  reasonById: Map<number, string> | undefined,
-  runs: readonly RunRecord[],
-): Map<number, string> | undefined {
-  let reasons = reasonById;
-  for (const run of runs) {
-    if (run.cleanStop) {
-      reasons ??= new Map<number, string>();
-      reasons.set(run.id, CLEAN_STOP_RUN_REASON);
-    }
-  }
-  return reasons;
-}
-
-/** Outcome of checking whether an orphaned ticket is still stranded. */
-type TicketProgressCheck =
-  | { kind: "stranded"; movedToInProgress: boolean }
-  | { kind: "moved-on"; currentStatus?: string }
-  | { kind: "unreadable"; error: string };
-
-/**
- * Only tickets still sitting in the configured In Progress status were
- * stranded by the crash. A ticket that moved on (Done, In Review, moved by a
- * human) or whose details cannot be fetched must be left alone.
- */
-async function checkTicketProgress(
-  tracker: TaskTrackerClient,
-  taskKey: string,
-  inProgressStatus: string | undefined,
-): Promise<TicketProgressCheck> {
-  try {
-    const task = await tracker.getTask(taskKey);
-    const currentStatus = task.status?.trim();
-    if (inProgressStatus && currentStatus !== inProgressStatus) {
-      return { kind: "moved-on", currentStatus };
-    }
-    return { kind: "stranded", movedToInProgress: Boolean(inProgressStatus) };
-  } catch (error) {
-    return { kind: "unreadable", error: (error as Error).message };
-  }
-}
-
-/**
  * Detect runs abandoned by a previous worker instance, reap them, and give
  * the affected tickets the same interrupt feedback a graceful shutdown
  * would have. Never throws.
@@ -248,14 +133,9 @@ export async function recoverOrphanedTaskRuns(
   }
 
   // Reap first (all origins) — the pre-existing behavior this module builds on.
-  // Runs named by a clean-stop resume note, and runs whose child left its own
-  // durable `clean_stop` marker, are reaped with a distinct reason so the
-  // history does not report a clean stop as a crash.
-  const cleanStopRunIds = deps.cleanStopRunIds;
-  const reasonById = mergeCleanStopMarkerReasons(cleanStopReasonById(cleanStopRunIds), orphans);
   let reaped = 0;
   try {
-    reaped = deps.runStore.reapOrphanedRuns(reasonById ? { reasonById } : {});
+    reaped = deps.runStore.reapOrphanedRuns();
   } catch (error) {
     warn(`⚠️  Could not reap orphaned runs: ${(error as Error).message}`);
   }
@@ -327,21 +207,24 @@ export async function recoverOrphanedTaskRuns(
     // configured In Progress status were stranded by the crash.
     const projectKey = (deps.projectKeyFor ?? defaultProjectKeyFor)(taskKey);
     const inProgressStatus = deps.getInProgressStatus?.(projectKey)?.trim();
-    const progress = await checkTicketProgress(deps.tracker, taskKey, inProgressStatus);
-    if (progress.kind === "unreadable") {
-      warn(`⚠️  Could not fetch ${taskKey} to recover it: ${progress.error}`);
+    let movedToInProgress = false;
+    try {
+      const task = await deps.tracker.getTask(taskKey);
+      const currentStatus = task.status?.trim();
+      if (inProgressStatus && currentStatus !== inProgressStatus) {
+        log(
+          `⏭️  ${taskKey} is now '${currentStatus ?? "unknown"}' (not '${inProgressStatus}'); ` +
+            "assuming it was handled after the crash and leaving it alone",
+        );
+        skipped++;
+        continue;
+      }
+      movedToInProgress = Boolean(inProgressStatus);
+    } catch (error) {
+      warn(`⚠️  Could not fetch ${taskKey} to recover it: ${(error as Error).message}`);
       skipped++;
       continue;
     }
-    if (progress.kind === "moved-on") {
-      log(
-        `⏭️  ${taskKey} is now '${progress.currentStatus ?? "unknown"}' (not '${inProgressStatus}'); ` +
-          "assuming it was handled after the crash and leaving it alone",
-      );
-      skipped++;
-      continue;
-    }
-    const movedToInProgress = progress.movedToInProgress;
 
     // Session pickup: when the interrupted run left complete recorded state
     // (a branch and its own implementation report), resume it instead of
@@ -362,25 +245,12 @@ export async function recoverOrphanedTaskRuns(
       continue;
     }
 
-    // A clean stop's in-progress child already posted the interruption comment
-    // through its own SIGTERM handler. Suppress the crash comment only on
-    // positive evidence the child delivered it (its own `clean_stop` marker, or
-    // a retry attempt recorded at/after the run started). The portable resume
-    // note is only a snapshot and cannot distinguish delivery from a tracker
-    // hiccup at shutdown, so it must never suppress on its own — otherwise a
-    // failed report strands the ticket in In Progress with no comment.
-    if (childDeliveredFeedback(run, deps.getAttemptReportedAt)) {
-      log(
-        `⏸️  ${taskKey} was interrupted by a clean worker stop (run #${run.id}); ` +
-          "its interrupted run already reported the stop, so no crash comment is posted",
-      );
-      skipped++;
-      continue;
-    }
-
     await reportTaskFailure({
       taskKey,
       reason: ORPHANED_RUN_REASON,
+      // The child handled interruption feedback. Still retry the transition:
+      // its comment may have succeeded while moving back to To Do failed.
+      skipComment: run.cleanStop,
       tracker: deps.tracker,
       trackerType: deps.trackerType ?? process.env.TASK_TRACKER ?? "jira",
       projectKey,
@@ -395,7 +265,7 @@ export async function recoverOrphanedTaskRuns(
 
   if (recovered > 0) {
     log(
-      `✅ Recovered ${recovered} orphaned ticket(s): failure comment posted and moved back to ` +
+      `✅ Recovered ${recovered} orphaned ticket(s): failure feedback handled and moved back to ` +
         "To Do. They re-run when the ticket changes (see the posted comment).",
     );
   }

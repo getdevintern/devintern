@@ -90,8 +90,7 @@ export interface RunRecord extends RunMeta {
    * Set by the interrupted child once it has delivered its clean-stop
    * interruption feedback (posted, or deliberately skipped under
    * `--skip-comments`). Orphan recovery treats this positive marker as
-   * evidence that no crash comment is needed, so it never has to trust the
-   * parent's point-in-time resume note.
+   * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
 }
@@ -402,9 +401,8 @@ export class RunStore {
    * Durably mark an in-progress run as interrupted by a clean worker stop
    * whose shutdown feedback the child already delivered (posted, or
    * deliberately skipped). The run row itself carries the marker, so orphan
-   * recovery can trust it regardless of when the parent snapshotted the run —
-   * unlike the point-in-time resume note, which can miss a run row the child
-   * created after the signal.
+   * recovery can suppress duplicate feedback without relying on a parent
+   * shutdown snapshot or task-level retry timestamps.
    *
    * Only in-progress rows are marked: a run that finished normally during
    * shutdown must not be labelled a clean stop.
@@ -480,12 +478,9 @@ export class RunStore {
    * stage are one transaction, and the sweep only touches rows that are still
    * `in_progress`, so repeated calls are no-ops.
    *
-   * @param options - Optional per-run outcome reasons (e.g. a clean worker
-   *                  stop recorded in a durable resume note). Runs without an
-   *                  override keep the crash reason.
    * @returns Number of reaped runs
    */
-  reapOrphanedRuns(options: { reasonById?: ReadonlyMap<number, string> } = {}): number {
+  reapOrphanedRuns(): number {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
     return this.db
@@ -499,11 +494,14 @@ export class RunStore {
         // between the SELECT and the UPDATE (Bun ignores an `{immediate:true}`
         // options object, so the method form is required).
         const orphans = this.db
-          .query(`SELECT id FROM runs WHERE status = 'in_progress'`)
-          .all() as Array<{ id: number }>;
+          .query(`SELECT id, clean_stop FROM runs WHERE status = 'in_progress'`)
+          .all() as Array<{ id: number; clean_stop: number }>;
         let reaped = 0;
         for (const orphan of orphans) {
-          const orphanReason = options.reasonById?.get(orphan.id) ?? reason;
+          const orphanReason =
+            orphan.clean_stop === 1
+              ? "worker stopped cleanly; interruption feedback already handled"
+              : reason;
           const result = this.db.run(
             `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
              WHERE id = ? AND status = 'in_progress'`,
