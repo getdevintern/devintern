@@ -83,16 +83,22 @@ DevIntern is a self-hosted worker: it picks up ready tickets from the tracker yo
 curl -fsSL https://bun.sh/install | bash
 bun install -g @getdevintern/code
 
-# 1. Try one task in this repo (free, no signup)
-devintern init
-devintern ./tasks/my-task.md --create-pr   # or: devintern PROJ-123 --create-pr
-
-# 2. Leave it running (free Worker Pilot or automation license)
+# Recommended: workspace worker, including for one repo
+# Free Worker Pilot or automation license; wizard offers relay + service setup
 devintern worker init
-devintern worker
+# If the wizard did not start a service, start manually:
+# devintern worker
 ```
 
-One local run proves the loop. The worker is the intern: it keeps picking up ready tickets and turns review comments on its pull requests into commits.
+For a one-off task instead, run `devintern init` followed by `devintern ./tasks/my-task.md --create-pr` (or `devintern PROJ-123 --create-pr`). Interactive CLI runs are free and need no signup. The worker keeps picking up ready tickets and turns review comments on its pull requests into commits.
+
+For coding agents, the repository includes three focused skills:
+
+| Skill | Use it for |
+| --- | --- |
+| [devintern-setup](skills/devintern-setup/SKILL.md) | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
+| [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies. |
+| [devintern-delegate](skills/devintern-delegate/SKILL.md) | Hand one-off implementation tasks to a configured worker. |
 
 ## Why teams use it
 

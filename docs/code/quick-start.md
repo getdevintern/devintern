@@ -12,6 +12,10 @@ tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 
 **@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
+For agent-assisted setup, use the [devintern-setup skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-setup). It covers prerequisites, source-control and tracker credentials, browser authorization when needed, and verifying worker activation. For changes to an existing worker's repositories, routing, automations, and policies, use [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace).
+
+**Recommended for ongoing use:** set up a [workspace worker](./worker.md#quick-start), even for one repository, with relay-backed integrations. Start with `devintern worker init`; it includes tracker setup when needed and can install/start the service. The standalone CLI walkthrough below remains useful for an explicitly one-off task or trial run.
+
 Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, and **local markdown files** (no PM account required).
 
 ## Prerequisites
