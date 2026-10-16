@@ -248,6 +248,9 @@ export async function recoverOrphanedTaskRuns(
     await reportTaskFailure({
       taskKey,
       reason: ORPHANED_RUN_REASON,
+      // The child handled interruption feedback. Still retry the transition:
+      // its comment may have succeeded while moving back to To Do failed.
+      skipComment: run.cleanStop,
       tracker: deps.tracker,
       trackerType: deps.trackerType ?? process.env.TASK_TRACKER ?? "jira",
       projectKey,
@@ -262,7 +265,7 @@ export async function recoverOrphanedTaskRuns(
 
   if (recovered > 0) {
     log(
-      `✅ Recovered ${recovered} orphaned ticket(s): failure comment posted and moved back to ` +
+      `✅ Recovered ${recovered} orphaned ticket(s): failure feedback handled and moved back to ` +
         "To Do. They re-run when the ticket changes (see the posted comment).",
     );
   }

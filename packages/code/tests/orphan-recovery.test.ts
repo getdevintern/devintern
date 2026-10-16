@@ -11,6 +11,7 @@ import {
   recoverOrphanedTaskRuns,
   resolveStatusName,
 } from "../src/lib/worker/orphan-recovery";
+import { reportTaskFailure } from "../src/lib/task/failure-feedback";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
@@ -167,6 +168,85 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(posted).toHaveLength(0);
     expect(transitions).toHaveLength(0);
     expect(retryStore.getRetryState("PROJ-11")).toBeNull();
+  });
+
+  test("retries a failed shutdown transition without duplicating the delivered comment", async () => {
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-14" });
+    const tracker = fakeTracker();
+    const handled = await reportTaskFailure({
+      taskKey: "PROJ-14",
+      reason: "Processing was interrupted (SIGTERM)",
+      tracker: {
+        ...tracker,
+        transitionStatus: async () => {
+          throw new Error("tracker unavailable");
+        },
+      } as TaskTrackerClient,
+      trackerType: "jira",
+      projectKey: "PROJ",
+      movedToInProgress: true,
+      getTodoStatus: () => "To Do",
+      recordAttempt: (key, type, description) =>
+        retryStore.recordIncompleteAttempt(key, type, description),
+    });
+    expect(handled).toBe(true);
+    store.markCleanStop(runId);
+    const attempt = retryStore.getRetryState("PROJ-14");
+
+    const result = await recover({ tracker });
+
+    expect(result.reaped).toBe(1);
+    expect(result.recovered).toBe(1);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toContain("SIGTERM");
+    expect(transitions).toEqual([{ key: "PROJ-14", status: "To Do" }]);
+    expect(retryStore.getRetryState("PROJ-14")).toEqual(attempt);
+    expect(store.getRun(runId)?.outcomeReason).toContain("cleanly");
+  });
+
+  test("a clean stop with resumable state still schedules a pickup", async () => {
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-15",
+      branch: "feature/proj-15",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+    store.markCleanStop(runId);
+
+    const result = await recover();
+
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+  });
+
+  test("clean-stop feedback respects tickets that already moved on", async () => {
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-16" });
+    store.markCleanStop(runId);
+    tasksByKey["PROJ-16"] = ticket("PROJ-16", "To Do");
+
+    const result = await recover();
+
+    expect(result.skipped).toBe(1);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+  });
+
+  test("task-level retry state alone does not suppress crash recovery", async () => {
+    store.createRun({ origin: "task", taskKey: "PROJ-17" });
+    retryStore.recordIncompleteAttempt("PROJ-17", "jira", "description");
+
+    await recover();
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toContain("exited unexpectedly");
+    expect(transitions).toEqual([{ key: "PROJ-17", status: "To Do" }]);
   });
 
   test("falls back to failure feedback when the recorded state is incomplete", async () => {

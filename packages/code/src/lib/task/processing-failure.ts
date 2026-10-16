@@ -12,12 +12,19 @@ import { reportTaskFailure } from "./failure-feedback";
  * After posting, the attempt is recorded for the retry gate so posting the
  * comment (which bumps the ticket's `updated` stamp) does not itself cause
  * an immediate re-pickup loop.
+ *
+ * Returns `true` when the interruption feedback is handled — the comment was
+ * delivered, or comments are deliberately suppressed (`--skip-comments` /
+ * markdown inputs). Returns `false` when no run context exists or the comment
+ * could not be posted, so a caller can tell "already reported" from "recovery
+ * still needs to report it".
  */
-export async function reportProcessingFailure(taskKey: string, reason: string): Promise<void> {
+export async function reportProcessingFailure(taskKey: string, reason: string): Promise<boolean> {
   const context = runContext.activeTaskContext;
-  if (!context || runContext.options.skipComments || isMarkdownFilePath(taskKey)) return;
+  if (!context) return false;
+  if (runContext.options.skipComments || isMarkdownFilePath(taskKey)) return true;
 
-  await reportTaskFailure({
+  return reportTaskFailure({
     taskKey,
     reason,
     tracker: context.tracker,

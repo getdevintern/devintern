@@ -5,7 +5,13 @@ import { tmpdir } from "os";
 
 import type { Database } from "bun:sqlite";
 
-import { RunStore } from "../src/lib/state/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  getActiveRunContext,
+  markRunCleanStop,
+} from "../src/lib/state/run-recorder";
 
 describe("RunStore", () => {
   let dbPath: string;
@@ -450,9 +456,48 @@ describe("RunStore", () => {
     });
     expect(migrated.getRun(id)?.ticketUrl).toBe("https://acme.atlassian.net/browse/OLD-1");
     expect(migrated.getRun(id)?.taskDescription).toBe("doc");
+    // The clean-stop marker column also works on migrated databases.
+    migrated.markCleanStop(id);
+    expect(migrated.getRun(id)?.cleanStop).toBe(true);
     migrated.close();
     for (const suffix of ["", "-wal", "-shm"]) {
       rmSync(`${legacyPath}${suffix}`, { force: true });
     }
+  });
+
+  test("markCleanStop flags an in-progress run but leaves terminal runs alone", () => {
+    const inProgress = store.createRun({ origin: "task", taskKey: "PROJ-20" });
+    const finished = store.createRun({ origin: "task", taskKey: "PROJ-21" });
+    store.finishRun(finished, "succeeded");
+
+    store.markCleanStop(inProgress);
+    store.markCleanStop(finished);
+
+    expect(store.getRun(inProgress)?.cleanStop).toBe(true);
+    // markCleanStop must not relabel a run that finished during shutdown.
+    expect(store.getRun(finished)?.cleanStop).toBeUndefined();
+  });
+
+  test("markRunCleanStop labels only the captured run, never a later one", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-A" });
+    const runId = getActiveRunContext()!.id;
+    // The interrupted run is still in progress when its feedback is handled.
+    markRunCleanStop(runId);
+    endRun("failed", "interrupted");
+
+    // A later run becomes active while shutdown feedback finishes; its id was
+    // never captured, so the marker must not touch it.
+    beginRun({ origin: "task", taskKey: "PROJ-B" });
+    const nextId = getActiveRunContext()!.id;
+    markRunCleanStop(runId); // terminal now: no-op
+
+    const reader = new RunStore();
+    try {
+      expect(reader.getRun(runId)?.cleanStop).toBe(true);
+      expect(reader.getRun(nextId)?.cleanStop).toBeUndefined();
+    } finally {
+      reader.close();
+    }
+    endRun("failed", "test cleanup");
   });
 });
