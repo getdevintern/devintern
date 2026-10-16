@@ -16,7 +16,7 @@
 
     // Type-system discipline (DEV-154): external data is untyped until it is
     // parsed, so `any` is banned and each boundary must narrow to a named
-    // domain type. See docs/standards/typescript.md. The ratchet-baseline
+    // domain type. See CODING_STANDARDS.md. The ratchet-baseline
     // override below exempts files whose `any` predates this rule; shrink that
     // list as boundaries are typed rather than adding new entries.
     "typescript/no-explicit-any": "error",
