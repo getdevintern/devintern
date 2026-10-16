@@ -94,6 +94,14 @@ devintern worker
 
 One local run proves the loop. The worker is the intern: it keeps picking up ready tickets and turns review comments on its pull requests into commits.
 
+For coding agents, the repository includes three focused skills:
+
+| Skill | Use it for |
+| --- | --- |
+| [devintern-setup](skills/devintern-setup/SKILL.md) | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
+| [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies. |
+| [devintern-delegate](skills/devintern-delegate/SKILL.md) | Hand one-off implementation tasks to a configured worker. |
+
 ## Why teams use it
 
 |                     |                                                                                                                                   |
