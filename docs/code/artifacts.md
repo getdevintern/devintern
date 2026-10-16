@@ -1,3 +1,12 @@
+---
+title: "Pipeline Artifacts"
+sidebarLabel: "Artifacts"
+description: "Capture, inspect, and publish files produced by DevIntern pipeline steps."
+section: "Automation"
+order: 6
+dateModified: 2026-10-16
+---
+
 # Pipeline artifacts
 
 Artifacts are files deliberately registered by a pipeline step for inspection.
