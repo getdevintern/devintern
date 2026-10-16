@@ -1,9 +1,24 @@
 import { expect } from "bun:test";
+import type { PullRequest } from "../providers/github";
 import type { TrackerComment, TrackerTicketState } from "../providers/tracker";
 import type { TrackerScenario, TrackerStatusSettings } from "./tracker-scenario";
 
 /** Identifying header of the automated implementation-success comment. */
 export const IMPLEMENTATION_COMMENT_MARKER = "Implementation Completed by @devintern/code";
+
+/**
+ * Keep only the pull requests created by a scenario's own run.
+ *
+ * The code host is shared across scenarios, so a branch query can return a
+ * foreign run's PR whose head happens to reuse a deterministic tracker key (a
+ * fresh GitLab project always yields decoy iid 1, hence `feature/1`). Every PR
+ * a run creates targets that scenario's unique `base` ref, so filtering on it
+ * isolates this run's work and tolerates a foreign ref sharing the same head
+ * instead of requiring the branch to be globally absent.
+ */
+export function pullsCreatedByRun(pulls: PullRequest[], base: string): PullRequest[] {
+  return pulls.filter((pull) => pull.base.ref === base);
+}
 
 /**
  * Provider-agnostic assertions for a successful remote tracker lifecycle.
@@ -22,7 +37,9 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
   const statuses = scenario.statuses;
 
   // 1. PR metadata: the code host identifies the source ticket.
-  const pull = await scenario.github.waitForPull(scenario.head);
+  // Scope to this run's unique base so a foreign-run PR that reuses the
+  // deterministic head ref is not mistaken for a duplicate of our own PR.
+  const pull = await scenario.github.waitForPull(scenario.head, scenario.base);
   expect(pull.state).toBe("open");
   expect(pull.head.ref).toBe(scenario.head);
   expect(pull.base.ref).toBe(scenario.base);
@@ -77,7 +94,11 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
     expect(decoyState.state).toBe(scenario.tracker.openState);
     expect(decoyState.body).toContain(scenario.decoyMarker);
     expect(decoyState.body).not.toContain(scenario.descriptionMarker);
-    expect(await scenario.github.pulls(`feature/${decoy.key.toLowerCase()}`)).toEqual([]);
+    // Scope the decoy PR check to this run: a foreign run on the shared code
+    // host can hold a `feature/<decoy-key>` PR (deterministic keys), but only a
+    // PR this run created targets this scenario's unique base ref.
+    const decoyPulls = await scenario.github.pulls(`feature/${decoy.key.toLowerCase()}`);
+    expect(pullsCreatedByRun(decoyPulls, scenario.base)).toEqual([]);
   }
 }
 

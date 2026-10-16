@@ -28,6 +28,8 @@ export class GitLabTracker implements TrackerFixture {
   readonly type = "gitlab";
   /** GitLab reports active issues as `opened` (not GitHub's `open`). */
   readonly openState = "opened";
+  /** Required label color in GitLab's `#RRGGBB` hex notation. */
+  private static readonly labelColor = "#ededed";
 
   constructor(
     private readonly gitlab: GitLab,
@@ -66,7 +68,12 @@ export class GitLabTracker implements TrackerFixture {
   async ensureLabels(labels: string[]): Promise<void> {
     for (const name of labels) {
       try {
-        await this.gitlab.request(`/projects/${this.project.id}/labels`, "POST", { name });
+        // GitLab also requires `color`; unlike GitHub a bad payload fails with
+        // 400, so only the duplicate-label 409 below is treated as idempotent.
+        await this.gitlab.request(`/projects/${this.project.id}/labels`, "POST", {
+          name,
+          color: GitLabTracker.labelColor,
+        });
       } catch (error) {
         if (!(error instanceof Error) || !error.message.includes("HTTP 409")) throw error;
       }

@@ -226,11 +226,33 @@ export class TrackerScenario extends FixtureWorkspace {
     options: { agentMode?: "implement" | "fail" | "no-change"; implicitTarget?: boolean } = {},
   ) {
     if (!this.ticket) throw new Error("Tracker ticket has not been provisioned");
-    return this.runTask({
+    const result = await this.runTask({
       taskRef: this.ticket.key,
       skipComments: false,
       ...options,
     });
+    this.syncRecordedBranch();
+    return result;
+  }
+
+  /**
+   * Align owned branches with the branch the run actually recorded.
+   *
+   * The CLI derives the branch from the tracker key, which for a fresh GitLab
+   * project is always `feature/2`, while the code host is shared. If a prior
+   * run left that ref behind, the CLI pushes `feature/2-attempt-2` instead.
+   * Adopting the recorded branch makes assertions inspect the PR for that ref
+   * and keeps cleanup from deleting the foreign `feature/2`. When no branch was
+   * recorded the run never created one, so the derived head is dropped rather
+   * than left owned.
+   */
+  protected syncRecordedBranch(): void {
+    const branch = this.recordedBranch(this.requireTicketKey());
+    if (branch) {
+      this.adoptHead(branch);
+    } else {
+      this.ownedBranches.delete(this.head);
+    }
   }
 
   /** Run the CLI and fail the scenario when it exits non-zero. */
@@ -268,10 +290,27 @@ export class TrackerScenario extends FixtureWorkspace {
    * requiring the raw marker substring. The expected ticket is only reported
    * once its body actually contains the selector, which keeps a fuzzy index
    * match from being mistaken for a correct result.
+   *
+   * Polling backs off exponentially (capped) because provider search endpoints
+   * are rate-limited far below their core APIs; a tight one-second loop can
+   * exhaust the search quota before the index catches up. The first delay
+   * matches the previous fixed interval, so a fast index still resolves in one
+   * poll.
    */
-  async waitForSelectedTickets(deadlineMs = 30_000): Promise<TrackerTicket[]> {
+  async waitForSelectedTickets(
+    options: {
+      deadlineMs?: number;
+      initialDelayMs?: number;
+      maxDelayMs?: number;
+      sleep?: (ms: number) => Promise<unknown>;
+    } = {},
+  ): Promise<TrackerTicket[]> {
     const expected = this.requireTicketKey();
+    const deadlineMs = options.deadlineMs ?? 30_000;
+    const maxDelayMs = options.maxDelayMs ?? 5_000;
+    const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
     const deadline = Date.now() + deadlineMs;
+    let delayMs = options.initialDelayMs ?? 1_000;
     do {
       const hits = await this.tracker.findTickets(this.descriptionMarker);
       if (hits.some((ticket) => ticket.key === expected)) {
@@ -282,7 +321,8 @@ export class TrackerScenario extends FixtureWorkspace {
         }
         if (confirmed.some((ticket) => ticket.key === expected)) return confirmed;
       }
-      await Bun.sleep(1000);
+      await sleep(delayMs);
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
     } while (Date.now() < deadline);
     throw new Error(`Ticket ${expected} never matched selector ${this.descriptionMarker}`);
   }

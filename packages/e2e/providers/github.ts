@@ -56,12 +56,24 @@ export class GitHub {
     );
   }
 
-  async waitForPull(head: string): Promise<PullRequest> {
+  /**
+   * Wait for the pull request for `head`.
+   *
+   * The code host is shared across scenarios, and a deterministic tracker key
+   * (`feature/2` for a fresh GitLab project) can reuse a head ref deleted by a
+   * foreign run. GitHub retains the closed PR for a deleted head ref, so
+   * `state=all` can return several PRs for one head. Passing this run's unique
+   * `base` scopes the lookup to the PR this run created, instead of treating a
+   * foreign-run PR that shares the head as a duplicate.
+   */
+  async waitForPull(head: string, base?: string): Promise<PullRequest> {
     const deadline = Date.now() + 30_000;
     do {
       const pulls = await this.pulls(head);
-      if (pulls.length > 1) throw new Error(`Duplicate PRs for ${head}`);
-      if (pulls.length === 1) return pulls[0];
+      const candidates =
+        base === undefined ? pulls : pulls.filter((pull) => pull.base.ref === base);
+      if (candidates.length > 1) throw new Error(`Duplicate PRs for ${head}`);
+      if (candidates.length === 1) return candidates[0];
       await Bun.sleep(1000);
     } while (Date.now() < deadline);
     throw new Error(`No PR appeared for ${head}`);
@@ -97,7 +109,14 @@ export class GitHub {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(20_000),
     });
-    if (!response.ok) throw new Error(`GitHub ${method} ${label}: HTTP ${response.status}`);
+    if (!response.ok) {
+      // Keep the provider's error body so callers can distinguish a benign
+      // duplicate (e.g. `already_exists`) from a real payload rejection.
+      const detail = await response.text().catch(() => "");
+      throw new Error(
+        `GitHub ${method} ${label}: HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+      );
+    }
     return (response.status === 204 ? undefined : await response.json()) as T;
   }
 }

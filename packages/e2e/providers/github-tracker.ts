@@ -26,6 +26,8 @@ export class GitHubTracker implements TrackerFixture {
   readonly type = "github";
   /** GitHub Issues report active issues as `open`. */
   readonly openState = "open";
+  /** Required 6-digit hex label color (GitHub rejects a create without one). */
+  private static readonly labelColor = "ededed";
   private readonly api: GitHub;
 
   constructor(
@@ -60,11 +62,14 @@ export class GitHubTracker implements TrackerFixture {
   async ensureLabels(labels: string[]): Promise<void> {
     for (const name of labels) {
       try {
-        await this.api.request("/labels", "POST", { name });
+        // GitHub requires both `name` and a valid hex `color`; a missing color
+        // is rejected with 422 and would otherwise be misread as "already
+        // exists", silently leaving the label uncreated.
+        await this.api.request("/labels", "POST", { name, color: GitHubTracker.labelColor });
       } catch (error) {
-        // A label that already exists is reported as 422; anything else is a
-        // real failure the scenario must surface.
-        if (!(error instanceof Error) || !error.message.includes("HTTP 422")) throw error;
+        // Only the provider's duplicate-label rejection is idempotent; any
+        // other 422 (bad payload) is a real failure the scenario must surface.
+        if (!(error instanceof Error) || !error.message.includes("already_exists")) throw error;
       }
     }
   }
