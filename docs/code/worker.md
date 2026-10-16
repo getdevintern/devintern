@@ -56,6 +56,8 @@ Put recurring work in `workspace.toml`. Set `repo` when the workspace has multip
 
 To configure this through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." The skill covers prompt writing, schedule and PR settings, validation, and checking that the running worker accepted the change.
 
+To start from a proven recipe, install a bundled [automation pack](./automation-packs.md) by name — `devintern automations add dependency-health` writes the `[[automations]]` entry below for you.
+
 ```toml
 [[automations]]
 id = "dependency-health"

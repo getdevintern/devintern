@@ -1,0 +1,188 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
+import type { CatalogPack } from "../src/lib/automation/catalog";
+import { loadCatalogPack } from "../src/lib/automation/catalog";
+import { installCatalogPack, tomlBasicString } from "../src/lib/automation/install";
+import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { runWorkerScaffold } from "../src/lib/workspace/init";
+import { workspaceConfigPath } from "../src/lib/workspace/paths";
+
+function fakePack(overrides: Partial<CatalogPack> = {}): CatalogPack {
+  return {
+    id: "fake-pack",
+    name: "Fake pack",
+    description: "A test pack",
+    schedule: { cron: "0 1 * * *" },
+    openPr: true,
+    prompt: "Do one safe thing.\n",
+    promptFile: "prompt.md",
+    references: [],
+    dir: "/tmp",
+    ...overrides,
+  };
+}
+
+describe("installCatalogPack", () => {
+  let rootDir: string;
+  let workspaceDir: string;
+  let previousOverride: string | undefined;
+
+  beforeEach(() => {
+    rootDir = mkdtempSync(join(tmpdir(), "pack-install-"));
+    workspaceDir = join(rootDir, "workspace");
+    previousOverride = process.env.DEVINTERN_WORKSPACE_DIR;
+    process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
+    runWorkerScaffold();
+  });
+
+  afterEach(() => {
+    if (previousOverride === undefined) {
+      delete process.env.DEVINTERN_WORKSPACE_DIR;
+    } else {
+      process.env.DEVINTERN_WORKSPACE_DIR = previousOverride;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  test("installs a bundled pack as a valid, runnable automation", () => {
+    const result = installCatalogPack({
+      workspaceDir,
+      pack: loadCatalogPack("dependency-health"),
+    });
+
+    expect(result.added).toBe(true);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    const automation = config.automations.find((entry) => entry.id === "dependency-health");
+    expect(automation).toBeDefined();
+    expect(automation?.enabled).toBe(true);
+    expect(automation?.cron).toBe("0 8 * * 1");
+    expect(automation?.openPr).toBe(true);
+    expect(automation?.prompt).toContain("dependency");
+    // Newlines round-trip through the single-line TOML string.
+    expect(automation?.prompt).toContain("\n");
+  });
+
+  test("is idempotent for an identical install", () => {
+    const pack = loadCatalogPack("log-triage");
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(true);
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(false);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.automations.filter((entry) => entry.id === "log-triage")).toHaveLength(1);
+  });
+
+  test("supports an id override and installing disabled", () => {
+    installCatalogPack({
+      workspaceDir,
+      pack: loadCatalogPack("log-triage"),
+      id: "nightly-log-triage",
+      disabled: true,
+    });
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    const automation = config.automations.find((entry) => entry.id === "nightly-log-triage");
+    expect(automation?.enabled).toBe(false);
+  });
+
+  test("refuses a conflicting existing id", () => {
+    installCatalogPack({ workspaceDir, pack: loadCatalogPack("log-triage") });
+    expect(() =>
+      installCatalogPack({
+        workspaceDir,
+        pack: loadCatalogPack("dependency-health"),
+        id: "log-triage",
+      }),
+    ).toThrow(/already exists/);
+  });
+
+  test("requires --repo in a multi-repo workspace and validates the name", () => {
+    writeFileSync(
+      workspaceConfigPath(workspaceDir),
+      `[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+`,
+    );
+    expect(() => installCatalogPack({ workspaceDir, pack: loadCatalogPack("log-triage") })).toThrow(
+      /multiple repositories/,
+    );
+    expect(() =>
+      installCatalogPack({ workspaceDir, pack: loadCatalogPack("log-triage"), repo: "nope" }),
+    ).toThrow(/does not match any/);
+
+    installCatalogPack({ workspaceDir, pack: loadCatalogPack("log-triage"), repo: "backend" });
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.automations[0]?.repo).toBe("backend");
+  });
+
+  test("writes a bundled pipeline and points [defaults].pipeline_file at it", () => {
+    const result = installCatalogPack({
+      workspaceDir,
+      pack: fakePack({
+        id: "with-pipeline",
+        pipeline: {
+          steps: [{ use: "implement" }, { use: "finalize" }],
+          plugins: ["./steps/check.ts"],
+        },
+      }),
+    });
+
+    expect(result.pipelineFile).toBe(join("pipelines", "with-pipeline.json"));
+    const pipelinePath = join(workspaceDir, result.pipelineFile as string);
+    expect(existsSync(pipelinePath)).toBe(true);
+    const document = JSON.parse(readFileSync(pipelinePath, "utf8"));
+    expect(document.pipeline.plugins).toEqual(["./steps/check.ts"]);
+    expect(document.pipeline.steps).toHaveLength(2);
+
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.defaults.pipelineFile).toBe("pipelines/with-pipeline.json");
+  });
+
+  test("copies pack references and points the prompt at them", () => {
+    const packDir = join(rootDir, "pack");
+    mkdirSync(join(packDir, "references"), { recursive: true });
+    writeFileSync(join(packDir, "references", "notes.md"), "# Notes\n");
+    const result = installCatalogPack({
+      workspaceDir,
+      pack: fakePack({
+        id: "with-refs",
+        dir: packDir,
+        references: ["references/notes.md"],
+      }),
+    });
+
+    expect(result.referencesDir).toBeTruthy();
+    expect(existsSync(join(result.referencesDir as string, "references", "notes.md"))).toBe(true);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.automations[0]?.prompt).toContain(result.referencesDir as string);
+  });
+
+  test("rejects an unsafe id override before writing", () => {
+    expect(() => installCatalogPack({ workspaceDir, pack: fakePack(), id: "../escape" })).toThrow(
+      /Invalid automation id/,
+    );
+    expect(loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).automations).toHaveLength(0);
+  });
+
+  test("fails without a workspace.toml", () => {
+    const emptyDir = join(rootDir, "empty");
+    mkdirSync(emptyDir, { recursive: true });
+    expect(() => installCatalogPack({ workspaceDir: emptyDir, pack: fakePack() })).toThrow(
+      /No workspace.toml/,
+    );
+  });
+});
+
+describe("tomlBasicString", () => {
+  test("escapes quotes, backslashes, and newlines", () => {
+    expect(tomlBasicString('a"b\\c\nd\te')).toBe('"a\\"b\\\\c\\nd\\te"');
+  });
+});
