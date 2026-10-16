@@ -23,18 +23,18 @@ export interface UtilsSurface {
   formatDate(dateString: string): string;
   sanitizeFilename(filename: string): string;
   extractDomain(url: string): string;
-  truncateText(text: string, maxLength: any): string;
+  truncateText(text: string, maxLength: number): string;
   isValidUrl(string: string): boolean;
-  formatBytes(bytes: number, decimals: any): string;
+  formatBytes(bytes: number, decimals: number): string;
   sleep(ms: number): Promise<void>;
-  retry<T>(fn: () => Promise<T>, maxRetries: any, baseDelay: any): Promise<T>;
+  retry<T>(fn: () => Promise<T>, maxRetries: number, baseDelay: number): Promise<T>;
   parseTaskKey(taskKey: string): {
     project: string;
     number: number;
     key: string;
   };
   extractTargetBranch(description: string | undefined): string | null;
-  generateTaskFilename(taskKey: string, extension: any): string;
+  generateTaskFilename(taskKey: string, extension: string): string;
   executeGitCommand(
     args: string[],
     options?: {
