@@ -117,6 +117,26 @@ Refactor the auth middleware.
     }
   });
 
+  test("writeAgentPrompt directs boundary parsing of external data", async () => {
+    const testDir = makeTestDir();
+    const mdFile = join(testDir, "spec.md");
+    writeFileSync(mdFile, "Ship dark mode toggle in settings.\n");
+    const outputFile = join(testDir, "task-details.md");
+
+    try {
+      const client = new MarkdownTaskTrackerClient({ cwd: testDir });
+      const task = await client.getTask(mdFile);
+      client.writeAgentPrompt(outputFile, task);
+
+      const prompt = readFileSync(outputFile, "utf8");
+      expect(prompt).toContain("**Parse at the boundary**");
+      expect(prompt).toContain("named domain type");
+      expect(prompt).toContain("only use `as` casts after the value has been validated");
+    } finally {
+      cleanup(testDir);
+    }
+  });
+
   test("frames a body that contains the implementation-instructions heading", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "tricky.md");
