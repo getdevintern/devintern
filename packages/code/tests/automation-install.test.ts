@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
 
 import type { CatalogPack } from "../src/lib/automation/catalog";
 import { loadCatalogPack } from "../src/lib/automation/catalog";
 import { installCatalogPack, tomlBasicString } from "../src/lib/automation/install";
+import { loadPipelineConfigFile, selectPipelineConfig } from "../src/lib/task/pipeline-selection";
+import { WORKSPACE_PIPELINE_DEFAULT_ENV } from "../src/lib/workspace/env";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { runWorkerScaffold } from "../src/lib/workspace/init";
 import { workspaceConfigPath } from "../src/lib/workspace/paths";
@@ -138,12 +140,24 @@ remote = "git@github.com:acme/frontend.git"
     expect(result.pipelineFile).toBe(join("pipelines", "with-pipeline.json"));
     const pipelinePath = join(workspaceDir, result.pipelineFile as string);
     expect(existsSync(pipelinePath)).toBe(true);
-    const document = JSON.parse(readFileSync(pipelinePath, "utf8"));
-    expect(document.pipeline.plugins).toEqual(["./steps/check.ts"]);
-    expect(document.pipeline.steps).toHaveLength(2);
+
+    // Read the written file through the real loader the task path uses.
+    const loaded = loadPipelineConfigFile(pipelinePath);
+    expect(loaded.plugins).toEqual(["./steps/check.ts"]);
+    expect(loaded.steps).toHaveLength(2);
 
     const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
     expect(config.defaults.pipelineFile).toBe("pipelines/with-pipeline.json");
+
+    // End to end: the workspace default pipeline selection returns the steps.
+    const selected = selectPipelineConfig({
+      settings: null,
+      cwd: workspaceDir,
+      env: { [WORKSPACE_PIPELINE_DEFAULT_ENV]: pipelinePath },
+    });
+    expect(selected.scope).toBe("workspace-default");
+    expect(selected.config?.steps).toHaveLength(2);
+    expect(selected.config?.plugins).toEqual([resolve(dirname(pipelinePath), "./steps/check.ts")]);
   });
 
   test("copies pack references and points the prompt at them", () => {
@@ -160,9 +174,34 @@ remote = "git@github.com:acme/frontend.git"
     });
 
     expect(result.referencesDir).toBeTruthy();
-    expect(existsSync(join(result.referencesDir as string, "references", "notes.md"))).toBe(true);
+    // Declared references are pack-relative ("references/notes.md"); the copy
+    // lands directly under the references dir, not a doubled references/ path.
+    expect(existsSync(join(result.referencesDir as string, "notes.md"))).toBe(true);
+    expect(existsSync(join(result.referencesDir as string, "references"))).toBe(false);
     const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
     expect(config.automations[0]?.prompt).toContain(result.referencesDir as string);
+  });
+
+  test("treats a repeat install of a pack with references as idempotent", () => {
+    const packDir = join(rootDir, "refpack");
+    mkdirSync(join(packDir, "references"), { recursive: true });
+    writeFileSync(join(packDir, "references", "notes.md"), "# Notes\n");
+    const pack = fakePack({
+      id: "ref-idempotent",
+      dir: packDir,
+      references: ["references/notes.md"],
+    });
+
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(true);
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(false);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.automations.filter((entry) => entry.id === "ref-idempotent")).toHaveLength(1);
+  });
+
+  test("reports a conflict when a repeat install changes enabled", () => {
+    const pack = loadCatalogPack("log-triage");
+    installCatalogPack({ workspaceDir, pack, disabled: true });
+    expect(() => installCatalogPack({ workspaceDir, pack })).toThrow(/already exists/);
   });
 
   test("rejects an unsafe id override before writing", () => {

@@ -8,7 +8,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 
 import { parseWorkspaceConfig } from "../workspace/config";
 import { upsertWorkspaceDefaults } from "../workspace/init";
@@ -78,9 +78,28 @@ export function installCatalogPack(options: InstallCatalogPackOptions): InstallC
   }
   const warnings: string[] = [];
 
+  // The installed prompt is the pack prompt plus a pointer to any copied
+  // reference files. Compute it before the idempotency check so a repeat
+  // install compares the fully-rendered prompt, not the bare pack prompt.
+  let prompt = pack.prompt.trimEnd();
+  let referencesDir: string | undefined;
+  if (pack.references.length > 0) {
+    referencesDir = join(workspaceDir, "automation-packs", id, "references");
+    prompt += `\n\nReference materials for this task are bundled at: ${referencesDir}`;
+  }
+
   const existing = config.automations.find((automation) => automation.id === id);
   if (existing) {
-    if (existing.prompt === pack.prompt.trimEnd() && schedulesEqual(existing, pack.schedule)) {
+    // Idempotent only when every installed setting matches. A repeat install
+    // that changes enabled/open_pr/repo/prompt is a conflict, not a no-op.
+    const repoMatches = options.repo === undefined || existing.repo === options.repo;
+    if (
+      existing.prompt === prompt &&
+      schedulesEqual(existing, pack.schedule) &&
+      existing.enabled === !options.disabled &&
+      (existing.openPr ?? false) === pack.openPr &&
+      repoMatches
+    ) {
       return {
         id,
         configPath,
@@ -109,19 +128,17 @@ export function installCatalogPack(options: InstallCatalogPackOptions): InstallC
     );
   }
 
-  let prompt = pack.prompt.trimEnd();
-
-  // Copy pack references next to the workspace so the occurrence can find them.
-  let referencesDir: string | undefined;
-  if (pack.references.length > 0) {
-    referencesDir = join(workspaceDir, "automation-packs", id, "references");
+  // Copy pack references next to the workspace so the occurrence can find
+  // them. Declared references are pack-relative (e.g. "references/notes.md");
+  // flatten to the file name so the copied tree mirrors the declared
+  // references/ directory instead of nesting it twice.
+  if (referencesDir) {
     for (const reference of pack.references) {
       const source = join(pack.dir, reference);
-      const destination = join(referencesDir, reference);
+      const destination = join(referencesDir, basename(reference));
       mkdirSync(dirname(destination), { recursive: true });
       copyFileSync(source, destination);
     }
-    prompt += `\n\nReference materials for this task are bundled at: ${referencesDir}`;
   }
 
   const lines = [
@@ -154,11 +171,12 @@ export function installCatalogPack(options: InstallCatalogPackOptions): InstallC
       );
     } else {
       mkdirSync(dirname(pipelinePath), { recursive: true });
+      // Workspace pipeline files are top-level `{ steps, plugins }` (the
+      // shape `loadPipelineConfigFile`/`resolvePipelineSteps` read), not the
+      // nested `{ pipeline: {...} }` shape settings.json uses.
       const document = {
-        pipeline: {
-          ...(pack.pipeline.plugins ? { plugins: pack.pipeline.plugins } : {}),
-          steps: pack.pipeline.steps,
-        },
+        ...(pack.pipeline.plugins ? { plugins: pack.pipeline.plugins } : {}),
+        steps: pack.pipeline.steps,
       };
       writeFileSync(pipelinePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
       updated = upsertWorkspaceDefaults(updated, {
