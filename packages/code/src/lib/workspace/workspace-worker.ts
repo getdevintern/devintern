@@ -53,7 +53,7 @@ import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
-import { pickAgentSelection } from "../agent/selection";
+import { pickAgentSelection, warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
@@ -659,6 +659,7 @@ export function validateReloadedWorkspaceConfig(
 ): void {
   const fleet = resolveFleetAutomations(next);
   if (fleet.problems.length > 0) throw new Error(fleet.problems.join("\n- "));
+  warnUninstalledHarnessPins([...next.automations, ...next.estimations]);
   if (next.defaults.tracker !== current.defaults.tracker) {
     throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
   }
@@ -1211,6 +1212,9 @@ function applyWorkspaceEnv(
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  // A pinned harness opts an entry out of failover; surface a missing CLI here,
+  // where the workspace `.env` is already applied, so it is not silent.
+  warnUninstalledHarnessPins([...config.automations, ...config.estimations]);
   return {
     multiTeam,
     initialQuery: config.defaults.taskQuery,

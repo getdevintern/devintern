@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import { resolveHarness } from "@devintern/agent-harness";
 import {
   applyAgentSelectionEnv,
   parseAgentSelection,
   pickAgentSelection,
+  warnUninstalledHarnessPins,
 } from "../src/lib/agent/selection";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { buildRepoEnv, buildWorkspaceContextEnv } from "../src/lib/workspace/env";
@@ -103,13 +105,41 @@ describe("applyAgentSelectionEnv", () => {
   test("overlays only the selected fields over the layered env", () => {
     const env = applyAgentSelectionEnv(
       { AGENT_HARNESS: "claude-code", AGENT_MODEL: "workspace-model", KEEP: "1" },
-      { harness: "codex", effort: "medium" },
+      { harness: "codex", model: "gpt-5-codex", effort: "medium" },
     );
     expect(env).toEqual({
       AGENT_HARNESS: "codex",
-      AGENT_MODEL: "workspace-model",
+      AGENT_MODEL: "gpt-5-codex",
       AGENT_EFFORT: "medium",
       KEEP: "1",
+    });
+  });
+
+  test("drops an inherited model/effort when the pin changes the harness", () => {
+    // The inherited model/effort were chosen for the env's primary harness, so
+    // sending them to a different pinned harness is the cross-harness leak this
+    // module deliberately prevents.
+    const env = applyAgentSelectionEnv(
+      {
+        AGENT_HARNESS: "claude-code",
+        AGENT_MODEL: "claude-sonnet",
+        AGENT_EFFORT: "low",
+        KEEP: "1",
+      },
+      { harness: "codex" },
+    );
+    expect(env).toEqual({ AGENT_HARNESS: "codex", KEEP: "1" });
+  });
+
+  test("keeps an inherited model/effort when the pin keeps the primary harness", () => {
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "claude-code", AGENT_MODEL: "claude-sonnet", AGENT_EFFORT: "low" },
+      { harness: "claude-code" },
+    );
+    expect(env).toEqual({
+      AGENT_HARNESS: "claude-code",
+      AGENT_MODEL: "claude-sonnet",
+      AGENT_EFFORT: "low",
     });
   });
 
@@ -117,6 +147,76 @@ describe("applyAgentSelectionEnv", () => {
     const env = { AGENT_MODEL: "workspace-model" };
     applyAgentSelectionEnv(env, {});
     expect(env).toEqual({ AGENT_MODEL: "workspace-model" });
+  });
+
+  test("ignores model and effort when the entry does not pin a harness", () => {
+    // A model-only entry keeps the workspace failover chain, so writing a
+    // harness-specific model would leak it onto whichever fallback runs.
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "codex,grok", AGENT_MODEL: "workspace-model", KEEP: "1" },
+      { model: "gpt-5-codex", effort: "high" },
+    );
+    expect(env).toEqual({
+      AGENT_HARNESS: "codex,grok",
+      AGENT_MODEL: "workspace-model",
+      KEEP: "1",
+    });
+  });
+
+  test("drops a stale AGENT_CLI_PATH when pinning a non-primary harness", () => {
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "claude-code", AGENT_CLI_PATH: "/opt/custom/claude" },
+      { harness: "codex" },
+    );
+    expect(env.AGENT_HARNESS).toBe("codex");
+    expect(env.AGENT_CLI_PATH).toBeUndefined();
+  });
+
+  test("keeps AGENT_CLI_PATH when the pin is the env's primary harness", () => {
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "claude-code", AGENT_CLI_PATH: "/opt/custom/claude" },
+      { harness: "claude-code" },
+    );
+    expect(env.AGENT_HARNESS).toBe("claude-code");
+    expect(env.AGENT_CLI_PATH).toBe("/opt/custom/claude");
+  });
+
+  test("a non-claude pin does not resolve to the inherited CLAUDE_CLI_PATH", () => {
+    // `CLAUDE_CLI_PATH` is the resolver's backward-compat fallback for ANY
+    // harness, so a pin to codex must drop it or the child spawns the claude
+    // binary for the pinned harness.
+    const composed = applyAgentSelectionEnv(
+      {
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: "/opt/custom/claude",
+        CLAUDE_CLI_PATH: "/opt/custom/claude",
+      },
+      { harness: "codex" },
+    );
+    expect(composed.CLAUDE_CLI_PATH).toBeUndefined();
+    expect(composed.AGENT_CLI_PATH).toBeUndefined();
+
+    const previous = { ...process.env };
+    try {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("AGENT_") || key === "CLAUDE_CLI_PATH") delete process.env[key];
+      }
+      Object.assign(process.env, composed);
+      const resolved = resolveHarness();
+      expect(resolved.harness.name).toBe("codex");
+      expect(resolved.path).not.toBe("/opt/custom/claude");
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+  });
+
+  test("pinning claude-code keeps the inherited CLAUDE_CLI_PATH", () => {
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "claude-code", CLAUDE_CLI_PATH: "/opt/custom/claude" },
+      { harness: "claude-code" },
+    );
+    expect(env.CLAUDE_CLI_PATH).toBe("/opt/custom/claude");
   });
 });
 
@@ -234,7 +334,7 @@ describe("entry selection precedence in run env", () => {
     expect(env.AGENT_EFFORT).toBe("high");
   });
 
-  test("automationRunEnv keeps inherited model when the entry omits it", () => {
+  test("automationRunEnv drops the inherited model when the pin changes the harness", () => {
     const automation: AutomationConfig = {
       id: "daily",
       enabled: true,
@@ -243,9 +343,12 @@ describe("entry selection precedence in run env", () => {
       intervalMs: 3_600_000,
       harness: "codex",
     };
-    const env = automationRunEnv(automation, { AGENT_MODEL: "workspace-model" });
+    const env = automationRunEnv(automation, {
+      AGENT_HARNESS: "claude-code",
+      AGENT_MODEL: "claude-sonnet",
+    });
     expect(env.AGENT_HARNESS).toBe("codex");
-    expect(env.AGENT_MODEL).toBe("workspace-model");
+    expect(env.AGENT_MODEL).toBeUndefined();
   });
 
   test("estimationRunEnv overrides workspace env values", () => {
@@ -276,7 +379,9 @@ describe("env builder selection precedence", () => {
         agentSelection: { harness: "codex", effort: "high" },
       });
       expect(env.AGENT_HARNESS).toBe("codex");
-      expect(env.AGENT_MODEL).toBe("workspace-model");
+      // The workspace model was chosen for the claude-code primary, so it must
+      // not leak onto the codex pin the entry selected.
+      expect(env.AGENT_MODEL).toBeUndefined();
       expect(env.AGENT_EFFORT).toBe("high");
     } finally {
       if (previousHarness === undefined) delete process.env.AGENT_HARNESS;
@@ -301,5 +406,84 @@ describe("env builder selection precedence", () => {
     );
     expect(env.AGENT_HARNESS).toBe("codex");
     expect(env.AGENT_MODEL).toBe("entry-model");
+  });
+});
+
+describe("warnUninstalledHarnessPins", () => {
+  const KEYS = ["AGENT_HARNESS", "AGENT_CLI_PATH", "CODEX_CLI_PATH", "CLAUDE_CLI_PATH"] as const;
+
+  /** Run `fn` with only the listed AGENT_* keys set, restoring on exit. */
+  function withEnv(values: Partial<Record<(typeof KEYS)[number], string>>, fn: () => void): void {
+    const previous = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+    for (const key of KEYS) delete process.env[key];
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== undefined) process.env[key] = value;
+    }
+    try {
+      fn();
+    } finally {
+      for (const key of KEYS) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  test("warns when a pinned non-primary harness CLI is missing", () => {
+    withEnv({ AGENT_HARNESS: "claude-code", CODEX_CLI_PATH: "/nonexistent/codex" }, () => {
+      const warnings: string[] = [];
+      warnUninstalledHarnessPins([{ id: "dep", harness: "codex" }], (m) => warnings.push(m));
+      expect(warnings.some((w) => w.includes('"codex"') && w.includes('"dep"'))).toBe(true);
+      expect(warnings.some((w) => w.includes("CODEX_CLI_PATH"))).toBe(true);
+    });
+  });
+
+  test("stays silent when the pinned harness resolves to an executable", () => {
+    withEnv({ AGENT_HARNESS: "claude-code", CODEX_CLI_PATH: process.execPath }, () => {
+      const warnings: string[] = [];
+      warnUninstalledHarnessPins([{ id: "dep", harness: "codex" }], (m) => warnings.push(m));
+      expect(warnings).toEqual([]);
+    });
+  });
+
+  test("honours AGENT_CLI_PATH only when the pin is the env primary", () => {
+    withEnv(
+      {
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: process.execPath,
+        CLAUDE_CLI_PATH: "/nonexistent/claude",
+      },
+      () => {
+        const warnings: string[] = [];
+        warnUninstalledHarnessPins([{ id: "dep", harness: "claude-code" }], (m) =>
+          warnings.push(m),
+        );
+        expect(warnings).toEqual([]);
+      },
+    );
+
+    withEnv(
+      {
+        AGENT_HARNESS: "codex",
+        AGENT_CLI_PATH: process.execPath,
+        CLAUDE_CLI_PATH: "/nonexistent/claude",
+      },
+      () => {
+        const warnings: string[] = [];
+        warnUninstalledHarnessPins([{ id: "dep", harness: "claude-code" }], (m) =>
+          warnings.push(m),
+        );
+        expect(warnings.some((w) => w.includes('"claude-code"'))).toBe(true);
+      },
+    );
+  });
+
+  test("ignores entries without a pinned harness", () => {
+    withEnv({ AGENT_HARNESS: "claude-code" }, () => {
+      const warnings: string[] = [];
+      warnUninstalledHarnessPins([{ id: "dep" }], (m) => warnings.push(m));
+      expect(warnings).toEqual([]);
+    });
   });
 });

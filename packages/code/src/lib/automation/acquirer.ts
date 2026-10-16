@@ -10,7 +10,12 @@ import type { AutomationConfig } from "./config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
-import { applyAgentSelectionEnv, pickAgentSelection } from "../agent/selection";
+import {
+  applyAgentSelectionEnv,
+  dropForeignHarnessCliPaths,
+  pickAgentSelection,
+  primaryHarnessName,
+} from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { getWorkerFailover } from "../worker/failover";
@@ -18,6 +23,7 @@ import {
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
+  WORKER_CHILD_ENV,
 } from "../worker/usage-limit-protocol";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
@@ -804,10 +810,28 @@ function pinAutomationEnv(
   hintDir?: string;
 } {
   if (harnessPin) {
-    // Pin the entry's own harness and skip the failover overlay entirely so
-    // neither the workspace active harness nor the usage-limit protocol can
-    // re-route an entry that named its agent.
-    return { env: { ...base, AGENT_HARNESS: harnessPin } };
+    // Pin the entry's own harness and skip the workspace failover overlay so
+    // neither the active harness nor a usage-limit failover can re-route an
+    // entry that named its agent. Keep the worker-child marker — and drop any
+    // hint path inherited from an ancestor worker — so a usage-limit abort
+    // still signals the parent by exiting 75 instead of falling through to
+    // one-shot success handling. `spawnAutomationProcess`'s
+    // `!options.harnessPin` guard ignores that exit rather than re-spawning on
+    // another harness.
+    const env: Record<string, string | undefined> = {
+      ...base,
+      AGENT_HARNESS: harnessPin,
+      [WORKER_CHILD_ENV]: "1",
+    };
+    delete env[USAGE_LIMIT_FILE_ENV];
+    // The global AGENT_CLI_PATH names the env's primary harness binary, and the
+    // resolver's CLAUDE_CLI_PATH fallback applies to ANY harness; a pin to a
+    // non-claude harness must resolve its own `<HARNESS>_CLI_PATH` or default
+    // rather than spawn another harness's executable. `applyAgentSelectionEnv`
+    // already drops them when the pin flows through the entry selection; this
+    // guards direct callers that pin without pre-composing that selection.
+    dropForeignHarnessCliPaths(env, harnessPin, primaryHarnessName(base.AGENT_HARNESS));
+    return { env };
   }
   const failover = getWorkerFailover();
   if (!failover) {
