@@ -53,6 +53,7 @@ import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
+import { pickAgentSelection, warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
@@ -413,6 +414,9 @@ export async function resolveWorkspaceAutomationContext(
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
   const taskFileDir = join(workspaceDir, "automations");
+  // The entry's own harness/model/effort override every env layer for this
+  // occurrence only; other runs keep the workspace/repo defaults.
+  const agentSelection = pickAgentSelection(automation);
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
@@ -421,7 +425,7 @@ export async function resolveWorkspaceAutomationContext(
   if (!repo)
     return {
       cwd: workspaceDir,
-      env: buildWorkspaceContextEnv(workspaceDir),
+      env: buildWorkspaceContextEnv(workspaceDir, { agentSelection }),
       taskFileDir,
       release() {},
     };
@@ -435,6 +439,7 @@ export async function resolveWorkspaceAutomationContext(
       pipelineDefaultFile: config.defaults.pipelineFile
         ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
         : undefined,
+      agentSelection,
     }),
     repo: repo.name,
     taskFileDir,
@@ -654,6 +659,7 @@ export function validateReloadedWorkspaceConfig(
 ): void {
   const fleet = resolveFleetAutomations(next);
   if (fleet.problems.length > 0) throw new Error(fleet.problems.join("\n- "));
+  warnUninstalledHarnessPins([...next.automations, ...next.estimations]);
   if (next.defaults.tracker !== current.defaults.tracker) {
     throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
   }
@@ -868,7 +874,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       withSupervisorSlot(
         async () => ({
           cwd: workspaceDir,
-          env: buildWorkspaceContextEnv(workspaceDir),
+          env: buildWorkspaceContextEnv(workspaceDir, {
+            agentSelection: pickAgentSelection(estimation),
+          }),
           release() {},
         }),
         supervisor,
@@ -1204,6 +1212,9 @@ function applyWorkspaceEnv(
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.
   process.env.WEBHOOK_QUEUE_DB = workspaceDbPath(workspaceDir);
+  // A pinned harness opts an entry out of failover; surface a missing CLI here,
+  // where the workspace `.env` is already applied, so it is not silent.
+  warnUninstalledHarnessPins([...config.automations, ...config.estimations]);
   return {
     multiTeam,
     initialQuery: config.defaults.taskQuery,

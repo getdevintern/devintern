@@ -39,7 +39,7 @@ devintern webhook serve
 
 ## Agent failover
 
-Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work. Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations or estimations that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
 
 ## Error-monitor auto-fixes
 
@@ -131,6 +131,36 @@ The prompt replaces the ticket description the agent would normally read, so tre
 
 When `open_pr = true`, occurrences receive the same flags as polled tasks: `[defaults].worker_task_args` in `workspace.toml` (default `--create-pr`). For example, set `worker_task_args = "--create-pr --auto-review"` to have every automated PR go through the review loop too, and add `--auto-review-iterations 3` to the same value (or set the `AUTO_REVIEW_ITERATIONS` env var) to raise the shared review–fix cycle cap (default: 2). This setting applies to polled tracker tasks as well. Automations with `open_pr` off (the default) are never affected by these flags — PR and review flags are stripped from them and `--no-git` is applied instead.
 
+### Choosing the agent per schedule
+
+By default every run uses the workspace `AGENT_HARNESS` / `AGENT_MODEL` / `AGENT_EFFORT` from the [environment layers](./configuration.md). An individual `[[automations]]` or `[[estimations]]` entry can override the agent for its own runs, so a cheap model can handle a daily triage job while a frontier model handles release work:
+
+```toml
+[[automations]]
+id = "log-triage"
+enabled = true
+interval = "1d"
+harness = "codex"
+model = "gpt-5-codex"
+effort = "low"
+prompt = "Summarize new errors and file at most one issue."
+
+[[automations]]
+id = "release-manager"
+enabled = true
+cron = "0 9 * * 1"
+harness = "claude-code"
+effort = "high"
+open_pr = true
+prompt = "Cut the next release and update the changelog."
+```
+
+- `harness` names **one** registered agent (aliases such as `agy` resolve to their canonical name). An unknown name fails validation, naming the entry id and the `harness` field. Because a pin opts out of failover, the worker warns at startup (and on config reload) when an entry's `harness` is registered but its CLI is not installed or its `<HARNESS>_CLI_PATH` points at a missing executable, so the problem is visible before the first occurrence.
+- `model` is a harness-specific string (see that agent's CLI docs) and is never validated cross-harness. Because it only makes sense for one agent, it is applied only when the entry also sets `harness`; without `harness` the inherited `AGENT_MODEL` (if any) is kept. When `harness` names a different agent than the workspace primary, an inherited `AGENT_MODEL` chosen for that primary is dropped unless the entry sets `model`.
+- `effort` accepts only `low`, `medium`, or `high`; anything else fails validation. Like `model`, it is applied only when the entry also sets `harness`, and an inherited `AGENT_EFFORT` is dropped when the pin changes the harness unless the entry sets `effort`. It is applied only for harnesses that support reasoning effort — on any other harness it is ignored with a warning, and the run proceeds.
+- Precedence for the entry's runs is **entry field > team/repo env > workspace env > harness default**. Fields you omit fall through to the existing workspace/repo/team values, and entries that set none of the three fields behave exactly as before.
+- An entry that pins `harness` uses exactly that agent and opts out of the workspace `AGENT_HARNESS` failover chain for its runs; entries without `harness` keep normal failover and never receive a harness-specific `model`/`effort` the entry did not pair with a `harness`. A pinned harness also drops the inherited global `AGENT_CLI_PATH` (which names the workspace primary's binary) and, for a non-`claude-code` pin, the resolver's `CLAUDE_CLI_PATH` fallback, so it resolves its own `<HARNESS>_CLI_PATH` or default. The selection applies to subsequent occurrences after a live reload; a run already in flight keeps the agent it started with.
+
 ### Schedule semantics
 
 Schedule cursors and claims live in `queue.db`. Missed occurrences coalesce to at most one immediate run after startup. The occurrence cursor advances atomically when claimed, so a crash does not replay a possibly completed run. Active claims receive heartbeats; after two minutes without a heartbeat a later due occurrence may recover the stale claim. If the same automation is still active at its next occurrence, that occurrence is logged and skipped without creating a run record. If the repository lock is held by another task, the occurrence is also skipped. This is an at-most-once policy: skipped occurrences are not replayed. A dashboard-triggered manual run holds the same lease while it is active, so a scheduled occurrence coming due mid-validation is skipped rather than run concurrently.
@@ -168,6 +198,8 @@ query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 ```
 
 Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana, GitHub comment-only); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+
+Estimation entries accept the same optional `harness`, `model`, and `effort` overrides as `[[automations]]`, so a scheduled sweep can run on a cheap model — see [Choosing the agent per schedule](#choosing-the-agent-per-schedule). Because estimation never touches a repository, these fields do not require (and are unaffected by) a `repo`.
 
 Estimation entries live-reload with `workspace.toml`: added and re-enabled entries schedule their next future occurrence, changed schedules reset their cursor, query edits apply to the next sweep, and removed entries stop scheduling without interrupting a sweep already in progress.
 
