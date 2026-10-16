@@ -26,6 +26,8 @@ interface GitLabIssueNote {
  */
 export class GitLabTracker implements TrackerFixture {
   readonly type = "gitlab";
+  /** GitLab reports active issues as `opened` (not GitHub's `open`). */
+  readonly openState = "opened";
 
   constructor(
     private readonly gitlab: GitLab,

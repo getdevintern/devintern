@@ -262,13 +262,26 @@ export class TrackerScenario extends FixtureWorkspace {
    * Provider-native selector query with bounded polling for eventual
    * consistency: resolves once the expected ticket appears, and fails when it
    * never does.
+   *
+   * Search engines may tokenize the marker differently or match fuzzily, so
+   * every hit is confirmed client-side by re-reading the ticket body and
+   * requiring the raw marker substring. The expected ticket is only reported
+   * once its body actually contains the selector, which keeps a fuzzy index
+   * match from being mistaken for a correct result.
    */
   async waitForSelectedTickets(deadlineMs = 30_000): Promise<TrackerTicket[]> {
     const expected = this.requireTicketKey();
     const deadline = Date.now() + deadlineMs;
     do {
-      const tickets = await this.tracker.findTickets(this.descriptionMarker);
-      if (tickets.some((ticket) => ticket.key === expected)) return tickets;
+      const hits = await this.tracker.findTickets(this.descriptionMarker);
+      if (hits.some((ticket) => ticket.key === expected)) {
+        const confirmed: TrackerTicket[] = [];
+        for (const ticket of hits) {
+          const detail = await this.tracker.getTicket(ticket.key);
+          if (detail.body.includes(this.descriptionMarker)) confirmed.push(ticket);
+        }
+        if (confirmed.some((ticket) => ticket.key === expected)) return confirmed;
+      }
       await Bun.sleep(1000);
     } while (Date.now() < deadline);
     throw new Error(`Ticket ${expected} never matched selector ${this.descriptionMarker}`);

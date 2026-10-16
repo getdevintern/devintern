@@ -8,6 +8,7 @@ function stubTracker(fail: (operation: string, id: string) => boolean = () => fa
   const deleted: string[] = [];
   const tracker: TrackerFixture = {
     type: "github",
+    openState: "open",
     environment: () => ({ TASK_TRACKER: "github", GITHUB_REPO: "org/fixture" }),
     projectKey: () => "org/fixture",
     ensureLabels: async () => {},

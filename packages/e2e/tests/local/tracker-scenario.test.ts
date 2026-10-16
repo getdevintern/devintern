@@ -10,6 +10,7 @@ import { GitHub } from "../../providers/github";
 
 const stubTracker: TrackerFixture = {
   type: "github",
+  openState: "open",
   environment: () => ({ TASK_TRACKER: "github", GITHUB_REPO: "org/fixture" }),
   projectKey: () => "org/fixture",
   ensureLabels: async () => {},

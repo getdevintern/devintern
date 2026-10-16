@@ -43,6 +43,13 @@ export interface TrackerFixture {
   /** `TASK_TRACKER` value the CLI subprocess must use. */
   readonly type: string;
   /**
+   * Provider-native state value for an active (unresolved) ticket. GitHub
+   * Issues report `open`; GitLab Issues report `opened`. The shared lifecycle
+   * asserts read-back state against this value so provider semantics stay in
+   * the fixture instead of leaking into the assertion body.
+   */
+  readonly openState: string;
+  /**
    * Explicit tracker configuration/credentials for the CLI subprocess. This is
    * merged into the isolated environment; nothing is inherited implicitly.
    */

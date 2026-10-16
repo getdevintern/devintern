@@ -24,6 +24,8 @@ interface GitHubIssueComment {
  */
 export class GitHubTracker implements TrackerFixture {
   readonly type = "github";
+  /** GitHub Issues report active issues as `open`. */
+  readonly openState = "open";
   private readonly api: GitHub;
 
   constructor(

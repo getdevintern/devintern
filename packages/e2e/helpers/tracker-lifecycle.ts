@@ -1,13 +1,18 @@
 import { expect } from "bun:test";
-import type { TrackerScenario } from "./tracker-scenario";
+import type { TrackerComment, TrackerTicketState } from "../providers/tracker";
+import type { TrackerScenario, TrackerStatusSettings } from "./tracker-scenario";
+
+/** Identifying header of the automated implementation-success comment. */
+export const IMPLEMENTATION_COMMENT_MARKER = "Implementation Completed by @devintern/code";
 
 /**
  * Provider-agnostic assertions for a successful remote tracker lifecycle.
  *
  * Both the GitHub Issues and local GitLab Issues scenarios run the same code
- * host (GitHub) and the same deterministic agent, so the only difference is
- * the injected {@link TrackerScenario.tracker}. Keeping one assertion body
- * means the acceptance criteria cannot silently drift between providers.
+ * host (GitHub) and the same deterministic agent. Provider differences are
+ * confined to each {@link TrackerFixture} — most visibly `openState` (`open`
+ * for GitHub, `opened` for GitLab) — so one assertion body covers both without
+ * hardcoding either provider's semantics.
  *
  * Every tracker read below goes back through the provider API rather than the
  * CLI's stdout, so a passing run reflects durable tracker state.
@@ -45,19 +50,17 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
   // 4. Status transition: final status present, obsolete status labels removed,
   //    unrelated label preserved.
   const ticket = await scenario.getTicket(key);
-  expect(ticket.state).toBe("open");
-  expect(ticket.body).toContain(scenario.descriptionMarker);
-  expect(ticket.labels).toContain(statuses.prStatus);
-  expect(ticket.labels).not.toContain(statuses.todoStatus);
-  expect(ticket.labels).not.toContain(statuses.inProgressStatus);
-  for (const label of scenario.seedLabels) expect(ticket.labels).toContain(label);
+  assertTicketState({
+    ticket,
+    openState: scenario.tracker.openState,
+    descriptionMarker: scenario.descriptionMarker,
+    statuses,
+    seedLabels: scenario.seedLabels,
+  });
 
   // 5. The implementation summary comment is read back from the tracker.
   const comments = await scenario.listComments(key);
-  expect(
-    comments.some((comment) => comment.body.includes("<!-- devintern:summary:start -->")),
-  ).toBe(true);
-  expect(comments.some((comment) => comment.body.includes("Updated src/greeting.ts"))).toBe(true);
+  assertImplementationComment(comments);
   // The seeded comment remains until cleanup removes it.
   expect(comments.some((comment) => comment.body.includes(scenario.commentMarker))).toBe(true);
 
@@ -71,9 +74,50 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
   if (decoy) {
     expect(selected.map((ticket) => ticket.key)).not.toContain(decoy.key);
     const decoyState = await scenario.getTicket(decoy.key);
-    expect(decoyState.state).toBe("open");
+    expect(decoyState.state).toBe(scenario.tracker.openState);
     expect(decoyState.body).toContain(scenario.decoyMarker);
     expect(decoyState.body).not.toContain(scenario.descriptionMarker);
     expect(await scenario.github.pulls(`feature/${decoy.key.toLowerCase()}`)).toEqual([]);
   }
+}
+
+/**
+ * Assert a read-back ticket is still active with the expected labels.
+ *
+ * `openState` is the provider-native active state supplied by the fixture, so
+ * the same check works for GitHub (`open`) and GitLab (`opened`). Keeping this
+ * as a standalone function lets the offline suite exercise provider-native
+ * values without a live tracker.
+ */
+export function assertTicketState(input: {
+  ticket: TrackerTicketState;
+  openState: string;
+  descriptionMarker: string;
+  statuses: Required<TrackerStatusSettings>;
+  seedLabels: string[];
+}): void {
+  expect(input.ticket.state).toBe(input.openState);
+  expect(input.ticket.body).toContain(input.descriptionMarker);
+  expect(input.ticket.labels).toContain(input.statuses.prStatus);
+  expect(input.ticket.labels).not.toContain(input.statuses.todoStatus);
+  expect(input.ticket.labels).not.toContain(input.statuses.inProgressStatus);
+  for (const label of input.seedLabels) expect(input.ticket.labels).toContain(label);
+}
+
+/**
+ * Assert the implementation summary is readable back from the tracker.
+ *
+ * The CLI posts `extractImplementationSummary(...)`, which strips the
+ * `<!-- devintern:summary:... -->` delimiters, so the durable content the
+ * tracker stores is the formatter header plus the briefing headings and body.
+ * Asserting on those (never the raw delimiter) is what makes the check pass for
+ * every provider.
+ */
+export function assertImplementationComment(comments: TrackerComment[]): void {
+  const implementation = comments.find((comment) =>
+    comment.body.includes(IMPLEMENTATION_COMMENT_MARKER),
+  );
+  expect(implementation).toBeDefined();
+  expect(implementation?.body).toContain("## What changed");
+  expect(implementation?.body).toContain("Updated src/greeting.ts");
 }
