@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import { loadStandaloneAutomationActions } from "../src/lib/automation/manual";
 import { workerTaskArgs } from "../src/lib/acquirers/task-polling";
+import { WORKSPACE_PIPELINE_AUTOMATION_ENV } from "../src/lib/workspace/env";
 
 describe("standalone dashboard automation actions", () => {
   const dirs: string[] = [];
@@ -100,6 +101,56 @@ prompt = "Groom flaky tests."
     expect(await actions.trigger("weekly-grooming")).toMatchObject({
       ok: false,
     });
+  });
+
+  test("trigger pins pipeline_file against the project dir", async () => {
+    const dir = projectWith(`
+[[automations]]
+id = "pipeline-run"
+enabled = true
+interval = "1d"
+prompt = "Use a custom pipeline."
+pipeline_file = "pipelines/custom.json"
+`);
+    const spawned: Record<string, string | undefined>[] = [];
+    const actions = loadStandaloneAutomationActions(dir, {
+      spawnRun: (_automation, context) => {
+        spawned.push(context.env);
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+    });
+
+    expect(await actions.trigger("pipeline-run")).toEqual({ ok: true });
+    expect(spawned[0][WORKSPACE_PIPELINE_AUTOMATION_ENV]).toBe(
+      join(dir, "pipelines", "custom.json"),
+    );
+  });
+
+  test("trigger clears a stale pipeline env when the automation has none", async () => {
+    const dir = projectWith(`
+[[automations]]
+id = "plain-run"
+enabled = true
+interval = "1d"
+prompt = "No pipeline override."
+`);
+    const previous = process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+    process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = "/tmp/stale-automation-pipeline.json";
+    try {
+      const spawned: Record<string, string | undefined>[] = [];
+      const actions = loadStandaloneAutomationActions(dir, {
+        spawnRun: (_automation, context) => {
+          spawned.push(context.env);
+          return { completion: Promise.resolve(true), terminate() {} };
+        },
+      });
+
+      expect(await actions.trigger("plain-run")).toEqual({ ok: true });
+      expect(spawned[0][WORKSPACE_PIPELINE_AUTOMATION_ENV]).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+      else process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = previous;
+    }
   });
 
   test("workerTaskArgs still defaults to --create-pr for manual pipeline parity", () => {

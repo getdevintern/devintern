@@ -52,8 +52,23 @@ function renderIssueWarnings(issues: { level: string; message: string }[]): void
   }
 }
 
-function workspaceDirFromFlags(workspacePath: string | undefined): string {
-  return workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+/**
+ * Resolve the workspace directory and config file path from `--workspace`.
+ *
+ * `--workspace` is the path to `workspace.toml` (matching `worker`/`worker
+ * add`), so the file name is honored rather than assumed: passing
+ * `--workspace /w/custom.toml` installs into `custom.toml`.
+ */
+function workspacePathsFromFlags(workspacePath: string | undefined): {
+  workspaceDir: string;
+  configPath: string;
+} {
+  if (!workspacePath) {
+    const workspaceDir = resolveWorkspaceDir();
+    return { workspaceDir, configPath: workspaceConfigPath(workspaceDir) };
+  }
+  const configPath = resolve(workspacePath);
+  return { workspaceDir: dirname(configPath), configPath };
 }
 
 /** `devintern automations list` */
@@ -91,7 +106,13 @@ function runShow(args: string[]): never {
     console.error("❌ Usage: devintern automations show <pack>");
     process.exit(1);
   }
-  const pack = loadCatalogPack(id);
+  let pack;
+  try {
+    pack = loadCatalogPack(id);
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
+    process.exit(1);
+  }
   printPack(pack, pack.prompt);
   process.exit(0);
 }
@@ -108,28 +129,41 @@ function parseAddFlags(args: string[]): { flags: AddFlags; error?: string } {
   const flags: AddFlags = { disabled: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    // Normalize the `--key=value` form so it matches the same branches as
+    // `--key value`; a typo like `--worksapce` then fails instead of silently
+    // falling back to the default workspace.toml.
+    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
     const nextValue = (): string | undefined => {
+      if (inlineValue !== undefined) return inlineValue;
       const value = args[i + 1];
       if (!value || value.startsWith("-")) return undefined;
       i++;
       return value;
     };
-    if (arg === "--workspace") {
+    if (name === "--workspace") {
       const value = nextValue();
       if (!value) return { flags, error: "--workspace requires a path to workspace.toml." };
       flags.workspacePath = value;
-    } else if (arg === "--repo") {
+    } else if (name === "--repo") {
       const value = nextValue();
       if (!value) return { flags, error: "--repo requires a repository name." };
       flags.repo = value;
-    } else if (arg === "--id") {
+    } else if (name === "--id") {
       const value = nextValue();
       if (!value) return { flags, error: "--id requires an automation id." };
       flags.id = value;
-    } else if (arg === "--disabled") {
+    } else if (name === "--disabled") {
+      if (inlineValue !== undefined) return { flags, error: "--disabled does not take a value." };
       flags.disabled = true;
     } else if (!arg.startsWith("-") && !flags.packId) {
       flags.packId = arg;
+    } else {
+      return {
+        flags,
+        error: `Unknown ${arg.startsWith("-") ? "option" : "argument"} "${arg}".`,
+      };
     }
   }
   return { flags };
@@ -149,9 +183,9 @@ function runAdd(args: string[]): never {
     process.exit(1);
   }
 
-  const workspaceDir = workspaceDirFromFlags(flags.workspacePath);
-  if (!existsSync(workspaceConfigPath(workspaceDir))) {
-    console.error(`❌ No workspace.toml at ${workspaceConfigPath(workspaceDir)}.`);
+  const { workspaceDir, configPath } = workspacePathsFromFlags(flags.workspacePath);
+  if (!existsSync(configPath)) {
+    console.error(`❌ No workspace.toml at ${configPath}.`);
     console.error("   Run `devintern worker scaffold` first.");
     process.exit(1);
   }
@@ -161,6 +195,7 @@ function runAdd(args: string[]): never {
     const pack = loadCatalogPack(flags.packId);
     result = installCatalogPack({
       workspaceDir,
+      configPath,
       pack,
       repo: flags.repo,
       id: flags.id,

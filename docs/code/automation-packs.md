@@ -130,17 +130,29 @@ and customizing a recurring job stays one packaging story:
   "id": "with-pipeline",
   "prompt": "prompt.md",
   "pipeline": {
-    "plugins": ["./.devintern-code/steps/check-policy.ts"],
+    "plugins": ["./check-policy.ts"],
     "steps": [{ "use": "implement" }, { "use": "commit" }, { "use": "finalize" }]
   }
 }
 ```
 
 On install, the pipeline is written to `~/.devintern/pipelines/<id>.json` and
-`[defaults].pipeline_file` is pointed at it — unless the workspace already
-declares a default pipeline, in which case the install warns and leaves it
-alone. See [Customizing the Task Pipeline](./pipelines.md) for the pipeline
-schema.
+the installed `[[automations]]` entry gets `pipeline_file = "pipelines/<id>.json"`.
+The reference is **automation-scoped**: it applies only to that automation's
+occurrences, so installing a pack never re-routes the pipeline of unrelated
+tasks or the fleet default. It also takes precedence over a routed repository's
+own `[[repos]].pipeline_file` and its checked-in `.devintern-code/settings.json`
+pipeline, so the bundled flow is not silently bypassed.
+
+A relative `plugins` entry resolves against the installed pipeline's directory
+(`~/.devintern/pipelines/`), not the pack. The example above therefore requires
+`check-policy.ts` to live at `~/.devintern/pipelines/check-policy.ts`; the pack
+does not copy plugin modules. Reference a plugin installed in that directory by
+package name, or place the module there. See
+[Relative paths and plugin dependencies](./workspaces.md#pipelines-for-the-fleet-and-per-repository).
+
+See [Customizing the Task Pipeline](./pipelines.md) for the pipeline schema and
+the full precedence list.
 
 ## When to hand-write instead
 

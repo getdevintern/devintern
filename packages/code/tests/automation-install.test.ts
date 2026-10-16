@@ -7,7 +7,10 @@ import type { CatalogPack } from "../src/lib/automation/catalog";
 import { loadCatalogPack } from "../src/lib/automation/catalog";
 import { installCatalogPack, tomlBasicString } from "../src/lib/automation/install";
 import { loadPipelineConfigFile, selectPipelineConfig } from "../src/lib/task/pipeline-selection";
-import { WORKSPACE_PIPELINE_DEFAULT_ENV } from "../src/lib/workspace/env";
+import {
+  WORKSPACE_PIPELINE_AUTOMATION_ENV,
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+} from "../src/lib/workspace/env";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { runWorkerScaffold } from "../src/lib/workspace/init";
 import { workspaceConfigPath } from "../src/lib/workspace/paths";
@@ -125,7 +128,7 @@ remote = "git@github.com:acme/frontend.git"
     expect(config.automations[0]?.repo).toBe("backend");
   });
 
-  test("writes a bundled pipeline and points [defaults].pipeline_file at it", () => {
+  test("writes a bundled pipeline scoped to the installed automation", () => {
     const result = installCatalogPack({
       workspaceDir,
       pack: fakePack({
@@ -147,17 +150,92 @@ remote = "git@github.com:acme/frontend.git"
     expect(loaded.steps).toHaveLength(2);
 
     const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-    expect(config.defaults.pipelineFile).toBe("pipelines/with-pipeline.json");
+    // The pipeline is scoped to the automation entry, never to the fleet default.
+    expect(config.defaults.pipelineFile).toBeUndefined();
+    expect(config.automations[0]?.pipelineFile).toBe("pipelines/with-pipeline.json");
 
-    // End to end: the workspace default pipeline selection returns the steps.
+    // End to end: an automation-scoped selection returns the steps and wins
+    // over the workspace default.
+    const defaultPath = join(workspaceDir, "pipelines", "default.json");
+    writeFileSync(defaultPath, JSON.stringify({ steps: [{ use: "commit" }] }));
     const selected = selectPipelineConfig({
       settings: null,
       cwd: workspaceDir,
-      env: { [WORKSPACE_PIPELINE_DEFAULT_ENV]: pipelinePath },
+      env: {
+        [WORKSPACE_PIPELINE_AUTOMATION_ENV]: pipelinePath,
+        [WORKSPACE_PIPELINE_DEFAULT_ENV]: defaultPath,
+      },
     });
-    expect(selected.scope).toBe("workspace-default");
+    expect(selected.scope).toBe("automation");
     expect(selected.config?.steps).toHaveLength(2);
     expect(selected.config?.plugins).toEqual([resolve(dirname(pipelinePath), "./steps/check.ts")]);
+  });
+
+  test("leaves an existing workspace default pipeline untouched", () => {
+    writeFileSync(
+      workspaceConfigPath(workspaceDir),
+      `[defaults]
+tracker = "jira"
+pipeline_file = "pipelines/fleet.json"
+`,
+    );
+    const result = installCatalogPack({
+      workspaceDir,
+      pack: fakePack({
+        id: "with-pipeline",
+        pipeline: { steps: [{ use: "implement" }, { use: "finalize" }] },
+      }),
+    });
+
+    expect(result.warnings).toEqual([]);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.defaults.pipelineFile).toBe("pipelines/fleet.json");
+    expect(config.automations[0]?.pipelineFile).toBe("pipelines/with-pipeline.json");
+  });
+
+  test("is idempotent for a repeat install of a pack with a pipeline", () => {
+    const pack = fakePack({
+      id: "pipeline-idempotent",
+      pipeline: { steps: [{ use: "implement" }, { use: "finalize" }] },
+    });
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(true);
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(false);
+    const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+    expect(config.automations.filter((entry) => entry.id === "pipeline-idempotent")).toHaveLength(
+      1,
+    );
+  });
+
+  test("re-materializes a missing bundled pipeline on a repeat install", () => {
+    const pack = fakePack({
+      id: "pipeline-repair",
+      pipeline: { steps: [{ use: "implement" }, { use: "finalize" }] },
+    });
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(true);
+    const pipelinePath = join(workspaceDir, "pipelines", "pipeline-repair.json");
+    expect(existsSync(pipelinePath)).toBe(true);
+
+    rmSync(pipelinePath);
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(false);
+    expect(existsSync(pipelinePath)).toBe(true);
+  });
+
+  test("re-copies a missing reference file on a repeat install", () => {
+    const packDir = join(rootDir, "repairpack");
+    mkdirSync(join(packDir, "references"), { recursive: true });
+    writeFileSync(join(packDir, "references", "notes.md"), "# Notes\n");
+    const pack = fakePack({
+      id: "ref-repair",
+      dir: packDir,
+      references: ["references/notes.md"],
+    });
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(true);
+    const copied = join(workspaceDir, "automation-packs", "ref-repair", "references", "notes.md");
+    expect(existsSync(copied)).toBe(true);
+
+    rmSync(copied);
+    expect(installCatalogPack({ workspaceDir, pack }).added).toBe(false);
+    expect(existsSync(copied)).toBe(true);
   });
 
   test("copies pack references and points the prompt at them", () => {

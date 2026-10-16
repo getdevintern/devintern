@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -76,6 +76,55 @@ describe("devintern automations CLI", () => {
     expect(config.automations[0]?.prompt).toContain("\n");
   });
 
+  test("add installs into the exact config file named by --workspace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "automation-cli-custom-"));
+    tempDirs.push(dir);
+    const customPath = join(dir, "custom.toml");
+    writeFileSync(customPath, `[defaults]\ntracker = "jira"\n`);
+
+    const { stdout, exitCode } = await runCli(
+      ["automations", "add", "dependency-health", "--workspace", customPath],
+      dir,
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Installed "dependency-health"');
+
+    const config = loadWorkspaceConfig(customPath);
+    expect(config.automations.map((entry) => entry.id)).toEqual(["dependency-health"]);
+    // The default `workspace.toml` was never created.
+    expect(existsSync(join(dir, "workspace.toml"))).toBe(false);
+  });
+
+  test("add accepts the --workspace=<path> form", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "automation-cli-eq-"));
+    tempDirs.push(dir);
+    const customPath = join(dir, "custom.toml");
+    writeFileSync(customPath, `[defaults]\ntracker = "jira"\n`);
+
+    const { stdout, exitCode } = await runCli(
+      ["automations", "add", "dependency-health", `--workspace=${customPath}`],
+      dir,
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Installed "dependency-health"');
+
+    const config = loadWorkspaceConfig(customPath);
+    expect(config.automations.map((entry) => entry.id)).toEqual(["dependency-health"]);
+    expect(existsSync(join(dir, "workspace.toml"))).toBe(false);
+  });
+
+  test("add rejects an unknown flag instead of writing to the default workspace", async () => {
+    const { dir, configPath } = makeWorkspace();
+    const { stderr, exitCode } = await runCli(
+      ["automations", "add", "dependency-health", "--worksapce", configPath],
+      dir,
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Unknown option");
+    const config = loadWorkspaceConfig(configPath);
+    expect(config.automations).toEqual([]);
+  });
+
   test("add fails clearly for an unknown pack", async () => {
     const { dir, configPath } = makeWorkspace();
     const { stderr, exitCode } = await runCli(
@@ -84,6 +133,14 @@ describe("devintern automations CLI", () => {
     );
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Unknown automation pack");
+  });
+
+  test("show fails cleanly for an unknown pack", async () => {
+    const { dir } = makeWorkspace();
+    const { stderr, exitCode } = await runCli(["automations", "show", "does-not-exist"], dir);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('❌ Unknown automation pack "does-not-exist"');
+    expect(stderr).not.toMatch(/cli\.ts:\d+/);
   });
 
   test("help lists the subcommands", async () => {

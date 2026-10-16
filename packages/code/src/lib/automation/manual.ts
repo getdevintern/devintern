@@ -15,8 +15,11 @@
  * to the worker's embedded dashboard.
  */
 
+import { isAbsolute, join } from "path";
+
 import { loadSingleRepoAutomations, automationTaskArgs } from "./config";
 import type { AutomationConfig } from "./config";
+import { WORKSPACE_PIPELINE_AUTOMATION_ENV } from "../workspace/env";
 import { AUTOMATION_ID_ENV, MANUAL_ORIGIN_ENV_VALUE, spawnManualAutomationRun } from "./acquirer";
 import type {
   AutomationRunContext,
@@ -72,15 +75,26 @@ export function loadStandaloneAutomationActions(
         reason: `automation "${automationId}" is disabled; enable it in the config first`,
       };
     }
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      [RUN_ORIGIN_ENV]: MANUAL_ORIGIN_ENV_VALUE,
+      [AUTOMATION_ID_ENV]: automation.id,
+    };
+    // A single-repo automation's `pipeline_file` resolves against the project
+    // directory and is pinned as the most specific pipeline scope, matching the
+    // workspace fleet path. Clear any stale value first so a run without one
+    // cannot inherit a reference the worker leaked into the process env.
+    delete env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+    if (automation.pipelineFile) {
+      env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = isAbsolute(automation.pipelineFile)
+        ? automation.pipelineFile
+        : join(workingDir, automation.pipelineFile);
+    }
     const context: AutomationRunContext = {
       cwd: workingDir,
       // Attribution lives on the context so any spawn path (and the run
       // records the CLI writes) sees the manual origin.
-      env: {
-        ...process.env,
-        [RUN_ORIGIN_ENV]: MANUAL_ORIGIN_ENV_VALUE,
-        [AUTOMATION_ID_ENV]: automation.id,
-      },
+      env,
       release() {},
     };
     const run = options.spawnRun
