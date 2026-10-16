@@ -10,6 +10,7 @@ import type { AutomationConfig } from "./config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
+import { applyAgentSelectionEnv, pickAgentSelection } from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { getWorkerFailover } from "../worker/failover";
@@ -618,7 +619,7 @@ export function automationRunEnv(
   originValue: string = "scheduled",
 ): Record<string, string | undefined> {
   return {
-    ...base,
+    ...applyAgentSelectionEnv({ ...base }, pickAgentSelection(automation)),
     [AUTOMATION_ORIGIN_ENV]: originValue,
     [AUTOMATION_ID_ENV]: automation.id,
   };
@@ -638,6 +639,9 @@ function defaultSpawnRun(
     {
       cwd: context.cwd,
       env: automationRunEnv(automation, context.env, originValue),
+      // A pinned harness must survive the failover child-env pin (see
+      // `pinAutomationEnv`); entries without one keep workspace failover.
+      harnessPin: automation.harness,
       terminationGraceMs,
     },
   );
@@ -674,6 +678,13 @@ export function spawnAutomationProcess(
   options: {
     cwd: string;
     env: Record<string, string | undefined>;
+    /**
+     * Explicit harness pinned by the scheduled entry (`harness` field). When
+     * set, the child is pinned to it and the workspace failover overlay is
+     * skipped so the entry always uses the agent it named. Entries without a
+     * `harness` keep normal workspace failover.
+     */
+    harnessPin?: string;
     terminationGraceMs?: number;
   },
 ): SpawnedAutomationRun {
@@ -746,11 +757,13 @@ export function spawnAutomationProcess(
       }
       if (code === USAGE_LIMIT_EXIT_CODE) {
         const failover = getWorkerFailover();
-        if (failover && !failover.allLimited()) {
+        // A harness pinned by the entry opts out of workspace failover, so an
+        // explicit selection never silently runs a different agent.
+        if (!options.harnessPin && failover && !failover.allLimited()) {
           const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
           if (outcome.kind !== "exhausted") {
             cleanupHint();
-            const nextEnv = pinAutomationEnv(options.env);
+            const nextEnv = pinAutomationEnv(options.env, options.harnessPin);
             hintDir = nextEnv.hintDir;
             start(nextEnv.env);
             return;
@@ -773,7 +786,7 @@ export function spawnAutomationProcess(
     });
   };
 
-  const initial = pinAutomationEnv(options.env);
+  const initial = pinAutomationEnv(options.env, options.harnessPin);
   hintDir = initial.hintDir;
   start(initial.env);
 
@@ -783,10 +796,19 @@ export function spawnAutomationProcess(
   };
 }
 
-function pinAutomationEnv(base: Record<string, string | undefined>): {
+function pinAutomationEnv(
+  base: Record<string, string | undefined>,
+  harnessPin?: string,
+): {
   env: Record<string, string | undefined>;
   hintDir?: string;
 } {
+  if (harnessPin) {
+    // Pin the entry's own harness and skip the failover overlay entirely so
+    // neither the workspace active harness nor the usage-limit protocol can
+    // re-route an entry that named its agent.
+    return { env: { ...base, AGENT_HARNESS: harnessPin } };
+  }
   const failover = getWorkerFailover();
   if (!failover) {
     return { env: base };

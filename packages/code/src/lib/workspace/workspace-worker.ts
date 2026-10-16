@@ -53,6 +53,7 @@ import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
+import { pickAgentSelection } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
@@ -413,6 +414,9 @@ export async function resolveWorkspaceAutomationContext(
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
   const taskFileDir = join(workspaceDir, "automations");
+  // The entry's own harness/model/effort override every env layer for this
+  // occurrence only; other runs keep the workspace/repo defaults.
+  const agentSelection = pickAgentSelection(automation);
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
@@ -421,7 +425,7 @@ export async function resolveWorkspaceAutomationContext(
   if (!repo)
     return {
       cwd: workspaceDir,
-      env: buildWorkspaceContextEnv(workspaceDir),
+      env: buildWorkspaceContextEnv(workspaceDir, { agentSelection }),
       taskFileDir,
       release() {},
     };
@@ -435,6 +439,7 @@ export async function resolveWorkspaceAutomationContext(
       pipelineDefaultFile: config.defaults.pipelineFile
         ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
         : undefined,
+      agentSelection,
     }),
     repo: repo.name,
     taskFileDir,
@@ -868,7 +873,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       withSupervisorSlot(
         async () => ({
           cwd: workspaceDir,
-          env: buildWorkspaceContextEnv(workspaceDir),
+          env: buildWorkspaceContextEnv(workspaceDir, {
+            agentSelection: pickAgentSelection(estimation),
+          }),
           release() {},
         }),
         supervisor,
