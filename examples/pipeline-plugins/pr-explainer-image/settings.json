@@ -1,0 +1,23 @@
+{
+  "pipeline": {
+    "artifacts": {
+      "publish": {
+        "destination": "pr-comment",
+        "uploader": "./.devintern-code/adapters/artifact-storage.ts",
+        "select": [{ "key": "explanation-image", "presentation": "embed" }]
+      }
+    },
+    "plugins": ["./.devintern-code/steps/pr-explainer-image.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "loopback" },
+      { "use": "auto-review" },
+      {
+        "use": "pr-explainer-image",
+        "promptFile": "./.devintern-code/prompts/pr-explainer-image.md"
+      },
+      { "use": "finalize" }
+    ]
+  }
+}

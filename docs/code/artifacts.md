@@ -157,6 +157,43 @@ Only explicitly selected `embed`/`link` artifacts are uploaded. Successful URLs
 are persisted per artifact and uploader module, so publishing again can reuse
 them. Upload failures are recorded independently and do not block PR creation.
 
+### Files SDK uploader
+
+`@getdevintern/code` includes `files-sdk` as a runtime dependency. The public
+pipeline API exports a reusable factory for any configured Files SDK backend:
+
+```ts
+import { Files } from "files-sdk";
+import { bunS3 } from "files-sdk/bun-s3";
+import { createFilesArtifactUploader } from "@getdevintern/code/pipeline";
+
+export default createFilesArtifactUploader({
+  files: new Files({ adapter: bunS3({ bucket: "review-artifacts" }) }),
+  publicBaseUrl: "https://artifacts.example.com/",
+  keyPrefix: "devintern/artifacts",
+});
+```
+
+When your own module imports `files-sdk`, declare it in that project's
+dependencies too (`bun add files-sdk`). Provider-specific peers are needed
+only for the Files SDK adapters that require them; `bun-s3` uses Bun's native
+S3 client. Swap the adapter to use another provider.
+
+The factory uploads arbitrary bytes with the artifact's media type. Stable
+keys include a hash of the content and media type plus a sanitized filename.
+It sets an overall upload deadline (`timeoutMs`, default 30000, maximum 300000)
+and allows two retries within it. Keep the Files instance's own `prefix` empty;
+the factory's `keyPrefix` is applied to both storage keys and URLs.
+
+`publicBaseUrl` must serve the same storage root through a durable HTTP(S)
+endpoint without credentials or query parameters. Configure bucket/CDN read
+access and retention yourself. The factory constructs URLs; it does not probe
+them, alter bucket visibility, or generate expiring signed links. Private
+storage without a stable reviewer-accessible endpoint needs a custom uploader.
+
+See the [PNG explainer example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/pr-explainer-image)
+for the full generation → capture → upload → PR comment configuration.
+
 ## Reference files from Markdown
 
 Use logical artifact references instead of absolute paths:

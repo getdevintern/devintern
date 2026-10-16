@@ -21,6 +21,7 @@ steps, and configuration precedence.
 | [`agent-review/`](./agent-review) | Agent-backed review using `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority`, with a bounded repeat. | Agent |
 | [`pr-explainer-narrative/`](./pr-explainer-narrative) | Diff-grounded reviewer narrative. | Agent |
 | [`pr-explainer-visual/`](./pr-explainer-visual) | Visual Summary/Evidence/Merge-Danger explainer. | Agent |
+| [`pr-explainer-image/`](./pr-explainer-image) | Generate a PNG explainer and embed it in the PR through a reusable Files SDK uploader. | Agent + image tool |
 
 The two explainer variants share an execution scaffold in
 [`shared/explainer.ts`](./shared/explainer.ts). Test scaffolding shared by every
@@ -133,3 +134,9 @@ The narrative key is `explanation-narrative`; the visual key is
 in one managed PR comment. The same artifacts appear in the dashboard, scoped
 to the exact run.
 See [Pipeline artifacts](../../docs/code/artifacts.md) for the full contract.
+
+The image example registers `explanation-image` and selects it for `embed`
+publication. Its copyable storage module uses the public
+`createFilesArtifactUploader` factory with a configured Files SDK backend and
+a durable public URL. It needs an image-capable harness; the Markdown
+explainer variants work with text-only harnesses.

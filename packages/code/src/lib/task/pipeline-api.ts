@@ -6,6 +6,8 @@ export type { PipelineContext, PipelineStep, StepDefinition } from "./pipeline-r
 export type { TaskStep, TaskStepRecord, TaskStepResult, TaskStepsResult } from "./step-runner";
 export type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
 export type { PipelineConfig, PipelineStepConfig } from "../../types/settings";
+export { createFilesArtifactUploader } from "../artifacts/files-sdk-uploader";
+export type { FilesArtifactUploaderOptions } from "../artifacts/files-sdk-uploader";
 
 export type {
   ArtifactInput,
