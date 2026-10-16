@@ -17,6 +17,8 @@ The default worker config is `~/.devintern/workspace.toml`. Honor `DEVINTERN_WOR
 
 Read [Integrations](references/integrations.md) when configuring source control, tracker credentials, provider authorization, or relay connections. Code-host access, task-tracker access, DevIntern sign-in, and agent authentication are separate checks.
 
+Actively help complete provider setup through available browser automation, such as browser-use, Chrome DevTools Protocol (CDP), or another browser tool. This can include GitHub App authorization, repository selection, and tracker webhook settings. Use an existing authorized browser connection when available; no particular browser tool is required. Let the user complete login, MFA, or admin approval when needed, then resume setup and verify the CLI result.
+
 For a new worker with supported code-host/tracker integrations, recommend the hosted relay as the standard setup. Provider webhooks reach DevIntern's relay and the worker connects outbound, so the worker needs no public webhook endpoint, inbound port, tunnel, or customer-owned GitHub App. Include relay pairing in the normal integration setup and retain polling as fallback. Honor an explicit polling-only, no-relay, or air-gapped choice and preserve existing delivery choices when making unrelated changes. Standalone CLI tasks and local-only automations do not need relay pairing.
 
 ## Prepare the runtime and configuration
