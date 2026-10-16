@@ -5,7 +5,6 @@ import { convertADFToMarkdown } from "@devintern/task-trackers";
 import { loadPrompt } from "../prompts/loader";
 import type { LoadPromptOptions } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { PARSE_AT_BOUNDARY_GUIDANCE } from "./implementation-instructions";
 import {
   FormattedTaskDetails,
   DetailedRelatedIssue,
@@ -370,7 +369,6 @@ Please analyze the above task and implement the requested functionality. Conside
 3. **Dependencies**: Check if any external resources (Figma designs, documentation) provide additional context
 4. **Testing**: Include appropriate tests for the implementation
 5. **Documentation**: Update relevant documentation if needed
-6. ${PARSE_AT_BOUNDARY_GUIDANCE}
 
 If you need clarification on any requirements or if the task description is unclear, please ask specific questions.
 

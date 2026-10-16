@@ -26,7 +26,6 @@ import type {
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
 import { untrustedContentBlock } from "../../prompts/untrusted-content";
-import { PARSE_AT_BOUNDARY_GUIDANCE } from "../../task/implementation-instructions";
 import type { TaskTrackerClient } from "../client";
 
 export interface MarkdownTaskRaw {
@@ -50,8 +49,6 @@ const IMPLEMENTATION_INSTRUCTIONS_HEADING = "## Implementation Instructions";
 const IMPLEMENTATION_INSTRUCTIONS = `${IMPLEMENTATION_INSTRUCTIONS_HEADING}
 
 Please analyze the above task description and implement the requested functionality.
-
-${PARSE_AT_BOUNDARY_GUIDANCE}
 `;
 
 export class MarkdownTaskTrackerClient implements TaskTrackerClient {
