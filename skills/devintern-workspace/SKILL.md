@@ -5,7 +5,7 @@ description: Inspect or configure an existing DevIntern worker workspace, includ
 
 # Configure a DevIntern workspace
 
-The worker serves registered repositories from `~/.devintern/workspace.toml` by default. Honor an explicit `devintern worker --workspace /path/to/workspace.toml` selection and `DEVINTERN_WORKSPACE_DIR` when present; check command help before assuming setup subcommands accept the same flags.
+Workspace/worker mode is the recommended ongoing DevIntern setup, including for a single repository. The worker serves registered repositories from `~/.devintern/workspace.toml` by default. Honor an explicit `devintern worker --workspace /path/to/workspace.toml` selection and `DEVINTERN_WORKSPACE_DIR` when present; check command help before assuming setup subcommands accept the same flags.
 
 For first-time installation, credentials, source-control/tracker authorization, or bringing a worker online, use `devintern-setup` when available. Otherwise follow the [quick start](https://devintern.com/docs/code/quick-start) and [relay guide](https://devintern.com/docs/code/relay). A repository/team entry does not establish account access. Use `devintern-delegate` when available for one-off task dispatch. This skill can configure the requested behavior without assuming either companion skill is installed.
 
