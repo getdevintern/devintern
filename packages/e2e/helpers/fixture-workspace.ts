@@ -176,12 +176,22 @@ export class FixtureWorkspace {
     return { existingSha, attemptHead };
   }
 
-  runRecords(): Array<{ status: string; pr_url: string | null; outcome_reason: string | null }> {
+  runRecords(): Array<{
+    task_key: string | null;
+    tracker: string | null;
+    status: string;
+    pr_url: string | null;
+    outcome_reason: string | null;
+  }> {
     const db = new Database(this.env.WEBHOOK_QUEUE_DB, { readonly: true });
     try {
       return db
-        .query("SELECT status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id")
+        .query(
+          "SELECT task_key, tracker, status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id",
+        )
         .all(this.taskKey) as Array<{
+        task_key: string | null;
+        tracker: string | null;
         status: string;
         pr_url: string | null;
         outcome_reason: string | null;

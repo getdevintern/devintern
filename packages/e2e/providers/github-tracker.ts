@@ -1,5 +1,18 @@
 import { GitHub } from "./github";
-import type { TrackerFixture, TrackerTicket } from "./tracker";
+import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+
+interface GitHubIssueDetail {
+  number: number;
+  html_url: string;
+  body: string | null;
+  state: string;
+  labels: Array<{ name: string } | string>;
+}
+
+interface GitHubIssueComment {
+  id: number;
+  body: string;
+}
 
 /**
  * GitHub Issues tracker fixture.
@@ -42,6 +55,18 @@ export class GitHubTracker implements TrackerFixture {
     return this.repository;
   }
 
+  async ensureLabels(labels: string[]): Promise<void> {
+    for (const name of labels) {
+      try {
+        await this.api.request("/labels", "POST", { name });
+      } catch (error) {
+        // A label that already exists is reported as 422; anything else is a
+        // real failure the scenario must surface.
+        if (!(error instanceof Error) || !error.message.includes("HTTP 422")) throw error;
+      }
+    }
+  }
+
   async createTicket(input: {
     title: string;
     body: string;
@@ -72,6 +97,36 @@ export class GitHubTracker implements TrackerFixture {
 
   async deleteComment(commentId: string): Promise<void> {
     await this.api.request(`/issues/comments/${this.numericId(commentId, "comment")}`, "DELETE");
+  }
+
+  async getTicket(ticketKey: string): Promise<TrackerTicketState> {
+    const issue = await this.api.request<GitHubIssueDetail>(
+      `/issues/${this.numericId(ticketKey, "ticket")}`,
+    );
+    return {
+      state: issue.state,
+      labels: (issue.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
+      body: issue.body ?? "",
+    };
+  }
+
+  async listComments(ticketKey: string): Promise<TrackerComment[]> {
+    const comments = await this.api.request<GitHubIssueComment[]>(
+      `/issues/${this.numericId(ticketKey, "ticket")}/comments?per_page=100`,
+    );
+    return comments.map((comment) => ({ id: String(comment.id), body: comment.body }));
+  }
+
+  /**
+   * Provider-native search scoped to the fixture repository. Search is
+   * eventually consistent, so callers must poll (see
+   * {@link TrackerScenario.waitForSelectedTickets}).
+   */
+  async findTickets(query: string): Promise<TrackerTicket[]> {
+    const issues = await this.api.searchIssues(query);
+    return issues
+      .filter((issue) => issue.pull_request === undefined)
+      .map((issue) => ({ key: String(issue.number), url: issue.html_url }));
   }
 
   /** Reject anything but a positive GitHub numeric id before URL interpolation. */

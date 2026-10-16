@@ -16,6 +16,7 @@
     "gitlab:status": "bun run scripts/gitlab-local.ts status",
     "test:e2e:bitbucket": "bun run scripts/hosted.ts bitbucket",
     "test:e2e:gitlab-com": "bun run scripts/hosted.ts gitlab-com",
-    "test:e2e:tracker": "bun run scripts/tracker.ts"
+    "test:e2e:tracker": "bun run scripts/tracker.ts",
+    "test:e2e:tracker:gitlab": "bun run scripts/tracker-gitlab.ts"
   }
 }
