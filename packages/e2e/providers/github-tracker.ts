@@ -1,5 +1,18 @@
 import { GitHub } from "./github";
-import type { TrackerFixture, TrackerTicket } from "./tracker";
+import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+
+interface GitHubIssueDetail {
+  number: number;
+  html_url: string;
+  body: string | null;
+  state: string;
+  labels: Array<{ name: string } | string>;
+}
+
+interface GitHubIssueComment {
+  id: number;
+  body: string;
+}
 
 /**
  * GitHub Issues tracker fixture.
@@ -11,6 +24,10 @@ import type { TrackerFixture, TrackerTicket } from "./tracker";
  */
 export class GitHubTracker implements TrackerFixture {
   readonly type = "github";
+  /** GitHub Issues report active issues as `open`. */
+  readonly openState = "open";
+  /** Required 6-digit hex label color (GitHub rejects a create without one). */
+  private static readonly labelColor = "ededed";
   private readonly api: GitHub;
 
   constructor(
@@ -40,6 +57,21 @@ export class GitHubTracker implements TrackerFixture {
   /** Project key `resolveProjectKey` derives for GitHub Issues. */
   projectKey(): string {
     return this.repository;
+  }
+
+  async ensureLabels(labels: string[]): Promise<void> {
+    for (const name of labels) {
+      try {
+        // GitHub requires both `name` and a valid hex `color`; a missing color
+        // is rejected with 422 and would otherwise be misread as "already
+        // exists", silently leaving the label uncreated.
+        await this.api.request("/labels", "POST", { name, color: GitHubTracker.labelColor });
+      } catch (error) {
+        // Only the provider's duplicate-label rejection is idempotent; any
+        // other 422 (bad payload) is a real failure the scenario must surface.
+        if (!(error instanceof Error) || !error.message.includes("already_exists")) throw error;
+      }
+    }
   }
 
   async createTicket(input: {
@@ -72,6 +104,36 @@ export class GitHubTracker implements TrackerFixture {
 
   async deleteComment(commentId: string): Promise<void> {
     await this.api.request(`/issues/comments/${this.numericId(commentId, "comment")}`, "DELETE");
+  }
+
+  async getTicket(ticketKey: string): Promise<TrackerTicketState> {
+    const issue = await this.api.request<GitHubIssueDetail>(
+      `/issues/${this.numericId(ticketKey, "ticket")}`,
+    );
+    return {
+      state: issue.state,
+      labels: (issue.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
+      body: issue.body ?? "",
+    };
+  }
+
+  async listComments(ticketKey: string): Promise<TrackerComment[]> {
+    const comments = await this.api.request<GitHubIssueComment[]>(
+      `/issues/${this.numericId(ticketKey, "ticket")}/comments?per_page=100`,
+    );
+    return comments.map((comment) => ({ id: String(comment.id), body: comment.body }));
+  }
+
+  /**
+   * Provider-native search scoped to the fixture repository. Search is
+   * eventually consistent, so callers must poll (see
+   * {@link TrackerScenario.waitForSelectedTickets}).
+   */
+  async findTickets(query: string): Promise<TrackerTicket[]> {
+    const issues = await this.api.searchIssues(query);
+    return issues
+      .filter((issue) => issue.pull_request === undefined)
+      .map((issue) => ({ key: String(issue.number), url: issue.html_url }));
   }
 
   /** Reject anything but a positive GitHub numeric id before URL interpolation. */

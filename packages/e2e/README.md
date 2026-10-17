@@ -170,23 +170,43 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Remote tracker fixtures
 
-The Markdown suites above need no task tracker. A separate opt-in suite exercises
+The Markdown suites above need no task tracker. Separate opt-in suites exercise
 the same built CLI against a real remote tracker ticket through the reusable
-`TrackerScenario` fixture. GitHub Issues is the initial tracker and GitHub remains
-the common code host for every tracker, so there is no tracker-by-code-host
-matrix to configure. No model or AI-agent credentials are needed: the
-deterministic fixture agent verifies that unique markers seeded into the ticket
-description and a seeded comment reached its actual input before it edits
-`src/greeting.ts`.
+`TrackerScenario` fixture. There are two providers, both published to GitHub:
 
-Each scenario provisions one fresh ticket in the explicitly configured tracker
-repository, runs the CLI with comments enabled against the ticket's real key
+- **GitHub Issues** uses a dedicated GitHub tracker repository that is also the
+  code host (the initial pairing).
+- **Local GitLab Issues** uses a dedicated project on the local Self-Managed
+  instance as the issue source while GitHub remains the publication host. The
+  GitLab project is created from the fixture and permanently deleted in cleanup;
+  the suite does not require hosted GitLab.com.
+
+No model or AI-agent credentials are needed: the deterministic fixture agent
+verifies that unique markers seeded into the ticket description and a seeded
+comment reached its actual input before it edits `src/greeting.ts`. The scenario
+runs both explicit-key and `--query` scenarios. The latter passes the unique
+description marker to the built CLI so its production tracker client performs
+search and task selection. Fixture API polling only waits for search indexing;
+it does not supply task keys or filter the CLI results. Assertions inspect all
+run records and prove the decoy has no run, comment, status change, or PR.
+
+Each scenario provisions one fresh ticket in the explicitly configured tracker,
+runs the CLI with comments enabled against the ticket's real key
 (`feature/<key>` and run-record lookups derive from that key, not the synthetic
-Markdown key), then closes the ticket, deletes only the seeded comment, closes
-the scenario's PR and deletes only its branches. Ownership is recorded the moment
-a resource is created; cleanup attempts every operation even after a failure and
-reports the ids of anything it could not remove. The suite never creates or
-deletes the containing repository and never touches pre-existing tickets.
+Markdown key), then closes the tickets, deletes only the seeded comment, closes
+the scenario's PR and deletes only its branches. It also configures three
+mutually-exclusive status labels plus per-project `settings.json` statuses and
+asserts the final status label is applied, the obsolete status labels are
+removed, and an unrelated label survives. The implementation summary comment is
+read back from the tracker API rather than trusted from CLI output. Status
+labels are shared tracker configuration the scenario creates but intentionally
+never deletes. Ownership is recorded the moment a resource is created; cleanup
+attempts every operation even after a failure and reports the ids of anything it
+could not remove. The GitHub suite never creates or deletes the containing
+repository and never touches pre-existing tickets; the GitLab suite removes only
+the project it created.
+
+### GitHub Issues tracker
 
 Configure a dedicated tracker repository in `packages/e2e/.env.local` (ignored by
 Git) and run:
@@ -196,17 +216,35 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test:e2e:tracker
 ```
 
-| Variable                    | Meaning                                                |
-| --------------------------- | ------------------------------------------------------ |
-| `E2E_TRACKER_REPOSITORY`    | Existing `owner/repo` that will host test tickets      |
-| `E2E_TRACKER_TOKEN`         | Token with issues read/write on that repository        |
-| `E2E_TRACKER_STATUS_LABELS` | Optional comma-separated status labels for transitions |
+| Variable                    | Meaning                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| `E2E_TRACKER_REPOSITORY`    | Existing `owner/repo` that will host test tickets            |
+| `E2E_TRACKER_TOKEN`         | Token with issues read/write on that repository              |
+| `E2E_TRACKER_STATUS_LABELS` | Optional extra comma-separated status labels for transitions |
 
-The tracker repository is also the GitHub code host in this initial suite, so the
-token needs repository contents and pull-request write access too. Missing
+The tracker repository is also the GitHub code host, so the token needs
+repository contents and pull-request write access too. Missing
 `E2E_TRACKER_REPOSITORY` or `E2E_TRACKER_TOKEN` fails the opt-in command before
-any remote mutation. Ordinary `test` runs only local harness checks and never the
-live tracker suite.
+any remote mutation.
+
+### Local GitLab Issues tracker
+
+Start the local GitLab instance (see above), then provide a GitHub code host via
+`E2E_GITHUB_REPOSITORY`/`E2E_GITHUB_TOKEN` (or a local `gh auth login`) and run:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:tracker:gitlab
+```
+
+Each run creates a private `e2e-<uuid>` project on the local instance for the
+issue source and deletes it in cleanup. The GitHub token must have repository
+contents and pull-request write access on the code-host repository. As with the
+other local GitLab suites, `E2E_GITLAB_URL` and `E2E_GITLAB_TOKEN` override the
+generated `.local/gitlab.json` credentials.
+
+Ordinary `bun run test` runs only local harness checks and never the live tracker
+suites.
 
 ## Delivery lifecycle coverage
 
