@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
+import {
+  Activity,
+  ChartNoAxesCombined,
+  GitPullRequest,
+  ListTodo,
+  ScrollText,
+  Workflow,
+} from "lucide-react";
 
 import { StatusStrip } from "@/components/StatusStrip";
-import { buttonVariants } from "@/components/ui/button";
 import { AgentPrsView } from "@/views/AgentPrsView";
 import { AutomationsView } from "@/views/AutomationsView";
 import { LogsView } from "@/views/LogsView";
@@ -25,20 +32,29 @@ function parseHash(): Route {
   if (runMatch) {
     return { view: "run", id: parseInt(runMatch[1] ?? "0", 10) };
   }
-  if (hash === "#/automations") {
-    return { view: "automations" };
-  }
-  if (hash === "#/stats") {
-    return { view: "stats" };
-  }
-  if (hash === "#/prs") {
-    return { view: "prs" };
-  }
-  if (hash === "#/logs") {
-    return { view: "logs" };
-  }
+  if (hash === "#/automations") return { view: "automations" };
+  if (hash === "#/stats") return { view: "stats" };
+  if (hash === "#/prs") return { view: "prs" };
+  if (hash === "#/logs") return { view: "logs" };
   return { view: "runs" };
 }
+
+const sections = [
+  { label: "Runs", hash: "#/", view: "runs", icon: ListTodo },
+  { label: "Automations", hash: "#/automations", view: "automations", icon: Workflow },
+  { label: "Pull requests", hash: "#/prs", view: "prs", icon: GitPullRequest },
+  { label: "Statistics", hash: "#/stats", view: "stats", icon: ChartNoAxesCombined },
+  { label: "Logs", hash: "#/logs", view: "logs", icon: ScrollText },
+] as const;
+
+const pageCopy = {
+  runs: { title: "Runs", description: "Follow work from pickup through delivery." },
+  run: { title: "Run details", description: "Review the timeline, output, and next steps." },
+  automations: { title: "Automations", description: "Manage scheduled work and run it on demand." },
+  prs: { title: "Pull requests", description: "Review work opened by your agents." },
+  stats: { title: "Statistics", description: "See how your agents perform over time." },
+  logs: { title: "Worker logs", description: "Inspect the worker's latest activity." },
+};
 
 export function App() {
   const [route, setRoute] = useState<Route>(parseHash);
@@ -49,53 +65,81 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  const tabs = [
-    { label: "Runs", hash: "#/", active: route.view === "runs" || route.view === "run" },
-    { label: "Automations", hash: "#/automations", active: route.view === "automations" },
-    { label: "PRs", hash: "#/prs", active: route.view === "prs" },
-    { label: "Stats", hash: "#/stats", active: route.view === "stats" },
-    { label: "Logs", hash: "#/logs", active: route.view === "logs" },
-  ];
+  const currentSection = route.view === "run" ? "runs" : route.view;
+  const page = pageCopy[route.view];
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6">
-      <header className="mb-6 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-lg font-semibold">
-            DevIntern <span className="text-muted-foreground">dashboard</span>
-          </h1>
-          <nav className="flex gap-1">
-            {tabs.map((tab) => (
-              <a
-                key={tab.label}
-                href={tab.hash}
-                className={cn(
-                  buttonVariants({ variant: "ghost" }),
-                  tab.active
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {tab.label}
-              </a>
-            ))}
-          </nav>
-        </div>
-        <StatusStrip />
-      </header>
+    <div className="dashboard-shell">
+      <aside className="dashboard-sidebar">
+        <a className="dashboard-brand" href="#/" aria-label="DevIntern dashboard home">
+          <span className="dashboard-brand-mark" aria-hidden="true">
+            <Activity size={22} strokeWidth={2.5} />
+          </span>
+          <span className="dashboard-brand-name">
+            DevIntern <small>Dashboard</small>
+          </span>
+        </a>
 
-      {route.view === "runs" ? (
-        <RunsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
-      ) : null}
-      {route.view === "run" ? (
-        <RunDetailView runId={route.id} onBack={() => (window.location.hash = "#/")} />
-      ) : null}
-      {route.view === "automations" ? (
-        <AutomationsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
-      ) : null}
-      {route.view === "prs" ? <AgentPrsView /> : null}
-      {route.view === "stats" ? <StatsView /> : null}
-      {route.view === "logs" ? <LogsView /> : null}
+        <div className="dashboard-nav-label">Workspace</div>
+        <nav className="dashboard-nav" aria-label="Dashboard sections">
+          {sections.map((section) => {
+            const Icon = section.icon;
+            const active = currentSection === section.view;
+            return (
+              <a
+                key={section.view}
+                href={section.hash}
+                aria-current={active ? "page" : undefined}
+                className={cn("dashboard-nav-link", active && "dashboard-nav-link-active")}
+              >
+                <Icon size={18} strokeWidth={active ? 2.2 : 1.8} aria-hidden="true" />
+                <span>{section.label}</span>
+              </a>
+            );
+          })}
+        </nav>
+
+        <div className="dashboard-sidebar-foot">
+          <span className="dashboard-local-dot" />
+          Local workspace
+        </div>
+      </aside>
+
+      <div className="dashboard-main">
+        <header className="dashboard-topbar">
+          <span className="dashboard-topbar-title">Worker overview</span>
+          <StatusStrip />
+        </header>
+
+        <main className="dashboard-content">
+          <div className="dashboard-page-heading">
+            <div>
+              <h1>{page.title}</h1>
+              <p>{page.description}</p>
+            </div>
+            <span className="dashboard-live-label">
+              <span className="dashboard-live-dot" /> Checks every 5s
+            </span>
+          </div>
+
+          {route.view === "runs" ? (
+            <RunsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
+          ) : null}
+          {route.view === "run" ? (
+            <RunDetailView
+              key={route.id}
+              runId={route.id}
+              onBack={() => (window.location.hash = "#/")}
+            />
+          ) : null}
+          {route.view === "automations" ? (
+            <AutomationsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
+          ) : null}
+          {route.view === "prs" ? <AgentPrsView /> : null}
+          {route.view === "stats" ? <StatsView /> : null}
+          {route.view === "logs" ? <LogsView /> : null}
+        </main>
+      </div>
     </div>
   );
 }

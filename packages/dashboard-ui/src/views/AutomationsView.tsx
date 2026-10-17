@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Play } from "lucide-react";
+import { ChevronRight, Play } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge } from "@/components/shared";
@@ -108,6 +108,17 @@ function AutomationRow({
               {formatRunOrigin(lastRun.origin)} · {formatTime(lastRun.startedAt)}
             </span>
             <RunResult run={lastRun} />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Open last run for ${automation.id}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenRun(lastRun.id);
+              }}
+            >
+              <ChevronRight aria-hidden="true" />
+            </Button>
           </div>
         ) : (
           <span className="text-muted-foreground">–</span>

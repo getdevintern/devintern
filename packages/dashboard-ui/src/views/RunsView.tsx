@@ -147,13 +147,16 @@ export function RunsTable({
     <Table className="text-sm">
       <TableHeader>
         <TableRow>
-          <TableHead className="px-4">Work</TableHead>
-          <TableHead className="px-4">Origin</TableHead>
-          <TableHead className="px-4">Harness</TableHead>
-          <TableHead className="px-4">Status</TableHead>
-          <TableHead className="px-4">Result</TableHead>
-          <TableHead className="px-4">Started</TableHead>
-          <TableHead className="px-4">Duration</TableHead>
+          <TableHead className="px-2 md:px-4">Work</TableHead>
+          <TableHead className="hidden px-4 md:table-cell">Origin</TableHead>
+          <TableHead className="hidden px-4 md:table-cell">Harness</TableHead>
+          <TableHead className="px-2 md:px-4">Status</TableHead>
+          <TableHead className="px-2 md:px-4">Result</TableHead>
+          <TableHead className="hidden px-4 md:table-cell">Started</TableHead>
+          <TableHead className="hidden px-4 md:table-cell">Duration</TableHead>
+          <TableHead className="w-10 px-2">
+            <span className="sr-only">Open run</span>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -161,26 +164,41 @@ export function RunsTable({
           const work = runWorkLink(run);
           return (
             <TableRow key={run.id} onClick={() => onOpenRun(run.id)} className="cursor-pointer">
-              <TableCell className="px-4 py-2.5 font-medium">
-                <TicketKey label={work.label} href={work.href} />
+              <TableCell className="max-w-36 px-2 py-2.5 font-medium md:max-w-none md:px-4">
+                <div className="truncate" title={work.label}>
+                  <TicketKey label={work.label} href={work.href} />
+                </div>
               </TableCell>
-              <TableCell className="px-4 py-2.5 text-muted-foreground">
+              <TableCell className="hidden px-4 py-2.5 text-muted-foreground md:table-cell">
                 {formatRunOrigin(run.origin)}
               </TableCell>
-              <TableCell className="px-4 py-2.5 text-muted-foreground">
+              <TableCell className="hidden px-4 py-2.5 text-muted-foreground md:table-cell">
                 {run.harness ?? "–"}
               </TableCell>
-              <TableCell className="px-4 py-2.5">
+              <TableCell className="px-2 py-2.5 md:px-4">
                 <StatusBadge status={run.status} />
               </TableCell>
-              <TableCell className="px-4 py-2.5">
+              <TableCell className="px-2 py-2.5 md:px-4">
                 <RunResult run={run} />
               </TableCell>
-              <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+              <TableCell className="hidden px-4 py-2.5 tabular-nums text-muted-foreground md:table-cell">
                 {formatTime(run.startedAt)}
               </TableCell>
-              <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+              <TableCell className="hidden px-4 py-2.5 tabular-nums text-muted-foreground md:table-cell">
                 {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}
+              </TableCell>
+              <TableCell className="px-1 py-2.5">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Open run ${work.label ?? run.id}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenRun(run.id);
+                  }}
+                >
+                  <ChevronRight aria-hidden="true" />
+                </Button>
               </TableCell>
             </TableRow>
           );
