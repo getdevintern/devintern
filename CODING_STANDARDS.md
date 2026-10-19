@@ -1,8 +1,5 @@
 # Coding standards
 
-Short, enforceable rules for `.ts`/`.tsx`, adapted from the
-[`typescript-best-practices`](https://github.com/cursor/plugins/blob/main/pstack/skills/typescript-best-practices/SKILL.md) skill.
-
 ## Parse external data at the boundary
 
 Data crossing into the process — tracker/API payloads, `JSON.parse` and HTTP
@@ -15,25 +12,12 @@ file contents — is `unknown`, not a domain type.
   derive the TS type from the schema so they can't drift.
 - Never let `any`/`unknown` flow past the boundary into core logic.
 - Cast (`as`) only after validation; `satisfies` validates without widening.
-
-```ts
-// Don't: raw `any` crosses the boundary and is trusted indefinitely.
-function loadConfig(raw: any): Config {
-  return raw as Config;
-}
-
-// Do: parse at the boundary; the rest of the code trusts the type.
-function parseConfig(raw: unknown): Config {
-  if (typeof raw !== "object" || raw === null) throw new Error("config must be an object");
-  return { /* validate fields or `schema.parse(raw)` */ };
-}
-```
-
-Prefer `unknown` over `any`; a genuine ad-hoc `any` needs a boundary reason.
+- Prefer `unknown` over `any`; a genuine ad-hoc `any` needs a boundary reason.
 
 ## Lint enforcement
 
-`.oxlintrc.json` enables `typescript/no-explicit-any` and
-`typescript/ban-types`. Tests are exempt (fixtures build malformed inputs on
-purpose). A ratchet-baseline override lists files whose `any` predates the rule;
-type each boundary and delete its entry rather than growing the list.
+- `.oxlintrc.json` enables `typescript/no-explicit-any` and
+  `typescript/ban-types`.
+- Tests are exempt (fixtures build malformed inputs on purpose).
+- A ratchet-baseline override lists files whose `any` predates the rule; type
+  each boundary and delete its entry rather than growing the list.
