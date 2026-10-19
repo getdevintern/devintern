@@ -1,5 +1,22 @@
 # @devintern/code Changelog
 
+## [2.19.1] - 2026-10-20
+
+No-op automation patch: recurring jobs can opt into treating a run that changes nothing as a successful no-op, the local dashboard gets a worker-console refresh, and repository-wide TypeScript boundary and lint rules are tightened with expanded live tracker E2E coverage.
+
+### Added
+
+- **Dashboard worker-console refresh**: the local dashboard now uses a responsive worker-console shell with clearer run and automation navigation, refreshed brand colors and a favicon, a more prominent run timeline with improved metadata and retry states, and run details that reset when the URL switches to a different run
+
+### Fixed
+
+- **Opt-in no-op automation runs succeed**: recurring automations whose prompts can legitimately make no changes — for example "keep main green", "release only when warranted", or "find flaky tests" — failed with `Implementation was not committed` even when the agent correctly did nothing. `[[automations]]` entries now accept `allow_no_changes` (boolean, default `false`) and the CLI accepts `--allow-no-changes`; when enabled, a run with no repository changes is recorded as a successful no-op and stops delivery without creating a branch or PR or running verification, review, or publish. Scheduled and dashboard **Run now** occurrences receive the flag automatically, and behavior without the flag is unchanged
+
+### Technical
+
+- **TypeScript parse-at-boundary and lint hardening (DEV-154)**: `@getdevintern/code` narrows its harness and utility types away from `any`, adds a root `CODING_STANDARDS.md` documenting boundary parsing and `unknown`-over-`any`, and enables `typescript/no-explicit-any` and `typescript/ban-types` in oxlint with a ratchet baseline for nine existing source files
+- **Live tracker ticket-to-PR end-to-end scenarios (DEV-178)**: the private `packages/e2e` workspace gains explicit-key and production `--query` scenarios for GitHub Issues and local GitLab Issues that create a real ticket, seeded comment, and decoy through provider APIs; verify marker delivery to the deterministic agent, commit/PR publication, provider-native status labels, preserved unrelated labels, and stored implementation summaries; inspect every run for decoy activity; and close scenario tickets, pull requests, branches, and local GitLab projects during cleanup. The ordinary offline test command remains unchanged
+
 ## [2.19.0] - 2026-10-17
 
 Artifact-storage release: pipeline evidence can now be published to Cloudflare R2 or any S3-compatible bucket through a built-in Files SDK uploader selected in configuration, with a runnable PNG-explainer example plugin, and auto-review recovers its verdict JSON when a harness truncates tool output ahead of the final object.
