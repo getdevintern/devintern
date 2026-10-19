@@ -48,6 +48,8 @@ interface RunAgentHarnessOptions {
   enableGit?: boolean;
   task?: Task;
   createPr?: boolean;
+  /** Treat a run that makes no repository changes as a successful no-op. */
+  allowNoChanges?: boolean;
   prTargetBranch?: string;
   tracker?: TaskTrackerClient;
   skipComments?: boolean;
@@ -86,6 +88,7 @@ export async function runAgentSession(
     enableGit = true,
     task,
     createPr = false,
+    allowNoChanges = false,
     prTargetBranch = "main",
     tracker,
     skipComments = false,
@@ -444,6 +447,7 @@ export async function runAgentSession(
               maxTurns,
               enableGit,
               createPr,
+              allowNoChanges,
               prTargetBranch,
               skipComments,
               hookRetries,

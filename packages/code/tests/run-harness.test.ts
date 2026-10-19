@@ -417,6 +417,26 @@ describe("runAgentHarness git delivery", () => {
     expect(tracker.transitionStatus).not.toHaveBeenCalled();
   });
 
+  test("accepts an allowed no-op without publishing or transitioning", async () => {
+    scenario.stdout = "main is green; no changes needed";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await runAgentHarness({ ...baseInput(), createPr: true, allowNoChanges: true });
+
+    expect(deliveryEvents).toEqual(["commit"]);
+    expect(postImplementationCommentMock).not.toHaveBeenCalled();
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test("still rejects an uncommitted run when allowNoChanges is off", async () => {
+    scenario.stdout = "done";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, allowNoChanges: false }),
+    ).rejects.toThrow("Implementation was not committed");
+  });
+
   test("rejects a failed push without posting completion or transitioning the task", async () => {
     scenario.stdout = "done";
     pushResult = { success: false, message: "Push rejected" };

@@ -32,6 +32,7 @@ function state(verify: FinalizeContext["verify"]): DeliveryState {
     projectSettings: null,
     enableGit: true,
     createPr: false,
+    allowNoChanges: false,
     skipComments: false,
     autoReview: false,
     autoReviewIterations: 5,
@@ -57,6 +58,7 @@ function state(verify: FinalizeContext["verify"]): DeliveryState {
     autoReviewRan: false,
     hookValidated: false,
     implementationStepSeen: false,
+    noChanges: false,
   };
 }
 

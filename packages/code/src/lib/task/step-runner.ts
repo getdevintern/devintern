@@ -9,7 +9,16 @@ export interface TaskStep<Context> {
 export type TaskStepResult = (
   | { kind: "continue" }
   | { kind: "warn"; reason: string }
-  | { kind: "halt"; reason: string; haltKind?: "incomplete" | "stop" }
+  | {
+      kind: "halt";
+      reason: string;
+      /**
+       * `incomplete`: the work stopped short and needs a human.
+       * `stop`: a deliberate stop that is not a success (push/review failed).
+       * `noop`: nothing needed doing; the run completed successfully.
+       */
+      haltKind?: "incomplete" | "stop" | "noop";
+    }
   | { kind: "repeat"; from: string; maxRepeats: number; reason?: string; feedback?: ReviewFeedback }
 ) & { data?: Record<string, unknown> };
 
@@ -20,7 +29,12 @@ export interface TaskStepRecord {
 
 export type TaskStepsResult =
   | { kind: "completed" }
-  | { kind: "halted"; step: string; reason: string; haltKind?: "incomplete" | "stop" };
+  | {
+      kind: "halted";
+      step: string;
+      reason: string;
+      haltKind?: "incomplete" | "stop" | "noop";
+    };
 
 /**
  * Execute task steps in order. A step may halt or repeat an earlier phase;
@@ -90,7 +104,7 @@ export async function runTaskSteps<Context>(
         kind: "halted",
         step: step.name,
         reason: result.reason,
-        ...(result.haltKind === "stop" ? { haltKind: "stop" as const } : {}),
+        ...(result.haltKind ? { haltKind: result.haltKind } : {}),
       };
     }
 

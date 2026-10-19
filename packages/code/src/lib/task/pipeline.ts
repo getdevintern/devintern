@@ -215,6 +215,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     enableGit: options.git && options.autoCommit,
     task,
     createPr: options.createPr,
+    allowNoChanges: options.allowNoChanges,
     prTargetBranch: effectiveTargetBranch,
     tracker,
     skipComments: options.skipComments,
