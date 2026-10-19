@@ -26,6 +26,7 @@ import { describePipelineSelection, selectPipelineConfig } from "../task/pipelin
 import { loadArtifactUploader } from "../artifacts/upload";
 import type { LoadedArtifactUploader } from "../artifacts/upload";
 import type { PipelineConfig } from "../../types/settings";
+import type { Task } from "../../types/task-tracker";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
@@ -45,7 +46,7 @@ interface RunAgentHarnessOptions {
   taskKey?: string;
   taskSummary?: string;
   enableGit?: boolean;
-  task?: any;
+  task?: Task;
   createPr?: boolean;
   prTargetBranch?: string;
   tracker?: TaskTrackerClient;
