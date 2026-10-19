@@ -50,6 +50,8 @@ export interface DeliveryState extends PipelineContext {
   pendingFeedback?: ReviewFeedback;
   failedPlugin?: boolean;
   implementationStepSeen: boolean;
+  /** Set when `--allow-no-changes` accepted a delivery with nothing to commit. */
+  noChanges: boolean;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -234,6 +236,15 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
       console.log("✅ Delivering implementation commits inherited from the prior attempt");
       return true;
     }
+  }
+
+  if (outcome.result.message === "No changes to commit" && ctx.allowNoChanges) {
+    // Recurring jobs can legitimately decide there is nothing to do. Record
+    // the delivery as a successful no-op so the run does not fail merely
+    // because there is no commit to publish.
+    state.noChanges = true;
+    console.log("✅ No changes were required; treating the run as a successful no-op");
+    return true;
   }
 
   console.log(
@@ -478,9 +489,15 @@ const commitStep: TaskStep<DeliveryState> = {
     if (!(state.enableGit && state.taskKey && state.taskSummary)) {
       return { kind: "continue", data: { skipped: true } };
     }
-    return (await commitImplementation(state))
-      ? undefined
-      : { kind: "halt", reason: "Implementation was not committed" };
+    if (!(await commitImplementation(state))) {
+      return { kind: "halt", reason: "Implementation was not committed" };
+    }
+    if (state.noChanges) {
+      // Nothing to commit means there is also nothing to verify, review, or
+      // publish. Stop the delivery pipeline as a completed no-op.
+      return { kind: "halt", reason: "No changes were required", haltKind: "noop" };
+    }
+    return;
   },
 };
 
@@ -634,6 +651,7 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     prTargetBranch: ctx.prTargetBranch,
     enableGit: ctx.enableGit,
     createPr: ctx.createPr,
+    allowNoChanges: ctx.allowNoChanges,
     skipComments: ctx.skipComments,
     autoReview: ctx.autoReview,
     autoReviewIterations: ctx.autoReviewIterations,
@@ -651,16 +669,22 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     autoReviewRan: false,
     hookValidated: false,
     implementationStepSeen: false,
+    noChanges: false,
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
-      if (result.kind === "halted" && ["commit", "auto-review", "publish"].includes(result.step)) {
+      if (
+        result.kind === "halted" &&
+        result.haltKind !== "noop" &&
+        ["commit", "auto-review", "publish"].includes(result.step)
+      ) {
         ctx.reject(new Error(result.reason));
         return;
       }
       if (
         result.kind === "halted" &&
         result.haltKind !== "stop" &&
+        result.haltKind !== "noop" &&
         !["commit", "auto-review", "publish"].includes(result.step)
       ) {
         await reportPipelineHalt(state, result.reason);

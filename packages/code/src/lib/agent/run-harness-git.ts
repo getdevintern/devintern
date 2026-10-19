@@ -27,6 +27,8 @@ export interface FinalizeContext {
   resumeBranch?: string;
   task?: any;
   createPr: boolean;
+  /** Treat a run that makes no repository changes as a successful no-op. */
+  allowNoChanges: boolean;
   prTargetBranch: string;
   tracker?: TaskTrackerClient;
   skipComments: boolean;
