@@ -112,7 +112,7 @@ function escapeUnescapedQuotesInStrings(text: string): string {
   return result;
 }
 
-function balancedObjectCandidates(text: string): string[] {
+function balancedObjectCandidates(text: string, firstOnly = false): string[] {
   const candidates: string[] = [];
   let start = -1;
   let depth = 0;
@@ -149,6 +149,7 @@ function balancedObjectCandidates(text: string): string[] {
       depth -= 1;
       if (depth === 0) {
         candidates.push(text.slice(start, index + 1));
+        if (firstOnly) return candidates;
         start = -1;
       }
     }
@@ -216,6 +217,31 @@ export function parseAgentJsonObject(output: string, requiredKey: string): Recor
       lastParseError = error;
     }
   }
+
+  // Plain-text harnesses can include truncated tool output (for example
+  // `head package.json`) before the verdict. Restart at independent opening
+  // braces when the normal scan fails. Skip complete parsed objects so their
+  // nested fields cannot replace the outer verdict; the last verdict wins.
+  let recovered: Record<string, unknown> | undefined;
+  for (let start = output.indexOf("{"); start >= 0; start = output.indexOf("{", start + 1)) {
+    const [candidate] = balancedObjectCandidates(output.slice(start), true);
+    if (!candidate) continue;
+    for (const variant of [
+      candidate,
+      escapeControlCharsInStrings(candidate),
+      escapeUnescapedQuotesInStrings(escapeControlCharsInStrings(candidate)),
+    ]) {
+      try {
+        const parsed = JSON.parse(variant) as Record<string, unknown>;
+        if (Object.hasOwn(parsed, requiredKey)) recovered = parsed;
+        start += candidate.length - 1;
+        break;
+      } catch {
+        // This opening brace belonged to tool output or malformed JSON.
+      }
+    }
+  }
+  if (recovered) return recovered;
 
   if (lastParseError instanceof SyntaxError && candidates.length === 1) {
     throw lastParseError;

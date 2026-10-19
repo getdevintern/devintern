@@ -21,6 +21,8 @@ export interface PipelineContext {
   prTargetBranch: string;
   enableGit: boolean;
   createPr: boolean;
+  /** Treat a run that makes no repository changes as a successful no-op. */
+  allowNoChanges: boolean;
   skipComments: boolean;
   autoReview: boolean;
   autoReviewIterations: number;

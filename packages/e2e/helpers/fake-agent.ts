@@ -5,6 +5,25 @@ const mode = process.env.E2E_AGENT_MODE ?? "implement";
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
+// Tracker scenarios seed unique markers into the ticket description and a
+// comment; both must reach the agent's actual input before it edits anything.
+const agentInput = process.argv.join(" ");
+const missingMarkers: string[] = [];
+if (
+  process.env.E2E_EXPECT_DESCRIPTION_MARKER &&
+  !agentInput.includes(process.env.E2E_EXPECT_DESCRIPTION_MARKER)
+) {
+  missingMarkers.push("description");
+}
+if (
+  process.env.E2E_EXPECT_COMMENT_MARKER &&
+  !agentInput.includes(process.env.E2E_EXPECT_COMMENT_MARKER)
+) {
+  missingMarkers.push("comment");
+}
+if (missingMarkers.length > 0) {
+  throw new Error(`Seeded ${missingMarkers.join(" and ")} marker(s) did not reach the agent input`);
+}
 const path = "src/greeting.ts";
 if (mode === "no-change") {
   console.log(

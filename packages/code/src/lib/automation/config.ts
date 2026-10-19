@@ -20,6 +20,12 @@ export interface AutomationConfig extends AgentSelection {
    * omitting it (workspace `worker_task_args` included) never creates PRs.
    */
   openPr?: boolean;
+  /**
+   * Whether an occurrence that makes no repository changes is a successful
+   * no-op instead of a failed run. Opt-in and off by default, for jobs whose
+   * prompt explicitly allows "make no changes and report".
+   */
+  allowNoChanges?: boolean;
 }
 
 /** A cron-or-interval schedule using the `[[automations]]` format. */
@@ -185,6 +191,16 @@ export function parseAutomationEntries(
 
     const selection = parseAgentSelection(table, { label, id }, errors);
 
+    const allowNoChangesValue = table.allow_no_changes;
+    const allowNoChanges = typeof allowNoChangesValue === "boolean" ? allowNoChangesValue : false;
+    if (
+      allowNoChangesValue !== undefined &&
+      allowNoChangesValue !== null &&
+      typeof allowNoChangesValue !== "boolean"
+    ) {
+      errors.push(`${label}.allow_no_changes must be a boolean.`);
+    }
+
     if (id && typeof enabledValue === "boolean" && prompt && schedule) {
       automations.push({
         id,
@@ -195,6 +211,7 @@ export function parseAutomationEntries(
         intervalMs: schedule.intervalMs,
         repo,
         openPr,
+        allowNoChanges,
         ...selection,
       });
     }
@@ -245,27 +262,40 @@ const CREATE_PR_PATTERN = /^--create-pr(?:=(?!false$).*)?$/;
  *   `--flag=value` form — cannot leak in) and append `--no-git` so the run
  *   makes no branch, no push, and no PR — the work lands wherever the
  *   prompt says it should.
+ *
+ * `allow_no_changes = true` appends `--allow-no-changes`, so a run that ends
+ * without repository changes is recorded as a successful no-op instead of a
+ * failed delivery.
  */
-export function automationTaskArgs(automation: { openPr?: boolean }, baseArgs: string[]): string[] {
+export function automationTaskArgs(
+  automation: { openPr?: boolean; allowNoChanges?: boolean },
+  baseArgs: string[],
+): string[] {
+  let args: string[];
   if (automation.openPr) {
-    return baseArgs.some((arg) => CREATE_PR_PATTERN.test(arg))
-      ? baseArgs
+    args = baseArgs.some((arg) => CREATE_PR_PATTERN.test(arg))
+      ? [...baseArgs]
       : [...baseArgs, "--create-pr"];
-  }
-  const filtered: string[] = [];
-  let skipNext = false;
-  for (const arg of baseArgs) {
-    if (skipNext) {
-      skipNext = false;
-      continue;
+  } else {
+    const filtered: string[] = [];
+    let skipNext = false;
+    for (const arg of baseArgs) {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      if (PR_FLAGS_WITH_VALUE.has(arg)) {
+        skipNext = true;
+        continue;
+      }
+      if (PR_FLAG_PATTERN.test(arg)) continue;
+      filtered.push(arg);
     }
-    if (PR_FLAGS_WITH_VALUE.has(arg)) {
-      skipNext = true;
-      continue;
-    }
-    if (PR_FLAG_PATTERN.test(arg)) continue;
-    filtered.push(arg);
+    if (!filtered.includes("--no-git")) filtered.push("--no-git");
+    args = filtered;
   }
-  if (!filtered.includes("--no-git")) filtered.push("--no-git");
-  return filtered;
+  if (automation.allowNoChanges && !args.includes("--allow-no-changes")) {
+    args.push("--allow-no-changes");
+  }
+  return args;
 }

@@ -1,10 +1,75 @@
 import { expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isolatedEnvironment } from "../../helpers/environment";
+import { FixtureWorkspace } from "../../helpers/fixture-workspace";
 import { checkedCommand } from "../../helpers/process";
 import { cliPath } from "../../helpers/scenario";
+
+test.skipIf(!existsSync(cliPath))(
+  "FixtureWorkspace runs the Markdown fixture and derives the branch from its task key",
+  async () => {
+    const run = new FixtureWorkspace();
+    const remote = join(run.root, "remote.git");
+    try {
+      await checkedCommand(["git", "init", "--bare", remote], run.root, run.env);
+      await run.prepare(remote, "test-token", {});
+      expect(run.taskKey).toBe(run.id);
+      await run.runCli();
+      expect(await run.git("branch", "--show-current")).toBe(run.head);
+      expect(await run.git("diff", "--name-only", `${run.base}...HEAD`)).toBe("src/greeting.ts");
+      expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+    } finally {
+      run.dispose();
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "a leftover remote-only feature branch makes the CLI work on -attempt-2 and preserves it",
+  async () => {
+    const run = new FixtureWorkspace();
+    const remote = join(run.root, "remote.git");
+    const seed = join(run.root, "seed");
+    try {
+      await checkedCommand(["git", "init", "--bare", remote], run.root, run.env);
+      // Seed a foreign branch under the fixture's derived task key on the shared
+      // remote, then prepare a fresh workspace that must discover it.
+      mkdirSync(seed, { recursive: true });
+      await checkedCommand(["git", "init", "--initial-branch", "seed"], seed, run.env);
+      writeFileSync(join(seed, "foreign.txt"), "preserve me\n");
+      await checkedCommand(["git", "add", "."], seed, run.env);
+      await checkedCommand(["git", "commit", "-m", "foreign attempt"], seed, run.env);
+      await checkedCommand(["git", "remote", "add", "origin", remote], seed, run.env);
+      await checkedCommand(["git", "push", "origin", "seed"], seed, run.env);
+      await checkedCommand(["git", "checkout", "-b", run.head], seed, run.env);
+      await checkedCommand(["git", "push", "origin", run.head], seed, run.env);
+      const foreignSha = await checkedCommand(["git", "rev-parse", "HEAD"], seed, run.env);
+
+      await run.prepare(remote, "test-token", {});
+      await run.runCli();
+
+      // The run must have fallen back to the attempt branch instead of failing
+      // on a rejected push, and must never have touched the foreign ref.
+      expect(await run.git("branch", "--show-current")).toBe(`${run.head}-attempt-2`);
+      expect(await run.remoteSha(run.head)).toBe(foreignSha);
+      expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+    } finally {
+      run.dispose();
+    }
+  },
+  60_000,
+);
 
 test.skipIf(!existsSync(cliPath))(
   "built CLI implements, commits and pushes the fixture task using local Git",

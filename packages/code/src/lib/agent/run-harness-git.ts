@@ -7,6 +7,7 @@ import { applyActionedTransition } from "../task/actioned-transition";
 import { recordRunPr } from "../state/run-recorder";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
+import type { Task } from "../../types/task-tracker";
 import { Utils } from "../utils";
 import { runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { logHookErrorToFile } from "./plan";
@@ -25,8 +26,10 @@ export interface FinalizeContext {
   enableGit: boolean;
   /** Branch successfully inherited from a prior attempt. */
   resumeBranch?: string;
-  task?: any;
+  task?: Task;
   createPr: boolean;
+  /** Treat a run that makes no repository changes as a successful no-op. */
+  allowNoChanges: boolean;
   prTargetBranch: string;
   tracker?: TaskTrackerClient;
   skipComments: boolean;
@@ -162,6 +165,10 @@ export function createGitHelpers(ctx: FinalizeContext) {
   ) => {
     console.log("\n🔀 Creating pull request...");
     try {
+      if (!task) {
+        console.log("⚠️  No task available; skipping pull request creation");
+        return;
+      }
       const prManager = new PRManager();
       const branchForPr = await Utils.getCurrentBranch();
 

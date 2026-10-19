@@ -22,11 +22,84 @@ export class FixtureWorkspace {
   readonly cwd = join(this.root, "repo");
   readonly id = `e2e-${crypto.randomUUID()}`;
   readonly base = `e2e/base-${this.id}`;
-  readonly head = `feature/${this.id}`;
+  private taskKeyValue = this.id;
+  /** Exact branch a completed run recorded; overrides the derived head. */
+  private adoptedHead?: string;
   readonly env = isolatedEnvironment(this.root);
-  readonly ownedBranches = new Set([this.head, this.base]);
+  readonly ownedBranches = new Set([this.base, this.head]);
 
   constructor(private readonly apiTokenVariable = "GITHUB_TOKEN") {}
+
+  /** Task key driving branch naming and run-record lookups. */
+  get taskKey(): string {
+    return this.taskKeyValue;
+  }
+
+  /**
+   * Active feature branch: the branch a run actually recorded once one is
+   * known, otherwise `feature/<task-key>` derived from the task key.
+   */
+  get head(): string {
+    return this.adoptedHead ?? `feature/${this.taskKeyValue.toLowerCase()}`;
+  }
+
+  /**
+   * Point branch naming and run-record lookups at a remote tracker key.
+   * Registers the derived feature branch as owned as soon as the ticket exists.
+   *
+   * @param taskKey - Actual tracker key (e.g. a GitHub issue number)
+   */
+  protected useTaskKey(taskKey: string): void {
+    if (!taskKey.trim()) throw new Error("Task key must not be empty");
+    // Drop the previous derived head so a tracker scenario owns only the
+    // branch its real ticket key produces.
+    this.ownedBranches.delete(this.head);
+    this.adoptedHead = undefined;
+    this.taskKeyValue = taskKey;
+    this.ownedBranches.add(this.head);
+  }
+
+  /**
+   * Adopt the exact branch a run recorded, which can carry an `-attempt-N`
+   * suffix. Replaces the derived head in the owned set so assertions inspect
+   * the PR for the pushed branch and cleanup deletes only that ref, never a
+   * foreign branch that merely shares a deterministic tracker key.
+   *
+   * @param branch - Branch the run created or resumed
+   */
+  adoptHead(branch: string): void {
+    if (!branch.trim()) throw new Error("Adopted branch must not be empty");
+    if (branch === this.head) return;
+    this.ownedBranches.delete(this.head);
+    this.adoptedHead = branch;
+    this.ownedBranches.add(branch);
+  }
+
+  /**
+   * Branch a completed run recorded for `taskKey`, including any `-attempt-N`
+   * suffix. A run records its branch only after creating it, so a recorded ref
+   * is always owned by the scenario. Best-effort: an unreadable or absent
+   * run-records database yields `undefined` rather than masking a run failure.
+   *
+   * @param taskKey - Task key the run was started with
+   */
+  recordedBranch(taskKey: string): string | undefined {
+    if (!existsSync(this.env.WEBHOOK_QUEUE_DB)) return undefined;
+    let db: Database | undefined;
+    try {
+      db = new Database(this.env.WEBHOOK_QUEUE_DB, { readonly: true });
+      const row = db
+        .query(
+          "SELECT branch FROM runs WHERE task_key = ? AND branch IS NOT NULL ORDER BY id DESC LIMIT 1",
+        )
+        .get(taskKey) as { branch: string | null } | null;
+      return row?.branch ?? undefined;
+    } catch {
+      return undefined;
+    } finally {
+      db?.close();
+    }
+  }
 
   async prepare(
     remoteUrl: string,
@@ -67,8 +140,13 @@ export class FixtureWorkspace {
     await this.git("add", ".");
     await this.git("commit", "-m", "Seed isolated E2E fixture");
     await this.git("push", "--set-upstream", "origin", this.base);
-    // Fetch establishes remote branch refs without cloning unrelated project files.
-    await this.git("fetch", "origin", this.base);
+    // Fetch every remote head, not just base, without cloning unrelated project
+    // files. A previous run on the shared code host can leave a `feature/<key>`
+    // ref behind; the CLI's collision detection only consults local and
+    // remote-tracking refs, so unless that ref is fetched it recreates the
+    // foreign branch and the push is rejected instead of falling back to
+    // `feature/<key>-attempt-2`.
+    await this.git("fetch", "--prune", "origin");
     writeFileSync(
       join(this.root, `${this.id}.md`),
       `---\nkey: ${this.id}\n---\n# Expand the greeting\n\nChange the greeting to Hello, world! and run bun test.\n`,
@@ -85,17 +163,25 @@ export class FixtureWorkspace {
       implicitTarget?: boolean;
       agentMode?: "implement" | "fail" | "no-change";
       gitToken?: string;
+      /** Task reference passed to the CLI; defaults to the Markdown fixture. */
+      taskRef?: string;
+      /** Select tasks through the production tracker search instead of a positional key. */
+      query?: string;
+      /** Skip tracker comments/transitions; defaults to true for Markdown. */
+      skipComments?: boolean;
     } = {},
   ) {
     return command(
       [
         process.execPath,
         cliPath,
-        join(this.root, `${this.id}.md`),
+        ...(options.query === undefined
+          ? [options.taskRef ?? join(this.root, `${this.id}.md`)]
+          : ["--query", options.query]),
         "--agent-path",
         join(this.root, "bin/agent.ts"),
         "--skip-clarity-check",
-        "--skip-comments",
+        ...(options.skipComments === false ? [] : ["--skip-comments"]),
         "--create-pr",
         ...(options.implicitTarget ? [] : ["--pr-target-branch", this.base]),
         "--hook-retries",
@@ -147,12 +233,22 @@ export class FixtureWorkspace {
     return { existingSha, attemptHead };
   }
 
-  runRecords(): Array<{ status: string; pr_url: string | null; outcome_reason: string | null }> {
+  runRecords(options: { allTasks?: boolean } = {}): Array<{
+    task_key: string | null;
+    tracker: string | null;
+    status: string;
+    pr_url: string | null;
+    outcome_reason: string | null;
+  }> {
     const db = new Database(this.env.WEBHOOK_QUEUE_DB, { readonly: true });
     try {
       return db
-        .query("SELECT status, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id")
-        .all(this.id) as Array<{
+        .query(
+          `SELECT task_key, tracker, status, pr_url, outcome_reason FROM runs${options.allTasks ? "" : " WHERE task_key = ?"} ORDER BY id`,
+        )
+        .all(...(options.allTasks ? [] : [this.taskKey])) as Array<{
+        task_key: string | null;
+        tracker: string | null;
         status: string;
         pr_url: string | null;
         outcome_reason: string | null;

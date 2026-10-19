@@ -1,0 +1,380 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { GitHub } from "../providers/github";
+import type {
+  TrackerComment,
+  TrackerFixture,
+  TrackerTicket,
+  TrackerTicketState,
+} from "../providers/tracker";
+import { collectGitHubCleanupFailures, throwCleanupFailures } from "./cleanup";
+import type { CleanupFailure } from "./cleanup";
+import { FixtureWorkspace } from "./fixture-workspace";
+
+/**
+ * Mutually-exclusive status labels every tracker lifecycle scenario uses.
+ *
+ * The labels are created by the scenario itself (never inherited from the
+ * environment) so a live run is deterministic; `E2E_TRACKER_STATUS_LABELS`
+ * remains available to add operator-chosen labels to the exclusive set.
+ */
+export const TRACKER_STATUS_LABELS = {
+  todo: "e2e: To Do",
+  inProgress: "e2e: In Progress",
+  inReview: "e2e: In Review",
+} as const;
+
+/** A non-status label that must survive every status transition. */
+export const TRACKER_UNRELATED_LABEL = "e2e: keep";
+
+/** Per-project status names written into `.devintern-code/settings.json`. */
+export interface TrackerStatusSettings {
+  inProgressStatus?: string;
+  todoStatus?: string;
+  prStatus?: string;
+}
+
+/** Default per-project status settings derived from {@link TRACKER_STATUS_LABELS}. */
+export const TRACKER_STATUS_SETTINGS: Required<TrackerStatusSettings> = {
+  todoStatus: TRACKER_STATUS_LABELS.todo,
+  inProgressStatus: TRACKER_STATUS_LABELS.inProgress,
+  prStatus: TRACKER_STATUS_LABELS.inReview,
+};
+
+export interface TrackerScenarioOptions {
+  /** Ticket title; the created PR title becomes `[<key>] <title>`. */
+  title?: string;
+  /**
+   * Seed a comment whose unique marker must reach the agent (default true).
+   * Set false for scenarios that only need the description marker.
+   */
+  seedComment?: boolean;
+  /** Tracker project status settings the CLI should apply. */
+  statuses?: TrackerStatusSettings;
+  /** Extra non-status labels seeded on the ticket (default: the unrelated label). */
+  seedLabels?: string[];
+  /** Create a decoy ticket outside the scenario selector (default true). */
+  decoy?: boolean;
+}
+
+/** Env var carrying the mutually-exclusive status label set for a tracker. */
+function statusLabelsVariable(trackerType: string): string | undefined {
+  switch (trackerType) {
+    case "github":
+      return "GITHUB_STATUS_LABELS";
+    case "gitlab":
+      return "GITLAB_STATUS_LABELS";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Build the tracker-scoped `.devintern-code/settings.json` body.
+ *
+ * The project key mirrors what `resolveProjectKey` derives for the tracker so
+ * the CLI finds the configured per-project statuses.
+ */
+export function buildTrackerSettings(
+  trackerType: string,
+  projectKey: string,
+  statuses: TrackerStatusSettings,
+): Record<string, unknown> {
+  return { [trackerType]: { projects: { [projectKey]: statuses } } };
+}
+
+/**
+ * Delete seeded comments then close the owned tickets, attempting every
+ * operation and tagging failures with their resource ids.
+ */
+export async function collectTrackerCleanupFailures(
+  tracker: TrackerFixture,
+  owned: { ticketKeys: Iterable<string>; commentIds: Iterable<string> },
+): Promise<CleanupFailure[]> {
+  const failures: CleanupFailure[] = [];
+  for (const commentId of owned.commentIds) {
+    try {
+      await tracker.deleteComment(commentId);
+    } catch (error) {
+      failures.push({ resource: `comment:${commentId}`, error });
+    }
+  }
+  for (const ticketKey of owned.ticketKeys) {
+    try {
+      await tracker.closeTicket(ticketKey);
+    } catch (error) {
+      failures.push({ resource: `ticket:${ticketKey}`, error });
+    }
+  }
+  return failures;
+}
+
+/**
+ * Lifecycle for a scenario driven by a remote tracker ticket.
+ *
+ * The code host is always GitHub, but the tracker backend is injected, so a
+ * provider task can add Jira/Linear/etc. without a tracker-by-code-host matrix.
+ * The fixture provisions one fresh ticket (and optional seeded comment) in an
+ * explicitly configured repository, runs the built CLI against the ticket's
+ * real key, then closes/deletes only the resources it created.
+ *
+ * A decoy ticket outside the scenario's unique selector is created alongside
+ * the expected ticket so a provider-native query can prove the selector picks
+ * only the intended ticket.
+ */
+export class TrackerScenario extends FixtureWorkspace {
+  // Markers are continuous alphanumeric tokens (no separators) so provider
+  // full-text search treats each as one term and can match them reliably.
+  private readonly markerToken = crypto.randomUUID().replace(/-/g, "");
+  /** Unique marker embedded in the seeded ticket description; the selector. */
+  readonly descriptionMarker = `E2EDESCRIPTIONMARKER${this.markerToken}`;
+  /** Unique marker embedded in the seeded ticket comment. */
+  readonly commentMarker = `E2ECOMMENTMARKER${this.markerToken}`;
+  /** Unique marker on the decoy ticket, kept outside the selector. */
+  readonly decoyMarker = `E2EDECOY${this.markerToken}`;
+
+  ticket?: TrackerTicket;
+  decoyTicket?: TrackerTicket;
+
+  private readonly ownedCommentIds: string[] = [];
+
+  constructor(
+    readonly github: GitHub,
+    readonly tracker: TrackerFixture,
+    private readonly options: TrackerScenarioOptions = {},
+  ) {
+    super();
+  }
+
+  /** Title shared by the ticket and the resulting PR. */
+  get title(): string {
+    return this.options.title ?? "Expand the greeting";
+  }
+
+  /** Effective per-project statuses (defaults to the shared label names). */
+  get statuses(): Required<TrackerStatusSettings> {
+    return {
+      todoStatus: this.options.statuses?.todoStatus ?? TRACKER_STATUS_SETTINGS.todoStatus,
+      inProgressStatus:
+        this.options.statuses?.inProgressStatus ?? TRACKER_STATUS_SETTINGS.inProgressStatus,
+      prStatus: this.options.statuses?.prStatus ?? TRACKER_STATUS_SETTINGS.prStatus,
+    };
+  }
+
+  /** Non-status labels the ticket starts with. */
+  get seedLabels(): string[] {
+    return this.options.seedLabels ?? [TRACKER_UNRELATED_LABEL];
+  }
+
+  async setup(token: string): Promise<void> {
+    const statuses = this.statuses;
+    await this.tracker.ensureLabels([...Object.values(statuses), ...this.seedLabels]);
+
+    if (this.options.decoy !== false) {
+      // Created before the expected ticket; ownership is recorded immediately.
+      // The decoy deliberately omits the description marker so the selector
+      // must not match it.
+      this.decoyTicket = await this.tracker.createTicket({
+        title: `${this.title} (decoy)`,
+        body: `# Decoy\n\nThis ticket is outside the scenario selector and must stay untouched.\n\n${this.decoyMarker}\n`,
+      });
+    }
+
+    const body = `# ${this.title}\n\nChange the greeting to Hello, world! and run bun test.\n\n${this.descriptionMarker}\n`;
+    // First expected mutation; ownership is recorded immediately so a later
+    // failure (comment, git setup) still cleans the ticket up.
+    const ticket = await this.tracker.createTicket({
+      title: this.title,
+      body,
+      labels: [...this.seedLabels, statuses.todoStatus],
+    });
+    this.ticket = ticket;
+    this.useTaskKey(ticket.key);
+
+    const providerEnv: Record<string, string> = {
+      ...this.tracker.environment(),
+      GITHUB_TOKEN: token,
+      E2E_EXPECT_DESCRIPTION_MARKER: this.descriptionMarker,
+    };
+    const statusVariable = statusLabelsVariable(this.tracker.type);
+    if (statusVariable) {
+      // Keep any operator-configured labels and add the scenario's explicit set
+      // so both are treated as mutually exclusive on transition.
+      const configured = (providerEnv[statusVariable] ?? "")
+        .split(",")
+        .map((label) => label.trim())
+        .filter(Boolean);
+      providerEnv[statusVariable] = [...new Set([...configured, ...Object.values(statuses)])].join(
+        ",",
+      );
+    }
+    if (this.options.seedComment !== false) {
+      const commentId = await this.tracker.addComment(
+        ticket.key,
+        `Please keep the change minimal.\n\n${this.commentMarker}\n`,
+      );
+      this.ownedCommentIds.push(commentId);
+      providerEnv.E2E_EXPECT_COMMENT_MARKER = this.commentMarker;
+    }
+
+    await this.prepare(`https://github.com/${this.github.repository}.git`, token, providerEnv);
+    this.writeSettings();
+  }
+
+  /** Run the CLI by tracker key or query, with comments enabled. */
+  async runTrackerTask(
+    options: {
+      agentMode?: "implement" | "fail" | "no-change";
+      implicitTarget?: boolean;
+      query?: boolean;
+    } = {},
+  ) {
+    if (!this.ticket) throw new Error("Tracker ticket has not been provisioned");
+    const { query, ...taskOptions } = options;
+    try {
+      if (query) {
+        // Wait only for remote indexing. Selection itself happens in the built
+        // CLI via --query and its production TaskTrackerClient.searchTasks.
+        await this.waitForSelectedTickets();
+      }
+      return await this.runTask({
+        ...(query ? { query: `is:open ${this.descriptionMarker}` } : { taskRef: this.ticket.key }),
+        skipComments: false,
+        ...taskOptions,
+      });
+    } finally {
+      // A failed indexing wait must also release the uncreated derived branch.
+      this.syncRecordedBranch();
+    }
+  }
+
+  /**
+   * Align owned branches with the branch the run actually recorded.
+   *
+   * The CLI derives the branch from the tracker key, which for a fresh GitLab
+   * project is always `feature/2`, while the code host is shared. If a prior
+   * run left that ref behind, the CLI pushes `feature/2-attempt-2` instead.
+   * Adopting the recorded branch makes assertions inspect the PR for that ref
+   * and keeps cleanup from deleting the foreign `feature/2`. When no branch was
+   * recorded the run never created one, so the derived head is dropped rather
+   * than left owned.
+   */
+  protected syncRecordedBranch(): void {
+    const branch = this.recordedBranch(this.requireTicketKey());
+    if (branch) {
+      this.adoptHead(branch);
+    } else {
+      this.ownedBranches.delete(this.head);
+    }
+  }
+
+  /** Run the CLI and fail the scenario when it exits non-zero. */
+  async runTrackerCli(
+    options: {
+      agentMode?: "implement" | "fail" | "no-change";
+      implicitTarget?: boolean;
+      query?: boolean;
+    } = {},
+  ) {
+    const result = await this.runTrackerTask(options);
+    if (result.exitCode !== 0) {
+      throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
+    }
+    return result;
+  }
+
+  /** Key of the expected ticket, failing when setup did not provision it. */
+  requireTicketKey(): string {
+    if (!this.ticket) throw new Error("Tracker ticket has not been provisioned");
+    return this.ticket.key;
+  }
+
+  getTicket(ticketKey: string): Promise<TrackerTicketState> {
+    return this.tracker.getTicket(ticketKey);
+  }
+
+  listComments(ticketKey: string): Promise<TrackerComment[]> {
+    return this.tracker.listComments(ticketKey);
+  }
+
+  /**
+   * Provider-native selector query with bounded polling for eventual
+   * consistency: resolves once the expected ticket appears, and fails when it
+   * never does.
+   *
+   * Search engines may tokenize the marker differently or match fuzzily, so
+   * the expected hit is confirmed by re-reading its body for the raw marker.
+   * Once indexed, all raw search hits are returned so assertions can detect
+   * an incorrect extra match rather than silently filtering it out.
+   *
+   * Polling backs off exponentially (capped) because provider search endpoints
+   * are rate-limited far below their core APIs; a tight one-second loop can
+   * exhaust the search quota before the index catches up. The first delay
+   * matches the previous fixed interval, so a fast index still resolves in one
+   * poll.
+   */
+  async waitForSelectedTickets(
+    options: {
+      deadlineMs?: number;
+      initialDelayMs?: number;
+      maxDelayMs?: number;
+      sleep?: (ms: number) => Promise<unknown>;
+    } = {},
+  ): Promise<TrackerTicket[]> {
+    const expected = this.requireTicketKey();
+    const deadlineMs = options.deadlineMs ?? 30_000;
+    const maxDelayMs = options.maxDelayMs ?? 5_000;
+    const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+    const deadline = Date.now() + deadlineMs;
+    let delayMs = options.initialDelayMs ?? 1_000;
+    do {
+      const hits = await this.tracker.findTickets(this.descriptionMarker);
+      if (hits.some((ticket) => ticket.key === expected)) {
+        const detail = await this.tracker.getTicket(expected);
+        // Return raw search results so the test cannot hide an incorrectly
+        // selected decoy behind its own body filtering.
+        if (detail.body.includes(this.descriptionMarker)) return hits;
+      }
+      await sleep(delayMs);
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    } while (Date.now() < deadline);
+    throw new Error(`Ticket ${expected} never matched selector ${this.descriptionMarker}`);
+  }
+
+  async cleanup(): Promise<void> {
+    const ticketKeys = [this.ticket?.key, this.decoyTicket?.key].filter((key): key is string =>
+      Boolean(key),
+    );
+    const failures = await collectTrackerCleanupFailures(this.tracker, {
+      ticketKeys,
+      commentIds: this.ownedCommentIds,
+    });
+    if (this.tracker.cleanup) {
+      try {
+        await this.tracker.cleanup();
+      } catch (error) {
+        failures.push({ resource: `tracker:${this.tracker.type}`, error });
+      }
+    }
+    failures.push(
+      ...(await collectGitHubCleanupFailures(this.github, this.ownedBranches, this.base)),
+    );
+    this.dispose();
+    throwCleanupFailures(
+      `Tracker cleanup failed for ${this.id}; tickets ${ticketKeys.join(", ") || "not created"}`,
+      failures,
+    );
+  }
+
+  private writeSettings(): void {
+    mkdirSync(join(this.cwd, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(this.cwd, ".devintern-code", "settings.json"),
+      `${JSON.stringify(
+        buildTrackerSettings(this.tracker.type, this.tracker.projectKey(), this.statuses),
+        null,
+        2,
+      )}\n`,
+    );
+  }
+}

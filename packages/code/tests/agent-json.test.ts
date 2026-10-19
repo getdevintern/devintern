@@ -95,3 +95,34 @@ That is the final review.`;
     );
   });
 });
+
+describe("JSON recovery across plain-text harness outputs", () => {
+  const verdict = { summary: "Checked", items: [], approved: false };
+
+  test.each([
+    [
+      "truncated package JSON",
+      '$ cat package.json | head -3\n{\n  "name": "example",\n  "scripts": {',
+    ],
+    ["truncated string", '{"description":"unfinished'],
+    ["source snippet", "function example() {\n  const value = {"],
+    ["terminal formatting", "\u001b[0mTool output: {\n\u001b[0m"],
+  ])("recovers a final verdict after %s", (_label, prefix) => {
+    expect(parseAgentJsonObject(`${prefix}\n${JSON.stringify(verdict)}`, "approved")).toEqual(
+      verdict,
+    );
+  });
+
+  test("does not infer a missing approval from prose", () => {
+    expect(() =>
+      parseAgentJsonObject('{"summary":"approved is false","items":[]}', "approved"),
+    ).toThrow('No valid JSON object containing "approved"');
+  });
+
+  test("keeps the complete outer verdict rather than a nested approval", () => {
+    const outer = { approved: false, detail: { approved: true } };
+    expect(parseAgentJsonObject(`truncated {\n${JSON.stringify(outer)}`, "approved")).toEqual(
+      outer,
+    );
+  });
+});

@@ -13,6 +13,7 @@ export interface ProgramOptions {
   autoCommit: boolean;
   skipClarityCheck: boolean; // New option to skip clarity check
   createPr: boolean; // New option to create pull request
+  allowNoChanges: boolean; // Treat a run that changes nothing as a successful no-op
   prTargetBranch: string; // Target branch for PR
   prTargetBranchExplicit?: boolean; // Whether --pr-target-branch was supplied
   requestedPrTargetBranch?: string; // Unresolved explicit target for provider validation
@@ -76,6 +77,10 @@ export function createProgram(): Command {
     .option("--no-auto-commit", "Skip automatic git commit after Agent completes")
     .option("--skip-clarity-check", "Skip running Agent for clarity assessment")
     .option("--create-pr", "Create pull request after implementation")
+    .option(
+      "--allow-no-changes",
+      "Treat a run that makes no repository changes as a successful no-op",
+    )
     .option(
       "--pr-target-branch <branch>",
       "Target branch for pull request (omitting this uses the repository default branch)",
