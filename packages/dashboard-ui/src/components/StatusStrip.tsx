@@ -79,9 +79,17 @@ export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
 
 /** Header strip: worker liveness, queue counts, and open agent PRs. */
 export function StatusStrip() {
-  const { data } = usePoll<WorkerResponse>("/api/worker");
+  const { data, error } = usePoll<WorkerResponse>("/api/worker");
   if (!data) {
-    return null;
+    return (
+      <div className="dashboard-status-strip">
+        <Item
+          icon={<CircleHelp className="size-4" />}
+          label={error ? "Worker status unavailable" : "Checking worker status…"}
+          title={error ?? undefined}
+        />
+      </div>
+    );
   }
 
   const queueLabel =
@@ -90,7 +98,7 @@ export function StatusStrip() {
       : `${data.queue.pending + data.queue.processing} queued`;
 
   return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-muted-foreground">
+    <div className="dashboard-status-strip">
       <WorkerStatusIndicator worker={data.worker} />
       {data.schedule?.enabled ? (
         <Item
@@ -113,6 +121,13 @@ export function StatusStrip() {
         <Item
           icon={<Activity className="size-4" />}
           label="no database yet: run the worker once to start recording"
+        />
+      ) : null}
+      {error ? (
+        <Item
+          icon={<CircleHelp className="size-4 text-chart-5" />}
+          label="Connection interrupted; showing last known status"
+          title={error}
         />
       ) : null}
     </div>

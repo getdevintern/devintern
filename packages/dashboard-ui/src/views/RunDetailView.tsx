@@ -32,6 +32,10 @@ const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
   outcome: "Outcome",
 };
 
+function formatStageLabel(stage: string): string {
+  return (STAGE_LABELS as Record<string, string>)[stage] ?? stage;
+}
+
 /**
  * Human-readable rendering of a stage's detail blob, surfaced directly under
  * the stage so the full content (markdown prose + structured fields) is
@@ -88,7 +92,7 @@ function StageDetail({
             className="-ml-1 text-muted-foreground"
           >
             {rawOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            raw
+            {rawOpen ? "Hide raw details" : "View raw details"}
           </Button>
           {rawOpen ? (
             <pre className="mt-1 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
@@ -101,11 +105,19 @@ function StageDetail({
   );
 }
 
-function MetaItem({ label, value }: { label: string; value: React.ReactNode }) {
+function MetaItem({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <div>
+    <div className={className}>
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-0.5 text-sm">{value}</div>
+      <div className="mt-0.5 min-w-0 break-words text-sm">{value}</div>
     </div>
   );
 }
@@ -146,16 +158,12 @@ function RetryConfirm({
     <div className="rounded-md border bg-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
         {automation ? (
-          <>
-            Start a fresh run of the automation that produced this run? The worker runs it through
-            its normal automation pipeline — the same flow a scheduled occurrence or Run now uses.
-          </>
+          <>Start a new run of this automation? The current run stays in history.</>
         ) : (
           <>
-            Schedule a fresh run of{" "}
-            {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"} with{" "}
-            <code className="font-mono">--force</code>? The worker picks it up through its normal
-            pipeline (routing, worktree, per-repo environment) and skips the retry gate.
+            Schedule a new run of{" "}
+            {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"}? This bypasses
+            the retry limit. The current run stays in history.
           </>
         )}
       </p>
@@ -166,8 +174,8 @@ function RetryConfirm({
               ? "Triggering…"
               : "Scheduling…"
             : automation
-              ? "Yes, re-run automation"
-              : "Yes, schedule retry"}
+              ? "Start new run"
+              : "Schedule retry"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
@@ -261,8 +269,7 @@ function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }
         className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <span className="font-medium">{file.label ?? file.origin}</span>
-        <span className="text-xs text-muted-foreground">{formatRunOriginLabel(file.origin)}</span>
+        <span className="font-medium">{file.label ?? formatRunOriginLabel(file.origin)}</span>
         {file.taskKey ? (
           <span className="font-mono text-xs text-muted-foreground">{file.taskKey}</span>
         ) : null}
@@ -326,7 +333,7 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
       return;
     }
     setOpen(true);
-    if (content || loading) {
+    if (content || loading || !file.available) {
       return;
     }
     setLoading(true);
@@ -356,9 +363,9 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
         className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <span className="text-xs">{file.title}</span>
+        <span className="font-medium">{file.title}</span>
         <span className="text-xs text-muted-foreground">
-          {file.step} · execution {file.iteration}
+          {formatStageLabel(file.step)} · execution {file.iteration}
           {file.commitSha ? ` · ${file.commitSha.slice(0, 7)}` : ""}
         </span>
         <span className="ml-auto text-xs tabular-nums text-muted-foreground">
@@ -469,9 +476,10 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
         const scheduled = body.status === "scheduled";
         const pidSuffix = body.pid !== undefined ? ` (pid ${body.pid})` : "";
         if (data.retry.kind === "automation") {
+          const triggered = body.status === "triggered";
           setFeedback({
-            kind: "success",
-            message: body.status
+            kind: triggered ? "success" : "error",
+            message: triggered
               ? `Automation re-run triggered. A fresh run will appear in the run list shortly.`
               : "Could not trigger the automation re-run.",
           });
@@ -504,8 +512,25 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
         <ArrowLeft /> All runs
       </Button>
 
+      {!data && loading ? (
+        <p role="status" className="py-8 text-center text-sm text-muted-foreground">
+          Loading run details…
+        </p>
+      ) : null}
+
       {error ? (
-        <EmptyState title={loading ? "Loading…" : "Could not load run"} body={error} />
+        data ? (
+          <div role="status" className="rounded-md border border-destructive/30 px-3 py-2 text-sm">
+            Could not refresh this run. Showing the last loaded details. {error}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <EmptyState title="Could not load run" body={error} />
+            <Button variant="outline" size="sm" onClick={refresh}>
+              <RefreshCcw /> Try again
+            </Button>
+          </div>
+        )
       ) : null}
 
       {data ? (
@@ -558,20 +583,10 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                 <p className="mt-1 text-sm text-muted-foreground">{data.run.outcomeReason}</p>
               ) : null}
             </CardHeader>
-            <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            <CardContent className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-5">
               <MetaItem label="Origin" value={formatRunOrigin(data.run.origin)} />
               <MetaItem label="Tracker" value={data.run.tracker ?? "–"} />
               <MetaItem label="Harness" value={data.run.harness ?? "–"} />
-              <MetaItem
-                label="Branch"
-                value={
-                  data.run.branch ? (
-                    <code className="font-mono text-xs">{data.run.branch}</code>
-                  ) : (
-                    "–"
-                  )
-                }
-              />
               <MetaItem label="Result" value={<RunResult run={data.run} />} />
               <MetaItem
                 label="Duration"
@@ -581,8 +596,57 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                     : "in progress"
                 }
               />
+              <MetaItem
+                label="Branch"
+                className="col-span-full"
+                value={
+                  data.run.branch ? (
+                    <code className="break-words font-mono text-xs">{data.run.branch}</code>
+                  ) : (
+                    "–"
+                  )
+                }
+              />
             </CardContent>
           </Card>
+
+          <section aria-labelledby="run-timeline-heading" className="pt-2">
+            <h2 id="run-timeline-heading" className="mb-5 text-lg font-semibold">
+              Run timeline
+            </h2>
+            <div className="space-y-0">
+              {data.stages.map((stage, index) => (
+                <div key={stage.id} className="relative flex gap-4 pb-6">
+                  {index < data.stages.length - 1 ? (
+                    <div className="absolute top-5 bottom-0 left-[7px] w-px bg-border" />
+                  ) : null}
+                  <div className="relative mt-1.5 size-[15px] shrink-0 rounded-full border-2 border-primary bg-background" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{STAGE_LABELS[stage.stage]}</span>
+                      <StageBadge status={stage.status} />
+                      <span className="text-xs tabular-nums text-muted-foreground">
+                        {formatTime(stage.createdAt)}
+                      </span>
+                    </div>
+                    {stage.summary ? (
+                      <p className="mt-1 text-sm text-muted-foreground">{stage.summary}</p>
+                    ) : null}
+                    {stage.detail ? (
+                      <StageDetail
+                        stage={stage.stage}
+                        detail={stage.detail}
+                        summary={stage.summary}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+              {data.stages.length === 0 ? (
+                <EmptyState title="No stages recorded" body="This run has no stage records yet." />
+              ) : null}
+            </div>
+          </section>
 
           {(data.run.taskKey || data.run.ticketUrl) && (
             <Card>
@@ -602,39 +666,6 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
           <HarnessLogsCard runId={data.run.id} logs={data.harnessLogs ?? []} />
 
           <ArtifactsCard runId={data.run.id} artifacts={data.artifacts ?? []} />
-
-          <div className="space-y-0">
-            {data.stages.map((stage, index) => (
-              <div key={stage.id} className="relative flex gap-4 pb-6">
-                {index < data.stages.length - 1 ? (
-                  <div className="absolute top-5 bottom-0 left-[7px] w-px bg-border" />
-                ) : null}
-                <div className="relative mt-1.5 size-[15px] shrink-0 rounded-full border-2 border-primary bg-background" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">{STAGE_LABELS[stage.stage]}</span>
-                    <StageBadge status={stage.status} />
-                    <span className="text-xs tabular-nums text-muted-foreground">
-                      {formatTime(stage.createdAt)}
-                    </span>
-                  </div>
-                  {stage.summary ? (
-                    <p className="mt-1 text-sm text-muted-foreground">{stage.summary}</p>
-                  ) : null}
-                  {stage.detail ? (
-                    <StageDetail
-                      stage={stage.stage}
-                      detail={stage.detail}
-                      summary={stage.summary}
-                    />
-                  ) : null}
-                </div>
-              </div>
-            ))}
-            {data.stages.length === 0 ? (
-              <EmptyState title="No stages recorded" body="This run has no stage records yet." />
-            ) : null}
-          </div>
         </>
       ) : null}
     </div>

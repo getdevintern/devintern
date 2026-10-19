@@ -6,6 +6,10 @@ dist/
 .env
 .env.local
 
+# Impeccable machine-local state
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+
 # devintern-pm configuration (contains secrets)
 .devintern-pm/.env
 .devintern-pm/.auth-session.json
