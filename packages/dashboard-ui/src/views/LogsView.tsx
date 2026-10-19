@@ -171,7 +171,7 @@ export function LogsView() {
                   title={`${entry.level}${entry.stream === "err" ? " (stderr)" : ""}`}
                 />
                 <span
-                  className="w-28 shrink-0 tabular-nums text-muted-foreground"
+                  className="hidden w-28 shrink-0 tabular-nums text-muted-foreground sm:block"
                   title={
                     entry.timestamp === null
                       ? "unknown time"
@@ -180,8 +180,18 @@ export function LogsView() {
                 >
                   {entry.timestamp === null ? "–" : formatTime(entry.timestamp)}
                 </span>
-                <span className="min-w-0 flex-1 whitespace-pre-wrap break-all">
-                  {entry.message}
+                <span className="min-w-0 flex-1">
+                  <span
+                    className="mb-0.5 block tabular-nums text-muted-foreground sm:hidden"
+                    title={
+                      entry.timestamp === null
+                        ? "unknown time"
+                        : new Date(entry.timestamp).toLocaleString()
+                    }
+                  >
+                    {entry.timestamp === null ? "–" : formatTime(entry.timestamp)}
+                  </span>
+                  <span className="whitespace-pre-wrap break-words">{entry.message}</span>
                 </span>
                 {entry.runId ? (
                   <a

@@ -131,27 +131,35 @@ export function StatsView() {
               <Table className="text-sm">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="px-4">Harness</TableHead>
-                    <TableHead className="px-4">Runs</TableHead>
-                    <TableHead className="px-4">Succeeded</TableHead>
-                    <TableHead className="px-4">Failed</TableHead>
-                    <TableHead className="px-4">Escalated</TableHead>
-                    <TableHead className="px-4">Median duration</TableHead>
+                    <TableHead className="px-2 sm:px-4">Harness</TableHead>
+                    <TableHead className="px-2 sm:px-4">Runs</TableHead>
+                    <TableHead className="px-2 sm:px-4">Succeeded</TableHead>
+                    <TableHead className="px-2 sm:px-4">Failed</TableHead>
+                    <TableHead className="hidden px-2 sm:px-4 md:table-cell">Escalated</TableHead>
+                    <TableHead className="hidden px-2 sm:px-4 sm:table-cell">
+                      Median duration
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {stats.byHarness.map((harness) => (
                     <TableRow key={harness.harness}>
-                      <TableCell className="px-4 py-2.5 font-medium">{harness.harness}</TableCell>
-                      <TableCell className="px-4 py-2.5 tabular-nums">{harness.runs}</TableCell>
-                      <TableCell className="px-4 py-2.5 tabular-nums">
+                      <TableCell className="px-2 sm:px-4 py-2.5 font-medium">
+                        {harness.harness}
+                      </TableCell>
+                      <TableCell className="px-2 sm:px-4 py-2.5 tabular-nums">
+                        {harness.runs}
+                      </TableCell>
+                      <TableCell className="px-2 sm:px-4 py-2.5 tabular-nums">
                         {harness.succeeded}
                       </TableCell>
-                      <TableCell className="px-4 py-2.5 tabular-nums">{harness.failed}</TableCell>
-                      <TableCell className="px-4 py-2.5 tabular-nums">
+                      <TableCell className="px-2 sm:px-4 py-2.5 tabular-nums">
+                        {harness.failed}
+                      </TableCell>
+                      <TableCell className="hidden px-2 sm:px-4 py-2.5 tabular-nums md:table-cell">
                         {harness.escalated}
                       </TableCell>
-                      <TableCell className="px-4 py-2.5 tabular-nums">
+                      <TableCell className="hidden px-2 sm:px-4 py-2.5 tabular-nums sm:table-cell">
                         {harness.medianDurationMs === null
                           ? "–"
                           : formatDuration(harness.medianDurationMs)}

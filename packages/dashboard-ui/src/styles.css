@@ -353,20 +353,22 @@
   }
 
   .dashboard-nav {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     overflow: visible;
     padding-bottom: 12px;
   }
 
   .dashboard-nav-link {
+    flex: none;
     justify-content: center;
     gap: 7px;
     min-width: 0;
-    padding-inline: 5px;
+    padding-inline: 9px;
     border-radius: 7px;
     font-size: 12px;
+    white-space: nowrap;
   }
 
   .dashboard-topbar {

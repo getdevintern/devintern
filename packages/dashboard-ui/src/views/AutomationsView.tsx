@@ -54,7 +54,7 @@ function AutomationRow({
       onClick={() => lastRun && onOpenRun(lastRun.id)}
       className={lastRun ? "cursor-pointer" : undefined}
     >
-      <TableCell className="max-w-72 px-4 py-2.5 font-medium">
+      <TableCell className="max-w-40 px-4 py-2.5 font-medium md:max-w-72">
         <div className="flex flex-col gap-0.5">
           <span className="truncate" title={automation.id}>
             {automation.id}
@@ -67,7 +67,10 @@ function AutomationRow({
           </span>
         </div>
       </TableCell>
-      <TableCell className="max-w-28 truncate px-4 py-2.5" title={automation.schedule}>
+      <TableCell
+        className="hidden max-w-28 truncate px-4 py-2.5 sm:table-cell"
+        title={automation.schedule}
+      >
         {automation.schedule ? (
           <code className="font-mono text-xs">{automation.schedule}</code>
         ) : (
@@ -75,12 +78,12 @@ function AutomationRow({
         )}
       </TableCell>
       <TableCell
-        className="max-w-32 truncate px-4 py-2.5 text-muted-foreground"
+        className="hidden max-w-32 truncate px-4 py-2.5 text-muted-foreground lg:table-cell"
         title={automation.repo}
       >
         {automation.repo ?? "–"}
       </TableCell>
-      <TableCell className="px-4 py-2.5">
+      <TableCell className="hidden px-4 py-2.5 lg:table-cell">
         {automation.openPr ? (
           <span
             className="inline-flex items-center rounded-full border border-chart-4/40 bg-chart-4/10 px-2 py-0.5 text-xs font-medium text-chart-4"
@@ -97,14 +100,14 @@ function AutomationRow({
           </span>
         )}
       </TableCell>
-      <TableCell className="px-4 py-2.5 tabular-nums text-muted-foreground">
+      <TableCell className="hidden px-4 py-2.5 tabular-nums text-muted-foreground md:table-cell">
         {automation.nextDueAt ? formatTime(automation.nextDueAt) : "–"}
       </TableCell>
       <TableCell className="min-w-0 px-4 py-2.5">
         {lastRun ? (
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={lastRun.status} />
-            <span className="text-xs text-muted-foreground">
+            <span className="min-w-0 max-w-full truncate text-xs text-muted-foreground">
               {formatRunOrigin(lastRun.origin)} · {formatTime(lastRun.startedAt)}
             </span>
             <RunResult run={lastRun} />
@@ -124,7 +127,10 @@ function AutomationRow({
           <span className="text-muted-foreground">–</span>
         )}
       </TableCell>
-      <TableCell className="px-4 py-2.5 text-right" onClick={(event) => event.stopPropagation()}>
+      <TableCell
+        className="sticky right-0 z-10 border-l border-border bg-card px-4 py-2.5 text-right"
+        onClick={(event) => event.stopPropagation()}
+      >
         {automation.enabled ? (
           <Button
             variant="outline"
@@ -172,12 +178,14 @@ export function AutomationsTable({
       <TableHeader>
         <TableRow>
           <TableHead className="px-4">Automation</TableHead>
-          <TableHead className="px-4">Schedule</TableHead>
-          <TableHead className="px-4">Repo</TableHead>
-          <TableHead className="px-4">PR</TableHead>
-          <TableHead className="px-4">Next run</TableHead>
+          <TableHead className="hidden px-4 sm:table-cell">Schedule</TableHead>
+          <TableHead className="hidden px-4 lg:table-cell">Repo</TableHead>
+          <TableHead className="hidden px-4 lg:table-cell">PR</TableHead>
+          <TableHead className="hidden px-4 md:table-cell">Next run</TableHead>
           <TableHead className="px-4">Last run</TableHead>
-          <TableHead className="px-4 text-right">Actions</TableHead>
+          <TableHead className="sticky right-0 z-10 border-l border-border bg-muted px-4 text-right">
+            Actions
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
