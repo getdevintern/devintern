@@ -129,6 +129,43 @@ prompt = "Upgrade one dependency."
     expect(entries[1]?.openPr).toBe(true);
   });
 
+  test("defaults allow_no_changes to off and parses an explicit opt-in", () => {
+    const entries = parseAutomationConfig(`
+[[automations]]
+id = "weekday-tweets"
+enabled = true
+interval = "1d"
+prompt = "Draft a tweet."
+
+[[automations]]
+id = "main-red-fixer"
+enabled = true
+interval = "12h"
+open_pr = true
+allow_no_changes = true
+prompt = "Keep main green."
+`);
+    expect(entries[0]?.allowNoChanges).toBe(false);
+    expect(entries[1]?.allowNoChanges).toBe(true);
+  });
+
+  test("rejects a non-boolean allow_no_changes", () => {
+    let message = "";
+    try {
+      parseAutomationConfig(`
+[[automations]]
+id = "wrong"
+enabled = true
+interval = "1d"
+allow_no_changes = "yes"
+prompt = "work"
+`);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("[[automations]][0].allow_no_changes must be a boolean.");
+  });
+
   test("rejects a non-boolean open_pr like any other invalid field", () => {
     let message = "";
     try {
@@ -228,6 +265,23 @@ describe("automationTaskArgs", () => {
 
   test("off also strips --create-pr=false (PR creation never leaks in)", () => {
     expect(automationTaskArgs(off, ["--create-pr=false"])).toEqual(["--no-git"]);
+  });
+
+  test("allow_no_changes appends the no-op success flag", () => {
+    expect(automationTaskArgs({ openPr: true, allowNoChanges: true }, [])).toEqual([
+      "--create-pr",
+      "--allow-no-changes",
+    ]);
+    expect(automationTaskArgs({ openPr: false, allowNoChanges: true }, [])).toEqual([
+      "--no-git",
+      "--allow-no-changes",
+    ]);
+  });
+
+  test("an explicit --allow-no-changes is never duplicated", () => {
+    expect(
+      automationTaskArgs({ openPr: true, allowNoChanges: true }, ["--allow-no-changes"]),
+    ).toEqual(["--allow-no-changes", "--create-pr"]);
   });
 });
 

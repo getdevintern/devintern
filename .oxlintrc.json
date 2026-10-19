@@ -14,6 +14,14 @@
     "no-unused-vars": "error",
     "unicorn/no-useless-spread": "error",
 
+    // Type-system discipline (DEV-154): external data is untyped until it is
+    // parsed, so `any` is banned and each boundary must narrow to a named
+    // domain type. See CODING_STANDARDS.md. The ratchet-baseline
+    // override below exempts files whose `any` predates this rule; shrink that
+    // list as boundaries are typed rather than adding new entries.
+    "typescript/no-explicit-any": "error",
+    "typescript/ban-types": "error",
+
     // False-positive / intentional-pattern rules: disabled repo-wide because no
     // code change can clear them.
     // - `oxc/const-comparisons` misreads `(x as A).key || (x as B).key` fallbacks.
@@ -140,11 +148,37 @@
   },
   "overrides": [
     {
+      // Ratchet baseline (DEV-154, no-explicit-any). These files still carry
+      // `any` at untyped integration boundaries (Atlassian Document Format
+      // assembly, tracker/HTTP JSON payloads, GitHub App API responses). Each
+      // entry is known parse-at-the-boundary debt: type the boundary into a
+      // named domain type and remove its file from this list. Never add a file
+      // here to silence a newly introduced `any`.
+      "files": [
+        "packages/code/src/lib/code-host/base-client.ts",
+        "packages/code/src/lib/code-host/bitbucket/pr-client.ts",
+        "packages/code/src/lib/code-host/github/app-auth.ts",
+        "packages/code/src/lib/code-host/github/pr-client.ts",
+        "packages/code/src/lib/trackers/jira/jira-formatter.ts",
+        "packages/code/src/lib/trackers/jira/jira-task-tracker-client.ts",
+        "packages/task-trackers/src/clients/azure-devops.ts",
+        "packages/task-trackers/src/clients/jira-estimation.ts",
+        "packages/task-trackers/src/clients/jira.ts"
+      ],
+      "rules": {
+        "typescript/no-explicit-any": "off"
+      }
+    },
+    {
       "files": ["**/*.{test,spec}.{ts,tsx,js,jsx}", "**/test/**", "**/tests/**"],
       "rules": {
         "react/no-array-index-key": "off",
         "import/no-named-as-default": "off",
         "import/no-named-as-default-member": "off",
+        // Test fixtures and mocks routinely build intentionally malformed or
+        // partial values to exercise boundary parsing, so explicit `any` is
+        // allowed here even though product code bans it (DEV-154).
+        "typescript/no-explicit-any": "off",
         // Long/nested tests are legitimate; keep the size/complexity metrics off
         // here so the deferred rules above can be flipped on later without test noise.
         "complexity": "off",

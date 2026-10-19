@@ -104,6 +104,7 @@ export function createTestContext(options: TestContextOptions): TestContext {
     prTargetBranch: options.prTargetBranch ?? "main",
     enableGit: options.enableGit ?? true,
     createPr: options.createPr ?? true,
+    allowNoChanges: false,
     skipComments: false,
     autoReview: options.autoReview ?? false,
     autoReviewIterations: 2,

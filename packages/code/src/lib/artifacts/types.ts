@@ -40,7 +40,7 @@ export interface ArtifactPolicy {
   publish?: {
     destination: "pr-comment";
     select: ArtifactSelection[];
-    /** Plugin module default-exporting ArtifactUploader. Relative to the pipeline file. */
+    /** Built-in "files-sdk", or a module default-exporting ArtifactUploader. */
     uploader?: string;
   };
 }

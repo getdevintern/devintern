@@ -4,7 +4,7 @@
 /*
  * Theme variables mirror the marketing site's global stylesheet
  * ("Synthesized Intelligence" palette) so the dashboard matches the brand.
- * Dark mode follows the OS preference.
+ * The website uses the canonical dark palette by default.
  */
 
 @theme inline {
@@ -40,54 +40,37 @@
 }
 
 :root {
-  --background: #f6f7ff;
-  --foreground: #1a1f3a;
-  --card: #ffffff;
-  --card-foreground: #1a1f3a;
-  --primary: #494bd6;
-  --primary-foreground: #ffffff;
-  --secondary: #04b4a2;
-  --secondary-foreground: #ffffff;
-  --muted: #eef0fa;
-  --muted-foreground: #5b6285;
-  --accent: #eef0fa;
-  --accent-foreground: #1a1f3a;
-  --destructive: #c4344c;
-  --border: #e1e4f0;
-  --input: #e1e4f0;
-  --ring: #494bd6;
-  --chart-1: #494bd6;
-  --chart-2: #04b4a2;
-  --chart-3: #ff516a;
-  --chart-4: #1a8a5c;
-  --chart-5: #b56b00;
+  color-scheme: dark;
+  --background: #0b1326;
+  --foreground: #dae2fd;
+  --card: #131b2e;
+  --card-foreground: #dae2fd;
+  --primary: #c0c1ff;
+  --primary-foreground: #1000a9;
+  --secondary: #4fdbc8;
+  --secondary-foreground: #003731;
+  --muted: #171f33;
+  --muted-foreground: #c7c4d7;
+  --accent: #222a3d;
+  --accent-foreground: #dae2fd;
+  --destructive: #ffb4ab;
+  --border: #464554;
+  --input: #2d3449;
+  --ring: #c0c1ff;
+  --chart-1: #c0c1ff;
+  --chart-2: #4fdbc8;
+  --chart-3: #ffb2b7;
+  --chart-4: #6ee7a3;
+  --chart-5: #ffbd6b;
   --radius: 0.5rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0b1326;
-    --foreground: #dae2fd;
-    --card: #131b2e;
-    --card-foreground: #dae2fd;
-    --primary: #c0c1ff;
-    --primary-foreground: #1000a9;
-    --secondary: #4fdbc8;
-    --secondary-foreground: #003731;
-    --muted: #171f33;
-    --muted-foreground: #c7c4d7;
-    --accent: #222a3d;
-    --accent-foreground: #dae2fd;
-    --destructive: #ffb4ab;
-    --border: #464554;
-    --input: #2d3449;
-    --ring: #c0c1ff;
-    --chart-1: #c0c1ff;
-    --chart-2: #4fdbc8;
-    --chart-3: #ffb2b7;
-    --chart-4: #6ee7a3;
-    --chart-5: #ffbd6b;
-  }
+  --sidebar: #131b2e;
+  --sidebar-foreground: #dae2fd;
+  --sidebar-primary: #c0c1ff;
+  --sidebar-primary-foreground: #1000a9;
+  --sidebar-accent: #222a3d;
+  --sidebar-accent-foreground: #dae2fd;
+  --sidebar-border: #464554;
+  --sidebar-ring: #c0c1ff;
 }
 
 @layer base {
@@ -96,5 +79,317 @@
   }
   body {
     @apply bg-background text-foreground font-sans;
+    caret-color: var(--primary);
+    scrollbar-color: var(--border) var(--background);
+  }
+
+  ::selection {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+}
+
+/* Worker console: a calm navigation rail around dense, live operational data. */
+.dashboard-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.dashboard-sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--sidebar-border);
+  background: var(--sidebar);
+  padding: 28px 14px 20px;
+}
+
+.dashboard-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0 10px 48px;
+  color: var(--sidebar-foreground);
+  text-decoration: none;
+}
+
+.dashboard-brand-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--sidebar-primary);
+  color: var(--sidebar-primary-foreground);
+}
+
+.dashboard-brand-name {
+  display: flex;
+  flex-direction: column;
+  font-size: 16px;
+  font-weight: 750;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+}
+
+.dashboard-brand-name small {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.dashboard-nav-label {
+  margin: 0 17px 10px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dashboard-nav {
+  display: grid;
+  gap: 3px;
+}
+
+.dashboard-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 40px;
+  padding: 0 13px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 550;
+  text-decoration: none;
+  transition: background-color 140ms, color 140ms;
+}
+
+.dashboard-nav-link:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.dashboard-nav-link-active,
+.dashboard-nav-link-active:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-primary);
+}
+
+.dashboard-sidebar-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: auto 12px 0;
+  padding-top: 25px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.dashboard-local-dot,
+.dashboard-live-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--secondary);
+}
+
+.dashboard-main {
+  min-width: 0;
+}
+
+.dashboard-topbar {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  gap: 26px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  padding: 12px clamp(24px, 3vw, 48px);
+}
+
+.dashboard-topbar-title {
+  flex: none;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.dashboard-status-strip {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px 20px;
+  color: var(--muted-foreground);
+}
+
+.dashboard-status-strip :is(span, a) {
+  font-size: 12px;
+}
+
+.dashboard-content {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 38px clamp(24px, 3vw, 48px) 64px;
+}
+
+.dashboard-page-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 27px;
+}
+
+.dashboard-page-heading h1 {
+  font-size: clamp(27px, 2.5vw, 36px);
+  font-weight: 720;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.dashboard-page-heading p {
+  margin-top: 9px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dashboard-live-label {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.dashboard-content [data-slot="table-head"] {
+  height: 44px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.dashboard-content [data-slot="table-row"] {
+  border-color: var(--border);
+}
+
+.dashboard-content [data-slot="table-body"] [data-slot="table-row"]:hover {
+  background: var(--accent);
+}
+
+:where(.dashboard-shell) a:focus-visible,
+:where(.dashboard-shell) button:focus-visible,
+:where(.dashboard-shell) input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .dashboard-shell {
+    display: block;
+  }
+
+  .dashboard-sidebar {
+    padding: 14px 20px 0;
+  }
+
+  .dashboard-brand {
+    margin: 0 0 17px;
+  }
+
+  .dashboard-brand-name {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 7px;
+  }
+
+  .dashboard-nav-label,
+  .dashboard-sidebar-foot {
+    display: none;
+  }
+
+  .dashboard-nav {
+    display: flex;
+    gap: 3px;
+    overflow-x: auto;
+  }
+
+  .dashboard-nav-link {
+    flex: none;
+    min-height: 38px;
+    padding: 0 12px;
+    border-radius: 7px 7px 0 0;
+  }
+
+  .dashboard-topbar {
+    min-height: 52px;
+    padding: 10px 24px;
+  }
+
+  .dashboard-topbar-title {
+    display: none;
+  }
+
+  .dashboard-status-strip {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .dashboard-sidebar {
+    padding-inline: 14px;
+  }
+
+  .dashboard-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    overflow: visible;
+    padding-bottom: 12px;
+  }
+
+  .dashboard-nav-link {
+    flex: none;
+    justify-content: center;
+    gap: 7px;
+    min-width: 0;
+    padding-inline: 9px;
+    border-radius: 7px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .dashboard-topbar {
+    padding-inline: 16px;
+  }
+
+  .dashboard-content {
+    padding: 27px 16px 48px;
+  }
+
+  .dashboard-page-heading {
+    margin-bottom: 22px;
+  }
+
+  .dashboard-live-label {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-nav-link {
+    transition: none;
   }
 }

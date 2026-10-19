@@ -100,6 +100,26 @@ The dashboard's Automations table shows an **opens PR** badge per row; the dash 
 
 Migrating an existing workspace: PRs used to be the default. Any automation that should keep opening PRs (dependency-health-style jobs) must set `open_pr = true` — if you upgrade without touching the config, every automation silently stops creating PRs.
 
+### Allowing a no-op run
+
+Some recurring jobs are supposed to do nothing when there is nothing to do — "keep main green", "release only when warranted", "find flaky tests". Their prompts say to make no changes and report, but a PR-opening run with no commit used to fail with `Implementation was not committed`.
+
+Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run.
+
+```toml
+[[automations]]
+id = "main-red-fixer"
+enabled = true
+interval = "12h"
+repo = "devintern"
+open_pr = true
+allow_no_changes = true
+prompt = """Keep main green. If the latest CI run on main succeeded,
+make no changes and report that main is already green."""
+```
+
+The equivalent CLI flag is `--allow-no-changes` for a one-off run. Scheduled occurrences receive it automatically from the automation setting.
+
 Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). A non-boolean `open_pr` is rejected like every other invalid `[[automations]]` field, and the last valid config keeps serving. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
 ### What an automation is

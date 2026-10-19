@@ -455,6 +455,7 @@ Complete, runnable examples live under
 | `transient-retry` | `StepExecutionError` single-retry vs a permanent halt. |
 | `agent-review` | `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority` with a bounded repeat. |
 | `pr-explainer-narrative`, `pr-explainer-visual` | Diff-grounded explanations written before `finalize`; registered for the dashboard and optional PR-comment publication. |
+| `pr-explainer-image` | Generate a PNG with an image-capable harness, upload through Files SDK, and embed it in the managed PR comment. Includes storage setup and an upload probe. |
 
 Run the whole suite with `bun run examples/pipeline-plugins/run-tests.ts`.
 

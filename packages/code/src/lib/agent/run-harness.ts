@@ -26,6 +26,7 @@ import { describePipelineSelection, selectPipelineConfig } from "../task/pipelin
 import { loadArtifactUploader } from "../artifacts/upload";
 import type { LoadedArtifactUploader } from "../artifacts/upload";
 import type { PipelineConfig } from "../../types/settings";
+import type { Task } from "../../types/task-tracker";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
 import type { FinalizeContext } from "./run-harness-git";
@@ -45,8 +46,10 @@ interface RunAgentHarnessOptions {
   taskKey?: string;
   taskSummary?: string;
   enableGit?: boolean;
-  task?: any;
+  task?: Task;
   createPr?: boolean;
+  /** Treat a run that makes no repository changes as a successful no-op. */
+  allowNoChanges?: boolean;
   prTargetBranch?: string;
   tracker?: TaskTrackerClient;
   skipComments?: boolean;
@@ -85,6 +88,7 @@ export async function runAgentSession(
     enableGit = true,
     task,
     createPr = false,
+    allowNoChanges = false,
     prTargetBranch = "main",
     tracker,
     skipComments = false,
@@ -443,6 +447,7 @@ export async function runAgentSession(
               maxTurns,
               enableGit,
               createPr,
+              allowNoChanges,
               prTargetBranch,
               skipComments,
               hookRetries,
