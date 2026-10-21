@@ -49,6 +49,10 @@ const IMPLEMENTATION_INSTRUCTIONS_HEADING = "## Implementation Instructions";
 const IMPLEMENTATION_INSTRUCTIONS = `${IMPLEMENTATION_INSTRUCTIONS_HEADING}
 
 Please analyze the above task description and implement the requested functionality.
+
+## Delivery
+
+Do not create branches, commit, push, or open pull requests. Leave your changes uncommitted in the working tree; DevIntern handles git delivery — commit, push, and PR creation with labels and artifacts — after the agent finishes.
 `;
 
 export class MarkdownTaskTrackerClient implements TaskTrackerClient {

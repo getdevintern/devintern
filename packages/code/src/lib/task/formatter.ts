@@ -372,6 +372,10 @@ Please analyze the above task and implement the requested functionality. Conside
 
 If you need clarification on any requirements or if the task description is unclear, please ask specific questions.
 
+## Delivery
+
+Do not create branches, commit, push, or open pull requests. Leave your changes uncommitted in the working tree; DevIntern handles git delivery — commit, push, and PR creation with labels and artifacts — after the agent finishes.
+
 **Task Key for Reference**: ${untrustedContentBlock(key, "task key")}
 `;
 

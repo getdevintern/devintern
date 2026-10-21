@@ -354,6 +354,10 @@ Behavior to expect:
   the daemon (paid automation license, or the no-card Worker Pilot).
 - **Quiet hours.** Injected tasks are operator-initiated, so they bypass working
   windows like `devintern worker run-now`; no extra `run-now` is required.
+- **Delivery.** The pipeline owns git delivery: it commits, pushes, and opens
+  the PR with the workspace's `pr_labels`. Briefs should describe the
+  implementation and verification only — do not ask the agent to commit, push,
+  or open a pull request itself.
 - **PR behavior.** Injected runs inherit `[defaults].worker_task_args` (default
   `--create-pr`), so they open a pull request just like tracker tasks.
 

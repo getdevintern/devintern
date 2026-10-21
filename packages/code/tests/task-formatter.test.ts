@@ -47,6 +47,9 @@ describe("TaskFormatter untrusted-content framing", () => {
     expect(prompt).toContain(INJECTION);
     // The injection must sit inside a framed block, after the notice.
     expect(prompt.indexOf(UNTRUSTED_CONTENT_NOTICE)).toBeLessThan(prompt.indexOf(INJECTION));
+    // The pipeline owns git delivery; agents must not commit, push, or open PRs.
+    expect(prompt).toContain("## Delivery");
+    expect(prompt).toContain("Do not create branches, commit, push, or open pull requests");
   });
 
   test("clarity assessment frames task content as untrusted", () => {

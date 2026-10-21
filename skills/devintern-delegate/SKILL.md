@@ -18,6 +18,8 @@ Use `devintern worker add` to hand work to an existing workspace worker. It runs
 
 Write a self-contained Markdown brief with the desired behavior, relevant files or symbols, acceptance criteria, scope boundaries, and useful verification commands. Include the necessary conversation context: the worker does not inherit this chat, uncommitted edits, or local-only files. Reference committed paths, accessible issue/PR URLs, and revisions when they matter. Include needed local findings in the brief itself; do not include credentials.
 
+The worker owns git delivery: it creates the branch, commits, pushes, and opens/labels the PR (`--create-pr` by default). Never ask the agent in the brief to commit, push, or open a pull request — that bypasses PR labels and watch-list registration, and an already-committed tree makes the pipeline's commit step report "No changes to commit". Describe the implementation and verification only; let the pipeline deliver it.
+
 The body is limited to 20,000 characters. Prefer a file passed through `--body-file` over interpolating a long prompt into a shell command. Use a unique temporary file for each handoff and remove it after enqueueing has returned.
 
 ## Dispatch

@@ -112,6 +112,8 @@ Refactor the auth middleware.
       expect(prompt).toContain(content.trim());
       expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
       expect(prompt).toContain("## Implementation Instructions");
+      expect(prompt).toContain("## Delivery");
+      expect(prompt).toContain("Do not create branches, commit, push, or open pull requests");
     } finally {
       cleanup(testDir);
     }
