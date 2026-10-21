@@ -32,8 +32,9 @@ rules must allow creating and deleting the suite's branches.
 
 Each test seeds the canonical `fixtures/simple-project` into a unique
 `e2e/base-e2e-<uuid>` branch, then expects the CLI to create
-`feature/e2e-<uuid>`. It asserts the PR's target, title, summary, remote commit
-and exact changed file. A second scenario uses invalid PR API credentials while
+`feature/e2e-<uuid>`. It asserts the PR's target, title, summary, remote commit,
+exact changed file, and that configured `PR_LABELS` reach the real PR. A second
+scenario uses invalid PR API credentials while
 retaining valid Git credentials to prove a successful push cannot conceal PR
 creation failure. Currently the CLI reports that failure in its output while
 exiting successfully; the test checks that behavior explicitly.
@@ -54,11 +55,11 @@ no broad branch sweep.
 
 ## CI
 
-The ordinary `test` command runs local harness checks only, including a built-CLI
-Git smoke test when `packages/code/dist/index.js` exists. Live tests require
-the explicit `test:e2e` command and fail if configuration is missing; direct
-`bun test` skips the live suite. Keep live tests in a trusted, uncached CI job
-with dedicated secrets, initially manual or scheduled. The included **GitHub E2E**
+The ordinary `test` command runs local harness checks only, including built-CLI
+Git and worker-daemon smoke tests when `packages/code/dist/index.js` exists.
+Live tests require the explicit `test:e2e` command and fail if configuration is
+missing; direct `bun test` skips the live suite. Keep live tests in a trusted,
+uncached CI job with dedicated secrets, initially manual or scheduled. The included **GitHub E2E**
 workflow is manual (`workflow_dispatch`): configure the repository variable
 `E2E_GITHUB_REPOSITORY` and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before

@@ -5,6 +5,7 @@ export interface PullRequest {
   body: string;
   head: { ref: string; sha: string };
   base: { ref: string };
+  labels: Array<{ name: string }>;
 }
 
 /** A GitHub issue search hit (pull requests share the same endpoint). */
@@ -54,6 +55,23 @@ export class GitHub {
     return this.request(
       `/pulls?state=all&head=${encodeURIComponent(`${owner}:${head}`)}&per_page=100`,
     );
+  }
+
+  /**
+   * Ensure a label exists on the fixture repository.
+   *
+   * PR creation applies labels best-effort, so a missing label would otherwise
+   * make the live assertion indistinguishable from an unlabeled PR. Labels are
+   * shared repository configuration and are intentionally not deleted.
+   */
+  async ensureLabel(name: string, color = "ededed"): Promise<void> {
+    try {
+      await this.request("/labels", "POST", { name, color });
+    } catch (error) {
+      // GitHub reports an existing label as 422 `already_exists`; any other
+      // rejection (invalid payload, lost permissions) must surface.
+      if (!(error instanceof Error) || !error.message.includes("already_exists")) throw error;
+    }
   }
 
   /**
