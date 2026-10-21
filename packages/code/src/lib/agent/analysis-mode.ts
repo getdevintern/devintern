@@ -101,6 +101,11 @@ export function shouldRetryInDefaultMode(error: unknown): boolean {
   if (error instanceof Error && error.name === "UsageLimitError") {
     return false;
   }
+  // A harness that cannot start under the sandbox will fail in default mode
+  // too; retrying only delays failover to the next chain entry.
+  if (error instanceof Error && error.name === "HarnessUnavailableError") {
+    return false;
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (/timed out/i.test(message) || /not found/i.test(message)) {
     return false;

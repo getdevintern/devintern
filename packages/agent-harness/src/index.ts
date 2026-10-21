@@ -57,6 +57,8 @@ export {
 export {
   parseHarnessList,
   resolveHarnessChain,
+  resolveHarnessChainSync,
+  resetMiseShimWarnings,
   type HarnessChainEntry,
   type HarnessChainIssue,
   type HarnessChainOptions,
@@ -146,6 +148,20 @@ export {
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
+export {
+  probeHarnessUnderSandbox,
+  resetHarnessSandboxProbeCache,
+  resolveProbeProvider,
+  firstActionableProbeLine,
+  type HarnessSandboxProbeOptions,
+  type HarnessSandboxProbeResult,
+} from "./sandbox/harness-probe.js";
+export {
+  detectMiseShim,
+  harnessCliPathEnvKey,
+  miseShimFixHint,
+  type MiseShimInfo,
+} from "./sandbox/shim-detect.js";
 export { NativeSandboxProvider } from "./sandbox/providers/native.js";
 export {
   NonoSandboxProvider,

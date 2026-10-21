@@ -34,6 +34,7 @@ import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
+import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -155,6 +156,7 @@ export async function runAgentSession(
         ...agentArgs,
         ...buildPromptArgs(harness, withImplementationSummary(promptOverride ?? taskContent)),
       ];
+      const runStartedAt = Date.now();
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
@@ -219,8 +221,9 @@ export async function runAgentSession(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            new HarnessUnavailableError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+              { harnessName: harness.name },
             ),
           );
         } else {
@@ -255,6 +258,28 @@ export async function runAgentSession(
           }
           reject(new UsageLimitError(usage.resetsAt));
           return;
+        }
+
+        // A sandbox denial, mise shim failure, or missing binary means the
+        // harness never started. Surface it as a harness problem so the
+        // worker can fail over/defer instead of burning a task attempt.
+        if (code !== 0) {
+          const startupFailure = detectHarnessStartupFailure({
+            exitCode: code,
+            stdout: stdoutOutput,
+            stderr: stderrOutput,
+            durationMs: Date.now() - runStartedAt,
+          });
+          if (startupFailure) {
+            console.log(`\n🛠️  ${harness.displayName} could not start: ${startupFailure.reason}`);
+            reject(
+              new HarnessUnavailableError(
+                `${harness.displayName} (${executablePath}) could not start: ${startupFailure.reason}`,
+                { harnessName: harness.name },
+              ),
+            );
+            return;
+          }
         }
 
         const maxTurnsReached = detectMaxTurnsReached(
