@@ -42,6 +42,7 @@ const SUBCOMMANDS = [
   "whoami",
   "sandbox",
   "doctor",
+  "report",
 ] as const;
 
 /** Whether `command` is handled by the pre-Commander subcommand dispatch. */

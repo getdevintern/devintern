@@ -98,7 +98,7 @@ Install the DevIntern skills into your project for Codex:
 
 ```bash
 bunx skills add getdevintern/devintern \
-  --skill devintern-setup devintern-workspace devintern-delegate --agent codex
+  --skill devintern-setup devintern-workspace devintern-delegate devintern-report --agent codex
 ```
 
 Use `--agent claude-code` for Claude Code, or add `--global` for user-wide availability. Install only the skills you need by selecting their names with `--skill`.
@@ -108,6 +108,7 @@ Use `--agent claude-code` for Claude Code, or add `--global` for user-wide avail
 | [devintern-setup](skills/devintern-setup/SKILL.md)         | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
 | [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies.    |
 | [devintern-delegate](skills/devintern-delegate/SKILL.md)   | Hand one-off implementation tasks to a configured worker.                                                  |
+| [devintern-report](skills/devintern-report/SKILL.md)       | Diagnose a DevIntern failure and file a redacted bug report.                                               |
 
 Skills provide instructions for your agent. The setup skill helps install and configure DevIntern; installing the skills alone does not install the CLI, connect accounts, or start a worker. Workspace changes require an existing workspace; delegation requires a registered repository and a running worker with automation access (Worker Pilot or paid license).
 
@@ -183,6 +184,7 @@ Point the CLI at a ticket and get a reviewed diff back. Interactive use is free 
 | `devintern address-review <pr-url>`                | Review comments on a pull request become addressed commits on its branch                          |
 | `devintern resolve-conflicts <pr-url>`             | The base branch is merged in and the agent resolves the conflicted files sensibly                 |
 | `devintern doctor`                                 | Pre-flight check for runtime, git, agent CLIs, tracker credentials — with a fix hint per problem  |
+| `devintern report`                                 | File a redacted DevIntern bug report with the failing run and log tails attached                  |
 
 When a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR. See the [quick-start guide](docs/code/quick-start.md) and [full usage reference](docs/code/usage.md).
 

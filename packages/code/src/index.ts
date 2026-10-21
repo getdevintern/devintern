@@ -52,6 +52,7 @@ import { runWebhookCommand } from "./lib/code-host/cli";
 import { runAddressReviewCommand, runResolveConflictsCommand } from "./lib/review/cli";
 import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
 import { runSandboxCommand } from "./lib/agent/cli";
+import { runReportCommand } from "./lib/report/cli";
 
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
 const __filename_resolved = fileURLToPath(import.meta.url);
@@ -125,6 +126,8 @@ if (process.argv[2] === "init") {
   await runSandboxCommand();
 } else if (process.argv[2] === "doctor") {
   await runDoctorCommand();
+} else if (process.argv[2] === "report") {
+  await runReportCommand(process.argv.slice(3));
 } else if (process.argv[2] === "whoami") {
   await runWhoamiCommand();
 } else {
