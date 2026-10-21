@@ -68,6 +68,8 @@ export interface AddOptions {
   body?: string;
   bodyFile?: string;
   idempotencyKey?: string;
+  /** Re-queue this settled ad-hoc task instead of enqueuing a new one. */
+  resume?: string;
   wait: boolean;
   json: boolean;
   /** `--wait` deadline in seconds; `0` waits without a limit (default 6h). */
@@ -81,18 +83,19 @@ export type ParsedAddArgs =
 
 function usage(): string {
   return [
-    "Usage: devintern worker add --title <text> [--repo <name>] [options]",
+    "Usage: devintern worker add (--title <text> | --resume <taskKey>) [options]",
     "",
     "Enqueue a one-off task against a workspace repo without a tracker ticket.",
     "The running worker runs it through the normal pipeline (checkout, agent,",
     "PR) on its next poll.",
     "",
     "Options:",
-    "  --title <text>            Task title (required)",
+    "  --title <text>            Task title (required unless --resume)",
     "  --repo <name>             [[repos]] name to target (default: the only repo)",
     "  --body <text>             Task description",
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
+    "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
     "  --wait                    Block until the run finishes; exit with its status",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
     "  --json                    Emit a machine-readable result on stdout",
@@ -109,8 +112,35 @@ const VALUE_FLAGS = new Set([
   "--body",
   "--body-file",
   "--idempotency-key",
+  "--resume",
   "--wait-timeout",
 ]);
+
+/**
+ * Validate the `--resume` form.
+ *
+ * The row already holds its title, body, repo, and idempotency key; passing
+ * them again would silently disagree with what the worker will run.
+ *
+ * @returns An error message, or null when the arguments are acceptable
+ */
+function validateResumeArgs(options: AddOptions): string | null {
+  if (options.resume === undefined) return null;
+  if (!options.resume.trim()) {
+    return "--resume requires a task key.";
+  }
+  const conflicting = [
+    options.title.trim() ? "--title" : undefined,
+    options.body !== undefined ? "--body" : undefined,
+    options.bodyFile !== undefined ? "--body-file" : undefined,
+    options.repo !== undefined ? "--repo" : undefined,
+    options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
+  ].filter((flag): flag is string => flag !== undefined);
+  if (conflicting.length > 0) {
+    return `--resume re-queues the existing task; drop ${conflicting.join(", ")}.`;
+  }
+  return null;
+}
 
 /**
  * Parse `worker add` arguments. Kept separate from execution so help and arg
@@ -158,6 +188,9 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
         case "--idempotency-key":
           options.idempotencyKey = value;
           break;
+        case "--resume":
+          options.resume = value;
+          break;
         case "--wait-timeout": {
           const seconds = Number(value);
           if (!Number.isInteger(seconds) || seconds < 0) {
@@ -175,6 +208,13 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
     return { kind: "error", message: `Unknown option: ${arg}` };
   }
 
+  const resumeError = validateResumeArgs(options);
+  if (resumeError) {
+    return { kind: "error", message: resumeError };
+  }
+  if (options.resume !== undefined) {
+    return { kind: "ok", options };
+  }
   if (!options.title.trim()) {
     return { kind: "error", message: "--title is required and cannot be empty." };
   }
@@ -376,13 +416,17 @@ export async function runWorkerAdd(
     return 1;
   }
 
-  const repoResult = resolveTargetRepo(config, add.repo, error);
-  if (!repoResult.ok) return repoResult.code;
-  const repo = repoResult.repo;
+  // `--resume` re-queues an existing row, so title/body/repo resolution (and
+  // their validation) apply only to a new enqueue.
+  let target: { repo: RepoConfig; body: string } | null = null;
+  if (!add.resume) {
+    const repoResult = resolveTargetRepo(config, add.repo, error);
+    if (!repoResult.ok) return repoResult.code;
 
-  const bodyResult = resolveInjectedBody(add, options, error);
-  if (!bodyResult.ok) return 1;
-  const body = bodyResult.body;
+    const bodyResult = resolveInjectedBody(add, options, error);
+    if (!bodyResult.ok) return 1;
+    target = { repo: repoResult.repo, body: bodyResult.body };
+  }
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
 
@@ -396,26 +440,7 @@ export async function runWorkerAdd(
 
   const store = new InjectedTaskStore(workspaceDbPath(selectedDir));
   try {
-    if (add.idempotencyKey) {
-      // Only an active (pending/running) task dedupes; a settled one under the
-      // same key is history and a new occurrence is enqueued below.
-      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
-      if (existing) {
-        // `await` is load-bearing: without it the surrounding `finally` would
-        // `store.close()` while `reportTask`/`waitForTask` is still polling.
-        return await reportTask(existing, {
-          log,
-          error,
-          status,
-          wait: add.wait,
-          json: add.json,
-          waitTimeoutSeconds: add.waitTimeoutSeconds,
-          store,
-          selectedDir,
-        });
-      }
-    }
-    return await enqueueNewTask(add, body, repo, {
+    const context: TaskContext & { workerRunning: boolean } = {
       store,
       selectedDir,
       workerRunning,
@@ -425,7 +450,25 @@ export async function runWorkerAdd(
       wait: add.wait,
       json: add.json,
       waitTimeoutSeconds: add.waitTimeoutSeconds,
-    });
+    };
+    if (add.resume) {
+      return await resumeTask(add.resume, context);
+    }
+    if (!target) {
+      error("❌ Could not resolve the task's repo and body.");
+      return 1;
+    }
+    if (add.idempotencyKey) {
+      // Only an active (pending/running) task dedupes; a settled one under the
+      // same key is history and a new occurrence is enqueued below.
+      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
+      if (existing) {
+        // `await` is load-bearing: without it the surrounding `finally` would
+        // `store.close()` while `reportTask`/`waitForTask` is still polling.
+        return await reportTask(existing, context);
+      }
+    }
+    return await enqueueNewTask(add, target.body, target.repo, context);
   } finally {
     store.close();
   }
@@ -572,6 +615,54 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
     return emitSettled(task, true, ctx);
   }
   return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+}
+
+/**
+ * Re-queue a settled ad-hoc task by key (`worker add --resume`).
+ *
+ * The row keeps its `task_key`, so the rerun targets the same
+ * `feature/local-<slug>` branch the interrupted attempt recorded and session
+ * pickup can hand the prior report to the next agent. An already-active row is
+ * reported instead of queued twice.
+ */
+async function resumeTask(
+  taskKey: string,
+  ctx: TaskContext & { workerRunning: boolean },
+): Promise<number> {
+  const { store, workerRunning } = ctx;
+  const task = store.getByTaskKey(taskKey);
+  if (!task) {
+    ctx.error(`❌ No ad-hoc task "${taskKey}" in this workspace.`);
+    ctx.error("   Enqueue it with `devintern worker add --title ...`.");
+    return 1;
+  }
+  if (task.status === "pending" || task.status === "running") {
+    ctx.status(`ℹ️  ${taskKey} is already ${task.status} (task #${task.id}); not re-queued.`);
+    if (!ctx.wait) {
+      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+      return 0;
+    }
+    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey });
+  }
+
+  const revived = store.requeueSettled(taskKey);
+  if (!revived) {
+    ctx.error(`❌ ${taskKey} could not be re-queued; it moved on. Reload and try again.`);
+    return 1;
+  }
+  if (!ctx.json) {
+    ctx.status(`♻️  Re-queued ${revived.taskKey} (task #${revived.id}, repo "${revived.repo}").`);
+    ctx.status(
+      workerRunning
+        ? "   The worker resumes it on its next poll (same branch when the prior attempt left one)."
+        : "⚠️  No worker is running; the task stays queued until one starts.",
+    );
+  }
+  if (!ctx.wait) {
+    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
+    return 0;
+  }
+  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey });
 }
 
 /**
