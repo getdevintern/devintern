@@ -16,21 +16,35 @@ const realSpawnSync = spawnSync;
 // The Linux Landlock preflight inside NonoSandboxProvider.wrapCommand shells
 // out to `nono run … -- true`; these tests assert argv composition, not the
 // host-dependent grant refinement, so stub just that spawn to a fast no-op.
+// `nono profile show <name>` is stubbed separately so tests can simulate a
+// machine where the harness pack is (not) installed.
 // mock.module is process-global for the whole `bun test` run, so every other
 // export — and every non-`nono` spawnSync call — must delegate to the real
 // implementation, otherwise the stub leaks into other test files (e.g.
 // sandbox-detect.test.ts) and breaks their live-probe assertions.
+let nonoPackInstalled = true;
 mock.module("child_process", () => ({
   execSync,
   spawn: nodeSpawn,
-  spawnSync: (...callArgs: Parameters<typeof realSpawnSync>) =>
-    callArgs[0] === "nono"
-      ? { status: 0, stdout: "", stderr: "" }
-      : realSpawnSync(...callArgs),
+  spawnSync: (...callArgs: Parameters<typeof realSpawnSync>) => {
+    if (callArgs[0] !== "nono") return realSpawnSync(...callArgs);
+    const args = (callArgs[1] ?? []) as string[];
+    if (args[0] === "profile" && args[1] === "show") {
+      return nonoPackInstalled
+        ? { status: 0, stdout: "nono: profile: profile 'stub'", stderr: "" }
+        : { status: 1, stdout: "", stderr: "nono: Profile not found" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  },
 }));
 
-const { NonoSandboxProvider, parseDenyOverlaps, refineGrantsAgainstDenies } =
-  await import("../src/sandbox/providers/nono.js");
+const {
+  NonoSandboxProvider,
+  describeNonoPack,
+  parseDenyOverlaps,
+  refineGrantsAgainstDenies,
+  resetNonoPackState,
+} = await import("../src/sandbox/providers/nono.js");
 
 function policy(overrides: Partial<SandboxPolicy> = {}): SandboxPolicy {
   return {
@@ -156,6 +170,176 @@ describe("NonoSandboxProvider.wrapCommand", () => {
       if (wrapped.args[i] === "--allow-file") allowFiles.push(wrapped.args[i + 1] as string);
     }
     expect(allowFiles).toContain("/dev/ptmx");
+  });
+});
+
+describe("NonoSandboxProvider harness state grants", () => {
+  const originalHome = process.env.HOME;
+  let home: string;
+
+  beforeEach(() => {
+    // A temporary HOME makes the grant set deterministic: the provider skips
+    // state dirs that do not exist on this machine.
+    home = mkdtempSync(join(tmpdir(), "nono-home-"));
+    process.env.HOME = home;
+    delete process.env.AGENT_SANDBOX_NONO_PROFILE;
+    resetNonoPackState();
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    resetNonoPackState();
+  });
+
+  /** The paths the provider grants read+write access to. */
+  function allows(wrapped: { args: string[] }): string[] {
+    const sep = wrapped.args.indexOf("--");
+    const out: string[] = [];
+    for (let i = 0; i < sep; i++) {
+      if (wrapped.args[i] === "--allow") out.push(wrapped.args[i + 1] as string);
+    }
+    return out;
+  }
+
+  function wrap(harnessName: string, cli = `/usr/local/bin/${harnessName}`) {
+    return new NonoSandboxProvider().wrapCommand(cli, ["-p", "hi"], policy({ harnessName }));
+  }
+
+  test("grants grok write access to ~/.grok (auth, sessions and logs)", () => {
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    expect(allows(wrap("grok"))).toContain(join(home, ".grok"));
+  });
+
+  test("never grants write access to toolchain dirs such as mise", () => {
+    mkdirSync(join(home, ".local/share/mise"), { recursive: true });
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    const grants = allows(wrap("grok"));
+    expect(grants).not.toContain(join(home, ".local/share/mise"));
+    expect(grants).not.toContain(join(home, ".local"));
+    expect(grants).not.toContain(join(home, ".local/share"));
+  });
+
+  test("grants a newly declared harness state dir (qwen → ~/.qwen)", () => {
+    mkdirSync(join(home, ".qwen"), { recursive: true });
+    expect(allows(wrap("qwen"))).toContain(join(home, ".qwen"));
+  });
+
+  test("keeps the existing claude-code, codex and opencode grants", () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(join(home, ".config/opencode"), { recursive: true });
+    mkdirSync(join(home, ".local/share/opencode"), { recursive: true });
+    mkdirSync(join(home, ".local/state/opencode"), { recursive: true });
+
+    expect(allows(wrap("claude-code"))).toContain(join(home, ".claude"));
+    expect(allows(wrap("codex"))).toContain(join(home, ".codex"));
+    const opencode = allows(wrap("opencode"));
+    expect(opencode).toContain(join(home, ".config/opencode"));
+    expect(opencode).toContain(join(home, ".local/share/opencode"));
+    expect(opencode).toContain(join(home, ".local/state/opencode"));
+    expect(opencode).not.toContain(join(home, ".local/state"));
+  });
+
+  test("grants the XDG state dirs of XDG-based harnesses (goose, kilo-code)", () => {
+    mkdirSync(join(home, ".config/goose"), { recursive: true });
+    mkdirSync(join(home, ".local/share/goose"), { recursive: true });
+    mkdirSync(join(home, ".config/kilo"), { recursive: true });
+    mkdirSync(join(home, ".cache/kilo"), { recursive: true });
+
+    const goose = allows(wrap("goose"));
+    expect(goose).toContain(join(home, ".config/goose"));
+    expect(goose).toContain(join(home, ".local/share/goose"));
+
+    const kilo = allows(wrap("kilo-code"));
+    expect(kilo).toContain(join(home, ".config/kilo"));
+    expect(kilo).toContain(join(home, ".cache/kilo"));
+  });
+});
+
+describe("nono pack profile status", () => {
+  beforeEach(() => {
+    resetNonoPackState();
+    delete process.env.AGENT_SANDBOX_NONO_PROFILE;
+  });
+
+  afterEach(() => {
+    resetNonoPackState();
+    nonoPackInstalled = true;
+  });
+
+  test("a harness without a pack reports the generic fallback and its state dirs", () => {
+    const status = describeNonoPack("grok");
+    expect(status.packBacked).toBe(false);
+    expect(status.note).toBe(
+      `nono has no pack profile for "grok"; using ` +
+        `${process.platform === "linux" ? "linux-host-compat" : "nono's default profile"} ` +
+        "+ explicit grants (state: ~/.grok).",
+    );
+  });
+
+  test("a pack-backed harness reports no fallback note", () => {
+    nonoPackInstalled = true;
+    const status = describeNonoPack("opencode");
+    expect(status.packBacked).toBe(true);
+    expect(status.profile).toBe("opencode");
+    expect(status.note).toBeUndefined();
+  });
+
+  test("a known but uninstalled pack is named in the note", () => {
+    nonoPackInstalled = false;
+    const status = describeNonoPack("codex");
+    expect(status.packBacked).toBe(false);
+    expect(status.note).toContain('nono pack profile "codex" is not installed');
+  });
+
+  test("the missing-pack note is logged once per process, not per spawn", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+    } finally {
+      console.warn = originalWarn;
+    }
+    const notes = warnings.filter((w) => w.includes('no pack profile for "grok"'));
+    expect(notes).toHaveLength(1);
+  });
+
+  test("no note is logged for a pack-backed harness", () => {
+    nonoPackInstalled = true;
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/opencode",
+        [],
+        policy({ harnessName: "opencode" }),
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.filter((w) => w.includes("pack profile"))).toHaveLength(0);
+  });
+
+  test("no note is logged when the user supplies their own nono profile", () => {
+    process.env.AGENT_SANDBOX_NONO_PROFILE = "my-profile";
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.filter((w) => w.includes("pack profile"))).toHaveLength(0);
   });
 });
 

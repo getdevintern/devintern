@@ -1,7 +1,10 @@
 import { readFileSync } from "fs";
 import {
   activeSandboxName,
+  describeNonoPack,
   detectSandboxProviders,
+  getHarness,
+  parseHarnessList,
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
@@ -36,14 +39,18 @@ export async function runSandboxCommand(): Promise<never> {
     : "default";
   const harnessName = resolveHarness().harness.name;
   const preflight = await collectHarnessPreflight(configured, detections);
+  // Pack-profile status per chain entry: shows which harness runs are backed
+  // by a nono pack and which fall back to the generic profile.
+  const packStatuses = parseHarnessList(process.env.AGENT_HARNESS)
+    .filter((name) => getHarness(name) !== undefined)
+    .map((name) => describeNonoPack(name));
   const report = buildSandboxDoctorReport(
     detections,
     configured,
     configuredSource,
     harnessName,
     process.platform,
-    activeSandboxName(),
-    preflight,
+    { activeSandbox: activeSandboxName(), packStatuses, preflight },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

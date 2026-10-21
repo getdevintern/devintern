@@ -163,7 +163,13 @@ export {
   type MiseShimInfo,
 } from "./sandbox/shim-detect.js";
 export { NativeSandboxProvider } from "./sandbox/providers/native.js";
-export { NonoSandboxProvider } from "./sandbox/providers/nono.js";
+export {
+  NonoSandboxProvider,
+  describeNonoPack,
+  resetNonoPackState,
+  type NonoPackStatus,
+} from "./sandbox/providers/nono.js";
+export { harnessStatePaths, resolveHomeDir } from "./sandbox/harness-state.js";
 export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
 export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
