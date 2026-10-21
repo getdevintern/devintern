@@ -221,7 +221,7 @@ Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure 
 
 ### Delivery failures
 
-A run that cannot commit its implementation (including an agent that produces no changes), fails pre-push validation, or cannot push its branch is recorded as failed. It does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
+A run that leaves no implementation to publish — no uncommitted changes and no commits ahead of the PR target — fails, as does a run that fails pre-push validation or cannot push its branch. If the agent committed its own changes on the feature branch, the worker verifies and publishes those commits instead of requiring an additional working-tree commit. A failed run does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
 
 ### Re-running a task
 
