@@ -31,6 +31,12 @@
  * `AGENT_SANDBOX_NONO_PROFILE` still selects a nono profile (`--profile`);
  * the explicit grants compose on top of it.
  *
+ * Pack profiles: when nono has a pack installed for the harness, its profile
+ * is used (on Linux composed with `linux-host-compat`). Harnesses without a
+ * pack fall back to the generic profile plus the explicit grants above; that
+ * fallback is legitimate but was invisible, so it is now reported once per
+ * process (see {@link describeNonoPack}).
+ *
  * Linux: Landlock cannot express "deny under an allowed parent", so nono
  * refuses to start when a broad grant contains one of its protected paths
  * (browser profiles, cloud credentials — the set is machine-dependent, e.g.
@@ -44,23 +50,12 @@
 import { spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "fs";
 import type { Dirent } from "fs";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
+import { harnessStatePaths, resolveHomeDir } from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
-
-/** Harness name → $HOME config paths the agent needs read+write access to. */
-const HARNESS_STATE_PATHS: Record<string, string[]> = {
-  "claude-code": [".claude", ".claude.json"],
-  codex: [".codex"],
-  // agy keeps state under ~/.gemini (legacy Gemini CLI layout)
-  antigravity: [".gemini"],
-  gemini: [".gemini"],
-  // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
-  cursor: [".cursor", ".config/cursor"],
-  opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
-};
 
 /**
  * Harness name → nono registry pack profile name (used when installed).
@@ -95,6 +90,104 @@ function builtinProfileFor(harnessName: string): string | undefined {
       : undefined;
   profileProbeCache.set(harnessName, resolved);
   return resolved;
+}
+
+/** Pack-profile status for a harness under nono. */
+export interface NonoPackStatus {
+  /** Harness the status describes. */
+  harnessName: string;
+  /** Pack profile known for this harness, whether or not it is installed. */
+  expectedProfile?: string;
+  /** Installed pack profile used for the run, when the harness has one. */
+  profile?: string;
+  /** True when the run is backed by an installed nono pack profile. */
+  packBacked: boolean;
+  /**
+   * One-line explanation for harnesses that fall back to the generic profile.
+   * Undefined for pack-backed harnesses.
+   */
+  note?: string;
+}
+
+/**
+ * Name of the generic profile nono falls back to when no pack is installed.
+ *
+ * Linux composes `linux-host-compat` with the pack (see
+ * {@link linuxCompositeProfile}); macOS has no such base, so the run uses
+ * nono's own default profile.
+ */
+function genericProfileName(): string {
+  return process.platform === "linux" ? "linux-host-compat" : "nono's default profile";
+}
+
+/**
+ * Explain the generic fallback used for a harness without a usable pack.
+ *
+ * @param harnessName - Registered harness name.
+ * @param expectedProfile - Pack profile known for the harness, when any.
+ * @returns A one-line explanation naming the fallback and the state dirs.
+ */
+function missingPackNote(harnessName: string, expectedProfile?: string): string {
+  const state = harnessStatePaths(harnessName).map((rel) => `~/${rel}`);
+  const stateText = state.length > 0 ? ` (state: ${state.join(", ")})` : "";
+  const head = expectedProfile
+    ? `nono pack profile "${expectedProfile}" is not installed`
+    : `nono has no pack profile for "${harnessName}"`;
+  return `${head}; using ${genericProfileName()} + explicit grants${stateText}.`;
+}
+
+/**
+ * Describe the nono pack-profile situation for a harness.
+ *
+ * The fallback (no pack installed, or no pack published for the harness) is
+ * legitimate — the explicit grants still confine the run — but it used to be
+ * invisible, so callers surface {@link NonoPackStatus.note} to the user.
+ *
+ * @param harnessName - Registered harness name (e.g. "grok").
+ * @returns Whether the harness is pack-backed, and the fallback note if not.
+ */
+export function describeNonoPack(harnessName: string): NonoPackStatus {
+  const expectedProfile = HARNESS_NONO_PROFILES[harnessName];
+  const profile = builtinProfileFor(harnessName);
+  if (profile) {
+    return { harnessName, expectedProfile, profile, packBacked: true };
+  }
+  return {
+    harnessName,
+    expectedProfile,
+    packBacked: false,
+    note: missingPackNote(harnessName, expectedProfile),
+  };
+}
+
+/** Harnesses whose missing-pack note has already been logged in this process. */
+const packWarned = new Set<string>();
+
+/**
+ * Log the missing-pack note once per process per harness.
+ *
+ * `wrapCommand` runs for every agent spawn, so the note is deduplicated here:
+ * it surfaces once (at the first spawn of a process) instead of on every
+ * spawn.
+ *
+ * @param harnessName - Registered harness name.
+ */
+function warnMissingPackOnce(harnessName: string): void {
+  if (packWarned.has(harnessName)) return;
+  packWarned.add(harnessName);
+  const status = describeNonoPack(harnessName);
+  if (status.note) console.warn(status.note);
+}
+
+/**
+ * Forget the cached pack probes and the logged missing-pack notes.
+ *
+ * Exposed for tests and for long-lived hosts that install a pack while
+ * running (the next spawn then picks the pack profile up).
+ */
+export function resetNonoPackState(): void {
+  profileProbeCache.clear();
+  packWarned.clear();
 }
 
 /** A single filesystem grant flag for `nono run`. */
@@ -305,6 +398,12 @@ export class NonoSandboxProvider implements SandboxProvider {
     // host-compat and pack profiles, macOS uses the pack profile directly.
     const envProfile = process.env.AGENT_SANDBOX_NONO_PROFILE;
     const packProfile = builtinProfileFor(harnessName);
+    // An explicit AGENT_SANDBOX_NONO_PROFILE replaces the pack, so the
+    // missing-pack note would be misleading — only warn when nono is left to
+    // pick the profile itself.
+    if (!envProfile && !packProfile) {
+      warnMissingPackOnce(harnessName);
+    }
     const profile =
       envProfile ??
       (process.platform === "linux" ? linuxCompositeProfile(packProfile) : packProfile);
@@ -312,7 +411,7 @@ export class NonoSandboxProvider implements SandboxProvider {
       nonoArgs.push("--profile", profile);
     }
 
-    const home = homedir();
+    const home = resolveHomeDir();
     const grants: NonoGrant[] = [];
 
     // Read+write: the policy's writable set.
@@ -324,7 +423,7 @@ export class NonoSandboxProvider implements SandboxProvider {
     // Read+write: the harness's own state (session files, settings). Without
     // this the agent exits at startup (observed with claude-code, which also
     // writes ~/.claude/projects during a run).
-    for (const rel of HARNESS_STATE_PATHS[harnessName] ?? []) {
+    for (const rel of harnessStatePaths(harnessName)) {
       const p = join(home, rel);
       if (!existsSync(p)) continue;
       grants.push({ flag: rel.endsWith(".json") ? "--allow-file" : "--allow", path: p });
