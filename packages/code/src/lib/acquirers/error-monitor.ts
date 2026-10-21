@@ -208,6 +208,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
           break;
         }
         handled++;
+        if (result === "skipped") {
+          // A retry-gate skip started no run. The issue stays claimed so it
+          // does not re-enter the sweep until it changes, and reporting a
+          // "failed" action comment on the vendor would be wrong.
+          console.log(
+            `⏭️  [${this.name}] ${issue.displayId} skipped (previous attempt reported incomplete; ticket unchanged)`,
+          );
+          continue;
+        }
         await this.reportAction(issue, result);
         console.log(
           result

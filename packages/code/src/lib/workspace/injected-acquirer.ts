@@ -102,6 +102,11 @@ export class InjectedTaskAcquirer implements Acquirer {
       }
       if (result === true) {
         store.finish(task.id, "done");
+      } else if (result === "skipped") {
+        // Defensive: a skip means the ticket was left untouched, which is a
+        // settled row rather than a failure.
+        store.finish(task.id, "done", "skipped: ticket unchanged since the incomplete attempt");
+        console.log(`⏭️  [${this.name}] ${task.taskKey} skipped; ticket unchanged`);
       } else if (result === "deferred") {
         // Repo busy (or otherwise not started): back to the queue for the next
         // tick. The caller excludes this id for the rest of the drain so it is

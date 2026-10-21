@@ -829,6 +829,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
       );
+    } else if (ok === "skipped") {
+      console.log(`⏭️  [${this.name}] ${repo}#${prNumber} skipped; nothing to address`);
     } else {
       console.log(
         ok

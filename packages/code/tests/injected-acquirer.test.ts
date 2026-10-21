@@ -75,6 +75,22 @@ describe("InjectedTaskAcquirer", () => {
     expect(store.hasPending()).toBe(false);
   });
 
+  test("settles a skipped task as done rather than failed", async () => {
+    enqueue("local-a");
+
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => "skipped",
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+
+    const [task] = store.list();
+    expect(task?.status).toBe("done");
+    expect(task?.message).toContain("skipped");
+    expect(store.hasPending()).toBe(false);
+  });
+
   test("a deferred repo does not starve tasks for other repos", async () => {
     enqueue("local-a", "r1");
     enqueue("local-b", "r2");

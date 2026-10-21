@@ -68,7 +68,8 @@ type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult
  *
  * A `false` outcome from any run wins (a run did not complete cleanly);
  * otherwise the last outcome is reported, so a follow-up run that succeeded
- * clears an earlier `"deferred"`.
+ * clears an earlier `"deferred"`. A `"skipped"` outcome (retry gate) passes
+ * through like any other non-failure.
  */
 export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
   const active = new Map<

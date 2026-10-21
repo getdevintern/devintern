@@ -7,6 +7,7 @@ import { UsageLimitError } from "@devintern/agent-harness";
 
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
+  cliResultToTaskResult,
   getWorkerFailover,
   resetWorkerFailover,
   runWithFailover,
@@ -15,6 +16,7 @@ import {
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   readUsageLimitHint,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   writeUsageLimitHint,
@@ -81,6 +83,33 @@ describe("runWithFailover", () => {
       return 0;
     });
     expect(result).toBe("ok");
+  });
+
+  test("reports a retry-gate skip without trying another harness", async () => {
+    startWorkerFailover({ checkInstalled: false, raw: "codex,grok", log: () => {} });
+
+    let calls = 0;
+    const result = await runWithFailover(async () => {
+      calls++;
+      return TASK_SKIP_EXIT_CODE;
+    });
+
+    expect(result).toBe("skipped");
+    expect(calls).toBe(1);
+  });
+
+  test("without a worker controller, exit 3 is still a skip", async () => {
+    const result = await runWithFailover(async () => TASK_SKIP_EXIT_CODE);
+    expect(result).toBe("skipped");
+  });
+});
+
+describe("cliResultToTaskResult", () => {
+  test("maps ok, deferred, skipped, and failure distinctly", () => {
+    expect(cliResultToTaskResult("ok")).toBe(true);
+    expect(cliResultToTaskResult("deferred")).toBe("deferred");
+    expect(cliResultToTaskResult("skipped")).toBe("skipped");
+    expect(cliResultToTaskResult("failed")).toBe(false);
   });
 });
 

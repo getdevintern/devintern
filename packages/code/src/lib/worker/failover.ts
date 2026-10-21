@@ -30,13 +30,14 @@ import {
   AUTOMATION_ACCESS_EXIT_CODE,
   RATE_LIMIT_FALLBACK_MS,
   readUsageLimitHint,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   WORKER_CHILD_ENV,
 } from "./usage-limit-protocol";
 import type { UsageLimitHint } from "./usage-limit-protocol";
 
-export type CliFailoverResult = "ok" | "failed" | "deferred";
+export type CliFailoverResult = "ok" | "failed" | "deferred" | "skipped";
 
 export interface WorkerFailoverOptions {
   /** Queue used to persist windows and the active harness across restarts. */
@@ -280,7 +281,9 @@ export function resetWorkerFailover(): void {
 
 /**
  * Run a CLI child, retrying on usage-limit exit 75 until the chain is
- * exhausted. When failover has not been started, the spawn runs once with
+ * exhausted. A retry-gate skip ({@link TASK_SKIP_EXIT_CODE}) is reported as
+ * `"skipped"` immediately: another harness would make the same decision.
+ * When failover has not been started, the spawn runs once with
  * the caller's env (one-shot / tests).
  *
  * @param spawnOnce - Spawn the child with the given env; return its exit code
@@ -294,6 +297,7 @@ export async function runWithFailover(
   if (!failover) {
     const code = await spawnOnce(baseEnv);
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+    if (code === TASK_SKIP_EXIT_CODE) return "skipped";
     return code === 0 ? "ok" : "failed";
   }
 
@@ -307,6 +311,7 @@ export async function runWithFailover(
     try {
       const code = await spawnOnce(failover.childEnv(baseEnv, hintPath));
       if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+      if (code === TASK_SKIP_EXIT_CODE) return "skipped";
       if (code !== USAGE_LIMIT_EXIT_CODE) {
         return code === 0 ? "ok" : "failed";
       }
@@ -322,13 +327,20 @@ export async function runWithFailover(
   return "deferred";
 }
 
-/** Map {@link runWithFailover} onto the poller's `boolean | "deferred"` result. */
-export function cliResultToTaskResult(result: CliFailoverResult): boolean | "deferred" {
+/**
+ * Map {@link runWithFailover} onto the poller's `TaskExecutionResult`
+ * (`boolean | "deferred" | "skipped"`). The union is spelled out here rather
+ * than imported so this module stays free of an import cycle with the acquirer.
+ */
+export function cliResultToTaskResult(result: CliFailoverResult): boolean | "deferred" | "skipped" {
   if (result === "ok") {
     return true;
   }
   if (result === "deferred") {
     return "deferred";
+  }
+  if (result === "skipped") {
+    return "skipped";
   }
   return false;
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
 import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
-import type { ReadyTask } from "../src/lib/acquirers/task-polling";
+import type { ReadyTask, TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 import type { PickupGate } from "../src/lib/worker/schedule";
 import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
@@ -126,7 +126,7 @@ describe("TaskPollingAcquirer", () => {
     detectorResults: Array<{ changed: boolean; nextCursor: string | null }>;
     tasks: ReadyTask[];
     executed: string[];
-    executeResult?: boolean;
+    executeResult?: TaskExecutionResult;
     gate?: PickupGate;
     isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
   }) {
@@ -762,6 +762,43 @@ describe("TaskPollingAcquirer", () => {
     await acquirer.tick();
     await acquirer.tick();
     expect(executed).toEqual(["TASK-1"]);
+  });
+
+  test("a retry-gate skip is logged as skipped, not completed, and stays deduped", async () => {
+    const executed: string[] = [];
+    const { acquirer } = makeAcquirer({
+      detectorResults: [
+        { changed: true, nextCursor: "100" },
+        { changed: true, nextCursor: "200" },
+      ],
+      tasks: [{ key: "DEV-188", updated: "a" }],
+      executed,
+      executeResult: "skipped",
+    });
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(executed).toEqual(["DEV-188"]); // the claim survives the second tick
+    expect(
+      logs.some(
+        (line) =>
+          line.includes("⏭️") &&
+          line.includes("DEV-188") &&
+          line.includes("skipped (previous attempt reported incomplete; ticket unchanged)"),
+      ),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("✅") && line.includes("DEV-188 completed"))).toBe(
+      false,
+    );
+    expect(queue.hasProcessed("markdown", "task:DEV-188:a")).toBe(true);
   });
 
   test("a deferred task retries while completed tasks stay deduped", async () => {
