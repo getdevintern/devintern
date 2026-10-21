@@ -4,6 +4,7 @@ import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
+import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
@@ -351,6 +352,12 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
 
   const err = error as Error;
   await finishTaskRun("failed", err.message);
+
+  // A failed run may still have pushed a branch and opened a PR itself (agents
+  // sometimes run `gh pr create`). Register and label it so review polling and
+  // PR metadata stay correct; the run remains failed.
+  await adoptAgentCreatedChangeRequest({ taskKey });
+
   const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
   console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
   if (options.verbose && err.stack) {

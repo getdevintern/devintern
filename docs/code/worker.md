@@ -425,6 +425,8 @@ The opt-out is a live setting: removing it or flipping it back on applies withou
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open.
 
+If a run fails after the agent opened a PR itself (for example by running `gh pr create`), the worker adopts that open PR for the worktree's branch: it applies `pr_labels` and registers the PR in the watch list. The run still reports failed. This failure-path adoption currently looks up GitHub PRs only.
+
 The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 
 The regular polling requests use ETags, and GitHub does not count `304 Not Modified` responses against the API rate limit. The worker makes unconditional PR requests only once to hydrate state after startup and immediately before an eligible base-sync attempt. Comparison results are reused for each immutable base/head SHA pair.

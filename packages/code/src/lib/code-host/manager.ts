@@ -6,7 +6,7 @@ import { GitHubPRClient } from "./github/pr-client";
 import { GitLabMRClient } from "./gitlab/mr-client";
 import { buildPrBody } from "./pr-body";
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "./provider";
-import type { CodeHostRepository } from "./provider";
+import type { ChangeRequestIdentity, CodeHostRepository } from "./provider";
 import { isTransientPrFailure, parsePrLabels, resolveGitLabCodeHostConfig } from "./shared";
 import type { PRInfo, PRResult } from "./shared";
 
@@ -153,6 +153,64 @@ export class PRManager {
       }
     }
     return result;
+  }
+
+  /**
+   * Find an open pull request for a branch, so an agent-created PR can be
+   * adopted (labeled and registered) even when its run failed.
+   *
+   * Provider support: GitHub today. GitLab and Bitbucket already adopt an
+   * existing change request when a duplicate create is attempted; failure-path
+   * adoption for them is a follow-up.
+   *
+   * @param sourceBranch - Head/feature branch name
+   * @returns Provider-neutral identity, or `undefined` when no PR exists or the
+   *   repository platform is unsupported
+   */
+  async findOpenChangeRequest(sourceBranch: string): Promise<ChangeRequestIdentity | undefined> {
+    const repoInfo = await this.detectRepository();
+    if (repoInfo.platform !== "github") return undefined;
+    const client = await this.githubClientFor(repoInfo.repository);
+    if (!client) return undefined;
+    return client.findOpenChangeRequest(repoInfo.repository, sourceBranch);
+  }
+
+  /**
+   * Apply labels to an existing change request (best-effort).
+   *
+   * @param identity - Change request returned by {@link findOpenChangeRequest}
+   * @param labels - Label names to apply
+   */
+  async applyLabelsToChangeRequest(
+    identity: ChangeRequestIdentity,
+    labels: string[],
+  ): Promise<void> {
+    if (identity.provider !== "github" || labels.length === 0) return;
+    const client = await this.githubClientFor(identity.projectPath);
+    if (!client) return;
+    await client.applyLabelsToChangeRequest(identity.projectPath, identity.number, labels);
+  }
+
+  /**
+   * Resolve a GitHub client with the token this manager is configured to use.
+   *
+   * @param repository - `owner/repo` slug (App tokens are scoped per repo)
+   * @returns A client, or `undefined` when GitHub is not configured
+   */
+  private async githubClientFor(repository: string): Promise<GitHubPRClient | undefined> {
+    if (this.githubClient) return this.githubClient;
+    if (!this.githubAppAuth) return undefined;
+    try {
+      const [owner, repo] = repository.split("/");
+      if (!owner || !repo) return undefined;
+      const token = await this.githubAppAuth.getTokenForRepository(owner, repo);
+      return new GitHubPRClient(token);
+    } catch (error) {
+      console.warn(
+        `⚠️  Could not resolve a GitHub token for ${repository}: ${(error as Error).message}`,
+      );
+      return undefined;
+    }
   }
 
   /**
