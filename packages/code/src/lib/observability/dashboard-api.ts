@@ -161,6 +161,12 @@ export interface EnrichedLogEntry extends LogEntry {
   runStatus?: RunStatus;
 }
 
+/** A harness log extended with the attempt metadata of the run that produced it. */
+export interface RunHarnessLogFile extends HarnessLogFile {
+  /** 1-based attempt number of the producing run, when its row still exists. */
+  attempt?: number;
+}
+
 /** Worker liveness as reported by `GET /api/worker`. */
 export type WorkerLiveness = "running" | "stopped" | "unknown";
 
@@ -336,14 +342,31 @@ export class DashboardData {
    * run id or by the run's task key, so executions that started before the run
    * row existed (or outside a run context) still associate with the ticket.
    *
+   * Each log carries its producing run's attempt number so the dashboard can
+   * group transcripts from earlier attempts of the same ticket.
+   *
    * @param runId - Run id
    */
-  listRunHarnessLogs(runId: number): HarnessLogFile[] {
+  listRunHarnessLogs(runId: number): RunHarnessLogFile[] {
     const run = this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(runId));
     if (!run) {
       return [];
     }
-    return listHarnessLogs({ runId, taskKey: run.taskKey });
+    // Resolve each producing run once; logs can outlive their run row.
+    const attempts = new Map<number, number | undefined>();
+    return listHarnessLogs({ runId, taskKey: run.taskKey }).map((file) => {
+      const id = file.runId;
+      if (id === undefined) {
+        return file;
+      }
+      if (!attempts.has(id)) {
+        attempts.set(
+          id,
+          this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(id))?.attempt,
+        );
+      }
+      return { ...file, attempt: attempts.get(id) };
+    });
   }
 
   /**

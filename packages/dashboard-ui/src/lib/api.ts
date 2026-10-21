@@ -88,6 +88,8 @@ export interface HarnessLogFile {
   origin: string;
   taskKey?: string;
   runId?: number;
+  /** 1-based attempt number of the run that produced the log, when known. */
+  attempt?: number;
   label?: string;
 }
 

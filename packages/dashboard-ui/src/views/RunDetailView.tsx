@@ -19,6 +19,7 @@ import type {
   TaskArtifactContent,
   TaskArtifactFile,
 } from "@/lib/api";
+import { groupHarnessLogs } from "@/lib/harness-log-groups";
 import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
 import { runWorkLink } from "@/lib/run-work";
 import { parseStageDetail } from "@/lib/stage-detail";
@@ -299,11 +300,19 @@ function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }
   );
 }
 
-/** Every harness execution recorded for a run (clarity, implementation, review…). */
+/**
+ * Every harness execution recorded for a run (clarity, implementation, review…).
+ *
+ * The list is attributed by task key as well as run id, so retries contribute
+ * earlier attempts' transcripts. Show them under per-attempt headers when more
+ * than one attempt is present, and keep everything oldest first.
+ */
 function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[] }) {
   if (logs.length === 0) {
     return null;
   }
+  const { grouped, groups } = groupHarnessLogs(logs);
+
   return (
     <Card>
       <CardHeader>
@@ -311,10 +320,29 @@ function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[
           Harness logs ({logs.length})
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {logs.map((file) => (
-          <HarnessLogItem key={file.name} runId={runId} file={file} />
-        ))}
+      <CardContent className={grouped ? "space-y-4" : "space-y-2"}>
+        {grouped
+          ? groups.map((group) => (
+              <section key={group.key} className="space-y-2">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="text-xs font-medium text-foreground">{group.label}</span>
+                  {group.runId !== undefined ? (
+                    <span className="font-mono text-xs text-muted-foreground">
+                      run {group.runId}
+                    </span>
+                  ) : null}
+                  <span className="text-xs text-muted-foreground">
+                    {group.logs.length} {group.logs.length === 1 ? "log" : "logs"}
+                  </span>
+                </div>
+                {group.logs.map((file) => (
+                  <HarnessLogItem key={file.name} runId={runId} file={file} />
+                ))}
+              </section>
+            ))
+          : groups[0]?.logs.map((file) => (
+              <HarnessLogItem key={file.name} runId={runId} file={file} />
+            ))}
       </CardContent>
     </Card>
   );
