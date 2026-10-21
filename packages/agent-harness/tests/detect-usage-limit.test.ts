@@ -399,6 +399,34 @@ describe("detectUsageLimit", () => {
     expect(result.matchedLine).toBe(out);
   });
 
+  test("extracts a usage limit from OpenCode v2's message field", () => {
+    const out =
+      'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=abc123 message="5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("extracts a usage limit from OpenCode v2's --format json error envelope", () => {
+    const out = JSON.stringify({
+      type: "error",
+      timestamp: 1_787_000_000_000,
+      sessionID: "ses_abc",
+      error: {
+        type: "unknown",
+        message: "Usage limit reached. It will reset in 15 minutes.",
+      },
+    });
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("15 minutes");
+  });
+
+  test("ignores a non-error JSON object the agent printed", () => {
+    const out = JSON.stringify({ type: "tool", message: "usage limit reached" });
+    expect(detectUsageLimit(out, "").limited).toBe(false);
+  });
+
   test("detects provider 'Rate limit reached' JSON error", () => {
     const out =
       'Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req"}}';

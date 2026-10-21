@@ -1,6 +1,7 @@
 import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   resolveExecutablePathWithRetry,
   spawnAgent,
@@ -30,6 +31,7 @@ import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToF
 import { createGitHelpers } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { runTaskSteps } from "../task/step-runner";
 import type { TaskStep, TaskStepResult } from "../task/step-runner";
@@ -113,21 +115,21 @@ async function implementPlan(
   const prompt = withImplementationSummary(
     createPlanImplementationPrompt(planPath, ctx.taskContent),
   );
-  const args = ctx.harness.buildArgs({
+  const resolvedPath = await resolveExecutablePathWithRetry(ctx.executablePath, {
+    displayName: ctx.harness.displayName,
+  });
+  const { args, env: agentEnv } = await buildHarnessInvocation(ctx.harness, resolvedPath, {
     maxTurns: ctx.maxTurns,
     skipPermissions: true,
     workingDir: process.cwd(),
     model: resolveAgentModel(),
     effort: resolveAgentEffort(),
   });
-  const resolvedPath = await resolveExecutablePathWithRetry(ctx.executablePath, {
-    displayName: ctx.harness.displayName,
-  });
   const spawnArgs = [...args, ...buildPromptArgs(ctx.harness, prompt)];
   const { child, cleanup } = await spawnAgent({
     resolvedPath,
     args: spawnArgs,
-    spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+    spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
     sandbox: await getSandbox(ctx.harness.name),
     sink: createHarnessLogSink({
       harness: ctx.harness,

@@ -477,6 +477,64 @@ describe("OpencodeHarness", () => {
   });
 });
 
+describe("OpencodeHarness (v2)", () => {
+  const h = new OpencodeHarness();
+  const v2 = { version: "2.0.23", major: 2 };
+
+  test("v2 drops --print-logs/--log-level and runs a private server", () => {
+    expect(h.buildArgs({}, v2)).toEqual(["run", "--standalone"]);
+    expect(h.buildArgs({ structuredOutput: true }, v2)).toEqual([
+      "run",
+      "--standalone",
+      "--format",
+      "json",
+    ]);
+  });
+
+  test("v2 folds effort into the model reference and omits --dir/--variant", () => {
+    expect(
+      h.buildArgs({ skipPermissions: true, model: "openai/gpt-5.2", effort: "high" }, v2),
+    ).toEqual([
+      "run",
+      "--standalone",
+      "--dangerously-skip-permissions",
+      "--model",
+      "openai/gpt-5.2#high",
+    ]);
+    expect(h.buildArgs({ workingDir: "/tmp/wt" }, v2)).toEqual(["run", "--standalone"]);
+  });
+
+  test("v2 constrained mode uses the plan agent without a YOLO flag", () => {
+    expect(h.buildArgs({ mode: "plan", skipPermissions: true }, v2)).toEqual([
+      "run",
+      "--standalone",
+      "--agent",
+      "plan",
+    ]);
+  });
+
+  test("v2 effort without a model is dropped (no --variant to attach it to)", () => {
+    expect(h.buildArgs({ effort: "high" }, v2)).toEqual(["run", "--standalone"]);
+  });
+
+  test("v2 environment enables ERROR logs and pins $PWD to the working dir", () => {
+    expect(h.buildEnv({ workingDir: "/tmp/wt" }, v2)).toEqual({
+      OPENCODE_PRINT_LOGS: "1",
+      OPENCODE_LOG_LEVEL: "ERROR",
+      PWD: "/tmp/wt",
+    });
+    expect(h.buildEnv({}, v2)).toEqual({
+      OPENCODE_PRINT_LOGS: "1",
+      OPENCODE_LOG_LEVEL: "ERROR",
+    });
+  });
+
+  test("v1 (probe unknown) keeps the legacy flag surface and no env overlay", () => {
+    expect(h.buildArgs({}, { major: 1 })).toEqual(["run", "--print-logs", "--log-level", "ERROR"]);
+    expect(h.buildEnv({ workingDir: "/tmp/wt" }, { major: 1 })).toBeUndefined();
+  });
+});
+
 describe("PiHarness", () => {
   const h = new PiHarness();
 
