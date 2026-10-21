@@ -28,6 +28,8 @@ import type {
   RunStats,
   RunStatus,
 } from "../state/run-recorder";
+import { InjectedTaskStore } from "../state/injected-tasks";
+import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
 import {
   isRunRetriable,
@@ -37,6 +39,7 @@ import {
 } from "../state/run-retry";
 import type {
   RetryActor,
+  RetryEligibility,
   RetryKind,
   RunRetryAuditEntry,
   SpawnedRetryProcess,
@@ -147,7 +150,9 @@ export interface RunRetryInfo {
   /**
    * How the retry dispatches: `task` forces the task key through the CLI
    * (`devintern <TASK> --force`), `automation` re-runs the automation that
-   * produced the run (its markdown stem is not a tracker key).
+   * produced the run (its markdown stem is not a tracker key), and `injected`
+   * re-queues the ad-hoc `worker add` row so the retry can resume the branch
+   * and report the interrupted attempt recorded.
    */
   kind?: RetryKind;
   reason?: string;
@@ -230,6 +235,8 @@ export class DashboardData {
   private retryAuditStore: RunRetryAuditStore | null = null;
   /** Lazy read-write connection for scheduled retries (schedule mode). */
   private scheduledRetryStore: ScheduledRetryStore | null = null;
+  /** Lazy read-write connection for ad-hoc (`worker add`) rows. */
+  private injectedTaskStore: InjectedTaskStore | null = null;
   /**
    * Task keys with a dashboard-triggered retry in flight (task key → claimed
    * at). The spawned CLI needs a moment to create its run row, so claims are
@@ -399,7 +406,7 @@ export class DashboardData {
     if (!detail) {
       return null;
     }
-    const eligibility = isRunRetriable(detail.run);
+    const eligibility = resolveRetryEligibility(this, detail.run);
     return {
       eligible: eligibility.eligible,
       kind: eligibility.kind,
@@ -427,6 +434,18 @@ export class DashboardData {
       this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
     }
     return this.scheduledRetryStore;
+  }
+
+  /**
+   * Store backing the ad-hoc retry action. Rows live in the same workspace DB,
+   * so the embedded worker's injected-task acquirer drains a re-queued row on
+   * its next poll.
+   */
+  getInjectedTaskStore(): InjectedTaskStore {
+    if (!this.injectedTaskStore) {
+      this.injectedTaskStore = new InjectedTaskStore(this.dbPath);
+    }
+    return this.injectedTaskStore;
   }
 
   /** Claim the retry slot for a task; false when one is already held. */
@@ -628,6 +647,8 @@ export class DashboardData {
     this.retryAuditStore = null;
     this.scheduledRetryStore?.close();
     this.scheduledRetryStore = null;
+    this.injectedTaskStore?.close();
+    this.injectedTaskStore = null;
   }
 }
 
@@ -661,6 +682,46 @@ export interface RetryHandlerDeps {
 /** How long a triggered retry blocks further retries of the same task. */
 const INFLIGHT_RETRY_TTL_MS = 60_000;
 
+/** Resolve an ad-hoc row, treating an unreadable/missing store as "no row". */
+function findInjectedTask(data: DashboardData, taskKey: string): InjectedTask | null {
+  try {
+    return data.getInjectedTaskStore().getByTaskKey(taskKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retry eligibility with the ad-hoc queue row resolved.
+ *
+ * An ad-hoc run whose row was pruned (or is still pending/running) cannot be
+ * re-queued, so the UI gets the concrete reason instead of a Retry button that
+ * would fail at POST time.
+ *
+ * @param data - Dashboard data source (owns the injected-task store)
+ * @param run - Run whose retry eligibility is being rendered
+ */
+function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryEligibility {
+  const eligibility = isRunRetriable(run);
+  if (eligibility.kind !== "injected" || !run.taskKey) {
+    return eligibility;
+  }
+  const task = findInjectedTask(data, run.taskKey);
+  if (!task) {
+    return {
+      eligible: false,
+      reason: `the ad-hoc queue row for ${run.taskKey} is gone; re-dispatch it with \`devintern worker add\``,
+    };
+  }
+  if (task.status === "pending" || task.status === "running") {
+    return {
+      eligible: false,
+      reason: `ad-hoc task ${run.taskKey} is already ${task.status} (task #${task.id})`,
+    };
+  }
+  return eligibility;
+}
+
 /**
  * `POST /api/runs/:id/retry` — re-run this run's task.
  *
@@ -681,6 +742,10 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
  *   "Run now" pipeline with the same overlap safeguards). Their `taskKey` is
  *   the markdown occurrence file's stem — not a tracker key — so forcing it
  *   would only 404 against the tracker.
+ * - Ad-hoc runs (`origin: "local"`) re-queue their durable `injected_tasks`
+ *   row under the same key, which the worker's injected-task acquirer drains on
+ *   its next poll. The row keeps its branch name, so session pickup can resume
+ *   the interrupted attempt instead of starting a second branch/PR.
  *
  * Returns 202 once the retry is queued; the new attempt then shows up in the
  * run list like any other run.
@@ -705,7 +770,7 @@ export async function handleRetryRun(
   }
   const run = detail.run;
 
-  const eligibility = isRunRetriable(run);
+  const eligibility = resolveRetryEligibility(data, run);
   if (!eligibility.eligible) {
     return conflict(`not retriable: ${eligibility.reason ?? "unknown reason"}`);
   }
@@ -724,15 +789,8 @@ export async function handleRetryRun(
   }
   const taskKey = run.taskKey;
 
-  // Concurrent retries: another dashboard retry for this task, or a live run
-  // for the task (the worker records one as soon as it picks the ticket up).
-  if (data.retryMode === "schedule") {
-    if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
-      return conflict(`a retry of ${taskKey} is already scheduled or running`);
-    }
-  } else if (data.hasInflightRetry(taskKey)) {
-    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
-  }
+  // A live run for the task blocks every kind of retry: the worker records one
+  // as soon as it picks the ticket (or the re-queued ad-hoc row) up.
   const activeRun = data
     .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
     .runs.find(
@@ -745,6 +803,23 @@ export async function handleRetryRun(
     return conflict(
       `${taskKey} already has a run in progress (run ${activeRun.id}); wait for it to finish`,
     );
+  }
+
+  // Ad-hoc runs: re-queue the durable injected row under the same key. Forcing
+  // a `local-…` key through the CLI would 404 against the tracker, and a fresh
+  // `worker add` would start a new branch instead of resuming this attempt.
+  if (eligibility.kind === "injected") {
+    return retryInjectedRun(data, id, taskKey, actorLabel);
+  }
+
+  // Concurrent retries: another dashboard retry for this task, or a live run
+  // for the task (the worker records one as soon as it picks the ticket up).
+  if (data.retryMode === "schedule") {
+    if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+  } else if (data.hasInflightRetry(taskKey)) {
+    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
   }
 
   if (data.retryMode === "schedule") {
@@ -816,6 +891,50 @@ export async function handleRetryRun(
       command: spawned.command,
     },
   };
+}
+
+/**
+ * Re-queue the durable `injected_tasks` row behind an ad-hoc run.
+ *
+ * The row keeps its `task_key`, so the retried run targets the same
+ * `feature/local-<slug>` branch the interrupted attempt recorded and session
+ * pickup can hand the prior report to the next agent. Nothing is spawned here:
+ * the workspace worker's injected-task acquirer drains the row on its next
+ * poll, exactly like a fresh `worker add`.
+ *
+ * @param data - Dashboard data source (owns the injected-task and audit stores)
+ * @param runId - The retried run's id (audit anchor)
+ * @param taskKey - Ad-hoc key (`local-…`) naming the row and its branch
+ * @param actorLabel - Audit identity for the trail
+ */
+function retryInjectedRun(
+  data: DashboardData,
+  runId: number,
+  taskKey: string,
+  actorLabel: string,
+): ApiResponse {
+  const store = data.getInjectedTaskStore();
+  const task = store.getByTaskKey(taskKey);
+  if (!task) {
+    return conflict(
+      `not retriable: the ad-hoc queue row for ${taskKey} is gone; re-dispatch it with \`devintern worker add\``,
+    );
+  }
+  if (task.status === "pending" || task.status === "running") {
+    return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
+  }
+  const revived = store.requeueSettled(taskKey);
+  if (!revived) {
+    return conflict(`ad-hoc task ${taskKey} moved on; reload the run and try again`);
+  }
+  data.getRetryAuditStore().record({
+    runId,
+    taskKey,
+    actor: actorLabel,
+    action: "scheduled",
+    message: "re-queued the interrupted ad-hoc task (resumes its branch)",
+  });
+  return { status: 202, body: { status: "scheduled", runId, taskKey } };
 }
 
 /**
@@ -1053,7 +1172,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
   if (!detail) {
     return { status: 404, body: { error: `run ${id} not found` } };
   }
-  const eligibility = isRunRetriable(detail.run);
+  const eligibility = resolveRetryEligibility(data, detail.run);
   const retry: RunRetryInfo = {
     eligible: eligibility.eligible,
     kind: eligibility.kind,

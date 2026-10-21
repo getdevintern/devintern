@@ -304,6 +304,7 @@ devintern worker add --repo backend --title "Fix flaky checkout test" \
   --body-file - < context.md
 devintern worker add --repo web --title "Regenerate API docs" \
   --idempotency-key nightly-docs --json
+devintern worker add --resume local-fix-flaky-checkout-test
 ```
 
 The task is materialized as a local markdown prompt in `~/.devintern/injected/`
@@ -316,10 +317,11 @@ records, and the dashboard, and start on a `feature/local-<slug>` branch (the
 | Option                     | Description                                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `--repo <name>`            | `[[repos]]` name to target (default: the only repo, else required)                                                              |
-| `--title <text>`           | Task title (required)                                                                                                           |
+| `--title <text>`           | Task title (required unless `--resume`)                                                                                         |
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
 | `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
+| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (resumes its branch and prior report)                                     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
@@ -330,6 +332,14 @@ Behavior to expect:
 - **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
   and runs on the next poll. If no worker is running the task is still queued —
   `worker add` says so — and `--wait` refuses to block.
+- **Interrupted tasks are not auto-restarted.** A task that was mid-run when the
+  worker died is marked `failed` at the next startup, and its run records why.
+  Re-queue it explicitly with `--resume <taskKey>` (or the dashboard's
+  **Re-queue task**): the row keeps its key, so the retry targets the same
+  `feature/local-<slug>` branch and session pickup hands the prior attempt's
+  report to the agent — when it recorded one — instead of starting a second
+  branch and PR. A task that never started is still `pending` and needs no
+  resume.
 - **Concurrency.** Pending ad-hoc tasks are claimed together and run in
   parallel up to the workspace's `max_concurrency` / `max_concurrency_per_repo`
   limits, sharing capacity with polled, review, and automation work. A task
@@ -365,7 +375,9 @@ Behavior to expect:
 `--repo` is optional only in a one-repo workspace. With several repos, omitting
 it fails and lists the valid names; an unknown `--repo` fails the same way. An
 empty title, a body over 20,000 characters, and a missing `--body-file` are
-rejected before anything is written.
+rejected before anything is written. `--resume` takes no title, body, repo, or
+idempotency key: the existing row already holds them, and an unknown task key
+fails without writing anything.
 
 ## Working windows (quiet hours)
 

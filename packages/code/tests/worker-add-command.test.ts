@@ -96,6 +96,21 @@ describe("worker add argument parsing", () => {
     expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "soon"]).kind).toBe("error");
     expect(parseWorkerAddArgs(["--title", "x", "--wait-timeout", "-1"]).kind).toBe("error");
   });
+
+  test("parses --resume and rejects flags that fight the existing row", () => {
+    expect(parseWorkerAddArgs(["--resume", "local-fix-flaky-test"])).toMatchObject({
+      kind: "ok",
+      options: { resume: "local-fix-flaky-test" },
+    });
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--title", "y"]).kind).toBe("error");
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--repo", "backend"]).kind).toBe("error");
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--body", "b"]).kind).toBe("error");
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--body-file", "-"]).kind).toBe("error");
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--idempotency-key", "k"]).kind).toBe(
+      "error",
+    );
+    expect(parseWorkerAddArgs(["--resume"]).kind).toBe("error");
+  });
 });
 
 describe("worker add key and markdown helpers", () => {
@@ -217,6 +232,79 @@ describe("runWorkerAdd", () => {
       deduplicated: false,
     });
     expect(cap.err.length).toBeGreaterThan(0);
+  });
+
+  test("--resume re-queues a settled task under the same key", async () => {
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    const { task } = seeded.enqueue({
+      taskKey: "local-interrupted",
+      repo: "backend",
+      title: "Interrupted task",
+      body: "context",
+      taskFile: join(dir, "injected", "local-interrupted.md"),
+    });
+    seeded.finish(seeded.claimNext()!.id, "failed", "worker restarted while this task was running");
+    seeded.close();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-interrupted", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({
+      id: task.id,
+      taskKey: "local-interrupted",
+      repo: "backend",
+      status: "pending",
+      deduplicated: false,
+    });
+
+    const after = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      const revived = after.getByTaskKey("local-interrupted");
+      expect(revived?.status).toBe("pending");
+      expect(revived?.message).toBeUndefined();
+      expect(revived?.taskFile).toBe(task.taskFile);
+    } finally {
+      after.close();
+    }
+  });
+
+  test("--resume reports an active task instead of queueing it twice", async () => {
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    const { task } = seeded.enqueue({
+      taskKey: "local-active",
+      repo: "web",
+      title: "Still queued",
+      body: "",
+      taskFile: join(dir, "injected", "local-active.md"),
+    });
+    seeded.close();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-active", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({
+      id: task.id,
+      taskKey: "local-active",
+      status: "pending",
+      deduplicated: true,
+    });
+    expect(cap.err.join("\n")).toContain("already pending");
+  });
+
+  test("--resume fails for an unknown task key", async () => {
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-missing"],
+      cap.options,
+    );
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain('No ad-hoc task "local-missing"');
   });
 
   test("--wait --json emits exactly one object for the settled run", async () => {

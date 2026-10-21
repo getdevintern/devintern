@@ -149,17 +149,24 @@ function RetryConfirm({
   onConfirm,
 }: {
   taskKey?: string;
-  kind?: "task" | "automation";
+  kind?: "task" | "automation" | "injected";
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const automation = kind === "automation";
+  const injected = kind === "injected";
   return (
     <div className="rounded-md border bg-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
         {automation ? (
           <>Start a new run of this automation? The current run stays in history.</>
+        ) : injected ? (
+          <>
+            Re-queue {taskKey ? <code className="font-mono">{taskKey}</code> : "this ad-hoc task"}?
+            The worker resumes the branch and report the interrupted run left behind, when it
+            recorded them. The current run stays in history.
+          </>
         ) : (
           <>
             Schedule a new run of{" "}
@@ -173,10 +180,14 @@ function RetryConfirm({
           {busy
             ? automation
               ? "Triggering…"
-              : "Scheduling…"
+              : injected
+                ? "Re-queuing…"
+                : "Scheduling…"
             : automation
               ? "Start new run"
-              : "Schedule retry"}
+              : injected
+                ? "Re-queue task"
+                : "Schedule retry"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
@@ -511,6 +522,11 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               ? `Automation re-run triggered. A fresh run will appear in the run list shortly.`
               : "Could not trigger the automation re-run.",
           });
+        } else if (data.retry.kind === "injected") {
+          setFeedback({
+            kind: "success",
+            message: `Re-queued. The worker will resume ${data.run.taskKey} on its next poll.`,
+          });
         } else {
           setFeedback({
             kind: "success",
@@ -582,7 +598,11 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                     }}
                   >
                     <RefreshCcw />{" "}
-                    {data.retry.kind === "automation" ? "Re-run automation" : "Retry this run"}
+                    {data.retry.kind === "automation"
+                      ? "Re-run automation"
+                      : data.retry.kind === "injected"
+                        ? "Re-queue task"
+                        : "Retry this run"}
                   </Button>
                 ) : null}
               </div>

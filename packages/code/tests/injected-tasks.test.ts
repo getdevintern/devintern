@@ -117,6 +117,34 @@ describe("InjectedTaskStore", () => {
     expect(store.hasTaskKey("local-nope")).toBe(false);
   });
 
+  test("requeueSettled revives a settled row under the same key", () => {
+    const { task } = store.enqueue(base);
+    const claimed = store.claimNext()!;
+    store.finish(claimed.id, "failed", "worker restarted while this task was running");
+
+    const revived = store.requeueSettled(base.taskKey);
+    expect(revived?.id).toBe(task.id);
+    expect(revived?.status).toBe("pending");
+    expect(revived?.message).toBeUndefined();
+    expect(revived?.startedAt).toBeUndefined();
+    expect(revived?.finishedAt).toBeUndefined();
+    // The same key (branch/worktree name) is reused, not re-derived.
+    expect(revived?.taskKey).toBe(base.taskKey);
+    expect(store.claimNext()?.id).toBe(task.id);
+
+    // A row that is already active is never revived twice.
+    expect(store.requeueSettled(base.taskKey)).toBeNull();
+    // An unknown key settles nothing.
+    expect(store.requeueSettled("local-missing")).toBeNull();
+  });
+
+  test("getByTaskKey loads the row without claiming it", () => {
+    const { task } = store.enqueue(base);
+    expect(store.getByTaskKey(base.taskKey)?.id).toBe(task.id);
+    expect(store.getByTaskKey(base.taskKey)?.status).toBe("pending");
+    expect(store.getByTaskKey("local-missing")).toBeNull();
+  });
+
   test("rejects a duplicate task_key without an idempotency key", () => {
     store.enqueue(base);
     expect(() => store.enqueue({ ...base, taskFile: "/ws/injected/other-path.md" })).toThrow(
