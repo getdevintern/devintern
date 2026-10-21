@@ -37,11 +37,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # Build before tests so the built-CLI smoke tests (e2e local suite) run
+      # instead of being skipped because packages/code/dist is absent.
+      - name: Build workspace graph
+        run: bun run build
+
       - name: Test
         run: bun run test
         env:
           # CLI argument tests resolve the configured harness but fail before invoking it.
           AGENT_CLI_PATH: bun
-
-      - name: Build workspace graph
-        run: bun run build

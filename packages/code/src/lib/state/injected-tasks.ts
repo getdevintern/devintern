@@ -257,6 +257,14 @@ export class InjectedTaskStore {
     return row ? rowToInjectedTask(row) : null;
   }
 
+  /** Load a task by its unique key (dashboard retry, `worker add --resume`). */
+  getByTaskKey(taskKey: string): InjectedTask | null {
+    const row = this.ensureDb()
+      .query("SELECT * FROM injected_tasks WHERE task_key = ?")
+      .get(taskKey) as InjectedTaskRow | null;
+    return row ? rowToInjectedTask(row) : null;
+  }
+
   /**
    * Claim the oldest pending task atomically (safe against concurrent
    * claimers): the subquery only matches a still-pending row.
@@ -304,6 +312,28 @@ export class InjectedTaskStore {
        WHERE id = ? AND status = 'running'`,
       [id],
     );
+  }
+
+  /**
+   * Return a settled row to the queue after an explicit retry (`worker add
+   * --resume`, dashboard "re-queue").
+   *
+   * The row keeps its `task_key`, so the retried run targets the same
+   * `feature/local-<slug>` branch and session pickup can inherit the prior
+   * attempt's branch and implementation report. A row that is already
+   * pending/running (or disappeared) is left alone: `null` tells the caller the
+   * retry did not start.
+   */
+  requeueSettled(taskKey: string): InjectedTask | null {
+    const row = this.ensureDb()
+      .query(
+        `UPDATE injected_tasks
+         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL
+         WHERE task_key = ? AND status IN ('done', 'failed')
+         RETURNING *`,
+      )
+      .get(taskKey) as InjectedTaskRow | null;
+    return row ? rowToInjectedTask(row) : null;
   }
 
   /**

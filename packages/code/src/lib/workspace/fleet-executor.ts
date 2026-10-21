@@ -314,7 +314,9 @@ export function createFleetTaskExecutor(
             signal,
           });
 
-          if (ok === true) {
+          // A retry-gate skip is a clean outcome: no run was started, so the
+          // disposable worktree holds no work to debug.
+          if (ok === true || ok === "skipped") {
             await repoManager.removeTaskWorktree(repo.name, worktree);
           } else {
             console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);

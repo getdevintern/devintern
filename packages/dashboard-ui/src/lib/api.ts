@@ -31,6 +31,8 @@ export interface RunRecord {
   ticketKey?: string;
   ticketUrl?: string;
   taskDescription?: string;
+  /** Short plain-text preview on the activity board. */
+  taskTitle?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;
@@ -40,6 +42,9 @@ export interface RunRecord {
   prUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
+  step?: string;
+  stepStartedAt?: number;
+  stepActive?: boolean;
   startedAt: number;
   finishedAt?: number;
 }
@@ -61,6 +66,11 @@ export interface RunStageRecord {
   summary?: string;
   detail?: string;
   createdAt: number;
+}
+
+export interface TaskActivityResponse {
+  runs: RunRecord[];
+  recentLimit: number;
 }
 
 export interface RunsResponse {
@@ -88,6 +98,8 @@ export interface HarnessLogFile {
   origin: string;
   taskKey?: string;
   runId?: number;
+  /** 1-based attempt number of the run that produced the log, when known. */
+  attempt?: number;
   label?: string;
 }
 
@@ -146,9 +158,11 @@ export interface RetryInfo {
   eligible: boolean;
   /**
    * How the retry dispatches: `task` forces the task key through the CLI,
-   * `automation` re-runs the automation that produced the run.
+   * `automation` re-runs the automation that produced the run, and `injected`
+   * re-queues the ad-hoc `worker add` row so the branch and prior report are
+   * resumed instead of starting over.
    */
-  kind?: "task" | "automation";
+  kind?: "task" | "automation" | "injected";
   reason?: string;
   /** Recent dashboard retries of this run, most recent first. */
   audit: RetryAuditEntry[];

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectMaxTurnsReached,
   detectUsageLimit,
@@ -13,8 +14,10 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "./analysis-mode";
+import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { parseAgentJsonObject } from "./json";
 import { getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import { resolveOutputDir } from "../config/output-dir";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -72,7 +75,11 @@ export async function runClarityCheck(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const clarityArgs = harness.buildArgs(runOptions);
+      const { args: clarityArgs, env: clarityEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        runOptions,
+      );
       console.log(`🔍 Running feasibility assessment with ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${clarityArgs.join(" ")}`);
       console.log(`   Input: ${clarityFile}`);
@@ -84,10 +91,11 @@ export async function runClarityCheck(
 
       // Spawn agent process for clarity check
       const spawnArgs = [...clarityArgs, ...buildPromptArgs(harness, clarityContent)];
+      const runStartedAt = Date.now();
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(clarityEnv) },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,
@@ -145,8 +153,9 @@ export async function runClarityCheck(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            new HarnessUnavailableError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+              { harnessName: harness.name },
             ),
           );
         } else {
@@ -155,6 +164,7 @@ export async function runClarityCheck(
       });
 
       // Handle process exit
+      // oxlint-disable-next-line complexity -- close handler fans out timeout, usage-limit, startup-failure, parse, and tracker-report branches; remedy: extract the assessment success/failure blocks.
       clarityAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
@@ -170,6 +180,23 @@ export async function runClarityCheck(
         if (usage.limited) {
           reject(new UsageLimitError(usage.resetsAt));
           return;
+        }
+        if (code !== 0) {
+          const startupFailure = detectHarnessStartupFailure({
+            exitCode: code,
+            stdout: stdoutOutput,
+            stderr: stderrOutput,
+            durationMs: Date.now() - runStartedAt,
+          });
+          if (startupFailure) {
+            reject(
+              new HarnessUnavailableError(
+                `${harness.displayName} (${executablePath}) could not start: ${startupFailure.reason}`,
+                { harnessName: harness.name },
+              ),
+            );
+            return;
+          }
         }
         if (code === 0) {
           try {

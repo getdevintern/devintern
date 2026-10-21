@@ -7,36 +7,51 @@
  * Grok (etc.) instead of only working inside `devintern webhook serve`.
  *
  * CLI subprocesses are pinned to the active harness via `AGENT_HARNESS` and
- * signal a limit with {@link USAGE_LIMIT_EXIT_CODE}; this module retries the
- * same spawn on the next chain entry, or reports `deferred` when the chain
- * is exhausted.
+ * signal a limit with {@link USAGE_LIMIT_EXIT_CODE} or a startup failure with
+ * {@link HARNESS_UNAVAILABLE_EXIT_CODE}; this module retries the same spawn on
+ * the next chain entry, or reports `deferred` when the chain is exhausted.
  */
 
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { resetHintToMs, resolveHarnessChain } from "@devintern/agent-harness";
+import {
+  resetHarnessSandboxProbeCache,
+  resetHintToMs,
+  resolveHarnessChain,
+  resolveHarnessChainSync,
+} from "@devintern/agent-harness";
 import type {
   HarnessChainEntry,
+  HarnessSandboxProbeResult,
   ResolvedHarness,
   ResolvedHarnessChain,
 } from "@devintern/agent-harness";
 
 import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
+import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   RATE_LIMIT_FALLBACK_MS,
   readUsageLimitHint,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   WORKER_CHILD_ENV,
 } from "./usage-limit-protocol";
 import type { UsageLimitHint } from "./usage-limit-protocol";
 
-export type CliFailoverResult = "ok" | "failed" | "deferred";
+export type CliFailoverResult = "ok" | "failed" | "deferred" | "skipped";
+
+/**
+ * How long a harness that could not start is skipped for this process. Short
+ * enough that a fixed path is retried without restarting the worker.
+ */
+export const HARNESS_UNAVAILABLE_COOLDOWN_MS = 60_000;
 
 export interface WorkerFailoverOptions {
   /** Queue used to persist windows and the active harness across restarts. */
@@ -53,6 +68,15 @@ export interface WorkerFailoverOptions {
   /** Called when a window elapses and at least one harness is available. */
   onResume?: () => void;
   log?: (message: string) => void;
+  /** Pre-resolved chain (tests/async startup); otherwise resolved internally. */
+  chain?: ResolvedHarnessChain;
+  /** Sandbox readiness probe override (tests). */
+  probeSandbox?: (entry: {
+    name: string;
+    path: string;
+  }) => HarnessSandboxProbeResult | Promise<HarnessSandboxProbeResult>;
+  /** Effective sandbox name override (tests). Defaults to `AGENT_SANDBOX`. */
+  sandboxName?: string;
 }
 
 /**
@@ -69,10 +93,12 @@ export class WorkerFailover {
   private readonly log: (message: string) => void;
 
   constructor(options: WorkerFailoverOptions = {}) {
-    this.chain = resolveHarnessChain({
-      checkInstalled: options.checkInstalled ?? true,
-      raw: options.raw,
-    });
+    this.chain =
+      options.chain ??
+      resolveHarnessChainSync({
+        checkInstalled: options.checkInstalled ?? true,
+        raw: options.raw,
+      });
     this.onPause = options.onPause;
     this.onResume = options.onResume;
     this.log = options.log ?? ((message) => console.log(message));
@@ -149,7 +175,9 @@ export class WorkerFailover {
 
   /**
    * Environment overlay for a CLI child: pin `AGENT_HARNESS` to the active
-   * entry so one-shot resolution uses that harness, and point at a hint file.
+   * entry so one-shot resolution uses that harness, keep the configured chain
+   * so model resolution can tell a fallback from the primary, and point at a
+   * hint file.
    */
   childEnv(
     base: Record<string, string | undefined>,
@@ -158,6 +186,7 @@ export class WorkerFailover {
     return {
       ...base,
       AGENT_HARNESS: this.manager.activeName,
+      [HARNESS_CHAIN_ENV]: this.chain.parsed.join(","),
       [WORKER_CHILD_ENV]: "1",
       [USAGE_LIMIT_FILE_ENV]: hintPath,
     };
@@ -196,6 +225,10 @@ export class WorkerFailover {
       () => {
         this.timer = null;
         const nowMs = Date.now();
+        // Falling back may select a harness whose sandbox readiness changed
+        // (binary updated/reconfigured); re-probe it on the next readiness
+        // resolution instead of trusting the cached failure.
+        resetHarnessSandboxProbeCache();
         for (const [harness, until] of Object.entries(this.manager.windows())) {
           if (until <= nowMs) {
             this.manager.windowElapsed(harness);
@@ -237,6 +270,17 @@ export class WorkerFailover {
       console.warn(`⚠️  ${issue.message}`);
     }
     this.log(`   ${this.describeStartup()}`);
+    if (this.chain.multiHarness) {
+      // Model ids are harness-specific; show what each entry will actually run
+      // so a fallback configured with no model is obvious at startup.
+      const models = this.chain.entries
+        .map(
+          (entry) =>
+            `${entry.name}: ${resolveAgentModel(entry.name, this.chain.parsed) ?? "default"}`,
+        )
+        .join(" | ");
+      this.log(`   Models: ${models}`);
+    }
   }
 }
 
@@ -247,9 +291,22 @@ let instance: WorkerFailover | null = null;
  *
  * @param options - Persistence, pause/resume hooks, and installability
  */
-export function startWorkerFailover(options: WorkerFailoverOptions = {}): WorkerFailover {
+export async function startWorkerFailover(
+  options: WorkerFailoverOptions = {},
+): Promise<WorkerFailover> {
   instance?.stop();
-  instance = new WorkerFailover(options);
+  // A fresh start is a configuration reload: drop cached sandbox readiness so
+  // a fixed <HARNESS>_CLI_PATH is probed again.
+  resetHarnessSandboxProbeCache();
+  const chain =
+    options.chain ??
+    (await resolveHarnessChain({
+      checkInstalled: options.checkInstalled ?? true,
+      raw: options.raw,
+      ...(options.sandboxName !== undefined ? { sandboxName: options.sandboxName } : {}),
+      ...(options.probeSandbox ? { probeSandbox: options.probeSandbox } : {}),
+    }));
+  instance = new WorkerFailover({ ...options, chain });
   instance.announceStartup();
   instance.pauseIfExhaustedOnRestore();
   return instance;
@@ -279,9 +336,11 @@ export function resetWorkerFailover(): void {
 }
 
 /**
- * Run a CLI child, retrying on usage-limit exit 75 until the chain is
- * exhausted. When failover has not been started, the spawn runs once with
- * the caller's env (one-shot / tests).
+ * Run a CLI child, retrying on usage-limit exit 75 or harness-startup exit 78
+ * until the chain is exhausted. A retry-gate skip
+ * ({@link TASK_SKIP_EXIT_CODE}) is reported as `"skipped"` immediately:
+ * another harness would make the same decision. When failover has not been
+ * started, the spawn runs once with the caller's env (one-shot / tests).
  *
  * @param spawnOnce - Spawn the child with the given env; return its exit code
  * @param baseEnv - Environment to pin the active harness onto
@@ -294,19 +353,36 @@ export async function runWithFailover(
   if (!failover) {
     const code = await spawnOnce(baseEnv);
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+    if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+    if (code === TASK_SKIP_EXIT_CODE) return "skipped";
     return code === 0 ? "ok" : "failed";
   }
 
   const attempts = Math.max(1, failover.chain.entries.length);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (failover.allLimited()) {
+    if (failover.allLimited() || failover.manager.allUnavailable()) {
       return "deferred";
     }
+    // A cooldown may have expired on a higher-priority entry while we were
+    // parked on a fallback; make sure this attempt uses a usable entry.
+    failover.manager.ensureAvailableActive();
     const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
     const hintPath = join(hintDir, "hint.json");
     try {
       const code = await spawnOnce(failover.childEnv(baseEnv, hintPath));
       if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+      if (code === TASK_SKIP_EXIT_CODE) return "skipped";
+      if (code === HARNESS_UNAVAILABLE_EXIT_CODE) {
+        // The child never started: skip this entry for the process and try
+        // the next one without recording a usage-limit window.
+        const outcome = failover.manager.reportHarnessUnavailable(
+          Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+        );
+        if (outcome.kind === "exhausted") {
+          return "deferred";
+        }
+        continue;
+      }
       if (code !== USAGE_LIMIT_EXIT_CODE) {
         return code === 0 ? "ok" : "failed";
       }
@@ -322,13 +398,20 @@ export async function runWithFailover(
   return "deferred";
 }
 
-/** Map {@link runWithFailover} onto the poller's `boolean | "deferred"` result. */
-export function cliResultToTaskResult(result: CliFailoverResult): boolean | "deferred" {
+/**
+ * Map {@link runWithFailover} onto the poller's `TaskExecutionResult`
+ * (`boolean | "deferred" | "skipped"`). The union is spelled out here rather
+ * than imported so this module stays free of an import cycle with the acquirer.
+ */
+export function cliResultToTaskResult(result: CliFailoverResult): boolean | "deferred" | "skipped" {
   if (result === "ok") {
     return true;
   }
   if (result === "deferred") {
     return "deferred";
+  }
+  if (result === "skipped") {
+    return "skipped";
   }
   return false;
 }

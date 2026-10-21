@@ -150,6 +150,13 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
       console.log(`✅ [${this.name}] ${mr.projectPath}!${mr.changeNumber} feedback addressed`);
       return;
     }
+    if (outcome === "skipped") {
+      this.recordFailure(key, now);
+      console.log(
+        `⏭️  [${this.name}] ${mr.projectPath}!${mr.changeNumber} skipped; retry scheduled`,
+      );
+      return;
+    }
     this.recordFailure(key, now);
     console.log(
       outcome === "deferred"

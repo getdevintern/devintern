@@ -19,6 +19,7 @@ import type {
   TaskArtifactContent,
   TaskArtifactFile,
 } from "@/lib/api";
+import { groupHarnessLogs } from "@/lib/harness-log-groups";
 import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
 import { runWorkLink } from "@/lib/run-work";
 import { parseStageDetail } from "@/lib/stage-detail";
@@ -148,17 +149,24 @@ function RetryConfirm({
   onConfirm,
 }: {
   taskKey?: string;
-  kind?: "task" | "automation";
+  kind?: "task" | "automation" | "injected";
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const automation = kind === "automation";
+  const injected = kind === "injected";
   return (
     <div className="rounded-md border bg-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
         {automation ? (
           <>Start a new run of this automation? The current run stays in history.</>
+        ) : injected ? (
+          <>
+            Re-queue {taskKey ? <code className="font-mono">{taskKey}</code> : "this ad-hoc task"}?
+            The worker resumes the branch and report the interrupted run left behind, when it
+            recorded them. The current run stays in history.
+          </>
         ) : (
           <>
             Schedule a new run of{" "}
@@ -172,10 +180,14 @@ function RetryConfirm({
           {busy
             ? automation
               ? "Triggering…"
-              : "Scheduling…"
+              : injected
+                ? "Re-queuing…"
+                : "Scheduling…"
             : automation
               ? "Start new run"
-              : "Schedule retry"}
+              : injected
+                ? "Re-queue task"
+                : "Schedule retry"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
@@ -299,11 +311,19 @@ function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }
   );
 }
 
-/** Every harness execution recorded for a run (clarity, implementation, review…). */
+/**
+ * Every harness execution recorded for a run (clarity, implementation, review…).
+ *
+ * The list is attributed by task key as well as run id, so retries contribute
+ * earlier attempts' transcripts. Show them under per-attempt headers when more
+ * than one attempt is present, and keep everything oldest first.
+ */
 function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[] }) {
   if (logs.length === 0) {
     return null;
   }
+  const { grouped, groups } = groupHarnessLogs(logs);
+
   return (
     <Card>
       <CardHeader>
@@ -311,10 +331,29 @@ function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[
           Harness logs ({logs.length})
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {logs.map((file) => (
-          <HarnessLogItem key={file.name} runId={runId} file={file} />
-        ))}
+      <CardContent className={grouped ? "space-y-4" : "space-y-2"}>
+        {grouped
+          ? groups.map((group) => (
+              <section key={group.key} className="space-y-2">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="text-xs font-medium text-foreground">{group.label}</span>
+                  {group.runId !== undefined ? (
+                    <span className="font-mono text-xs text-muted-foreground">
+                      run {group.runId}
+                    </span>
+                  ) : null}
+                  <span className="text-xs text-muted-foreground">
+                    {group.logs.length} {group.logs.length === 1 ? "log" : "logs"}
+                  </span>
+                </div>
+                {group.logs.map((file) => (
+                  <HarnessLogItem key={file.name} runId={runId} file={file} />
+                ))}
+              </section>
+            ))
+          : groups[0]?.logs.map((file) => (
+              <HarnessLogItem key={file.name} runId={runId} file={file} />
+            ))}
       </CardContent>
     </Card>
   );
@@ -483,6 +522,11 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
               ? `Automation re-run triggered. A fresh run will appear in the run list shortly.`
               : "Could not trigger the automation re-run.",
           });
+        } else if (data.retry.kind === "injected") {
+          setFeedback({
+            kind: "success",
+            message: `Re-queued. The worker will resume ${data.run.taskKey} on its next poll.`,
+          });
         } else {
           setFeedback({
             kind: "success",
@@ -554,7 +598,11 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
                     }}
                   >
                     <RefreshCcw />{" "}
-                    {data.retry.kind === "automation" ? "Re-run automation" : "Retry this run"}
+                    {data.retry.kind === "automation"
+                      ? "Re-run automation"
+                      : data.retry.kind === "injected"
+                        ? "Re-queue task"
+                        : "Retry this run"}
                   </Button>
                 ) : null}
               </div>

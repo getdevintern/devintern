@@ -3,6 +3,7 @@ import { Utils } from "../../utils";
 import { PRClient } from "../base-client";
 import { prNumberFromUrl } from "../shared";
 import type { PRInfo, PRResult } from "../shared";
+import type { ChangeRequestIdentity } from "../provider";
 
 export class GitHubPRClient extends PRClient {
   /**
@@ -163,6 +164,48 @@ export class GitHubPRClient extends PRClient {
     } catch (error) {
       console.warn(`⚠️  Could not label PR #${prNumber}: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Look up an open pull request for the given head branch.
+   *
+   * @param repository - `owner/repo` slug
+   * @param sourceBranch - Head/feature branch name
+   * @returns Provider-neutral identity, or `undefined` when none exists
+   */
+  async findOpenChangeRequest(
+    repository: string,
+    sourceBranch: string,
+  ): Promise<ChangeRequestIdentity | undefined> {
+    const [owner, repo] = repository.split("/");
+    if (!owner || !repo) return undefined;
+    const url = await this.findExistingPrUrl(owner, repo, sourceBranch);
+    const number = prNumberFromUrl(url ?? undefined);
+    if (!url || !number) return undefined;
+    return {
+      provider: "github",
+      instanceUrl: "https://github.com",
+      projectPath: repository,
+      number,
+      webUrl: url,
+    };
+  }
+
+  /**
+   * Apply labels to an existing pull request (best-effort, like create).
+   *
+   * @param repository - `owner/repo` slug
+   * @param prNumber - Pull request number
+   * @param labels - Label names to apply
+   */
+  async applyLabelsToChangeRequest(
+    repository: string,
+    prNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    const [owner, repo] = repository.split("/");
+    if (!owner || !repo) return;
+    await this.applyLabels(owner, repo, prNumber, labels);
   }
 
   /**

@@ -20,7 +20,11 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "../agent/json";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
+import {
+  buildHeadlessAgentInvocation,
+  harnessSpawnEnv,
+  HEADLESS_AGENT_STDIO,
+} from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
@@ -309,17 +313,26 @@ export async function runAgentPrompt(
     (async () => {
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = buildHeadlessAgentArgs(harness, prompt, {
-        maxTurns: 500,
-        skipPermissions: true,
-        workingDir,
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHeadlessAgentInvocation(
+        harness,
+        resolvedPath,
+        prompt,
+        {
+          maxTurns: 500,
+          skipPermissions: true,
+          workingDir,
+          model: resolveAgentModel(harness.name),
+          effort: resolveAgentEffort(),
+        },
+      );
       const { child: agentProcess, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workingDir, stdio: HEADLESS_AGENT_STDIO },
+        spawnOptions: {
+          cwd: workingDir,
+          stdio: HEADLESS_AGENT_STDIO,
+          env: harnessSpawnEnv(agentEnv),
+        },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,

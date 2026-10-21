@@ -51,6 +51,42 @@ describe("InjectedTaskAcquirer", () => {
     expect(store.hasPending()).toBe(false);
   });
 
+  test("runs pending tasks concurrently instead of one after another", async () => {
+    enqueue("local-a");
+    enqueue("local-b");
+
+    let started = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => {
+        started++;
+        if (started === 2) release();
+        await gate;
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+
+    const tick = acquirer.tick();
+    // Sequential drains would block on the first execute forever; the second
+    // only starts if both rows were claimed before awaiting either run.
+    const bothStarted = await Promise.race([
+      gate.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+    ]);
+    release();
+    await tick;
+
+    expect(bothStarted).toBe(true);
+    expect(started).toBe(2);
+    expect(store.hasPending()).toBe(false);
+  });
+
   test("requeues deferred tasks for the next tick", async () => {
     enqueue("local-a");
 
@@ -72,6 +108,22 @@ describe("InjectedTaskAcquirer", () => {
     busy = false;
     await acquirer.tick();
     expect(calls).toEqual(["local-a", "local-a"]);
+    expect(store.hasPending()).toBe(false);
+  });
+
+  test("settles a skipped task as done rather than failed", async () => {
+    enqueue("local-a");
+
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => "skipped",
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+
+    const [task] = store.list();
+    expect(task?.status).toBe("done");
+    expect(task?.message).toContain("skipped");
     expect(store.hasPending()).toBe(false);
   });
 

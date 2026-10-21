@@ -308,6 +308,27 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("Ran 429 tests across 47 files.", "").limited).toBe(false);
   });
 
+  test("ignores a numbered listing whose line number is 429", () => {
+    // `cat -n` / numbered code blocks produce a line that trims to `429`.
+    const listing = ["   427\t[Install]", "   428\t", "   429\t", "   430\tEnable and start:"].join(
+      "\n",
+    );
+
+    expect(detectUsageLimit(listing, "").limited).toBe(false);
+    expect(detectUsageLimit("", listing).limited).toBe(false);
+  });
+
+  test("ignores prose that starts with an HTTP 429 status", () => {
+    // Observed in this package's own readme, streamed to stderr while an
+    // agent was editing harness docs: the line starts like an HTTP status but
+    // is explanatory prose, not a provider diagnostic.
+    const prose =
+      "  HTTP 429 — accepted only on lines that look like real diagnostics, never raw";
+
+    expect(detectUsageLimit(prose, "").limited).toBe(false);
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects rate limit error phrasing", () => {
     expect(detectUsageLimit("rate limit exceeded", "").limited).toBe(true);
   });
@@ -376,6 +397,34 @@ describe("detectUsageLimit", () => {
     expect(result.limited).toBe(true);
     expect(result.resetsAt).toBe("4hr 9min");
     expect(result.matchedLine).toBe(out);
+  });
+
+  test("extracts a usage limit from OpenCode v2's message field", () => {
+    const out =
+      'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=abc123 message="5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("extracts a usage limit from OpenCode v2's --format json error envelope", () => {
+    const out = JSON.stringify({
+      type: "error",
+      timestamp: 1_787_000_000_000,
+      sessionID: "ses_abc",
+      error: {
+        type: "unknown",
+        message: "Usage limit reached. It will reset in 15 minutes.",
+      },
+    });
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("15 minutes");
+  });
+
+  test("ignores a non-error JSON object the agent printed", () => {
+    const out = JSON.stringify({ type: "tool", message: "usage limit reached" });
+    expect(detectUsageLimit(out, "").limited).toBe(false);
   });
 
   test("detects provider 'Rate limit reached' JSON error", () => {

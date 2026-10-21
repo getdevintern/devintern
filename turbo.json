@@ -47,6 +47,11 @@
     "test": {
       "env": ["AGENT_CLI_PATH"]
     },
+    "@devintern/e2e#test": {
+      "dependsOn": ["@getdevintern/code#build"],
+      "env": ["AGENT_CLI_PATH"],
+      "cache": false
+    },
     "typecheck": {}
   }
 }

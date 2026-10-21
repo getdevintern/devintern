@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectUsageLimit,
   isConstrainedMode,
@@ -13,6 +14,7 @@ import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "../agent/analysis-mode";
 import { parseAgentJsonObject } from "../agent/json";
 import { getSandbox } from "../agent/sandbox";
+import { harnessSpawnEnv } from "../agent/spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
 import { getStoryPointsFieldForProject } from "../config/project-settings";
@@ -76,7 +78,11 @@ export async function runEstimation(
       const estimationContent = readFileSync(estimationFile, "utf8");
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const estimationArgs = harness.buildArgs(runOptions);
+      const { args: estimationArgs, env: estimationEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        runOptions,
+      );
       console.log(`📊 Running story points estimation with ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${estimationArgs.join(" ")}`);
 
@@ -92,7 +98,7 @@ export async function runEstimation(
       const { child: estimationAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: estimationSpawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(estimationEnv) },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,

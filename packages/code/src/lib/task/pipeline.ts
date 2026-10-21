@@ -4,7 +4,9 @@ import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
+import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
+import { HarnessUnavailableError } from "../agent/harness-startup";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -48,6 +50,8 @@ import { isMarkdownTaskTracker } from "../trackers/markdown/markdown-task-tracke
 import type { MarkdownTaskRaw } from "../trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../utils";
 import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   isWorkerChild,
   writeUsageLimitHint,
@@ -136,6 +140,11 @@ async function runFeasibilityCheck(input: FeasibilityCheckInput): Promise<void> 
     // fail over. Swallowing them here used to launch implementation on
     // the same exhausted harness (Grok 402 during the clarity check).
     if (clarityError instanceof UsageLimitError) {
+      throw clarityError;
+    }
+    // A harness that could not start will fail implementation too. Let the
+    // worker fail over/defer instead of continuing on the same broken binary.
+    if (clarityError instanceof Error && clarityError.name === "HarnessUnavailableError") {
       throw clarityError;
     }
     recordRunStage("feasibility", {
@@ -348,8 +357,27 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
     await flushAnalyticsAndExit(0);
   }
 
+  // A harness that could not start is a configuration problem, not a task
+  // attempt. In a worker child, signal the parent to fail over/defer without
+  // posting a failure comment, recording retry state, or transitioning the
+  // ticket. Interactive runs keep the normal failure path below.
+  if (error instanceof HarnessUnavailableError && isWorkerChild()) {
+    await finishTaskRun("deferred", error.message);
+    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
+    if (runContext.lockManager) {
+      runContext.lockManager.release();
+    }
+    await flushAnalyticsAndExit(HARNESS_UNAVAILABLE_EXIT_CODE);
+  }
+
   const err = error as Error;
   await finishTaskRun("failed", err.message);
+
+  // A failed run may still have pushed a branch and opened a PR itself (agents
+  // sometimes run `gh pr create`). Register and label it so review polling and
+  // PR metadata stay correct; the run remains failed.
+  await adoptAgentCreatedChangeRequest({ taskKey });
+
   const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
   console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
   if (options.verbose && err.stack) {
@@ -404,7 +432,8 @@ interface PreparedTask {
 /**
  * Validate the environment, fetch the task and its context, apply the retry
  * gate, and open the run record. Returns `null` when the retry gate skips a
- * batch task; single-task skips exit directly.
+ * batch task; single-task skips exit directly (with
+ * {@link TASK_SKIP_EXIT_CODE} in a worker child, 0 otherwise).
  */
 async function prepareTask(input: {
   taskKey: string;
@@ -570,7 +599,8 @@ interface RetryGateResult {
 
 /**
  * Skip an unchanged incomplete task. Returns `null` when the task should be
- * skipped (batch returns, single exits); otherwise returns the retry state.
+ * skipped (batch returns, single exits with {@link TASK_SKIP_EXIT_CODE} for a
+ * worker child); otherwise returns the retry state.
  */
 async function applyRetryGate(input: {
   tracker: TaskTrackerClient;
@@ -611,7 +641,10 @@ async function applyRetryGate(input: {
       if (runContext.lockManager) {
         runContext.lockManager.release();
       }
-      process.exit(0);
+      // A worker child must not report a skip as success: exit 0 makes the
+      // poller log "completed" and the fleet tear down the worktree even
+      // though no run happened. Interactive runs keep a plain zero exit.
+      process.exit(isWorkerChild() ? TASK_SKIP_EXIT_CODE : 0);
     }
 
     if (priorRetryState) {

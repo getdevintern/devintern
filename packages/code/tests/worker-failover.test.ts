@@ -7,6 +7,7 @@ import { UsageLimitError } from "@devintern/agent-harness";
 
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
+  cliResultToTaskResult,
   getWorkerFailover,
   resetWorkerFailover,
   runWithFailover,
@@ -14,7 +15,9 @@ import {
 } from "../src/lib/worker/failover";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   writeUsageLimitHint,
@@ -26,7 +29,12 @@ afterEach(() => {
 
 describe("runWithFailover", () => {
   test("defers an access-denied child without trying another harness", async () => {
-    startWorkerFailover({ checkInstalled: false, raw: "codex,grok", log: () => {} });
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
     let calls = 0;
     const result = await runWithFailover(async () => {
       calls++;
@@ -42,7 +50,12 @@ describe("runWithFailover", () => {
   });
 
   test("retries the same spawn on the next harness after exit 75", async () => {
-    startWorkerFailover({ checkInstalled: false, raw: "codex,grok", log: () => {} });
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
 
     const seen: string[] = [];
     const result = await runWithFailover(async (env) => {
@@ -62,7 +75,12 @@ describe("runWithFailover", () => {
   });
 
   test("returns deferred when every harness in the chain is limited", async () => {
-    startWorkerFailover({ checkInstalled: false, raw: "codex,grok", log: () => {} });
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
 
     const result = await runWithFailover(async (env) => {
       writeFileSync(env[USAGE_LIMIT_FILE_ENV]!, JSON.stringify({ untilMs: Date.now() + 60_000 }));
@@ -72,20 +90,119 @@ describe("runWithFailover", () => {
     expect(result).toBe("deferred");
   });
 
+  test("tries the next entry when a harness cannot start", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+
+    const seen: string[] = [];
+    const result = await runWithFailover(async (env) => {
+      seen.push(env.AGENT_HARNESS ?? "");
+      return seen.length === 1 ? HARNESS_UNAVAILABLE_EXIT_CODE : 0;
+    });
+
+    expect(result).toBe("ok");
+    expect(seen).toEqual(["codex", "grok"]);
+  });
+
+  test("defers without burning an attempt when no harness can start", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+
+    const seen: string[] = [];
+    const result = await runWithFailover(async (env) => {
+      seen.push(env.AGENT_HARNESS ?? "");
+      return HARNESS_UNAVAILABLE_EXIT_CODE;
+    });
+
+    expect(result).toBe("deferred");
+    expect(seen).toEqual(["codex", "grok"]);
+  });
+
   test("pins AGENT_HARNESS to the active entry on the first attempt", async () => {
-    startWorkerFailover({ checkInstalled: false, raw: "codex,grok,cursor", log: () => {} });
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok,cursor",
+      log: () => {},
+    });
 
     const result = await runWithFailover(async (env) => {
       expect(env.AGENT_HARNESS).toBe("codex");
+      expect(env.DEVINTERN_HARNESS_CHAIN).toBe("codex,grok,cursor");
       expect(env.DEVINTERN_WORKER_CHILD).toBe("1");
       return 0;
     });
     expect(result).toBe("ok");
   });
+
+  test("reports a retry-gate skip without trying another harness", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+
+    let calls = 0;
+    const result = await runWithFailover(async () => {
+      calls++;
+      return TASK_SKIP_EXIT_CODE;
+    });
+
+    expect(result).toBe("skipped");
+    expect(calls).toBe(1);
+  });
+
+  test("without a worker controller, exit 3 is still a skip", async () => {
+    const result = await runWithFailover(async () => TASK_SKIP_EXIT_CODE);
+    expect(result).toBe("skipped");
+  });
+});
+
+describe("cliResultToTaskResult", () => {
+  test("maps ok, deferred, skipped, and failure distinctly", () => {
+    expect(cliResultToTaskResult("ok")).toBe(true);
+    expect(cliResultToTaskResult("deferred")).toBe("deferred");
+    expect(cliResultToTaskResult("skipped")).toBe("skipped");
+    expect(cliResultToTaskResult("failed")).toBe(false);
+  });
+});
+
+describe("worker startup model diagnostics", () => {
+  test("lists the effective model per chain entry and marks fallbacks without one", async () => {
+    const originalModel = process.env.AGENT_MODEL;
+    const originalGrokModel = process.env.GROK_MODEL;
+    const lines: string[] = [];
+    try {
+      process.env.AGENT_MODEL = "opencode-go/deepseek-v4.1-flash";
+      delete process.env.GROK_MODEL;
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode,grok",
+        log: (message) => lines.push(message),
+      });
+    } finally {
+      if (originalModel === undefined) delete process.env.AGENT_MODEL;
+      else process.env.AGENT_MODEL = originalModel;
+      if (originalGrokModel === undefined) delete process.env.GROK_MODEL;
+      else process.env.GROK_MODEL = originalGrokModel;
+    }
+
+    expect(lines).toContain("   Models: opencode: opencode-go/deepseek-v4.1-flash | grok: default");
+  });
 });
 
 describe("worker startup with a stale persisted active harness", () => {
-  test("the selected fallback is persisted so the next start does not re-warn", () => {
+  test("the selected fallback is persisted so the next start does not re-warn", async () => {
     const dir = mkdtempSync(join(tmpdir(), "devintern-stale-active-"));
     const dbPath = join(dir, "queue.db");
     const seed = new WebhookQueue({ dbPath });
@@ -97,8 +214,9 @@ describe("worker startup with a stale persisted active harness", () => {
     try {
       console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
       const firstQueue = new WebhookQueue({ dbPath });
-      startWorkerFailover({
+      await startWorkerFailover({
         checkInstalled: false,
+        sandboxName: "none",
         raw: "opencode,grok,cursor",
         queue: firstQueue,
         log: () => {},
@@ -111,8 +229,9 @@ describe("worker startup with a stale persisted active harness", () => {
 
       const secondWarnings: string[] = [];
       console.warn = (...args: unknown[]) => secondWarnings.push(args.join(" "));
-      startWorkerFailover({
+      await startWorkerFailover({
         checkInstalled: false,
+        sandboxName: "none",
         raw: "opencode,grok,cursor",
         queue: reopened,
         log: () => {},
@@ -130,7 +249,7 @@ describe("worker startup with a stale persisted active harness", () => {
 });
 
 describe("worker startup with corrupt persisted meta", () => {
-  test("starts on the primary harness instead of throwing", () => {
+  test("starts on the primary harness instead of throwing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "devintern-corrupt-meta-"));
     const dbPath = join(dir, "queue.db");
     const seed = new WebhookQueue({ dbPath });
@@ -146,14 +265,14 @@ describe("worker startup with corrupt persisted meta", () => {
     const originalWarn = console.warn;
     try {
       console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-      expect(() =>
-        startWorkerFailover({
-          checkInstalled: false,
-          raw: "opencode,grok",
-          queue,
-          log: () => {},
-        }),
-      ).not.toThrow();
+      // A corrupt persisted row must not reject startup.
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode,grok",
+        queue,
+        log: () => {},
+      });
     } finally {
       console.warn = originalWarn;
       queue.close();
@@ -166,7 +285,7 @@ describe("worker startup with corrupt persisted meta", () => {
     ).toBe(true);
   });
 
-  test("keeps healthy persisted rate-limit windows when the active harness is corrupt", () => {
+  test("keeps healthy persisted rate-limit windows when the active harness is corrupt", async () => {
     const dir = mkdtempSync(join(tmpdir(), "devintern-corrupt-active-"));
     const dbPath = join(dir, "queue.db");
     const seed = new WebhookQueue({ dbPath });
@@ -182,8 +301,9 @@ describe("worker startup with corrupt persisted meta", () => {
     const originalWarn = console.warn;
     try {
       console.warn = () => {};
-      startWorkerFailover({
+      await startWorkerFailover({
         checkInstalled: false,
+        sandboxName: "none",
         raw: "opencode,grok",
         queue,
         log: () => {},

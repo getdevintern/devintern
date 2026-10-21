@@ -734,7 +734,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
-  startWorkerFailover({
+  await startWorkerFailover({
     queue: state.queue,
     onPause: ({ untilMs, harness, resetHint }) => {
       console.warn(

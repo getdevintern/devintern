@@ -223,7 +223,7 @@ Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure 
 
 ### Delivery failures
 
-A run that cannot commit its implementation (including an agent that produces no changes), fails pre-push validation, or cannot push its branch is recorded as failed. It does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
+A run that leaves no implementation to publish — no uncommitted changes and no commits ahead of the PR target — fails, as does a run that fails pre-push validation or cannot push its branch. If the agent committed its own changes on the feature branch, the worker verifies and publishes those commits instead of requiring an additional working-tree commit. A failed run does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
 
 ### Re-running a task
 
@@ -282,6 +282,7 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 
 - `📌 picking up KEY` — it was claimed on this tick.
 - `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
+- `⏭️ KEY skipped (previous attempt reported incomplete; ticket unchanged)` — the retry gate declined the unchanged ticket, so no run started and no PR was attempted. Edit the description or comment to unlock a retry (see [Re-running a task](#re-running-a-task)); the ticket stays deduped until it changes.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
 - `⏭️ skipping KEY (already actioned; no change since the PR)` — a PR was already created for this ticket. Edit its summary/description, re-open it, or change its labels to re-arm it; see [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
@@ -305,6 +306,7 @@ devintern worker add --repo backend --title "Fix flaky checkout test" \
   --body-file - < context.md
 devintern worker add --repo web --title "Regenerate API docs" \
   --idempotency-key nightly-docs --json
+devintern worker add --resume local-fix-flaky-checkout-test
 ```
 
 The task is materialized as a local markdown prompt in `~/.devintern/injected/`
@@ -317,10 +319,11 @@ records, and the dashboard, and start on a `feature/local-<slug>` branch (the
 | Option                     | Description                                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `--repo <name>`            | `[[repos]]` name to target (default: the only repo, else required)                                                              |
-| `--title <text>`           | Task title (required)                                                                                                           |
+| `--title <text>`           | Task title (required unless `--resume`)                                                                                         |
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
 | `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
+| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (resumes its branch and prior report)                                     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
@@ -331,6 +334,19 @@ Behavior to expect:
 - **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
   and runs on the next poll. If no worker is running the task is still queued —
   `worker add` says so — and `--wait` refuses to block.
+- **Interrupted tasks are not auto-restarted.** A task that was mid-run when the
+  worker died is marked `failed` at the next startup, and its run records why.
+  Re-queue it explicitly with `--resume <taskKey>` (or the dashboard's
+  **Re-queue task**): the row keeps its key, so the retry targets the same
+  `feature/local-<slug>` branch and session pickup hands the prior attempt's
+  report to the agent — when it recorded one — instead of starting a second
+  branch and PR. A task that never started is still `pending` and needs no
+  resume.
+- **Concurrency.** Pending ad-hoc tasks are claimed together and run in
+  parallel up to the workspace's `max_concurrency` / `max_concurrency_per_repo`
+  limits, sharing capacity with polled, review, and automation work. A task
+  deferred because its repo is busy is requeued for the next poll without
+  blocking independent repos behind it.
 - **Non-interactive.** The command returns after enqueue. `--wait` is the
   scripting hook: it polls the row and exits with the run's status. It fails fast
   if the worker disappears, and exits non-zero with a clear message once
@@ -361,7 +377,9 @@ Behavior to expect:
 `--repo` is optional only in a one-repo workspace. With several repos, omitting
 it fails and lists the valid names; an unknown `--repo` fails the same way. An
 empty title, a body over 20,000 characters, and a missing `--body-file` are
-rejected before anything is written.
+rejected before anything is written. `--resume` takes no title, body, repo, or
+idempotency key: the existing row already holds them, and an unknown task key
+fails without writing anything.
 
 ## Working windows (quiet hours)
 
@@ -425,6 +443,8 @@ The opt-out is a live setting: removing it or flipping it back on applies withou
 ## Review feedback on the agent's PRs
 
 In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open.
+
+If a run fails after the agent opened a PR itself (for example by running `gh pr create`), the worker adopts that open PR for the worktree's branch: it applies `pr_labels` and registers the PR in the watch list. The run still reports failed. This failure-path adoption currently looks up GitHub PRs only.
 
 The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 

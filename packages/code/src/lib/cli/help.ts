@@ -70,6 +70,8 @@ Subcommands:
   doctor               Readiness check: runtime, git, agent CLI, tracker
                         credentials, sign-in, license, bundled catalog
                         (exit 1 if anything fails)
+  report               File a redacted bug report for DevIntern itself
+                        (run 'devintern report --help' for options)
 
 Licensing:
   Interactive runs are free forever and need no sign-in. Unattended runs

@@ -121,7 +121,7 @@ max_concurrency = 4
 max_concurrency_per_repo = 1
 ```
 
-`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, and estimations. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, estimations, and ad-hoc `worker add` tasks. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
 
 The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
 

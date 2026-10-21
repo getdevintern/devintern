@@ -14,6 +14,7 @@ import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
 import { warnEffortUnsupported } from "../effort.js";
 import { assertModeSupported } from "../modes.js";
+import { buildHarnessInvocation } from "../probe.js";
 import { buildPromptArgs } from "../prompt-args.js";
 import { spawnReapable, reapTree } from "../process-reaper.js";
 import { resolveExecutablePathWithRetry } from "../resolver.js";
@@ -52,7 +53,16 @@ export async function runAgentBun(
     prompt,
     options,
   );
-  const args = harness.buildArgs(options);
+
+  // Wait out any in-progress CLI auto-update swap before spawning, so a
+  // transient `spawn ENOENT` doesn't abort the run.
+  const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
+    displayName: harness.displayName,
+  });
+  // Probe the CLI once so version-dependent flags (e.g. Opencode v1/v2) are
+  // chosen correctly before the process is spawned.
+  const invocation = await buildHarnessInvocation(harness, resolvedPath, options);
+  const args = [...invocation.args];
 
   if (inputMethod === "arg") {
     args.push(...buildPromptArgs(harness, effectivePrompt));
@@ -63,16 +73,11 @@ export async function runAgentBun(
     console.log(`\n🤖 Running ${harness.displayName}...\n`);
   }
 
-  // Wait out any in-progress CLI auto-update swap before spawning, so a
-  // transient `spawn ENOENT` doesn't abort the run.
-  const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
-    displayName: harness.displayName,
-  });
-
   const proc = spawnReapable(resolvedPath, args, {
     // Only pipe stdin when feeding the prompt that way. An open stdin pipe (even
     // unused) makes opencode block until EOF.
     stdio: [inputMethod === "stdin" ? "pipe" : "ignore", "pipe", "pipe"],
+    env: invocation.env ? { ...process.env, ...invocation.env } : undefined,
   });
 
   if (inputMethod === "stdin" && proc.stdin) {

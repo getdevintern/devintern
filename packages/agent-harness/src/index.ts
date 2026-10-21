@@ -17,6 +17,8 @@ export type {
   AgentRunMode,
   AgentRunOptions,
   AgentRunResult,
+  HarnessInvocation,
+  HarnessProbe,
   ResolvedHarness,
   StructuredOutputResult,
 } from "./types.js";
@@ -55,6 +57,8 @@ export {
 export {
   parseHarnessList,
   resolveHarnessChain,
+  resolveHarnessChainSync,
+  resetMiseShimWarnings,
   type HarnessChainEntry,
   type HarnessChainIssue,
   type HarnessChainOptions,
@@ -63,6 +67,15 @@ export {
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
+
+// Harness capability probing (version-dependent flags, e.g. Opencode v1/v2)
+export {
+  buildHarnessInvocation,
+  parseMajorVersion,
+  probeHarness,
+  readCliVersion,
+  resetHarnessProbeCache,
+} from "./probe.js";
 
 // Attachment helpers (path injection + native image args)
 export {
@@ -135,8 +148,28 @@ export {
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
+export {
+  probeHarnessUnderSandbox,
+  resetHarnessSandboxProbeCache,
+  resolveProbeProvider,
+  firstActionableProbeLine,
+  type HarnessSandboxProbeOptions,
+  type HarnessSandboxProbeResult,
+} from "./sandbox/harness-probe.js";
+export {
+  detectMiseShim,
+  harnessCliPathEnvKey,
+  miseShimFixHint,
+  type MiseShimInfo,
+} from "./sandbox/shim-detect.js";
 export { NativeSandboxProvider } from "./sandbox/providers/native.js";
-export { NonoSandboxProvider } from "./sandbox/providers/nono.js";
+export {
+  NonoSandboxProvider,
+  describeNonoPack,
+  resetNonoPackState,
+  type NonoPackStatus,
+} from "./sandbox/providers/nono.js";
+export { harnessStatePaths, resolveHomeDir } from "./sandbox/harness-state.js";
 export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
 export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";

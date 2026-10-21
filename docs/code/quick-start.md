@@ -93,7 +93,7 @@ Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are cover
 
 ## Run Your First Task
 
-Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
+Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue. If a failure looks like a DevIntern defect rather than a setup problem, `devintern report` files a redacted report with the run and logs attached.
 
 If you chose Markdown during setup, add `TASK-1.md` to your configured task directory and pass its filename without the extension:
 

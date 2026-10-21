@@ -416,7 +416,7 @@ export async function startWebhookServer(
   // Shared failover controller: same chain, windows, and failback timers the
   // fleet worker uses. Persist through the queue DB so a restart resumes on
   // the right harness.
-  runtime.failover = startWorkerFailover({
+  runtime.failover = await startWorkerFailover({
     queue: runtime.queue,
     onPause: ({ untilMs, harness, resetHint }) => {
       if (!reviewQueue.isPaused) {

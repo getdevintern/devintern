@@ -74,6 +74,33 @@ describe("dashboard harness logs", () => {
     expect(body.harnessLogs[0]?.label).toBe("implementation");
   });
 
+  test("annotates each log with the attempt of the run that produced it", () => {
+    const store = new RunStore(dbPath);
+    const firstRunId = store.createRun({ origin: "task", taskKey: "DEV-128", attempt: 1 });
+    const secondRunId = store.createRun({ origin: "task", taskKey: "DEV-128", attempt: 2 });
+    store.close();
+
+    for (const [runId, label] of [
+      [firstRunId, "implementation"],
+      [secondRunId, "implementation"],
+    ] as const) {
+      const name = harnessLogFileName({
+        startedAt: new Date(),
+        origin: "task",
+        runId,
+        taskKey: "DEV-128",
+        label,
+      });
+      mkdirSync(harnessLogsDir(workspaceDir), { recursive: true });
+      writeFileSync(join(harnessLogsDir(workspaceDir), name), "=== devintern harness run ===\n");
+    }
+
+    // The current run sees both attempts, each with its own number.
+    const logs = data.listRunHarnessLogs(secondRunId);
+    expect(logs).toHaveLength(2);
+    expect(logs.map((file) => file.attempt).sort()).toEqual([1, 2]);
+  });
+
   test("serves a redacted log scoped to its run", () => {
     const { runId, name } = seedRunWithLog();
     const response = handleRunHarnessLog(data, String(runId), encodeURIComponent(name));

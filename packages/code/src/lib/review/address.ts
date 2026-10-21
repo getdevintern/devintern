@@ -16,7 +16,11 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import { readFileSync } from "fs";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
+import {
+  buildHeadlessAgentInvocation,
+  harnessSpawnEnv,
+  HEADLESS_AGENT_STDIO,
+} from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
 import { getSandbox } from "../agent/sandbox";
@@ -76,13 +80,18 @@ export async function runAgent(
         maxTurns,
         skipPermissions: true,
         workingDir: workDir,
-        model: resolveAgentModel(),
+        model: resolveAgentModel(harness.name),
         effort: resolveAgentEffort(),
       };
-      const agentArgs = buildHeadlessAgentArgs(harness, prompt, runOptions);
+      const { args: agentArgs, env: agentEnv } = await buildHeadlessAgentInvocation(
+        harness,
+        resolvedPath,
+        prompt,
+        runOptions,
+      );
 
       if (verbose) {
-        console.log(`   Command: ${executablePath} ${harness.buildArgs(runOptions).join(" ")}`);
+        console.log(`   Command: ${resolvedPath} ${agentArgs.join(" ")}`);
         console.log(`   Timeout: ${timeoutMinutes} minutes`);
       }
 
@@ -94,7 +103,11 @@ export async function runAgent(
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workDir, stdio: HEADLESS_AGENT_STDIO },
+        spawnOptions: {
+          cwd: workDir,
+          stdio: HEADLESS_AGENT_STDIO,
+          env: harnessSpawnEnv(agentEnv),
+        },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,

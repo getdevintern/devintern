@@ -98,6 +98,7 @@ function pullRequest(overrides: Partial<PullRequest> = {}): PullRequest {
     body: "Task 2: Expand the greeting\n\nHello, world!",
     head: { ref: "feature/2", sha: "deadbeef" },
     base: { ref: scenarioBase },
+    labels: [],
     ...overrides,
   };
 }

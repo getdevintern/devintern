@@ -94,6 +94,10 @@ export interface RunRecord extends RunMeta {
    * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
+  /** Explicit current/last step; never inferred from completed stage records. */
+  step?: string;
+  stepStartedAt?: number;
+  stepActive?: boolean;
 }
 
 export interface RunStageRecord {
@@ -247,6 +251,15 @@ export class RunStore {
     if (!columns.some((c) => c.name === "clean_stop")) {
       this.db.run("ALTER TABLE runs ADD COLUMN clean_stop INTEGER NOT NULL DEFAULT 0");
     }
+    if (!columns.some((c) => c.name === "step")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step TEXT");
+    }
+    if (!columns.some((c) => c.name === "step_started_at")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step_started_at INTEGER");
+    }
+    if (!columns.some((c) => c.name === "step_active")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step_active INTEGER NOT NULL DEFAULT 0");
+    }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
     this.db.run(`
@@ -300,6 +313,24 @@ export class RunStore {
       ],
     );
     return Number(result.lastInsertRowid);
+  }
+
+  /** Record an actual step entry, including custom and repeated executions. */
+  startStep(runId: number, step: string): number {
+    const startedAt = Date.now();
+    this.db.run(
+      "UPDATE runs SET step = ?, step_started_at = ?, step_active = 1 WHERE id = ? AND status = 'in_progress'",
+      [step, startedAt, runId],
+    );
+    return startedAt;
+  }
+
+  /** Keep the last step, but do not claim it is still executing after exit. */
+  completeStep(runId: number, step: string, startedAt: number): void {
+    this.db.run(
+      "UPDATE runs SET step_active = 0 WHERE id = ? AND step = ? AND step_started_at = ?",
+      [runId, step, startedAt],
+    );
   }
 
   /** Number of recorded runs (attempts) for a task. */
@@ -452,12 +483,10 @@ export class RunStore {
    */
   finishRun(runId: number, status: Exclude<RunStatus, "in_progress">, reason?: string): void {
     this.db.transaction(() => {
-      this.db.run(`UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ? WHERE id = ?`, [
-        status,
-        reason ?? null,
-        Date.now(),
-        runId,
-      ]);
+      this.db.run(
+        `UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ?, step_active = 0 WHERE id = ?`,
+        [status, reason ?? null, Date.now(), runId],
+      );
       this.replaceOutcomeStage(runId, status, reason);
     })();
   }
@@ -504,7 +533,7 @@ export class RunStore {
               ? "worker stopped cleanly; interruption feedback already handled"
               : reason;
           const result = this.db.run(
-            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
+            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?, step_active = 0
              WHERE id = ? AND status = 'in_progress'`,
             [orphanReason, now, orphan.id],
           );
@@ -761,6 +790,9 @@ export class RunStore {
       ticketKey: (row.ticket_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
       taskDescription: (row.task_description as string | null) ?? undefined,
+      step: typeof row.step === "string" ? row.step : undefined,
+      stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
+      stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
     };
   }
@@ -831,6 +863,26 @@ export function beginRun(meta: RunMeta): void {
     currentRunId = null;
     currentRunMeta = null;
     warnOnce("begin", error);
+  }
+}
+
+/** Track step execution without allowing observability failures to stop work. */
+export function beginRunStep(step: string): () => void {
+  const store = currentStore;
+  const runId = currentRunId;
+  if (!store || runId === null) return () => {};
+  try {
+    const startedAt = store.startStep(runId, step);
+    return () => {
+      try {
+        store.completeStep(runId, step, startedAt);
+      } catch (error) {
+        warnOnce("step-exit", error);
+      }
+    };
+  } catch (error) {
+    warnOnce("step-entry", error);
+    return () => {};
   }
 }
 

@@ -51,6 +51,30 @@ describe("dashboard API", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("activity includes older active runs, bounded recent history, and short task previews", () => {
+    const store = new RunStore(dbPath);
+    try {
+      const active = store.createRun({ origin: "task", taskKey: "ACTIVE-1" });
+      store.setRunTicket(active, { description: "# Fix the login\n\nLong description" });
+      store.startStep(active, "custom-check");
+      for (let i = 0; i < 105; i++) {
+        const id = store.createRun({ origin: "scheduled" });
+        store.finishRun(id, "succeeded");
+      }
+      const result = data.getTaskActivity();
+      expect(result.runs).toHaveLength(101);
+      expect(result.runs.find((run) => run.id === active)).toMatchObject({
+        step: "custom-check",
+        stepActive: true,
+        taskTitle: "Fix the login",
+        taskDescription: undefined,
+      });
+      expect(result.recentLimit).toBe(100);
+    } finally {
+      store.close();
+    }
+  });
+
   /** Seed a finished run and return its id. */
   function seedRun(
     store: RunStore,
@@ -562,6 +586,12 @@ describe("dashboard server", () => {
 
       const runs = (await (await fetch(`${base}/api/runs`)).json()) as { total: number };
       expect(runs.total).toBe(1);
+      const activity = await fetch(`${base}/api/task-activity`);
+      expect(activity.status).toBe(200);
+      expect(await activity.json()).toMatchObject({
+        runs: [{ id, status: "succeeded", stepActive: false }],
+        recentLimit: 100,
+      });
 
       const detail = await fetch(`${base}/api/runs/${id}`);
       expect(detail.status).toBe(200);

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
@@ -33,8 +34,10 @@ import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
+import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
 
@@ -122,13 +125,17 @@ export async function runAgentSession(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = harness.buildArgs({
-        maxTurns,
-        skipPermissions: true,
-        workingDir: process.cwd(),
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        {
+          maxTurns,
+          skipPermissions: true,
+          workingDir: process.cwd(),
+          model: resolveAgentModel(harness.name),
+          effort: resolveAgentEffort(),
+        },
+      );
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
@@ -149,10 +156,11 @@ export async function runAgentSession(
         ...agentArgs,
         ...buildPromptArgs(harness, withImplementationSummary(promptOverride ?? taskContent)),
       ];
+      const runStartedAt = Date.now();
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,
@@ -213,8 +221,9 @@ export async function runAgentSession(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            new HarnessUnavailableError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+              { harnessName: harness.name },
             ),
           );
         } else {
@@ -249,6 +258,28 @@ export async function runAgentSession(
           }
           reject(new UsageLimitError(usage.resetsAt));
           return;
+        }
+
+        // A sandbox denial, mise shim failure, or missing binary means the
+        // harness never started. Surface it as a harness problem so the
+        // worker can fail over/defer instead of burning a task attempt.
+        if (code !== 0) {
+          const startupFailure = detectHarnessStartupFailure({
+            exitCode: code,
+            stdout: stdoutOutput,
+            stderr: stderrOutput,
+            durationMs: Date.now() - runStartedAt,
+          });
+          if (startupFailure) {
+            console.log(`\n🛠️  ${harness.displayName} could not start: ${startupFailure.reason}`);
+            reject(
+              new HarnessUnavailableError(
+                `${harness.displayName} (${executablePath}) could not start: ${startupFailure.reason}`,
+                { harnessName: harness.name },
+              ),
+            );
+            return;
+          }
         }
 
         const maxTurnsReached = detectMaxTurnsReached(

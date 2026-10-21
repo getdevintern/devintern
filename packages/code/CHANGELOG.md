@@ -1,5 +1,22 @@
 # @devintern/code Changelog
 
+## [2.19.1] - 2026-10-20
+
+No-op automation patch: recurring jobs can opt into treating a run that changes nothing as a successful no-op, the local dashboard gets a worker-console refresh, and repository-wide TypeScript boundary and lint rules are tightened with expanded live tracker E2E coverage.
+
+### Added
+
+- **Dashboard worker-console refresh**: the local dashboard now uses a responsive worker-console shell with clearer run and automation navigation, refreshed brand colors and a favicon, a more prominent run timeline with improved metadata and retry states, and run details that reset when the URL switches to a different run
+
+### Fixed
+
+- **Opt-in no-op automation runs succeed**: recurring automations whose prompts can legitimately make no changes — for example "keep main green", "release only when warranted", or "find flaky tests" — failed with `Implementation was not committed` even when the agent correctly did nothing. `[[automations]]` entries now accept `allow_no_changes` (boolean, default `false`) and the CLI accepts `--allow-no-changes`; when enabled, a run with no repository changes is recorded as a successful no-op and stops delivery without creating a branch or PR or running verification, review, or publish. Scheduled and dashboard **Run now** occurrences receive the flag automatically, and behavior without the flag is unchanged
+
+### Technical
+
+- **TypeScript parse-at-boundary and lint hardening (DEV-154)**: `@getdevintern/code` narrows its harness and utility types away from `any`, adds a root `CODING_STANDARDS.md` documenting boundary parsing and `unknown`-over-`any`, and enables `typescript/no-explicit-any` and `typescript/ban-types` in oxlint with a ratchet baseline for nine existing source files
+- **Live tracker ticket-to-PR end-to-end scenarios (DEV-178)**: the private `packages/e2e` workspace gains explicit-key and production `--query` scenarios for GitHub Issues and local GitLab Issues that create a real ticket, seeded comment, and decoy through provider APIs; verify marker delivery to the deterministic agent, commit/PR publication, provider-native status labels, preserved unrelated labels, and stored implementation summaries; inspect every run for decoy activity; and close scenario tickets, pull requests, branches, and local GitLab projects during cleanup. The ordinary offline test command remains unchanged
+
 ## [2.19.0] - 2026-10-17
 
 Artifact-storage release: pipeline evidence can now be published to Cloudflare R2 or any S3-compatible bucket through a built-in Files SDK uploader selected in configuration, with a runnable PNG-explainer example plugin, and auto-review recovers its verdict JSON when a harness truncates tool output ahead of the final object.
@@ -45,6 +62,10 @@ Configurable-pipeline release: task delivery becomes a user-defined sequence of 
 ### Technical
 
 - **Source-control end-to-end suites**: a private `packages/e2e` Bun workspace runs the built Code CLI against real code hosts with a deterministic agent and Markdown tasks. Coverage spans GitHub (local `gh` login or CI credentials), local GitLab Self-Managed (pinned GitLab CE in Docker Compose on `127.0.0.1:8929` with a provisioned 30-day token), hosted GitLab.com, and hosted Bitbucket Cloud, verifying remote PR/MR metadata, commit and exact diffs, explicit target branches, and rejected API credentials after a successful push, with per-scenario branches and cleanup that preserves the default branch and repository. Manual hosted-provider workflows supply credentials, and CI never falls back to local authentication
+
+### Fixed
+
+- **OpenCode v2 support via version probing**: the `opencode` harness now probes the installed CLI (`opencode --version`) once per executable and picks the flag surface that matches its major version, so users on v2 are no longer broken by flags v2 removed. v2 dropped `--log-level`, `--dir`, and `--variant`, read the working directory from `$PWD`, and went server-backed, so on v2 headless runs now enable logs through `OPENCODE_PRINT_LOGS`/`OPENCODE_LOG_LEVEL`, pin the working directory with `PWD`, fold reasoning effort into the model reference (`--model provider/model#variant`, requiring `AGENT_MODEL`), and pass `--standalone` to avoid the user's shared background service. v1 keeps its existing `--print-logs --log-level ERROR --dir` / `--variant` invocation. A missing or unparseable version falls back to the v1 baseline instead of failing, and usage-limit detection now also reads the v2 structured log fields and `--format json` error envelope
 
 ## [2.17.0] - 2026-10-14
 

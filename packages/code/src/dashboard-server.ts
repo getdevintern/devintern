@@ -180,6 +180,9 @@ export function startDashboardServer(
         if (pathname === "/api/automations") {
           return json(handleAutomations(data));
         }
+        if (pathname === "/api/task-activity") {
+          return json({ status: 200, body: data.getTaskActivity() });
+        }
         if (pathname === "/api/runs") {
           return json(handleRuns(data, url.searchParams));
         }

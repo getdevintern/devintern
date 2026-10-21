@@ -13,7 +13,7 @@ import {
   UsageLimitError,
 } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "./spawn";
+import { buildHeadlessAgentInvocation, harnessSpawnEnv, HEADLESS_AGENT_STDIO } from "./spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { getSandbox } from "./sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
@@ -263,13 +263,18 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       let timedOut = false;
       let usageLimited = false;
 
-      const agentArgs = buildHeadlessAgentArgs(harness, fixPrompt, {
-        maxTurns,
-        skipPermissions: true,
-        workingDir,
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHeadlessAgentInvocation(
+        harness,
+        resolvedPath,
+        fixPrompt,
+        {
+          maxTurns,
+          skipPermissions: true,
+          workingDir,
+          model: resolveAgentModel(harness.name),
+          effort: resolveAgentEffort(),
+        },
+      );
 
       // Spawn agent process to fix the issues. The executable path was already
       // resolved (and waited on through any auto-update swap) above. Prompt
@@ -278,7 +283,11 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { stdio: HEADLESS_AGENT_STDIO, cwd: workingDir },
+        spawnOptions: {
+          stdio: HEADLESS_AGENT_STDIO,
+          cwd: workingDir,
+          env: harnessSpawnEnv(agentEnv),
+        },
         sandbox: await getSandbox(harness.name),
         sink: createHarnessLogSink({
           harness,

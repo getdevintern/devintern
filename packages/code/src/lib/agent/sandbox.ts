@@ -10,8 +10,19 @@
  * picks up changes on restart, same as AGENT_HARNESS.
  */
 
-import { resolveSandbox } from "@devintern/agent-harness";
-import type { DetectedSandboxProvider, ResolvedSandbox } from "@devintern/agent-harness";
+import {
+  harnessCliPathEnvKey,
+  probeHarnessUnderSandbox,
+  resolveExecutablePath,
+  resolveHarnessChainSync,
+  resolveSandbox,
+} from "@devintern/agent-harness";
+import type {
+  DetectedSandboxProvider,
+  NonoPackStatus,
+  ResolvedSandbox,
+  SandboxProvider,
+} from "@devintern/agent-harness";
 
 let cliOverride: string | undefined;
 let cached: Promise<ResolvedSandbox | null> | null = null;
@@ -71,10 +82,178 @@ const PROVIDER_SETUP_NOTES: Record<string, (linux: boolean) => string[]> = {
   ],
 };
 
+/**
+ * Render the per-provider block ("Providers on this machine").
+ *
+ * @param detections - Detected providers.
+ * @param harnessName - The configured harness, for compatibility filtering.
+ * @param linux - Whether the host is Linux (platform-specific setup notes).
+ * @returns The report lines for the provider block.
+ */
+function describeProviders(
+  detections: DetectedSandboxProvider[],
+  harnessName: string,
+  linux: boolean,
+): string[] {
+  const lines: string[] = ["Providers on this machine:\n"];
+  for (const { provider, detection } of detections) {
+    const notes: string[] = [];
+    if (provider.priority <= 0) notes.push("explicit-only, never picked by auto");
+    if (provider.supportsHarness && !provider.supportsHarness(harnessName)) {
+      notes.push(`does not support the configured "${harnessName}" harness`);
+    }
+    const noteText = notes.length > 0 ? ` [${notes.join("; ")}]` : "";
+    lines.push(`  ${provider.name.padEnd(8)} ${provider.displayName}${noteText}`);
+
+    // Some providers append an actionable hint to the version string
+    // ("0.69.0 — install the Claude pack..."); split it onto its own line.
+    const [version, ...versionHints] = (detection.version ?? "").split(" — ");
+    const status = detection.available
+      ? `✅ available${version ? ` (${version})` : ""}`
+      : `❌ ${detection.reason ?? "unavailable"}`;
+    lines.push(`  ${" ".repeat(8)} ${status}`);
+    for (const hint of versionHints) {
+      lines.push(`  ${" ".repeat(8)} ⚠ ${hint}`);
+    }
+    for (const step of PROVIDER_SETUP_NOTES[provider.name]?.(linux) ?? []) {
+      lines.push(`  ${" ".repeat(8)} setup: ${step}`);
+    }
+    if (provider.docsUrl) {
+      lines.push(`  ${" ".repeat(8)} docs: ${provider.docsUrl}`);
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+/**
+ * Render the nono pack-profile status per harness chain entry.
+ *
+ * A pack-backed harness runs with the pack's grants (Keychain access on
+ * macOS, agent-specific rules); the rest fall back to the generic profile
+ * plus DevIntern's explicit grants.
+ *
+ * @param packStatuses - Pack status per chain entry.
+ * @returns The report lines for the pack block (empty when there is nothing to show).
+ */
+function describeNonoPacks(packStatuses: NonoPackStatus[]): string[] {
+  if (packStatuses.length === 0) return [];
+  const lines: string[] = ["", "nono pack profiles (per harness chain entry):"];
+  for (const status of packStatuses) {
+    const text = status.packBacked
+      ? `pack profile "${status.profile}"`
+      : (status.note ?? "no pack profile");
+    lines.push(`  ${status.harnessName.padEnd(14)} ${status.packBacked ? "✅" : "⚠"} ${text}`);
+  }
+  return lines;
+}
+
 export interface SandboxDoctorReport {
   lines: string[];
   /** True when the configured provider would make the next run fail. */
   nextRunFails: boolean;
+}
+
+/** One harness entry in the doctor's sandbox preflight table. */
+export interface HarnessPreflightEntry {
+  name: string;
+  path: string;
+  ok: boolean;
+  /** First actionable failure line when `ok` is false. */
+  reason?: string;
+  /** Exact configuration fix to show under a failing row. */
+  suggestion?: string;
+}
+
+/** Preflight results collected before rendering the (pure) doctor report. */
+export interface HarnessPreflightReport {
+  /** Sandbox provider the entries were probed through. */
+  provider: string;
+  entries: HarnessPreflightEntry[];
+}
+
+/**
+ * Probe every configured harness CLI through the sandbox selected for the
+ * next run.
+ *
+ * Collection is async because it executes `--version` through the provider;
+ * {@link buildSandboxDoctorReport} stays pure and only renders the result.
+ *
+ * @param configured - Effective `AGENT_SANDBOX` value.
+ * @param detections - Provider detections already gathered by the doctor.
+ * @param raw - Raw `AGENT_HARNESS` value (defaults to the environment).
+ * @returns Preflight rows, or undefined when no sandbox/provider is configured.
+ */
+export async function collectHarnessPreflight(
+  configured: string,
+  detections: DetectedSandboxProvider[],
+  raw?: string,
+): Promise<HarnessPreflightReport | undefined> {
+  if (!configured || configured === "none") {
+    return undefined;
+  }
+
+  let provider: SandboxProvider | undefined;
+  if (configured === "auto") {
+    provider = detections
+      .filter(({ provider: candidate, detection }) => detection.available && candidate.priority > 0)
+      .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+  } else {
+    const detected = detections.find((entry) => entry.provider.name === configured);
+    provider = detected?.detection.available ? detected.provider : undefined;
+  }
+  if (!provider) {
+    return undefined;
+  }
+
+  // `sandboxName: "none"` keeps this chain resolution free of probes: the
+  // doctor runs the probes itself so it can render every entry, including
+  // fallbacks the runtime chain would drop.
+  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
+  const entries = await Promise.all(
+    chain.entries.map(async (entry): Promise<HarnessPreflightEntry> => {
+      const path = resolveExecutablePath(entry.path);
+      const result = await probeHarnessUnderSandbox({
+        path,
+        provider,
+        harnessName: entry.name,
+      });
+      return {
+        name: entry.name,
+        path,
+        ok: result.ok,
+        ...(result.ok
+          ? {}
+          : {
+              reason: result.reason,
+              suggestion: `set ${harnessCliPathEnvKey(entry.name)}=/path/to/${entry.name} (the real executable, not the mise shim)`,
+            }),
+      };
+    }),
+  );
+  return { provider: provider.name, entries };
+}
+
+/** Optional extras for {@link buildSandboxDoctorReport}. */
+export interface SandboxDoctorExtras {
+  /**
+   * Name of the sandbox already wrapping this process, if any. When set and the
+   * configured provider cannot nest ({@link SandboxProvider.canNestInSandbox} is
+   * falsy), the resolver skips adding another provider, so the report must
+   * describe the inherited confinement instead of the configured pick.
+   */
+  activeSandbox?: string;
+  /**
+   * nono pack-profile status per harness chain entry, so the report can show
+   * which runs are pack-backed and which fall back to the generic profile.
+   * Probing is done by the caller (this stays pure).
+   */
+  packStatuses?: NonoPackStatus[];
+  /**
+   * Collected harness readiness results, rendered as a per-entry table
+   * without executing anything in this function.
+   */
+  preflight?: HarnessPreflightReport;
 }
 
 /**
@@ -88,20 +267,20 @@ export interface SandboxDoctorReport {
  * @param configuredSource - Where the value came from, for the header line.
  * @param harnessName - The configured harness, for compatibility filtering.
  * @param platform - `process.platform`; injected for tests.
- * @param activeSandbox - Name of the sandbox already wrapping this process, if
- *   any. When set and the configured provider cannot nest
- *   ({@link SandboxProvider.canNestInSandbox} is falsy), the resolver skips
- *   adding another provider, so the report must describe the inherited
- *   confinement instead of the configured pick.
+ * @param extras - Optional extras: the enclosing sandbox name, the nono
+ *   pack-profile status per harness chain entry, and collected harness
+ *   readiness results.
  */
+// oxlint-disable-next-line max-params, complexity -- positional signature kept for existing callers; one branch per configured provider/next-run combination keeps the report readable.
 export function buildSandboxDoctorReport(
   detections: DetectedSandboxProvider[],
   configured: string,
   configuredSource: string,
   harnessName: string,
   platform: string = process.platform,
-  activeSandbox?: string,
+  extras: SandboxDoctorExtras = {},
 ): SandboxDoctorReport {
+  const { activeSandbox, packStatuses = [], preflight } = extras;
   const lines: string[] = [];
   const linux = platform === "linux";
   const usable = (d: DetectedSandboxProvider) =>
@@ -162,31 +341,21 @@ export function buildSandboxDoctorReport(
   }
   lines.push("");
 
-  lines.push("Providers on this machine:\n");
-  for (const { provider, detection } of detections) {
-    const notes: string[] = [];
-    if (provider.priority <= 0) notes.push("explicit-only, never picked by auto");
-    if (provider.supportsHarness && !provider.supportsHarness(harnessName)) {
-      notes.push(`does not support the configured "${harnessName}" harness`);
-    }
-    const noteText = notes.length > 0 ? ` [${notes.join("; ")}]` : "";
-    lines.push(`  ${provider.name.padEnd(8)} ${provider.displayName}${noteText}`);
+  lines.push(...describeProviders(detections, harnessName, linux));
 
-    // Some providers append an actionable hint to the version string
-    // ("0.69.0 — install the Claude pack..."); split it onto its own line.
-    const [version, ...versionHints] = (detection.version ?? "").split(" — ");
-    const status = detection.available
-      ? `✅ available${version ? ` (${version})` : ""}`
-      : `❌ ${detection.reason ?? "unavailable"}`;
-    lines.push(`  ${" ".repeat(8)} ${status}`);
-    for (const hint of versionHints) {
-      lines.push(`  ${" ".repeat(8)} ⚠ ${hint}`);
+  if (preflight && preflight.entries.length > 0) {
+    lines.push(`Harness CLI preflight (${preflight.provider})`);
+    for (const entry of preflight.entries) {
+      const status = entry.ok ? "OK" : `FAIL — ${entry.reason ?? "could not start"}`;
+      lines.push(`  ${entry.name.padEnd(9)} ${entry.path.padEnd(44)} ${status}`);
+      if (!entry.ok && entry.suggestion) {
+        lines.push(`  ${" ".repeat(9)} → ${entry.suggestion}`);
+      }
     }
-    for (const step of PROVIDER_SETUP_NOTES[provider.name]?.(linux) ?? []) {
-      lines.push(`  ${" ".repeat(8)} setup: ${step}`);
-    }
-    if (provider.docsUrl) {
-      lines.push(`  ${" ".repeat(8)} docs: ${provider.docsUrl}`);
+    // The primary is kept at runtime (an empty chain is worse), so a failing
+    // primary means the next task will hit the same startup error.
+    if (!preflight.entries[0]!.ok) {
+      nextRunFails = true;
     }
     lines.push("");
   }
@@ -196,6 +365,13 @@ export function buildSandboxDoctorReport(
       ? `AGENT_SANDBOX=auto would pick: ${autoPick.provider.name} (for AGENT_HARNESS=${harnessName})`
       : `AGENT_SANDBOX=auto would run unsandboxed (no provider available for AGENT_HARNESS=${harnessName}).`,
   );
+
+  // The pack block only makes sense when nono is installed.
+  const nonoAvailable = detections.some((d) => d.provider.name === "nono" && d.detection.available);
+  if (nonoAvailable) {
+    lines.push(...describeNonoPacks(packStatuses));
+  }
+
   lines.push(
     "\nEnable by setting AGENT_SANDBOX in .devintern-code/.env or passing --sandbox <name>." +
       "\nProvider setup guide: https://devintern.com/docs/code/configuration#sandboxing-the-agent",

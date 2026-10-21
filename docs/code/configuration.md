@@ -388,6 +388,10 @@ or set in `.devintern-code/settings.json`:
 
 The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above; setting `DEVINTERN_TELEMETRY_DISABLED` instead sends nothing at all. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
 
+## Bug Reports
+
+`devintern report` files a user-approved bug report for DevIntern itself, with a preview of the diagnostic bundle. Use it to describe expected behavior, reproduction steps, or incorrect results that an exception cannot explain. Existing Sentry error tracking handles automatic exception capture; this command does not add another automatic reporting channel. See [Reporting bugs](reporting-bugs.md).
+
 ## Readiness Check
 
 Run `devintern doctor` for a one-screen answer to "is everything set up?":
@@ -405,6 +409,8 @@ It checks, in order:
 - **License**: entitlement status when signed in (only needed for unattended automation)
 
 Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+
+If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
 ## Output Directory
 
@@ -466,12 +472,12 @@ storage, and explainer plugin configuration.
 
 The role prompts DevIntern sends to the agent are versioned Markdown files rather than inline TypeScript, so they can be reviewed, diffed, and overridden. The bundled catalog ships with the CLI:
 
-| Prompt       | Stage                                              |
-| ------------ | -------------------------------------------------- |
-| `clarity.md` | Pre-implementation feasibility / clarity check     |
-| `estimation.md` | Fibonacci story-point estimation                |
-| `review.md`  | Adversarial pull-request review (auto-review loop) |
-| `fix.md`     | Addressing structured review feedback              |
+| Prompt          | Stage                                              |
+| --------------- | -------------------------------------------------- |
+| `clarity.md`    | Pre-implementation feasibility / clarity check     |
+| `estimation.md` | Fibonacci story-point estimation                   |
+| `review.md`     | Adversarial pull-request review (auto-review loop) |
+| `fix.md`        | Addressing structured review feedback              |
 
 The `review` and `fix` prompts include a **blast-radius lens**: the reviewer must trace callers, callees, and sibling consumers beyond the diff, name the one fact the change is safe because of, and back it with evidence (`asserted` → `pointed` → `cant-happen` → `ran-it`). Findings carry a `confidence` of `high`, `medium`, or `low`; a finding without evidence is reported as `low` rather than dropped, and the fixer must prove each fix with a runnable check or mark it unproven. The optional `verify` pipeline step applies the same lens to the committed diff.
 
@@ -520,6 +526,10 @@ AGENT_HARNESS=claude-code
 # Optional: model the harness runs with (harness-specific string)
 # AGENT_MODEL=sonnet
 
+# Optional: per-harness model overrides, required for fallbacks in a chain
+# OPENCODE_MODEL=opencode-go/deepseek-v4.1-flash
+# GROK_MODEL=grok-4.7
+
 # Optional: reasoning effort for agent runs (low | medium | high)
 # AGENT_EFFORT=medium
 ```
@@ -555,7 +565,7 @@ The first entry is your preferred harness; later entries are fallbacks in priori
 
 Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
 
-- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`).
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
 - When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
@@ -565,7 +575,7 @@ Applies to every unattended worker surface — fleet task polling, PR review add
 
 Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
 
-**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. `AGENT_MODEL` applies to whichever harness is active (the string is harness-specific).
+**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. The model setting follows the same rule: `AGENT_MODEL` applies to the primary (first) entry, while each fallback uses its own `<HARNESS>_MODEL` (e.g. `GROK_MODEL`) or the CLI default — model ids are provider-specific, so sending one harness's model to another can make the fallback unusable.
 
 ### Model selection
 
@@ -576,7 +586,24 @@ Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-cod
 AGENT_MODEL=sonnet
 ```
 
-The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes). A few harnesses have no model flag and ignore the setting.
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes) for the primary harness. A few harnesses have no model flag and ignore the setting.
+
+With a failover chain, configure one model per harness so every entry gets a value its CLI understands:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=opencode,grok
+OPENCODE_MODEL=opencode-go/deepseek-v4.1-flash
+GROK_MODEL=grok-4.7
+```
+
+Resolution order per spawn:
+
+1. `<HARNESS>_MODEL` — explicit override, valid for the primary and every fallback (`OPENCODE_MODEL`, `GROK_MODEL`, `CODEX_MODEL`, `CLAUDE_CODE_MODEL`, …).
+2. `AGENT_MODEL` — when the harness is the only configured entry, or the primary (first) entry of a chain.
+3. Neither set — a fallback runs with its own CLI default model.
+
+`AGENT_MODEL` is never sent to a fallback, so a chain like `opencode,grok` keeps working when OpenCode's model id means nothing to Grok. The worker startup banner lists what each entry resolved to.
 
 ### Reasoning effort
 
@@ -587,7 +614,7 @@ Alongside the model you can tune how deeply the agent reasons per run with `AGEN
 AGENT_EFFORT=medium
 ```
 
-Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply — useful for hard analysis tasks, while routine work can stay at the default (unset). The setting applies to every agent spawn, mirroring `AGENT_MODEL`, and degrades cleanly in failover chains: harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. When `AGENT_EFFORT` is unset no extra flags are emitted and behavior is unchanged.
+Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply — useful for hard analysis tasks, while routine work can stay at the default (unset). The setting applies to every agent spawn, mirroring `AGENT_MODEL`, and degrades cleanly in failover chains: harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and instead folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured; with no model set it is ignored. When `AGENT_EFFORT` is unset no extra flags are emitted and behavior is unchanged.
 
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 
@@ -644,11 +671,11 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 
 If you explicitly select a provider that is not installed or does not support your harness, the run fails with an actionable error rather than silently running unsandboxed.
 
-When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`, `srt`) — stacking a *different* one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`, `smolvm`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads the markers each wrapper exports (`NONO_CAP_FILE` for nono, `SANDBOX_RUNTIME=1` for srt) from the real process environment captured when the CLI starts, *before* `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
+When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`, `srt`) — stacking a _different_ one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`, `smolvm`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads the markers each wrapper exports (`NONO_CAP_FILE` for nono, `SANDBOX_RUNTIME=1` for srt) from the real process environment captured when the CLI starts, _before_ `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
 
 ### What the sandbox allows
 
-The default policy confines filesystem writes to what a task run actually needs: your project working directory, the task output directory, the system temp directory, and the Playwright and Puppeteer browser caches (so agents that launch a browser for testing or research keep working). Network access stays open, since agents need to reach model APIs, push to git remotes, and install packages.
+The default policy confines filesystem writes to what a task run actually needs: your project working directory, the task output directory, the system temp directory, the Playwright and Puppeteer browser caches (so agents that launch a browser for testing or research keep working), and the harness's own state directories under your home directory (`~/.grok`, `~/.claude`, `~/.codex`, `~/.config/opencode`, …) — without those an agent starts logged out or fails on its first state write. Everything else in your home directory stays readable but not writable. Network access stays open, since agents need to reach model APIs, push to git remotes, and install packages.
 
 Optional restrictions:
 
@@ -663,6 +690,54 @@ AGENT_SANDBOX_ALLOWED_DOMAINS=api.anthropic.com,github.com
 # nono: use a custom profile instead of nono's default scope
 AGENT_SANDBOX_NONO_PROFILE=my-profile
 ```
+
+### nono profiles: packs, the generic fallback, and your own
+
+Under `nono` a run is governed by a **profile** plus the explicit grants DevIntern derives from the run policy. Which profile is in play depends on the harness:
+
+| Case                 | Profile in use                                                                                                  | Applies to                                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **Pack profile**     | the harness's official nono pack (`nono pull nolabs-ai/<agent>`)                                                | `claude-code`, `codex`, `opencode`, `goose`, `pi`, `antigravity` — the packs published today |
+| **Generic fallback** | nono's built-in `linux-host-compat` profile on Linux, nono's default profile on macOS, plus the explicit grants | every other harness (`grok`, `cline`, `qwen`, `kimi`, `cursor`, `deepseek`, `kilo-code`, …)  |
+| **Your own profile** | the profile named by `AGENT_SANDBOX_NONO_PROFILE`, used verbatim                                                | whenever you set the variable                                                                |
+
+The generic fallback is legitimate — the explicit grants still confine writes to your working directory, the task output directory, the temp directory and the harness's own state directories — but it is not equivalent to a pack: a pack carries grants plain flags cannot express (macOS Keychain access for `claude-code`, for example). DevIntern therefore names the fallback once per run instead of silently picking it:
+
+```
+nono has no pack profile for "grok"; using linux-host-compat + explicit grants (state: ~/.grok).
+```
+
+`devintern sandbox` prints the same status per harness chain entry, so you can see before a run which entries are pack-backed and which fall back.
+
+**Your own profile.** `AGENT_SANDBOX_NONO_PROFILE` selects a nono profile by name and DevIntern passes it through verbatim — the harness pack is _not_ added on top of it, so your file can extend several bases. Save it under `~/.config/nono/profiles/` (or point the variable at an absolute path) and set the variable:
+
+```json
+{
+  "extends": ["linux-host-compat", "claude-code"],
+  "meta": {
+    "name": "my-profile",
+    "description": "host compatibility + the Claude pack"
+  },
+  "filesystem": {
+    "read": ["/etc"]
+  }
+}
+```
+
+The explicit grants (working dir, task output dir, harness state dirs, `/dev/ptmx`, the ssh-agent socket) still compose on top of whatever the profile allows, and the missing-pack note is suppressed because you picked the profile yourself.
+
+### Pinning the agent CLI (`<HARNESS>_CLI_PATH`)
+
+The sandbox grants write access to the harness's own state directories (`~/.grok`, `~/.claude`, `~/.config/opencode`, …) and read access to your home directory — and **nothing else**. DevIntern does not grant write access to toolchain directories such as `~/.local/share/mise`, because a toolchain directory is not agent state. A CLI installed behind a mise shim (`~/.local/share/mise/shims/grok`) resolves through mise at run time, and mise wants to write to its own tree, so the shim fails inside the sandbox even though the real binary is perfectly fine.
+
+Pin the real binary instead of the shim:
+
+```bash
+# .devintern-code/.env
+GROK_CLI_PATH=/home/you/.grok/bin/grok
+```
+
+The variable name is the harness id in upper case with dashes replaced by underscores: `GROK_CLI_PATH`, `CODEX_CLI_PATH`, `OPENCODE_CLI_PATH`, `CLAUDE_CODE_CLI_PATH` (plus the legacy `CLAUDE_CLI_PATH`), `ANTIGRAVITY_CLI_PATH`, `AGY_CLI_PATH`, `KILO_CODE_CLI_PATH`, … Inside a failover chain, `<HARNESS>_CLI_PATH` resolves per active harness, while the global `AGENT_CLI_PATH` applies to the first entry only.
 
 ### Provider setup at a glance
 
@@ -680,7 +755,7 @@ Every provider needs its tool installed; some also need auth or one-time configu
 
 - **native** uses the sandbox already built into the harness: Claude Code's sandboxed Bash tool (see [Claude Code native sandbox details](#claude-code-native-sandbox-details) for the exact generated configuration) and Codex's `--sandbox workspace-write`. It needs no installation, and the agent understands its own sandbox errors, so it retries intelligently instead of failing on mysterious permission errors. Scope caveat: for Claude Code the native sandbox confines shell commands and their child processes, not the agent's built-in file tools. For a boundary around the whole agent process, use `nono` or `srt`. Antigravity (the Gemini CLI successor) is not supported in native mode: its built-in sandbox covers shell commands only and is bypassed during unattended runs, so use `nono` or `srt` with it.
 - **nono and srt** wrap the agent process directly, so any harness works and worktree-based flows (webhook reviews, `address-review`) are fully supported. On Linux, srt also requires `bubblewrap`, `socat`, and `ripgrep`. DevIntern translates the sandbox policy into each tool's own configuration, including read access to your home directory and write access to the agent's own state files (without which agents start logged out). When one of these wraps Codex on macOS, DevIntern automatically disables Codex's own sandbox for that run (nested macOS sandboxes are unsupported; the outer wrapper is the enforcement boundary). On Linux both layers stack.
-- **nono** works best with the official agent pack for your harness installed: run `nono pull nolabs-ai/<agent>` once (packs exist for `claude`, `codex`, `opencode`, `goose`, `pi`, and `antigravity`; each is Sigstore-verified on pull), and DevIntern automatically uses the pack profile for matching runs. The packs carry grants plain flags cannot express, such as macOS Keychain access; without the claude pack, `claude-code` under nono reports "Not logged in" on macOS. Browse packs at [registry.nono.sh](https://registry.nono.sh). On Linux, DevIntern generates a composite profile combining the pack (when installed) with nono's built-in `linux-host-compat` profile plus `/etc` read access, and automatically resolves Landlock conflicts between broad read grants and nono's protected paths, so runs work out of the box with no profile setup. DevIntern also grants `/dev/ptmx` so tools that allocate a PTY (for example lefthook during `git commit`) work inside the sandbox.
+- **nono** works best with the official agent pack for your harness installed: run `nono pull nolabs-ai/<agent>` once (packs exist for `claude`, `codex`, `opencode`, `goose`, `pi`, and `antigravity`; each is Sigstore-verified on pull), and DevIntern automatically uses the pack profile for matching runs. The packs carry grants plain flags cannot express, such as macOS Keychain access; without the claude pack, `claude-code` under nono reports "Not logged in" on macOS. Browse packs at [registry.nono.sh](https://registry.nono.sh). On Linux, DevIntern generates a composite profile combining the pack (when installed) with nono's built-in `linux-host-compat` profile plus `/etc` read access, and automatically resolves Landlock conflicts between broad read grants and nono's protected paths, so runs work out of the box with no profile setup. DevIntern also grants `/dev/ptmx` so tools that allocate a PTY (for example lefthook during `git commit`) work inside the sandbox. Harnesses without a pack fall back to the generic profile plus the explicit grants, and DevIntern says so once per run — see [nono profiles](#nono-profiles-packs-the-generic-fallback-and-your-own).
 - **srt cannot run with a fully open network.** Its settings schema requires an explicit domain allowlist and rejects `*`, so with no `AGENT_SANDBOX_ALLOWED_DOMAINS` set, DevIntern applies a built-in allowlist of agent essentials: model APIs (Anthropic, OpenAI, Google), git hosts (GitHub, GitLab, Bitbucket), and the common package registries (npm, PyPI, crates.io, Go, Maven). A task that needs another host will see its requests denied with a 403; add the domain via `AGENT_SANDBOX_ALLOWED_DOMAINS`. Localhost is unaffected (local binding is always allowed for dev servers and browser automation).
 - **Docker Sandboxes** run the agent inside a microVM that mounts your project directory as the workspace. It now ships as the standalone `sbx` CLI (the old `docker sandbox` plugin was removed). One-time setup: install `sbx` (see the table above), sign in with `sbx login` on Docker Desktop (native Linux with the local daemon needs no sign-in), run `sbx policy init balanced`, and store an API key for the in-VM agent with `sbx secret set anthropic` (the guest agent cannot use your host login). Host paths under `/tmp` are not part of the mounted workspace, so review worktree flows are not supported with this provider; use `nono` or `srt` for those, or move `DEVINTERN_OUTPUT_DIR` out of `/tmp`. Network follows the sandbox policy: DevIntern adds per-sandbox rules on top of your global `sbx` policy, allowing all hosts by default (the open-network policy) or exactly your `AGENT_SANDBOX_ALLOWED_DOMAINS` list when set. The rules are scoped to each run's sandbox and removed with it, so your global `sbx policy init` choice still governs everything you run outside DevIntern.
 - **SmolVM** is the strongest option for browser-heavy workloads (it can run a full browser inside the VM), and it forwards your host agent credentials into the sandbox automatically. Each run boots a fresh microVM with your working directory mounted read-write at its host path, runs the agent inside it, and deletes the VM afterward; the first run downloads a guest image, which takes several minutes. It is a young project, so you must opt in explicitly with `AGENT_SANDBOX=smolvm`. On Linux, DevIntern runs SmolVM with its QEMU backend (workspace mounts need it), which requires KVM (`/dev/kvm`) and your distro's QEMU system package (for example `qemu-system-x86` plus `qemu-img`); `devintern sandbox` reports both when missing. Note the name collision: this provider targets [CelestoAI SmolVM](https://docs.celesto.ai/smolvm/introduction) (installed via `curl -sSL https://celesto.ai/install.sh | bash`), not the unrelated smol-machines microVM runner that installs a binary with the same name; `devintern sandbox` detects and reports the wrong one.

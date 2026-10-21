@@ -537,6 +537,24 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(repoManager.calls).toContain("worktree:backend:T-C2");
   });
 
+  test("a retry-gate skip removes the worktree and is returned unchanged", async () => {
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => "skipped",
+    });
+    const result = await executor(
+      "T-SKIP",
+      toRoutableTask({ key: "T-SKIP", labels: ["backend"], components: [] }),
+    );
+
+    expect(result).toBe("skipped");
+    expect(repoManager.calls).toContain("worktree:backend:T-SKIP");
+    expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(true);
+  });
+
   test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
     const executor = createFleetTaskExecutor(
       {
