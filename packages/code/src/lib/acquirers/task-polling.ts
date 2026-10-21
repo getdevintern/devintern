@@ -39,8 +39,13 @@ export interface ReadyTask {
   updated?: string;
 }
 
-/** A deferred task was not attempted and must be evaluated again next tick. */
-export type TaskExecutionResult = boolean | "deferred";
+/**
+ * Outcome of one task execution. `true` means the run completed; `"deferred"`
+ * means it never started (repo busy or every harness usage-limited) and must be
+ * evaluated again next tick; `"skipped"` means the retry gate skipped an
+ * unchanged incomplete ticket, which is deliberately not a run.
+ */
+export type TaskExecutionResult = boolean | "deferred" | "skipped";
 
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
@@ -123,7 +128,8 @@ export function workerTaskArgs(): string[] {
  *               the workspace worker routes each task to its repo's worktree
  *               with per-repo env; direct callers inherit both
  * @returns true when the CLI exited 0, `"deferred"` when every harness in
- *   the failover chain is usage-limited, false on any other failure
+ *   the failover chain is usage-limited, `"skipped"` when the retry gate
+ *   skipped the task, false on any other failure
  */
 export async function runTaskViaCli(
   taskKey: string,
@@ -384,6 +390,13 @@ export class TaskPollingAcquirer implements Acquirer {
                   this.rememberPendingRescan(detector.source, task.key, externalId);
                   tickDeferred = true;
                   console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+                } else if (result === "skipped") {
+                  // The retry gate skipped an unchanged incomplete ticket. This
+                  // is not a run: report it as skipped, and keep the dedupe
+                  // claim so it stays out of the sweep until the ticket changes.
+                  console.log(
+                    `⏭️  [${this.name}] ${task.key} skipped (previous attempt reported incomplete; ticket unchanged)`,
+                  );
                 } else {
                   console.log(
                     result

@@ -21,6 +21,17 @@ export const USAGE_LIMIT_EXIT_CODE = 75;
 /** sysexits EX_NOPERM — parent workers defer the task until access is restored. */
 export const AUTOMATION_ACCESS_EXIT_CODE = 77;
 
+/**
+ * App-specific exit code (not sysexits) emitted only by worker children when
+ * the retry gate skipped the task because a previous attempt was reported
+ * incomplete and the ticket has not changed since.
+ *
+ * Distinct from 0 (success), 1 (failure), 75 (usage limit), and 77 (automation
+ * access denied): a skip is neither a completed run nor a failed one, so the
+ * parent must log it as skipped instead of completed.
+ */
+export const TASK_SKIP_EXIT_CODE = 3;
+
 /** Set to `"1"` on CLI subprocesses the worker will fail over for. */
 export const WORKER_CHILD_ENV = "DEVINTERN_WORKER_CHILD";
 

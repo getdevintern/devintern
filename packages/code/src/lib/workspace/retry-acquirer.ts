@@ -95,6 +95,11 @@ export class RetryQueueAcquirer implements Acquirer {
       );
       if (result === true) {
         store.finish(retry.id, "done");
+      } else if (result === "skipped") {
+        // Defensive: the retry queue prepends `--force`, which bypasses the
+        // gate. If a skip still happens, the row is settled, not failed.
+        store.finish(retry.id, "done", "skipped: ticket unchanged since the incomplete attempt");
+        console.log(`⏭️  [${this.name}] ${retry.taskKey} skipped; ticket unchanged`);
       } else if (result === "deferred") {
         // Repo busy (or otherwise not started): back to the queue; stop this
         // drain so the row is not re-claimed until the next tick.

@@ -87,6 +87,26 @@ describe("RetryQueueAcquirer", () => {
     expect(store.hasActive("PROJ-1")).toBe(false);
   });
 
+  test("settles a skipped row as done rather than failed", async () => {
+    store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
+
+    const calls: string[] = [];
+    const acquirer = makeAcquirer(() => "skipped", calls);
+    await acquirer.tick();
+
+    const { Database } = require("bun:sqlite");
+    const raw = new Database(dbPath, { readonly: true });
+    const row = raw
+      .query("SELECT status, message FROM scheduled_retries WHERE task_key = 'PROJ-1'")
+      .get() as { status: string; message: string | null };
+    raw.close();
+
+    expect(calls).toEqual(["PROJ-1"]);
+    expect(row.status).toBe("done");
+    expect(row.message).toContain("skipped");
+    expect(store.hasPending()).toBe(false);
+  });
+
   test("requeues deferred rows for the next tick", async () => {
     store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
 
