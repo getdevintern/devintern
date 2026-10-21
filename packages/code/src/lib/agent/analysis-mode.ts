@@ -60,16 +60,19 @@ export function analysisRunOptions(harness: AgentHarness, maxTurns: number): Age
       skipPermissions: false,
       workingDir: process.cwd(),
       ...(allowedTools.length > 0 ? { allowedTools } : {}),
-      ...(resolveAgentModel() ? { model: resolveAgentModel() } : {}),
+      ...(resolveAgentModel(harness.name) ? { model: resolveAgentModel(harness.name) } : {}),
       ...(resolveAgentEffort() ? { effort: resolveAgentEffort() } : {}),
     };
   }
-  return defaultAnalysisRunOptions(maxTurns);
+  return defaultAnalysisRunOptions(harness, maxTurns);
 }
 
 /** The pre-DEV-24 unattended path used when read-only mode is unavailable or failed. */
-export function defaultAnalysisRunOptions(maxTurns: number): AgentRunOptions {
-  const model = resolveAgentModel();
+export function defaultAnalysisRunOptions(
+  harness: AgentHarness,
+  maxTurns: number,
+): AgentRunOptions {
+  const model = resolveAgentModel(harness.name);
   const effort = resolveAgentEffort();
   return {
     maxTurns,
@@ -131,6 +134,6 @@ export async function runAnalysisWithFallback<T>(
     }
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`⚠️  Read-only analysis run failed (${message}); retrying once in default mode`);
-    return run(defaultAnalysisRunOptions(maxTurns));
+    return run(defaultAnalysisRunOptions(harness, maxTurns));
   }
 }

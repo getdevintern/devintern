@@ -131,7 +131,7 @@ export async function runAgentSession(
           maxTurns,
           skipPermissions: true,
           workingDir: process.cwd(),
-          model: resolveAgentModel(),
+          model: resolveAgentModel(harness.name),
           effort: resolveAgentEffort(),
         },
       );

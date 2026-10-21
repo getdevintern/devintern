@@ -59,7 +59,7 @@ export async function runAgentHarnessForReview(
         maxTurns,
         skipPermissions: true,
         workingDir: workDir,
-        model: resolveAgentModel(),
+        model: resolveAgentModel(harness.name),
         effort: resolveAgentEffort(),
       };
       const { args: agentArgs, env: agentEnv } = await buildHeadlessAgentInvocation(

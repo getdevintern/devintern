@@ -25,6 +25,7 @@ import type {
 
 import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
+import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -150,7 +151,9 @@ export class WorkerFailover {
 
   /**
    * Environment overlay for a CLI child: pin `AGENT_HARNESS` to the active
-   * entry so one-shot resolution uses that harness, and point at a hint file.
+   * entry so one-shot resolution uses that harness, keep the configured chain
+   * so model resolution can tell a fallback from the primary, and point at a
+   * hint file.
    */
   childEnv(
     base: Record<string, string | undefined>,
@@ -159,6 +162,7 @@ export class WorkerFailover {
     return {
       ...base,
       AGENT_HARNESS: this.manager.activeName,
+      [HARNESS_CHAIN_ENV]: this.chain.parsed.join(","),
       [WORKER_CHILD_ENV]: "1",
       [USAGE_LIMIT_FILE_ENV]: hintPath,
     };
@@ -238,6 +242,17 @@ export class WorkerFailover {
       console.warn(`⚠️  ${issue.message}`);
     }
     this.log(`   ${this.describeStartup()}`);
+    if (this.chain.multiHarness) {
+      // Model ids are harness-specific; show what each entry will actually run
+      // so a fallback configured with no model is obvious at startup.
+      const models = this.chain.entries
+        .map(
+          (entry) =>
+            `${entry.name}: ${resolveAgentModel(entry.name, this.chain.parsed) ?? "default"}`,
+        )
+        .join(" | ");
+      this.log(`   Models: ${models}`);
+    }
   }
 }
 

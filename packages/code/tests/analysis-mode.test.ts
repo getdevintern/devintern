@@ -54,23 +54,23 @@ describe("analysisRunOptions", () => {
 
   test("includes AGENT_MODEL in unattended options when set", () => {
     process.env.AGENT_MODEL = "sonnet";
-    const options = defaultAnalysisRunOptions(10);
+    const options = defaultAnalysisRunOptions(defaultOnlyHarness, 10);
     expect(options.model).toBe("sonnet");
   });
 
   test("omits model when AGENT_MODEL is unset", () => {
-    const options = defaultAnalysisRunOptions(10);
+    const options = defaultAnalysisRunOptions(defaultOnlyHarness, 10);
     expect(options.model).toBeUndefined();
   });
 
   test("includes AGENT_EFFORT in unattended options when set", () => {
     process.env.AGENT_EFFORT = "high";
-    const options = defaultAnalysisRunOptions(10);
+    const options = defaultAnalysisRunOptions(defaultOnlyHarness, 10);
     expect(options.effort).toBe("high");
   });
 
   test("omits effort when AGENT_EFFORT is unset", () => {
-    const options = defaultAnalysisRunOptions(10);
+    const options = defaultAnalysisRunOptions(defaultOnlyHarness, 10);
     expect(options.effort).toBeUndefined();
   });
 });

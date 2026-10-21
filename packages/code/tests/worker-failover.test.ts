@@ -79,6 +79,7 @@ describe("runWithFailover", () => {
 
     const result = await runWithFailover(async (env) => {
       expect(env.AGENT_HARNESS).toBe("codex");
+      expect(env.DEVINTERN_HARNESS_CHAIN).toBe("codex,grok,cursor");
       expect(env.DEVINTERN_WORKER_CHILD).toBe("1");
       return 0;
     });
@@ -110,6 +111,30 @@ describe("cliResultToTaskResult", () => {
     expect(cliResultToTaskResult("deferred")).toBe("deferred");
     expect(cliResultToTaskResult("skipped")).toBe("skipped");
     expect(cliResultToTaskResult("failed")).toBe(false);
+  });
+});
+
+describe("worker startup model diagnostics", () => {
+  test("lists the effective model per chain entry and marks fallbacks without one", () => {
+    const originalModel = process.env.AGENT_MODEL;
+    const originalGrokModel = process.env.GROK_MODEL;
+    const lines: string[] = [];
+    try {
+      process.env.AGENT_MODEL = "opencode-go/deepseek-v4.1-flash";
+      delete process.env.GROK_MODEL;
+      startWorkerFailover({
+        checkInstalled: false,
+        raw: "opencode,grok",
+        log: (message) => lines.push(message),
+      });
+    } finally {
+      if (originalModel === undefined) delete process.env.AGENT_MODEL;
+      else process.env.AGENT_MODEL = originalModel;
+      if (originalGrokModel === undefined) delete process.env.GROK_MODEL;
+      else process.env.GROK_MODEL = originalGrokModel;
+    }
+
+    expect(lines).toContain("   Models: opencode: opencode-go/deepseek-v4.1-flash | grok: default");
   });
 });
 

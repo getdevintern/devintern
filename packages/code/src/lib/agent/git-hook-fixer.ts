@@ -271,7 +271,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           maxTurns,
           skipPermissions: true,
           workingDir,
-          model: resolveAgentModel(),
+          model: resolveAgentModel(harness.name),
           effort: resolveAgentEffort(),
         },
       );
