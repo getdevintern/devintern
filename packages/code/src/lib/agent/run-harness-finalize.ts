@@ -192,6 +192,22 @@ async function implementPlan(
   return undefined;
 }
 
+/**
+ * Count commits on the current branch that are not on the PR target branch.
+ *
+ * @param ctx - Delivery context (provides the PR target branch).
+ * @returns Commit count, or 0 when the base ref cannot be resolved.
+ */
+async function commitsAheadOfTarget(ctx: FinalizeContext): Promise<number> {
+  const branchName = ctx.prTargetBranch.replace(/^origin\//, "");
+  const remoteBase = `refs/remotes/origin/${branchName}`;
+  const base = (await Utils.gitRefExists(remoteBase)) ? remoteBase : `refs/heads/${branchName}`;
+  const result = await Utils.executeGitCommand(["rev-list", "--count", `${base}..HEAD`]);
+  if (!result.success) return 0;
+  const value = result.output.trim();
+  return /^\d+$/.test(value) ? Number(value) : 0;
+}
+
 /** Commit the implementation, including the existing plan-only retry. */
 export async function commitImplementation(state: DeliveryState): Promise<boolean> {
   const ctx = state.context;
@@ -216,26 +232,26 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     }
     return false;
   }
-  if (
-    outcome.result.message === "No changes to commit" &&
-    ctx.resumeBranch &&
-    (await Utils.getCurrentBranch()) === ctx.resumeBranch &&
-    !(await Utils.isProtectedBranch(ctx.resumeBranch))
-  ) {
-    const branchName = ctx.prTargetBranch.replace(/^origin\//, "");
-    const remoteBase = `refs/remotes/origin/${branchName}`;
-    const base = (await Utils.gitRefExists(remoteBase)) ? remoteBase : `refs/heads/${branchName}`;
-    const inherited = await Utils.executeGitCommand(["rev-list", "--count", `${base}..HEAD`]);
+
+  if (outcome.result.message === "No changes to commit") {
+    // Agents sometimes commit their own work. The pipeline creates the branch
+    // from the PR target, so commits ahead of it are this run's implementation;
+    // deliver them instead of requiring an extra commit just to satisfy the
+    // clean-tree assumption. A protected or target branch is never accepted.
+    const currentBranch = await Utils.getCurrentBranch();
+    const targetBranch = ctx.prTargetBranch.replace(/^origin\//, "");
     if (
-      inherited.success &&
-      /^\d+$/.test(inherited.output.trim()) &&
-      Number(inherited.output.trim()) > 0
+      currentBranch &&
+      currentBranch !== targetBranch &&
+      !(await Utils.isProtectedBranch(currentBranch)) &&
+      (await commitsAheadOfTarget(ctx)) > 0
     ) {
-      // The resumed branch already contains implementation commits. Continue
-      // through verification, hooks, and publishing without inventing a new
-      // commit just to satisfy the fresh-run delivery assumption.
       state.committed = true;
-      console.log("✅ Delivering implementation commits inherited from the prior attempt");
+      console.log(
+        ctx.resumeBranch === currentBranch
+          ? "✅ Delivering implementation commits inherited from the prior attempt"
+          : "✅ Delivering implementation commits created by the agent",
+      );
       return true;
     }
   }

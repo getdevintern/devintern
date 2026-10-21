@@ -68,6 +68,8 @@ let commitResult: { success: boolean; message: string; hookError?: string };
 let commitResults: Array<typeof commitResult>;
 let commitCalls: number;
 let inheritedCommitCount: number;
+let currentBranch: string;
+let protectedBranch: boolean;
 let pushResult: { success: boolean; message: string; hookError?: string };
 let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
@@ -136,10 +138,10 @@ mock.module("../src/lib/utils", () => ({
       deliveryEvents.push("commit");
       return commitResults.shift() ?? commitResult;
     },
-    getCurrentBranch: async () => "feature/task-1",
+    getCurrentBranch: async () => currentBranch,
     gitRefExists: async () => true,
     executeGitCommand: async () => ({ success: true, output: String(inheritedCommitCount) }),
-    isProtectedBranch: async () => false,
+    isProtectedBranch: async () => protectedBranch,
     remoteBranchExists: async () => true,
     getMainBranchName: async () => "main",
   },
@@ -239,6 +241,8 @@ function baseInput() {
 
 beforeEach(() => {
   inheritedCommitCount = 0;
+  currentBranch = "feature/task-1";
+  protectedBranch = false;
   scenario = {};
   commitResult = { success: true, message: "committed" };
   commitResults = [];
@@ -390,19 +394,48 @@ describe("runAgentHarness git delivery", () => {
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 
-  test.each([undefined, "feature/other"])(
-    "does not publish a no-op without the inherited branch (%s)",
-    async (resumeBranch) => {
-      scenario.stdout = "No additional edits needed.";
-      commitResult = { success: false, message: "No changes to commit" };
-      inheritedCommitCount = 2;
-      await expect(
-        runAgentHarness({ ...baseInput(), createPr: true, resumeBranch }),
-      ).rejects.toThrow("Implementation was not committed");
-      expect(deliveryEvents).not.toContain("push");
-      expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
-    },
-  );
+  test("publishes commits the agent created on a fresh run", async () => {
+    scenario.stdout = "The implementation is complete.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
+    expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
+    expect(hookCalls).toBeGreaterThan(0);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not publish a clean tree when the branch has no commits ahead", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 0;
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+    expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not publish agent commits on the PR target branch", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    currentBranch = "main";
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+  });
+
+  test("does not publish agent commits on a protected branch", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    protectedBranch = true;
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+  });
 
   test("does not publish a resumed branch with no inherited implementation commits", async () => {
     scenario.stdout = "No additional edits needed.";
