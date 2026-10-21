@@ -388,6 +388,26 @@ or set in `.devintern-code/settings.json`:
 
 The settings-based opt-out is acknowledged once with the anonymous `analytics_opt_out` event described above; setting `DEVINTERN_TELEMETRY_DISABLED` instead sends nothing at all. See [devintern.com/privacy](https://devintern.com/privacy/) for details.
 
+## Bug Reports
+
+`devintern report` files a redacted bug report for DevIntern itself. Automatic reports for unexpected task failures are controlled separately from analytics:
+
+```json
+{
+  "diagnostics": {
+    "autoReport": "internal",
+    "includeLogs": false
+  }
+}
+```
+
+- `autoReport: "off"` disables automatic reports; manual reports still work.
+- `autoReport: "internal"` (default) reports only unexpected DevIntern failures.
+- `autoReport: "all"` also reports user-actionable failures and halted runs, except usage limits and cancellations.
+- `includeLogs: true` attaches a bounded, redacted worker log tail to automatic reports.
+
+Only signed-in users send automatic reports. `DEVINTERN_TELEMETRY_DISABLED=1` suppresses them, and `DEVINTERN_AUTO_REPORT` overrides the setting (`off`, `internal`, or `all`). See [Reporting bugs](reporting-bugs.md) for the payload, preview, retry, and privacy details.
+
 ## Readiness Check
 
 Run `devintern doctor` for a one-screen answer to "is everything set up?":
@@ -405,6 +425,8 @@ It checks, in order:
 - **License**: entitlement status when signed in (only needed for unattended automation)
 
 Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+
+If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
 ## Output Directory
 
@@ -466,12 +488,12 @@ storage, and explainer plugin configuration.
 
 The role prompts DevIntern sends to the agent are versioned Markdown files rather than inline TypeScript, so they can be reviewed, diffed, and overridden. The bundled catalog ships with the CLI:
 
-| Prompt       | Stage                                              |
-| ------------ | -------------------------------------------------- |
-| `clarity.md` | Pre-implementation feasibility / clarity check     |
-| `estimation.md` | Fibonacci story-point estimation                |
-| `review.md`  | Adversarial pull-request review (auto-review loop) |
-| `fix.md`     | Addressing structured review feedback              |
+| Prompt          | Stage                                              |
+| --------------- | -------------------------------------------------- |
+| `clarity.md`    | Pre-implementation feasibility / clarity check     |
+| `estimation.md` | Fibonacci story-point estimation                   |
+| `review.md`     | Adversarial pull-request review (auto-review loop) |
+| `fix.md`        | Addressing structured review feedback              |
 
 The `review` and `fix` prompts include a **blast-radius lens**: the reviewer must trace callers, callees, and sibling consumers beyond the diff, name the one fact the change is safe because of, and back it with evidence (`asserted` → `pointed` → `cant-happen` → `ran-it`). Findings carry a `confidence` of `high`, `medium`, or `low`; a finding without evidence is reported as `low` rather than dropped, and the fixer must prove each fix with a runnable check or mark it unproven. The optional `verify` pipeline step applies the same lens to the committed diff.
 
@@ -665,7 +687,7 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 
 If you explicitly select a provider that is not installed or does not support your harness, the run fails with an actionable error rather than silently running unsandboxed.
 
-When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`, `srt`) — stacking a *different* one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`, `smolvm`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads the markers each wrapper exports (`NONO_CAP_FILE` for nono, `SANDBOX_RUNTIME=1` for srt) from the real process environment captured when the CLI starts, *before* `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
+When DevIntern itself already runs inside a kernel sandbox (for example a `nono` or `srt` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`, `srt`) — stacking a _different_ one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`, `smolvm`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads the markers each wrapper exports (`NONO_CAP_FILE` for nono, `SANDBOX_RUNTIME=1` for srt) from the real process environment captured when the CLI starts, _before_ `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
 
 ### What the sandbox allows
 
@@ -689,11 +711,11 @@ AGENT_SANDBOX_NONO_PROFILE=my-profile
 
 Under `nono` a run is governed by a **profile** plus the explicit grants DevIntern derives from the run policy. Which profile is in play depends on the harness:
 
-| Case                | Profile in use                                                                                             | Applies to                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Pack profile**    | the harness's official nono pack (`nono pull nolabs-ai/<agent>`)                                             | `claude-code`, `codex`, `opencode`, `goose`, `pi`, `antigravity` — the packs published today              |
-| **Generic fallback** | nono's built-in `linux-host-compat` profile on Linux, nono's default profile on macOS, plus the explicit grants | every other harness (`grok`, `cline`, `qwen`, `kimi`, `cursor`, `deepseek`, `kilo-code`, …)              |
-| **Your own profile** | the profile named by `AGENT_SANDBOX_NONO_PROFILE`, used verbatim                                            | whenever you set the variable                                                                            |
+| Case                 | Profile in use                                                                                                  | Applies to                                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **Pack profile**     | the harness's official nono pack (`nono pull nolabs-ai/<agent>`)                                                | `claude-code`, `codex`, `opencode`, `goose`, `pi`, `antigravity` — the packs published today |
+| **Generic fallback** | nono's built-in `linux-host-compat` profile on Linux, nono's default profile on macOS, plus the explicit grants | every other harness (`grok`, `cline`, `qwen`, `kimi`, `cursor`, `deepseek`, `kilo-code`, …)  |
+| **Your own profile** | the profile named by `AGENT_SANDBOX_NONO_PROFILE`, used verbatim                                                | whenever you set the variable                                                                |
 
 The generic fallback is legitimate — the explicit grants still confine writes to your working directory, the task output directory, the temp directory and the harness's own state directories — but it is not equivalent to a pack: a pack carries grants plain flags cannot express (macOS Keychain access for `claude-code`, for example). DevIntern therefore names the fallback once per run instead of silently picking it:
 
@@ -703,7 +725,7 @@ nono has no pack profile for "grok"; using linux-host-compat + explicit grants (
 
 `devintern sandbox` prints the same status per harness chain entry, so you can see before a run which entries are pack-backed and which fall back.
 
-**Your own profile.** `AGENT_SANDBOX_NONO_PROFILE` selects a nono profile by name and DevIntern passes it through verbatim — the harness pack is *not* added on top of it, so your file can extend several bases. Save it under `~/.config/nono/profiles/` (or point the variable at an absolute path) and set the variable:
+**Your own profile.** `AGENT_SANDBOX_NONO_PROFILE` selects a nono profile by name and DevIntern passes it through verbatim — the harness pack is _not_ added on top of it, so your file can extend several bases. Save it under `~/.config/nono/profiles/` (or point the variable at an absolute path) and set the variable:
 
 ```json
 {

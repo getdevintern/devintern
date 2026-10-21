@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./pipeline": "./src/lib/task/pipeline-api.ts"
+    "./pipeline": "./src/lib/task/pipeline-api.ts",
+    "./report": "./src/lib/report/api.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",

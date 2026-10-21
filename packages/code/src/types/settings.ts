@@ -78,6 +78,18 @@ export interface AnalyticsSettings {
   enabled?: boolean;
 }
 
+/** Automatic bug-report policy for task failures. */
+export interface DiagnosticsSettings {
+  /**
+   * `off` disables automatic reports, `internal` reports only unexpected
+   * DevIntern failures (the default), and `all` also reports user-actionable
+   * failures such as tracker auth errors. Halts are only reported in `all`.
+   */
+  autoReport?: "off" | "internal" | "all";
+  /** Attach a redacted worker log tail to automatic reports. Default false. */
+  includeLogs?: boolean;
+}
+
 /** A built-in or registered task step with step-specific options. */
 export interface PipelineStepConfig {
   use: string;
@@ -107,6 +119,8 @@ export interface PipelineConfig {
 export interface ProjectSettings {
   /** Anonymous usage analytics preferences. */
   analytics?: AnalyticsSettings;
+  /** Automatic bug-report policy for task failures. */
+  diagnostics?: DiagnosticsSettings;
   /** Optional task pipeline customization. */
   pipeline?: PipelineConfig;
 

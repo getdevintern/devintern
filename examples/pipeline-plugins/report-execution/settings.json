@@ -1,0 +1,12 @@
+{
+  "pipeline": {
+    "plugins": ["./.devintern-code/steps/report-execution.ts"],
+    "steps": [
+      { "use": "implement" },
+      { "use": "commit" },
+      { "use": "verify", "onFail": "warn" },
+      { "use": "report-execution", "on": "warn", "dryRun": true },
+      { "use": "finalize" }
+    ]
+  }
+}
