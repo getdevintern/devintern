@@ -169,6 +169,8 @@ export class FixtureWorkspace {
       query?: string;
       /** Skip tracker comments/transitions; defaults to true for Markdown. */
       skipComments?: boolean;
+      /** Labels the CLI must apply to the created PR (`PR_LABELS`). */
+      prLabels?: string[];
     } = {},
   ) {
     return command(
@@ -194,12 +196,13 @@ export class FixtureWorkspace {
         E2E_AGENT_MODE: options.agentMode ?? "implement",
         ...(options.gitToken === undefined ? {} : { E2E_GIT_TOKEN: options.gitToken }),
         ...(options.apiToken === undefined ? {} : { [this.apiTokenVariable]: options.apiToken }),
+        ...(options.prLabels === undefined ? {} : { PR_LABELS: options.prLabels.join(",") }),
       },
     );
   }
 
-  async runCli(apiToken?: string, implicitTarget = false) {
-    const result = await this.runTask({ apiToken, implicitTarget });
+  async runCli(apiToken?: string, implicitTarget = false, options: { prLabels?: string[] } = {}) {
+    const result = await this.runTask({ apiToken, implicitTarget, ...options });
     if (result.exitCode !== 0)
       throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
     return result;
