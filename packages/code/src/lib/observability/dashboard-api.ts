@@ -327,6 +327,29 @@ export class DashboardData {
     }));
   }
 
+  /** All unfinished runs plus a bounded recent history, without per-run queries. */
+  getTaskActivity(): { runs: RunRecord[]; recentLimit: number } {
+    return this.read({ runs: [], recentLimit: 100 }, (stores) => {
+      const active = stores.runs.listRuns({ status: "in_progress", limit: -1 });
+      const recent = stores.runs.listRuns({ limit: 100 });
+      const runs = [...new Map([...active, ...recent].map((run) => [run.id, run])).values()];
+      return {
+        runs: runs.map((run) => ({
+          ...run,
+          taskTitle: run.taskDescription
+            ?.split("\n")
+            .map((line) => line.trim())
+            .find(Boolean)
+            ?.replace(/^#{1,6}\s+/, "")
+            .replace(/[*_`]/g, "")
+            .slice(0, 160),
+          taskDescription: undefined,
+        })),
+        recentLimit: 100,
+      };
+    });
+  }
+
   getRunDetail(id: number): { run: RunRecord; stages: RunStageRecord[] } | null {
     return this.read(null, (stores) => {
       const run = stores.runs.getRun(id);

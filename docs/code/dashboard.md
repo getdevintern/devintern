@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
 section: "Automation"
 order: 4
-dateModified: 2026-10-16
+dateModified: 2026-10-21
 ---
 
 # Worker Dashboard
@@ -24,6 +24,14 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Review recent worker logs when something needs attention
 
 The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
+
+## Follow task activity
+
+Open **Task activity** to see the step board. It includes all in-progress runs and the latest 100 runs, grouped by their explicitly recorded current or last step. Search by task, repository, branch, agent, or step, and filter by status. Select a card to see its activity and outcome, then choose **Show run details** for transcripts, artifacts, completed stages, and retry actions.
+
+Step tracking follows the task pipeline, including preparation, feasibility, implementation, commit, auto-review, publication, and custom steps. Repeated steps update their start time. Status badges distinguish running work from succeeded, failed, deferred, escalated, or abandoned runs; terminal runs retain their last recorded step without claiming it is still running. Between steps, the board identifies the last step explicitly.
+
+Older runs and workflows that do not use the task step runner appear under **Step unavailable**. The board never guesses the current step from a completed stage. A run interrupted before recovery may still be recorded as in progress until the worker reconciles its history.
 
 ## Retry a failed run
 

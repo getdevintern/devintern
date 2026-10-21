@@ -14,10 +14,12 @@ import { AutomationsView } from "@/views/AutomationsView";
 import { LogsView } from "@/views/LogsView";
 import { RunDetailView } from "@/views/RunDetailView";
 import { RunsView } from "@/views/RunsView";
+import { TaskActivityView } from "@/views/TaskActivityView";
 import { StatsView } from "@/views/StatsView";
 import { cn } from "@/lib/utils";
 
 type Route =
+  | { view: "activity" }
   | { view: "runs" }
   | { view: "run"; id: number }
   | { view: "automations" }
@@ -32,6 +34,7 @@ function parseHash(): Route {
   if (runMatch) {
     return { view: "run", id: parseInt(runMatch[1] ?? "0", 10) };
   }
+  if (hash === "#/activity") return { view: "activity" };
   if (hash === "#/automations") return { view: "automations" };
   if (hash === "#/stats") return { view: "stats" };
   if (hash === "#/prs") return { view: "prs" };
@@ -41,6 +44,7 @@ function parseHash(): Route {
 
 const sections = [
   { label: "Runs", hash: "#/", view: "runs", icon: ListTodo },
+  { label: "Task activity", hash: "#/activity", view: "activity", icon: Activity },
   { label: "Automations", hash: "#/automations", view: "automations", icon: Workflow },
   { label: "Pull requests", hash: "#/prs", view: "prs", icon: GitPullRequest },
   { label: "Statistics", hash: "#/stats", view: "stats", icon: ChartNoAxesCombined },
@@ -48,6 +52,10 @@ const sections = [
 ] as const;
 
 const pageCopy = {
+  activity: {
+    title: "Task activity",
+    description: "See how work is distributed across the pipeline.",
+  },
   runs: { title: "Runs", description: "Follow work from pickup through delivery." },
   run: { title: "Run details", description: "Review the timeline, output, and next steps." },
   automations: { title: "Automations", description: "Manage scheduled work and run it on demand." },
@@ -122,6 +130,9 @@ export function App() {
             </span>
           </div>
 
+          {route.view === "activity" ? (
+            <TaskActivityView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
+          ) : null}
           {route.view === "runs" ? (
             <RunsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
           ) : null}

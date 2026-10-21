@@ -31,6 +31,8 @@ export interface RunRecord {
   ticketKey?: string;
   ticketUrl?: string;
   taskDescription?: string;
+  /** Short plain-text preview on the activity board. */
+  taskTitle?: string;
   taskKey?: string;
   tracker?: string;
   harness?: string;
@@ -40,6 +42,9 @@ export interface RunRecord {
   prUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
+  step?: string;
+  stepStartedAt?: number;
+  stepActive?: boolean;
   startedAt: number;
   finishedAt?: number;
 }
@@ -61,6 +66,11 @@ export interface RunStageRecord {
   summary?: string;
   detail?: string;
   createdAt: number;
+}
+
+export interface TaskActivityResponse {
+  runs: RunRecord[];
+  recentLimit: number;
 }
 
 export interface RunsResponse {
