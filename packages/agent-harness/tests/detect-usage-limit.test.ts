@@ -308,6 +308,27 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("Ran 429 tests across 47 files.", "").limited).toBe(false);
   });
 
+  test("ignores a numbered listing whose line number is 429", () => {
+    // `cat -n` / numbered code blocks produce a line that trims to `429`.
+    const listing = ["   427\t[Install]", "   428\t", "   429\t", "   430\tEnable and start:"].join(
+      "\n",
+    );
+
+    expect(detectUsageLimit(listing, "").limited).toBe(false);
+    expect(detectUsageLimit("", listing).limited).toBe(false);
+  });
+
+  test("ignores prose that starts with an HTTP 429 status", () => {
+    // Observed in this package's own readme, streamed to stderr while an
+    // agent was editing harness docs: the line starts like an HTTP status but
+    // is explanatory prose, not a provider diagnostic.
+    const prose =
+      "  HTTP 429 — accepted only on lines that look like real diagnostics, never raw";
+
+    expect(detectUsageLimit(prose, "").limited).toBe(false);
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects rate limit error phrasing", () => {
     expect(detectUsageLimit("rate limit exceeded", "").limited).toBe(true);
   });

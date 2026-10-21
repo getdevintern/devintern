@@ -152,7 +152,14 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
     /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
     /^\[API Error:\s*429\b[^\n]*\]$/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
-    /^HTTP\s*429\b/i.test(trimmed) ||
+    // A bare `HTTP 429` prefix is not enough: agent transcripts often contain
+    // prose that starts with it (for example this package's own readme,
+    // "HTTP 429 — accepted only on lines that look like real diagnostics").
+    // Accept a status line, optionally with a status phrase, but not arbitrary
+    // text that merely begins with the code.
+    /^HTTP\s*429(?:\s*(?:[:(]\s*[^)\n]*\)?|[-–—]\s*too many requests|too many requests))?\s*[.!]?$/i.test(
+      trimmed,
+    ) ||
     /^(?:internal error|error:\s*internal error)\b/i.test(trimmed) ||
     /^\s*[{"[].*(?:rate_limit|quota|insufficient balance|add credits|payment required|usage balance exhausted).*[}\]]\s*$/i.test(
       trimmed,
@@ -166,7 +173,9 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
 
   // Preserve concise provider messages such as "rate limit exceeded" while
   // rejecting longer prose/source lines that merely mention the phrase.
-  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:error:\s*)?insufficient balance\.\s+please add credits to continue|(?:http\s*)?429(?:\s+too many requests)?)\s*[.!]?$/i.test(
+  // A bare `429` is not a diagnostic: numbered listings (`cat -n`, code blocks)
+  // routinely produce a line that trims to just the number 429.
+  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:error:\s*)?insufficient balance\.\s+please add credits to continue|429\s+too many requests)\s*[.!]?$/i.test(
     trimmed,
   );
 }
