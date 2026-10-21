@@ -14,6 +14,7 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "./analysis-mode";
+import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { parseAgentJsonObject } from "./json";
 import { getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -90,6 +91,7 @@ export async function runClarityCheck(
 
       // Spawn agent process for clarity check
       const spawnArgs = [...clarityArgs, ...buildPromptArgs(harness, clarityContent)];
+      const runStartedAt = Date.now();
       const { child: clarityAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
@@ -151,8 +153,9 @@ export async function runClarityCheck(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            new HarnessUnavailableError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+              { harnessName: harness.name },
             ),
           );
         } else {
@@ -161,6 +164,7 @@ export async function runClarityCheck(
       });
 
       // Handle process exit
+      // oxlint-disable-next-line complexity -- close handler fans out timeout, usage-limit, startup-failure, parse, and tracker-report branches; remedy: extract the assessment success/failure blocks.
       clarityAgent.on("close", async (code: number | null) => {
         clearTimeout(timeout);
         sandboxCleanup().catch(() => {});
@@ -176,6 +180,23 @@ export async function runClarityCheck(
         if (usage.limited) {
           reject(new UsageLimitError(usage.resetsAt));
           return;
+        }
+        if (code !== 0) {
+          const startupFailure = detectHarnessStartupFailure({
+            exitCode: code,
+            stdout: stdoutOutput,
+            stderr: stderrOutput,
+            durationMs: Date.now() - runStartedAt,
+          });
+          if (startupFailure) {
+            reject(
+              new HarnessUnavailableError(
+                `${harness.displayName} (${executablePath}) could not start: ${startupFailure.reason}`,
+                { harnessName: harness.name },
+              ),
+            );
+            return;
+          }
         }
         if (code === 0) {
           try {

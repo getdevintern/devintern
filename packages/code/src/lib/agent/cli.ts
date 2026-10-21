@@ -5,7 +5,7 @@ import {
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
-import { buildSandboxDoctorReport } from "./sandbox";
+import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
 
 /**
  * `devintern sandbox` — report detected providers, remaining setup steps, and
@@ -35,6 +35,7 @@ export async function runSandboxCommand(): Promise<never> {
       : "environment"
     : "default";
   const harnessName = resolveHarness().harness.name;
+  const preflight = await collectHarnessPreflight(configured, detections);
   const report = buildSandboxDoctorReport(
     detections,
     configured,
@@ -42,6 +43,7 @@ export async function runSandboxCommand(): Promise<never> {
     harnessName,
     process.platform,
     activeSandboxName(),
+    preflight,
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

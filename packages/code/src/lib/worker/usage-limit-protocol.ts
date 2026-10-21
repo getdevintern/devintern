@@ -22,6 +22,17 @@ export const USAGE_LIMIT_EXIT_CODE = 75;
 export const AUTOMATION_ACCESS_EXIT_CODE = 77;
 
 /**
+ * sysexits EX_CONFIG — the selected harness could not start (sandbox denial,
+ * mise shim install failure, missing binary). The parent marks that entry
+ * unavailable for the process and tries the next one; when none remain the
+ * task is deferred instead of consuming an attempt.
+ *
+ * Distinct from 0 (success), 1 (task failure), 75 (usage limit), and 77
+ * (automation access denied).
+ */
+export const HARNESS_UNAVAILABLE_EXIT_CODE = 78;
+
+/**
  * App-specific exit code (not sysexits) emitted only by worker children when
  * the retry gate skipped the task because a previous attempt was reported
  * incomplete and the ticket has not changed since.

@@ -10,8 +10,18 @@
  * picks up changes on restart, same as AGENT_HARNESS.
  */
 
-import { resolveSandbox } from "@devintern/agent-harness";
-import type { DetectedSandboxProvider, ResolvedSandbox } from "@devintern/agent-harness";
+import {
+  harnessCliPathEnvKey,
+  probeHarnessUnderSandbox,
+  resolveExecutablePath,
+  resolveHarnessChainSync,
+  resolveSandbox,
+} from "@devintern/agent-harness";
+import type {
+  DetectedSandboxProvider,
+  ResolvedSandbox,
+  SandboxProvider,
+} from "@devintern/agent-harness";
 
 let cliOverride: string | undefined;
 let cached: Promise<ResolvedSandbox | null> | null = null;
@@ -77,6 +87,86 @@ export interface SandboxDoctorReport {
   nextRunFails: boolean;
 }
 
+/** One harness entry in the doctor's sandbox preflight table. */
+export interface HarnessPreflightEntry {
+  name: string;
+  path: string;
+  ok: boolean;
+  /** First actionable failure line when `ok` is false. */
+  reason?: string;
+  /** Exact configuration fix to show under a failing row. */
+  suggestion?: string;
+}
+
+/** Preflight results collected before rendering the (pure) doctor report. */
+export interface HarnessPreflightReport {
+  /** Sandbox provider the entries were probed through. */
+  provider: string;
+  entries: HarnessPreflightEntry[];
+}
+
+/**
+ * Probe every configured harness CLI through the sandbox selected for the
+ * next run.
+ *
+ * Collection is async because it executes `--version` through the provider;
+ * {@link buildSandboxDoctorReport} stays pure and only renders the result.
+ *
+ * @param configured - Effective `AGENT_SANDBOX` value.
+ * @param detections - Provider detections already gathered by the doctor.
+ * @param raw - Raw `AGENT_HARNESS` value (defaults to the environment).
+ * @returns Preflight rows, or undefined when no sandbox/provider is configured.
+ */
+export async function collectHarnessPreflight(
+  configured: string,
+  detections: DetectedSandboxProvider[],
+  raw?: string,
+): Promise<HarnessPreflightReport | undefined> {
+  if (!configured || configured === "none") {
+    return undefined;
+  }
+
+  let provider: SandboxProvider | undefined;
+  if (configured === "auto") {
+    provider = detections
+      .filter(({ provider: candidate, detection }) => detection.available && candidate.priority > 0)
+      .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+  } else {
+    const detected = detections.find((entry) => entry.provider.name === configured);
+    provider = detected?.detection.available ? detected.provider : undefined;
+  }
+  if (!provider) {
+    return undefined;
+  }
+
+  // `sandboxName: "none"` keeps this chain resolution free of probes: the
+  // doctor runs the probes itself so it can render every entry, including
+  // fallbacks the runtime chain would drop.
+  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
+  const entries = await Promise.all(
+    chain.entries.map(async (entry): Promise<HarnessPreflightEntry> => {
+      const path = resolveExecutablePath(entry.path);
+      const result = await probeHarnessUnderSandbox({
+        path,
+        provider,
+        harnessName: entry.name,
+      });
+      return {
+        name: entry.name,
+        path,
+        ok: result.ok,
+        ...(result.ok
+          ? {}
+          : {
+              reason: result.reason,
+              suggestion: `set ${harnessCliPathEnvKey(entry.name)}=/path/to/${entry.name} (the real executable, not the mise shim)`,
+            }),
+      };
+    }),
+  );
+  return { provider: provider.name, entries };
+}
+
 /**
  * Build the `devintern sandbox` doctor output.
  *
@@ -93,7 +183,10 @@ export interface SandboxDoctorReport {
  *   ({@link SandboxProvider.canNestInSandbox} is falsy), the resolver skips
  *   adding another provider, so the report must describe the inherited
  *   confinement instead of the configured pick.
+ * @param preflight - Collected harness readiness results; rendered as a
+ *   per-entry table without executing anything in this function.
  */
+// oxlint-disable-next-line max-params, complexity -- positional signature kept for existing callers; one branch per configured provider/next-run combination keeps the report readable.
 export function buildSandboxDoctorReport(
   detections: DetectedSandboxProvider[],
   configured: string,
@@ -101,6 +194,7 @@ export function buildSandboxDoctorReport(
   harnessName: string,
   platform: string = process.platform,
   activeSandbox?: string,
+  preflight?: HarnessPreflightReport,
 ): SandboxDoctorReport {
   const lines: string[] = [];
   const linux = platform === "linux";
@@ -187,6 +281,23 @@ export function buildSandboxDoctorReport(
     }
     if (provider.docsUrl) {
       lines.push(`  ${" ".repeat(8)} docs: ${provider.docsUrl}`);
+    }
+    lines.push("");
+  }
+
+  if (preflight && preflight.entries.length > 0) {
+    lines.push(`Harness CLI preflight (${preflight.provider})`);
+    for (const entry of preflight.entries) {
+      const status = entry.ok ? "OK" : `FAIL — ${entry.reason ?? "could not start"}`;
+      lines.push(`  ${entry.name.padEnd(9)} ${entry.path.padEnd(44)} ${status}`);
+      if (!entry.ok && entry.suggestion) {
+        lines.push(`  ${" ".repeat(9)} → ${entry.suggestion}`);
+      }
+    }
+    // The primary is kept at runtime (an empty chain is worse), so a failing
+    // primary means the next task will hit the same startup error.
+    if (!preflight.entries[0]!.ok) {
+      nextRunFails = true;
     }
     lines.push("");
   }

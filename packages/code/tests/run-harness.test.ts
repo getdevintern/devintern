@@ -23,6 +23,7 @@ import type { ReviewFeedback } from "../src/types/auto-review";
 import type { PipelineConfig } from "../src/types/settings";
 import { registerStep } from "../src/lib/task/pipeline-registry";
 import { runContext } from "../src/lib/cli/context";
+import { HarnessUnavailableError } from "../src/lib/agent/harness-startup";
 
 // --- snapshot real modules before any mock.module override ---
 const realHarness = { ...(await import("@devintern/agent-harness")) };
@@ -312,9 +313,17 @@ describe("runAgentHarness early failures", () => {
     await expect(runAgentHarness(baseInput())).rejects.toThrow(realHarness.UsageLimitError);
   });
 
-  test("rejects on a non-zero exit code", async () => {
+  test("rejects on a non-zero exit code after the agent ran", async () => {
     scenario.closeCode = 1;
+    scenario.stdout = "The agent tried and failed.\n";
     await expect(runAgentHarness(baseInput())).rejects.toThrow("Agent exited with code 1");
+  });
+
+  test("classifies a sandbox/mise startup failure separately", async () => {
+    scenario.closeCode = 1;
+    scenario.stderr =
+      "mise ERROR Failed to install npm:@xai-official/grok: Permission denied (os error 13)";
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(HarnessUnavailableError);
   });
 
   test("rejects when the agent times out", async () => {

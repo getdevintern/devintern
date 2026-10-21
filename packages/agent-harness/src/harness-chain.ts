@@ -20,10 +20,19 @@
  * issues for the caller to warn about and skipped rather than fatal, unless
  * that would leave an empty chain (then the full list is kept and the spawn
  * itself surfaces the real error, matching single-harness behavior).
+ *
+ * When a sandbox is configured, usable entries are also executed through the
+ * sandbox wrapper (`<path> --version`) before they are trusted. A fallback
+ * that cannot start under the sandbox is dropped with an actionable issue; a
+ * failing primary is kept and reported because an empty chain is worse.
  */
 
 import { DEFAULT_HARNESS_NAME, getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import { getHarnessCliCommand, isHarnessCliAvailable } from "./resolver.js";
+import { probeHarnessUnderSandbox, resolveProbeProvider } from "./sandbox/harness-probe.js";
+import type { HarnessSandboxProbeResult } from "./sandbox/harness-probe.js";
+import { detectMiseShim, harnessCliPathEnvKey, miseShimFixHint } from "./sandbox/shim-detect.js";
+import type { SandboxProvider } from "./sandbox/types.js";
 import type { AgentHarness } from "./types.js";
 
 /**
@@ -69,7 +78,7 @@ export interface HarnessChainEntry {
 export interface HarnessChainIssue {
   /** Name as written in the list (after alias resolution). */
   readonly requested: string;
-  readonly reason: "unknown" | "not-installed";
+  readonly reason: "unknown" | "not-installed" | "sandbox-incompatible";
   readonly message: string;
 }
 
@@ -77,7 +86,7 @@ export interface HarnessChainIssue {
 export interface ResolvedHarnessChain {
   /** Ordered usable entries (priority first). */
   readonly entries: HarnessChainEntry[];
-  /** Entries dropped from the chain, with warning messages. */
+  /** Entries dropped from (or, for a failing primary, kept with a warning in) the chain. */
   readonly issues: HarnessChainIssue[];
   /** All canonical names as parsed from the raw value (before dropping). */
   readonly parsed: string[];
@@ -101,6 +110,22 @@ export interface HarnessChainOptions {
   warnDeprecated?: boolean;
   /** Installability predicate override (tests). Defaults to PATH probing. */
   isInstalled?: (entry: { name: string; path: string }) => boolean;
+  /**
+   * Effective sandbox name for readiness probing. Defaults to `AGENT_SANDBOX`.
+   * `none`/empty disables probing entirely.
+   */
+  sandboxName?: string;
+  /** Provider override (tests/doctor); otherwise derived from `sandboxName`. */
+  sandboxProvider?: SandboxProvider;
+  /**
+   * Sandbox readiness probe override (tests). Called only when a sandbox is
+   * configured. Returning `{ ok: false, reason }` marks the entry as
+   * sandbox-incompatible; thrown errors fail open.
+   */
+  probeSandbox?: (entry: {
+    name: string;
+    path: string;
+  }) => HarnessSandboxProbeResult | Promise<HarnessSandboxProbeResult>;
 }
 
 /**
@@ -128,17 +153,42 @@ function resolveEntryPath(
   return getHarnessCliCommand(harness, { warnDeprecated });
 }
 
+const warnedMiseShims = new Set<string>();
+
 /**
- * Resolve the priority-ordered harness chain from a comma-separated value.
+ * Warn once per process about a harness path that is a mise wrapper script.
  *
- * Unknown names and (when `checkInstalled`) not-installed CLIs are reported in
- * `issues` and skipped; if nothing survives, the full parsed list is kept so
- * spawning fails with the familiar actionable error instead of an empty chain.
- *
- * @param options - Raw value override, installability toggles, and test hooks.
- * @returns The resolved chain with usable entries and dropped-entry issues.
+ * @param entry - Resolved chain entry to inspect.
  */
-export function resolveHarnessChain(options: HarnessChainOptions = {}): ResolvedHarnessChain {
+function warnIfMiseShim(entry: HarnessChainEntry): void {
+  const shim = detectMiseShim(entry.path);
+  if (!shim.shim || warnedMiseShims.has(shim.path)) {
+    return;
+  }
+  warnedMiseShims.add(shim.path);
+  console.warn(
+    `⚠️  Harness "${entry.name}" resolves to a mise shim (${shim.path}) that runs ` +
+      `"${shim.match ?? "mise use/mise x"}". Under a sandbox the install step is denied. ` +
+      `Point it at the real executable: ${miseShimFixHint(entry.name)}.`,
+  );
+}
+
+/** Reset the once-per-process mise shim warning cache (tests). */
+export function resetMiseShimWarnings(): void {
+  warnedMiseShims.clear();
+}
+
+/**
+ * Resolve the chain without executing sandbox probes.
+ *
+ * Used by lazy fallbacks and tests that must stay synchronous. Prefer
+ * {@link resolveHarnessChain} at startup so sandbox-incompatible entries are
+ * filtered before the first task runs.
+ *
+ * @param options - Raw value override and installability toggles.
+ * @returns The resolved chain without sandbox readiness filtering.
+ */
+export function resolveHarnessChainSync(options: HarnessChainOptions = {}): ResolvedHarnessChain {
   const raw = options.raw ?? process.env.AGENT_HARNESS;
   const parsed = parseHarnessList(raw);
   const checkInstalled = options.checkInstalled ?? true;
@@ -239,4 +289,109 @@ export function resolveHarnessChain(options: HarnessChainOptions = {}): Resolved
     parsed,
     multiHarness: parsed.length > 1,
   };
+}
+
+/** Build the actionable issue for a harness that failed its sandbox probe. */
+function sandboxIncompatibleIssue(
+  entry: HarnessChainEntry,
+  providerName: string,
+  reason: string,
+  isPrimary: boolean,
+): HarnessChainIssue {
+  const fix = `${harnessCliPathEnvKey(entry.name)}=/path/to/${entry.name}`;
+  const kept = isPrimary ? " Keeping it as the primary entry so the chain is not empty." : "";
+  return {
+    requested: entry.name,
+    reason: "sandbox-incompatible",
+    message:
+      `Harness "${entry.name}" (${entry.path}) cannot start under the ${providerName} sandbox: ` +
+      `${reason}. Pin the real binary with ${fix}.${kept}`,
+  };
+}
+
+/**
+ * Resolve the priority-ordered harness chain from a comma-separated value.
+ *
+ * Unknown names and (when `checkInstalled`) not-installed CLIs are reported in
+ * `issues` and skipped; if nothing survives, the full parsed list is kept so
+ * spawning fails with the familiar actionable error instead of an empty chain.
+ *
+ * When a sandbox is configured, entries are probed in parallel through the
+ * sandbox wrapper. Fallbacks that cannot start are dropped; a failing primary
+ * is kept with an issue because an empty chain is worse. Probe infrastructure
+ * errors fail open (the entry is kept).
+ *
+ * @param options - Raw value override, installability toggles, and test hooks.
+ * @returns The resolved chain with usable entries and dropped-entry issues.
+ */
+export async function resolveHarnessChain(
+  options: HarnessChainOptions = {},
+): Promise<ResolvedHarnessChain> {
+  const base = resolveHarnessChainSync(options);
+  const sandboxName = (options.sandboxName ?? process.env.AGENT_SANDBOX ?? "none").trim();
+  if (!sandboxName || sandboxName === "none" || base.entries.length === 0) {
+    return base;
+  }
+
+  // Shim warnings only matter when confinement is active: unsandboxed users
+  // can run a mise wrapper just fine.
+  for (const entry of base.entries) {
+    warnIfMiseShim(entry);
+  }
+
+  let provider = options.sandboxProvider;
+  if (!provider && !options.probeSandbox) {
+    try {
+      provider = await resolveProbeProvider(sandboxName);
+    } catch {
+      provider = undefined;
+    }
+  }
+  if (!provider && !options.probeSandbox) {
+    // No usable provider to probe through; startup will surface the sandbox
+    // error. Never fail the chain because readiness probing itself failed.
+    return base;
+  }
+
+  const providerLabel = provider?.name ?? sandboxName;
+  const probe =
+    options.probeSandbox ??
+    ((entry: { name: string; path: string }) =>
+      probeHarnessUnderSandbox({
+        path: entry.path,
+        provider: provider as SandboxProvider,
+        harnessName: entry.name,
+      }));
+
+  const results = await Promise.all(
+    base.entries.map(async (entry): Promise<HarnessSandboxProbeResult> => {
+      if (!entry.installed) {
+        return { ok: true };
+      }
+      try {
+        return await probe({ name: entry.name, path: entry.path });
+      } catch {
+        // Probe infrastructure failure (e.g. provider wrap throws) is not
+        // evidence that the harness is unusable — fail open.
+        return { ok: true };
+      }
+    }),
+  );
+
+  const entries: HarnessChainEntry[] = [];
+  const issues = [...base.issues];
+  base.entries.forEach((entry, index) => {
+    const result = results[index] ?? { ok: true };
+    if (result.ok) {
+      entries.push(entry);
+      return;
+    }
+    const isPrimary = index === 0;
+    issues.push(sandboxIncompatibleIssue(entry, providerLabel, result.reason, isPrimary));
+    if (isPrimary) {
+      entries.push(entry);
+    }
+  });
+
+  return { ...base, entries, issues };
 }

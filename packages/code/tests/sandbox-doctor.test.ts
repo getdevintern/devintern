@@ -204,6 +204,60 @@ describe("buildSandboxDoctorReport", () => {
     expect(text).toContain("⚠ for claude-code runs, first install the Claude pack");
   });
 
+  test("renders the harness CLI preflight table with OK/FAIL and the fix", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "nono",
+      ".devintern-code/.env",
+      "opencode",
+      "linux",
+      undefined,
+      {
+        provider: "nono",
+        entries: [
+          { name: "opencode", path: "/home/daniil/.opencode/bin/opencode", ok: true },
+          {
+            name: "grok",
+            path: "/home/daniil/.local/bin/grok",
+            ok: false,
+            reason: "mise: Permission denied",
+            suggestion: "set GROK_CLI_PATH=/path/to/grok (the real executable, not the mise shim)",
+          },
+        ],
+      },
+    );
+    const text = report.lines.join("\n");
+    expect(text).toContain("Harness CLI preflight (nono)");
+    expect(text).toContain("opencode  /home/daniil/.opencode/bin/opencode");
+    expect(text).toContain("OK");
+    expect(text).toContain("grok      /home/daniil/.local/bin/grok");
+    expect(text).toContain("FAIL — mise: Permission denied");
+    expect(text).toContain("→ set GROK_CLI_PATH=/path/to/grok");
+  });
+
+  test("a failing primary preflight makes the next run fail", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "nono",
+      "environment",
+      "grok",
+      "linux",
+      undefined,
+      {
+        provider: "nono",
+        entries: [
+          {
+            name: "grok",
+            path: "/home/daniil/.local/bin/grok",
+            ok: false,
+            reason: "mise: Permission denied",
+          },
+        ],
+      },
+    );
+    expect(report.nextRunFails).toBe(true);
+  });
+
   test("per-provider setup notes are platform aware", () => {
     const linuxText = buildSandboxDoctorReport(
       [detected("docker"), detected("smolvm")],

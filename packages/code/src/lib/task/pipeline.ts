@@ -5,6 +5,7 @@ import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
 import { runClarityCheck } from "../agent/clarity";
+import { HarnessUnavailableError } from "../agent/harness-startup";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -48,6 +49,7 @@ import { isMarkdownTaskTracker } from "../trackers/markdown/markdown-task-tracke
 import type { MarkdownTaskRaw } from "../trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../utils";
 import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   isWorkerChild,
@@ -137,6 +139,11 @@ async function runFeasibilityCheck(input: FeasibilityCheckInput): Promise<void> 
     // fail over. Swallowing them here used to launch implementation on
     // the same exhausted harness (Grok 402 during the clarity check).
     if (clarityError instanceof UsageLimitError) {
+      throw clarityError;
+    }
+    // A harness that could not start will fail implementation too. Let the
+    // worker fail over/defer instead of continuing on the same broken binary.
+    if (clarityError instanceof Error && clarityError.name === "HarnessUnavailableError") {
       throw clarityError;
     }
     recordRunStage("feasibility", {
@@ -347,6 +354,19 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
       runContext.lockManager.release();
     }
     await flushAnalyticsAndExit(0);
+  }
+
+  // A harness that could not start is a configuration problem, not a task
+  // attempt. In a worker child, signal the parent to fail over/defer without
+  // posting a failure comment, recording retry state, or transitioning the
+  // ticket. Interactive runs keep the normal failure path below.
+  if (error instanceof HarnessUnavailableError && isWorkerChild()) {
+    await finishTaskRun("deferred", error.message);
+    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
+    if (runContext.lockManager) {
+      runContext.lockManager.release();
+    }
+    await flushAnalyticsAndExit(HARNESS_UNAVAILABLE_EXIT_CODE);
   }
 
   const err = error as Error;
