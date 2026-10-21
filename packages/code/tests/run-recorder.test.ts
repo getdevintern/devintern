@@ -3,6 +3,8 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+import { runTaskSteps } from "../src/lib/task/step-runner";
+
 import type { Database } from "bun:sqlite";
 
 import {
@@ -27,6 +29,78 @@ describe("RunStore", () => {
     for (const suffix of ["", "-wal", "-shm"]) {
       rmSync(`${dbPath}${suffix}`, { force: true });
     }
+  });
+
+  test("step runner records actual entries and clears activity after repeats and errors", async () => {
+    beginRun({ origin: "task", taskKey: "STEP-RUNNER" });
+    const id = getActiveRunContext()!.id;
+    const reader = new RunStore();
+    let executions = 0;
+    try {
+      await expect(
+        runTaskSteps(
+          [
+            {
+              name: "custom-audit",
+              run: async () => {
+                executions++;
+                expect(reader.getRun(id)).toMatchObject({ step: "custom-audit", stepActive: true });
+              },
+            },
+            {
+              name: "verify",
+              run: async () => {
+                expect(reader.getRun(id)).toMatchObject({ step: "verify", stepActive: true });
+                if (executions === 1)
+                  return { kind: "repeat" as const, from: "custom-audit", maxRepeats: 1 };
+                throw new Error("verification stopped");
+              },
+            },
+          ],
+          {},
+        ),
+      ).rejects.toThrow("verification stopped");
+      expect(executions).toBe(2);
+      expect(reader.getRun(id)).toMatchObject({ step: "verify", stepActive: false });
+    } finally {
+      endRun("failed", "test cleanup");
+      reader.close();
+    }
+  });
+
+  test("explicit step activity survives reads, exits, terminal outcomes, and retry attempts", () => {
+    const id = store.createRun({ origin: "task", taskKey: "STEP-1" });
+    expect(store.getRun(id)?.step).toBeUndefined();
+    store.addStage(id, "feasibility", "succeeded");
+    expect(store.getRun(id)?.step).toBeUndefined(); // never infer activity from outcomes
+    const first = store.startStep(id, "custom-audit");
+    expect(store.getRun(id)).toMatchObject({
+      step: "custom-audit",
+      stepStartedAt: first,
+      stepActive: true,
+    });
+    store.completeStep(id, "custom-audit", first);
+    expect(store.getRun(id)?.stepActive).toBe(false);
+    store.startStep(id, "publish");
+    store.completeStep(id, "custom-audit", first); // outer/nested exits cannot clear a later step
+    expect(store.getRun(id)?.stepActive).toBe(true);
+    store.finishRun(id, "deferred", "usage limit");
+    expect(store.getRun(id)).toMatchObject({
+      step: "publish",
+      stepActive: false,
+      status: "deferred",
+    });
+    store.startStep(id, "implement"); // late writers cannot resurrect terminal activity
+    expect(store.getRun(id)?.step).toBe("publish");
+    const retry = store.createRun({ origin: "task", taskKey: "STEP-1" });
+    expect(store.getRun(retry)?.step).toBeUndefined();
+    store.startStep(retry, "implement");
+    store.reapOrphanedRuns();
+    expect(store.getRun(retry)).toMatchObject({
+      step: "implement",
+      stepActive: false,
+      status: "failed",
+    });
   });
 
   test("createRun starts a run in in_progress with metadata", () => {
