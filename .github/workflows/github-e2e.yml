@@ -29,4 +29,6 @@ jobs:
         run: bun run --filter @devintern/e2e test:e2e
         env:
           E2E_GITHUB_REPOSITORY: ${{ vars.E2E_GITHUB_REPOSITORY }}
+          # Contents, Pull requests, and Issues write on the fixture repository.
+          # Issues write is only used to create the persistent `devintern-authored` label.
           E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}

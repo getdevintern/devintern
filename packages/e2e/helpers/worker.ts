@@ -16,6 +16,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -67,9 +68,9 @@ interface OutputWaiter {
 /**
  * Real workspace daemon backed by a local repository.
  *
- * Call {@link prepare}, {@link start}, and {@link waitForReady} before adding
- * tasks. Always call {@link dispose} in `finally` so the daemon and temporary
- * directories are released.
+ * Call {@link prepare}, enqueue tasks with {@link addTask}, then {@link start}
+ * and {@link waitForReady}. Always call {@link dispose} in `finally` so the
+ * daemon and temporary directories are released.
  */
 export class WorkerFixture {
   readonly root = mkdtempSync(join(tmpdir(), "devintern-e2e-worker-"));
@@ -109,17 +110,41 @@ export class WorkerFixture {
     return this.output;
   }
 
-  /** Whether the daemon process is still running. */
+  /** Last captured log lines, for failure diagnostics. */
+  tail(): string {
+    const lines = this.output.trim().split("\n");
+    return lines.slice(-80).join("\n");
+  }
+
+  /** Records written by the deterministic agent, one per invocation. */
+  agentInvocations(): Array<{ mode: string }> {
+    const path = this.env.E2E_AGENT_INVOCATIONS;
+    if (!path || !existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { mode: string });
+  }
+
+  /**
+   * Whether the daemon process is still running.
+   *
+   * `child.exitCode` is authoritative as soon as the process is reaped, even
+   * before the `exited` callback records {@link exitCode}, so a daemon that
+   * just died cannot be reported as running.
+   */
   get running(): boolean {
-    return this.child !== null && this.exitCode === undefined;
+    return this.child !== null && this.child.exitCode === null && this.exitCode === undefined;
   }
 
   /**
    * Seed the local bare repository and write a credential-free workspace.
    *
-   * The disabled automation exists only to satisfy the worker's startup guard:
-   * an injection-only workspace has no tracker query, so without any other
-   * configured work the daemon would exit before it could drain tasks.
+   * The workspace deliberately has no task query, automation, estimation, or
+   * error monitor. That is valid only while an injected task is pending, so
+   * enqueue work before {@link start}: the worker then takes the documented
+   * injection-only exception instead of exiting for lack of configured work.
    */
   async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
@@ -148,12 +173,6 @@ export class WorkerFixture {
         `name = "${this.repoName}"`,
         `remote = "${this.remote}"`,
         `default_branch = "${this.baseBranch}"`,
-        "",
-        "[[automations]]",
-        'id = "e2e-keepalive"',
-        "enabled = false",
-        'prompt = "unused"',
-        'interval = "1d"',
         "",
       ].join("\n"),
     );
@@ -300,6 +319,9 @@ export class WorkerFixture {
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      // A daemon that already exited can never settle the wait; fail fast with
+      // its logs instead of blocking until the deadline.
+      this.assertRunning(label);
       const value = probe();
       if (value !== undefined) return value;
       if (Date.now() >= deadline) {
@@ -312,9 +334,7 @@ export class WorkerFixture {
   /** Wait for a log pattern with a bounded timeout and fail fast on exit. */
   async waitForOutput(pattern: RegExp, timeoutMs = 20_000, label = "log line"): Promise<void> {
     if (pattern.test(this.output)) return;
-    if (this.exitCode !== undefined) {
-      throw new Error(`Worker already exited with code ${this.exitCode}\n${this.tail()}`);
-    }
+    this.assertRunning(label);
     await new Promise<void>((resolve, reject) => {
       const waiter: OutputWaiter = {
         pattern,
@@ -353,6 +373,21 @@ export class WorkerFixture {
     } finally {
       rmSync(this.root, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Throw when the daemon has already exited.
+   *
+   * Both sources are consulted: {@link exitCode} is recorded asynchronously by
+   * the `exited` handler, while the subprocess's own `exitCode` flips as soon
+   * as the process is reaped.
+   */
+  private assertRunning(label: string): void {
+    const exitCode = this.exitCode ?? this.child?.exitCode ?? undefined;
+    if (exitCode === undefined) return;
+    throw new Error(
+      `Worker exited with code ${exitCode} while waiting for ${label}\n${this.tail()}`,
+    );
   }
 
   /** Run a read-only queue query, tolerating a database that is still absent. */
@@ -434,11 +469,6 @@ export class WorkerFixture {
         // Already gone.
       }
     }
-  }
-
-  private tail(): string {
-    const lines = this.output.trim().split("\n");
-    return lines.slice(-80).join("\n");
   }
 }
 

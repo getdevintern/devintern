@@ -70,7 +70,16 @@ export class GitHub {
     } catch (error) {
       // GitHub reports an existing label as 422 `already_exists`; any other
       // rejection (invalid payload, lost permissions) must surface.
-      if (!(error instanceof Error) || !error.message.includes("already_exists")) throw error;
+      if (!(error instanceof Error) || !error.message.includes("already_exists")) {
+        if (error instanceof Error && /^GitHub POST \/labels: HTTP 403\b/.test(error.message)) {
+          throw new Error(
+            `${error.message}\nCreating labels requires Issues: write on the fixture repository; ` +
+              "update E2E_GITHUB_TOKEN (see packages/e2e/README.md).",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
     }
   }
 
