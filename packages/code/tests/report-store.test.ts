@@ -8,7 +8,6 @@ import {
   listSpoolEntries,
   markSpoolError,
   markSpoolSubmitted,
-  reserveAutoReport,
   saveSpoolEntry,
 } from "../src/lib/report/store";
 import type { BugReportPayload } from "../src/lib/report/types";
@@ -67,15 +66,5 @@ describe("report spool", () => {
     const entries = listSpoolEntries(workdir);
     expect(entries).toHaveLength(1);
     expect(entries[0]?.error).toBe("offline");
-  });
-
-  test("deduplicates and caps automatic reports", () => {
-    const now = new Date("2026-01-01T00:00:00.000Z");
-    expect(reserveAutoReport(workdir, "sha256:a", { now })).toBe(true);
-    expect(reserveAutoReport(workdir, "sha256:a", { now })).toBe(false);
-    for (let i = 0; i < 4; i++) {
-      expect(reserveAutoReport(workdir, `sha256:${i}`, { now })).toBe(true);
-    }
-    expect(reserveAutoReport(workdir, "sha256:overflow", { now })).toBe(false);
   });
 });

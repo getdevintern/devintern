@@ -2,9 +2,7 @@
  * Local audit and retry spool for bug reports.
  *
  * Every manual report is written before submission so a failed request leaves
- * a copy the user can retry (`devintern report --from <path>`). Automatic
- * reports keep a small fingerprint ledger so a crash loop cannot spam the
- * endpoint.
+ * a copy the user can retry (`devintern report --from <path>`).
  */
 
 import {
@@ -30,14 +28,6 @@ export interface SpoolEntry {
   error?: string;
   payload: BugReportPayload;
 }
-
-export interface AutoReportState {
-  version: 1;
-  reports: Array<{ fingerprint: string; at: string }>;
-}
-
-const AUTO_STATE_FILE = ".auto.json";
-const MAX_AUTO_STATE_ENTRIES = 100;
 
 /** Ensure the report directory exists with owner-only permissions. */
 export function ensureReportDir(dir: string): void {
@@ -226,83 +216,4 @@ export function pruneSpool(dir: string, maxAgeDays = 30, now = Date.now()): numb
     }
   }
   return removed;
-}
-
-/** Read the automatic-report fingerprint ledger. */
-export function readAutoState(dir: string): AutoReportState {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(join(dir, AUTO_STATE_FILE), "utf8"));
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      (parsed as { version?: unknown }).version === 1 &&
-      Array.isArray((parsed as { reports?: unknown }).reports)
-    ) {
-      const reports = (parsed as AutoReportState).reports.filter(
-        (item) =>
-          item !== null &&
-          typeof item === "object" &&
-          typeof (item as { fingerprint?: unknown }).fingerprint === "string" &&
-          typeof (item as { at?: unknown }).at === "string",
-      );
-      return { version: 1, reports };
-    }
-  } catch {
-    // Missing or malformed state starts fresh.
-  }
-  return { version: 1, reports: [] };
-}
-
-/** Persist the automatic-report ledger, bounded in size. */
-function writeAutoState(dir: string, state: AutoReportState): void {
-  ensureReportDir(dir);
-  const reports = state.reports.slice(-MAX_AUTO_STATE_ENTRIES);
-  writeJson(join(dir, AUTO_STATE_FILE), { version: 1, reports });
-}
-
-export interface AutoReportGateOptions {
-  dedupeHours?: number;
-  maxPerDay?: number;
-  now?: Date;
-}
-
-/**
- * Check and reserve a slot for an automatic report.
- *
- * The reservation is recorded immediately so two consecutive crash-loop
- * attempts in one process cannot both send. Callers should only reserve after
- * classification decided the failure is worth reporting.
- */
-export function reserveAutoReport(
-  dir: string,
-  fingerprint: string,
-  options: AutoReportGateOptions = {},
-): boolean {
-  const now = options.now ?? new Date();
-  const dedupeMs = (options.dedupeHours ?? 24) * 60 * 60 * 1000;
-  const maxPerDay = options.maxPerDay ?? 5;
-  const state = readAutoState(dir);
-  const recent = state.reports.filter(
-    (item) => now.getTime() - Date.parse(item.at) <= 7 * 24 * 60 * 60 * 1000,
-  );
-  if (
-    recent.some(
-      (item) => item.fingerprint === fingerprint && now.getTime() - Date.parse(item.at) < dedupeMs,
-    )
-  ) {
-    writeAutoState(dir, { version: 1, reports: recent });
-    return false;
-  }
-  const lastDay = recent.filter(
-    (item) => now.getTime() - Date.parse(item.at) < 24 * 60 * 60 * 1000,
-  );
-  if (lastDay.length >= maxPerDay) {
-    writeAutoState(dir, { version: 1, reports: recent });
-    return false;
-  }
-  writeAutoState(dir, {
-    version: 1,
-    reports: [...recent, { fingerprint, at: now.toISOString() }],
-  });
-  return true;
 }

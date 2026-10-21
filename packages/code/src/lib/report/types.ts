@@ -7,10 +7,7 @@
  */
 
 /** Where a report came from. */
-export type ReportSource = "cli" | "auto" | "pipeline";
-
-/** Automatic-report policy configured per project. */
-export type AutoReportMode = "off" | "internal" | "all";
+export type ReportSource = "cli";
 
 export interface ReportRuntimeInfo {
   bun?: string;
@@ -115,7 +112,7 @@ export interface BugReportDraft {
   contactEmail?: string;
   /** Caller-supplied structured evidence, capped at 16 KB per item. */
   evidence?: ReportEvidence[];
-  /** Command that triggered the failure, for automatic reports. */
+  /** Caller-supplied command description, reviewed before submission. */
   command?: string;
 }
 

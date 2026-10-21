@@ -390,23 +390,7 @@ The settings-based opt-out is acknowledged once with the anonymous `analytics_op
 
 ## Bug Reports
 
-`devintern report` files a redacted bug report for DevIntern itself. Automatic reports for unexpected task failures are controlled separately from analytics:
-
-```json
-{
-  "diagnostics": {
-    "autoReport": "internal",
-    "includeLogs": false
-  }
-}
-```
-
-- `autoReport: "off"` disables automatic reports; manual reports still work.
-- `autoReport: "internal"` (default) reports only unexpected DevIntern failures.
-- `autoReport: "all"` also reports user-actionable failures and halted runs, except usage limits and cancellations.
-- `includeLogs: true` attaches a bounded, redacted worker log tail to automatic reports.
-
-Only signed-in users send automatic reports. `DEVINTERN_TELEMETRY_DISABLED=1` suppresses them, and `DEVINTERN_AUTO_REPORT` overrides the setting (`off`, `internal`, or `all`). See [Reporting bugs](reporting-bugs.md) for the payload, preview, retry, and privacy details.
+`devintern report` files a user-approved bug report for DevIntern itself, with a preview of the diagnostic bundle. Use it to describe expected behavior, reproduction steps, or incorrect results that an exception cannot explain. Existing Sentry error tracking handles automatic exception capture; this command does not add another automatic reporting channel. See [Reporting bugs](reporting-bugs.md).
 
 ## Readiness Check
 

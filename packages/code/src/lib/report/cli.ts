@@ -13,7 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { detectInstallKind } from "@devintern/utils";
 import { VERSION, loadEnvironment } from "../cli/bootstrap";
 import { resolveRuntimeStateDir } from "../config/config-dir";
-import { createBugReporter } from "./api";
+import { createBugReporter, resolveReportEndpoint } from "./api";
 import { resolveReportDir } from "./paths";
 import { DEFAULT_REPORT_ENDPOINT, ReportSubmitError } from "./client";
 import { resolveIdentity } from "./identity";
@@ -512,6 +512,12 @@ async function handleFrom(
     console.log(`💾 Saved report payload to ${path}`);
     finish(0);
   }
+  const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (!options.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    console.log(`\nDestination: ${resolveReportEndpoint(options.endpoint)}`);
+  }
+  await confirmSubmission(options, interactive);
   const identity = await resolveIdentity(configDir);
   const reporter = createBugReporter({
     accessToken: identity.accessToken,

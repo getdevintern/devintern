@@ -1,2 +1,0 @@
-verify-artifacts: dist/report.json is missing required field "checks"
-pipeline: verify-onFail=warn

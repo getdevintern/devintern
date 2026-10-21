@@ -1,7 +1,7 @@
 /**
  * Public bug-reporting API for `@getdevintern/code/report`.
  *
- * The CLI command, automatic failure reporting, and pipeline plugins all go
+ * The CLI command and integrations preparing user-approved reports go
  * through this module so redaction, caps, and the payload schema stay in one
  * place. Tests inject `fetchImpl` and `now` to avoid the network and the clock.
  */
@@ -251,7 +251,6 @@ export { readStoredIdentity } from "./session";
 export { DEFAULT_REPORT_ENDPOINT, ReportSubmitError } from "./client";
 export { isBugReportPayload, isSpoolEntry, readSpoolFile } from "./store";
 export type {
-  AutoReportMode,
   BugReportDraft,
   BugReportPayload,
   BugReporter,

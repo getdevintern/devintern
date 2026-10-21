@@ -1,7 +1,7 @@
 ---
 title: "Reporting Bugs"
 sidebarLabel: "Bug Reports"
-description: "File a redacted DevIntern bug report from the CLI, attach a failed run, and control automatic reports."
+description: "File a redacted DevIntern bug report from the CLI, attach a relevant run, and preview the evidence before sending."
 section: "Automation Reference"
 order: 2
 dateModified: 2026-10-21
@@ -12,7 +12,7 @@ tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 
 `devintern report` files a bug report for DevIntern itself: the CLI, worker, pipeline, or agent integration. It gathers a redacted diagnostic bundle and shows exactly what will be sent before anything leaves your machine.
 
-Use it when DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](configuration.md#readiness-check) and the relevant integration guide instead.
+Use it when a run completes with incorrect behavior, DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](configuration.md#readiness-check) and the relevant integration guide instead.
 
 ## File a report
 
@@ -75,46 +75,17 @@ The payload contains:
 - Bounded log tails you explicitly attach or that the worker captured
 - A stable failure fingerprint used to group duplicates
 
-It never contains task descriptions, prompts, agent transcripts, diffs, source code, environment values, `.env` contents, credentials, or absolute paths. Task keys and repository slugs are redacted unless you pass `--share-identifiers`.
+The collector does not deliberately read task descriptions, prompts, agent transcripts, diffs, source files, or `.env` contents. Attached logs and free-text fields can still contain sensitive content: review the preview and remove anything private before submitting. Known credentials, the current checkout and home paths, task keys, and the detected repository slug are masked; `--share-identifiers` keeps task and repository identifiers.
 
-All free text passes through credential and path redaction before submission. The endpoint applies the same checks again before storage.
+Report descriptions and log text pass through redaction before submission. Redaction cannot recognize every secret or proprietary value.
 
-## Automatic reports
+## How this complements Sentry
 
-Automatic reports help catch DevIntern defects without requiring users to file them manually. Only signed-in users send automatic reports; anonymous users can always report manually.
+DevIntern already captures exceptions through Sentry. Manual reports add the context an exception cannot provide: expected behavior, reproduction steps, impact, and incorrect results from a run that completed successfully. Describe those details in the report, and attach the relevant run when available.
 
-```json
-{
-  "diagnostics": {
-    "autoReport": "internal",
-    "includeLogs": false
-  }
-}
-```
+Warnings and failed checks in user code are not automatically DevIntern defects. Diagnose them before filing a report. The report command sends only when you confirm submission (or explicitly pass `--yes`); task execution does not submit bug reports to this endpoint.
 
-| `autoReport`         | Behavior                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------ |
-| `off`                | Never send automatically. Manual reports still work.                                                   |
-| `internal` (default) | Report unexpected DevIntern failures: uncaught exceptions, storage errors, artifact failures, crashes. |
-| `all`                | Also report user-actionable failures and halted task runs, except usage limits and cancellations.      |
-
-`includeLogs: true` attaches a bounded worker log tail to automatic reports. It is off by default.
-
-Environment overrides:
-
-```bash
-DEVINTERN_AUTO_REPORT=off        # off | internal | all
-DEVINTERN_TELEMETRY_DISABLED=1   # suppress automatic reports and analytics
-DEVINTERN_REPORT_URL=https://devintern.com/api/reports
-```
-
-Automatic reports are deduplicated by fingerprint for 24 hours and capped at five per day. A crash loop produces one report, not one per retry. DevIntern prints the short report id after sending it; set `autoReport: "off"` to stop automatic reporting entirely.
-
-## Pipeline plugins
-
-The public `@getdevintern/code/report` API lets a pipeline step submit a report with its own evidence. See the [report-execution example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/report-execution) for a runnable step that reports pipeline warnings without ever halting the run.
-
-Pipeline halts skip later steps, so automatic reporting for failures happens in the CLI itself. A plugin is the right place for additional context on completed or warned runs, not a replacement for the built-in failure path.
+For a custom support intake, set `DEVINTERN_REPORT_URL` to its report endpoint.
 
 ## Report with a coding agent
 

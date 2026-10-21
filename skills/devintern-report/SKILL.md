@@ -1,6 +1,6 @@
 ---
 name: devintern-report
-description: Diagnose a DevIntern CLI or worker failure and file a redacted bug report with `devintern report`. Use when DevIntern crashes, a task run fails unexpectedly, or the user asks to report a bug.
+description: Diagnose a DevIntern CLI or worker failure and file a redacted bug report with `devintern report`. Use when DevIntern crashes, a task run fails unexpectedly or completes with incorrect behavior, or the user asks to report a bug.
 ---
 
 # Report a DevIntern bug
@@ -12,6 +12,8 @@ Reporting is for product defects. Missing credentials, a tracker outage, an unin
 ## Confirm the command exists
 
 Check `devintern report --help` before using flags. If the installed CLI does not have the command, say so and suggest upgrading `@getdevintern/code`; do not simulate a report or paste logs into a public issue.
+
+Existing Sentry error tracking captures exceptions automatically. Use a manual report to add expected behavior, reproduction steps, impact, or an incorrect result that produced no exception.
 
 ## Diagnose before filing
 
@@ -91,4 +93,4 @@ Return the short report id from the command, what was attached, what was omitted
 - Reporting another person's data without explicit permission
 - Inventing flags, endpoints, or report ids when the installed CLI lacks the command
 
-For payload details, automatic-report settings, and retention, see [Reporting bugs](https://devintern.com/docs/code/reporting-bugs).
+For payload details, previews, and retention, see [Reporting bugs](https://devintern.com/docs/code/reporting-bugs).

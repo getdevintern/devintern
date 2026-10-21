@@ -2,8 +2,7 @@
  * Reporter identity helpers for CLI entry points.
  *
  * Manual reports refresh the Supabase session when possible so an expired
- * token does not silently downgrade a signed-in report. Automatic reports use
- * the stored token without a network round trip (see `session.ts`).
+ * token does not silently downgrade a signed-in report.
  */
 
 import { join } from "node:path";

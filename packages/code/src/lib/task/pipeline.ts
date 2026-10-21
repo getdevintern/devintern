@@ -58,7 +58,6 @@ import {
 } from "../worker/usage-limit-protocol";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
-import { maybeAutoReportFailure } from "../report/auto";
 import { reportProcessingFailure } from "./processing-failure";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
@@ -372,7 +371,6 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   }
 
   const err = error as Error;
-  const failedRunId = getActiveRunContext()?.id;
   await finishTaskRun("failed", err.message);
 
   // A failed run may still have pushed a branch and opened a PR itself (agents
@@ -396,7 +394,6 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   } catch {
     /* best-effort */
   }
-  await maybeAutoReportFailure({ error, taskKey, runId: failedRunId });
   runContext.activeTaskContext = null;
 
   if (totalTasks > 1) {
@@ -1223,16 +1220,8 @@ export async function processSingleTask(
       resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
     });
     if (result.kind === "halted") {
-      const failedRunId = getActiveRunContext()?.id;
       await finishTaskRun("escalated", result.reason);
       runContext.activeTaskContext = null;
-      await maybeAutoReportFailure({
-        reason: result.reason,
-        failedStep: result.step,
-        ...(result.haltKind ? { haltKind: result.haltKind } : {}),
-        taskKey,
-        runId: failedRunId,
-      });
     }
   } catch (error) {
     await handleTaskFailure(error, { taskKey, taskIndex, totalTasks });
