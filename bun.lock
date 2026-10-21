@@ -96,6 +96,9 @@
     },
     "packages/e2e": {
       "name": "@devintern/e2e",
+      "dependencies": {
+        "@devintern/agent-harness": "workspace:*",
+      },
     },
     "packages/license-check": {
       "name": "@devintern/license-check",

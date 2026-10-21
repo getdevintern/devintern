@@ -64,6 +64,26 @@ workflow is manual (`workflow_dispatch`): configure the repository variable
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
+## Agent harness invocation checks
+
+The ordinary local suite also probes every registered agent harness whose CLI is
+installed on the machine. Harnesses that are not installed are reported as
+skipped, so the suite behaves the same on a laptop with six agent CLIs and in CI
+with none.
+
+Each installed harness is launched with the exact non-interactive invocation
+DevIntern generates (subcommand, flags, and prompt) inside a temporary home and
+workspace. The check asserts only that the CLI accepts that invocation: a
+removed flag, renamed subcommand, or changed prompt mode fails with a
+parser/usage error. Sign-in prompts, missing provider keys, model errors, and
+runs that exceed the probe timeout are expected and do not fail the suite, so no
+AI account, credentials, or model calls are required. The probe environment
+excludes ambient provider keys and harness configuration.
+
+Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
+`10000`). These checks do not run full agent tasks; the deterministic fake agent
+continues to cover the implementation, git, and pull-request lifecycle.
+
 ## Local GitLab Self-Managed
 
 Docker Engine and Docker Compose must be installed and accessible to your user.
