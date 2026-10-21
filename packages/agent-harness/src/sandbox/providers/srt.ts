@@ -19,9 +19,10 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
+import { harnessStatePaths, resolveHomeDir } from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -76,26 +77,24 @@ const SRT_OPEN_NETWORK_DOMAINS = [
 ];
 
 /**
- * $HOME state paths the harness itself must be able to write (session files,
- * settings, locks) — an agent denied these starts logged-out or exits.
- * Mirrors the nono provider's harness-state grants.
+ * Top-level lock files some harnesses create next to their state. They are
+ * granted even when they do not exist yet — the agent creates them on its
+ * first run.
  */
-const HARNESS_STATE_PATHS: Record<string, string[]> = {
-  "claude-code": [".claude", ".claude.json", ".claude.json.lock", ".claude.lock"],
-  codex: [".codex"],
-  // agy keeps state under ~/.gemini (legacy Gemini CLI layout)
-  antigravity: [".gemini"],
-  gemini: [".gemini"],
-  // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
-  cursor: [".cursor", ".config/cursor"],
-  opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
+const HARNESS_STATE_LOCK_FILES: Record<string, string[]> = {
+  "claude-code": [".claude.json.lock", ".claude.lock"],
 };
 
-function harnessStatePaths(harnessName: string | undefined): string[] {
-  const home = homedir();
-  return (HARNESS_STATE_PATHS[harnessName ?? "claude-code"] ?? [])
-    .map((rel) => join(home, rel))
-    .filter((p) => existsSync(p) || p.endsWith(".lock"));
+/**
+ * Absolute $HOME paths the harness itself must be able to write (session
+ * files, settings, locks) — an agent denied these starts logged-out or exits.
+ * Shares the audited per-harness state map with the nono provider.
+ */
+function harnessStateWritePaths(harnessName: string | undefined): string[] {
+  const home = resolveHomeDir();
+  const name = harnessName ?? "claude-code";
+  const rel = [...harnessStatePaths(name), ...(HARNESS_STATE_LOCK_FILES[name] ?? [])];
+  return rel.map((p) => join(home, p)).filter((p) => existsSync(p) || p.endsWith(".lock"));
 }
 
 export class SrtSandboxProvider implements SandboxProvider {
@@ -153,7 +152,7 @@ export class SrtSandboxProvider implements SandboxProvider {
         ...(sshAgentSocket ? { allowUnixSockets: [sshAgentSocket] } : {}),
       },
       filesystem: {
-        allowWrite: [...policy.writablePaths, ...harnessStatePaths(policy.harnessName)],
+        allowWrite: [...policy.writablePaths, ...harnessStateWritePaths(policy.harnessName)],
         denyRead: [],
         denyWrite: [],
         ...(policy.readablePaths?.length ? { allowRead: policy.readablePaths } : {}),

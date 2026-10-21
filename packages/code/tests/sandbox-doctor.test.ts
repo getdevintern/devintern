@@ -106,7 +106,7 @@ describe("buildSandboxDoctorReport", () => {
       ".devintern-code/.env",
       "claude-code",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(false);
@@ -121,7 +121,7 @@ describe("buildSandboxDoctorReport", () => {
       "default",
       "claude-code",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     expect(report.nextRunFails).toBe(false);
     expect(report.lines.join("\n")).toContain("already inside the nono sandbox");
@@ -134,7 +134,7 @@ describe("buildSandboxDoctorReport", () => {
       "environment",
       "claude-code",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     expect(report.nextRunFails).toBe(true);
     expect(report.lines.join("\n")).toContain('unknown provider "chroot"');
@@ -147,7 +147,7 @@ describe("buildSandboxDoctorReport", () => {
       ".devintern-code/.env",
       "claude-code",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
@@ -163,7 +163,7 @@ describe("buildSandboxDoctorReport", () => {
       "environment",
       "goose",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
@@ -178,7 +178,7 @@ describe("buildSandboxDoctorReport", () => {
       ".devintern-code/.env",
       "claude-code",
       "linux",
-      "nono",
+      { activeSandbox: "nono" },
     );
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(false);
@@ -225,5 +225,45 @@ describe("buildSandboxDoctorReport", () => {
     ).lines.join("\n");
     expect(macText).toContain("sbx policy init balanced (after sbx login)");
     expect(macText).not.toContain("needs KVM");
+  });
+
+  test("nono pack status per chain entry is surfaced", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "nono",
+      ".devintern-code/.env",
+      "grok",
+      "linux",
+      {
+        packStatuses: [
+          {
+            harnessName: "grok",
+            packBacked: false,
+            note: 'nono has no pack profile for "grok"; using linux-host-compat + explicit grants (state: ~/.grok).',
+          },
+          { harnessName: "opencode", packBacked: true, profile: "opencode" },
+        ],
+      },
+    );
+    const text = report.lines.join("\n");
+    expect(text).toContain("nono pack profiles (per harness chain entry):");
+    expect(text).toContain('nono has no pack profile for "grok"');
+    expect(text).toContain('pack profile "opencode"');
+  });
+
+  test("the pack section is hidden when nono is not installed", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { available: false, reason: "nono not found on PATH" })],
+      "none",
+      "default",
+      "grok",
+      "linux",
+      {
+        packStatuses: [
+          { harnessName: "grok", packBacked: false, note: 'nono has no pack profile for "grok".' },
+        ],
+      },
+    );
+    expect(report.lines.join("\n")).not.toContain("nono pack profiles");
   });
 });

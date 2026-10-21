@@ -11,10 +11,11 @@
 import { spawnSync } from "child_process";
 import type { ChildProcess, SpawnOptions } from "child_process";
 import { existsSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
+import { resolveHomeDir } from "./sandbox/harness-state.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
 export interface SpawnAgentOptions {
@@ -122,7 +123,7 @@ export function gitAdminPaths(workingDir: string): string[] {
  * @returns The default policy; callers may extend it via `SpawnAgentOptions.policy`.
  */
 export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
-  const home = homedir();
+  const home = resolveHomeDir();
   const browserCaches =
     process.platform === "darwin"
       ? [join(home, "Library", "Caches", "ms-playwright")]
