@@ -520,6 +520,10 @@ AGENT_HARNESS=claude-code
 # Optional: model the harness runs with (harness-specific string)
 # AGENT_MODEL=sonnet
 
+# Optional: per-harness model overrides, required for fallbacks in a chain
+# OPENCODE_MODEL=opencode-go/deepseek-v4.1-flash
+# GROK_MODEL=grok-4.7
+
 # Optional: reasoning effort for agent runs (low | medium | high)
 # AGENT_EFFORT=medium
 ```
@@ -555,7 +559,7 @@ The first entry is your preferred harness; later entries are fallbacks in priori
 
 Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
 
-- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`).
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
 - When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
@@ -565,7 +569,7 @@ Applies to every unattended worker surface — fleet task polling, PR review add
 
 Interactive one-shot runs you start yourself (`devintern TASK-123` in a terminal) always use the first (priority) entry; the worker pins each subprocess to the active harness so failover can switch the next attempt.
 
-**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. `AGENT_MODEL` applies to whichever harness is active (the string is harness-specific).
+**Per-harness overrides inside a list:** `<HARNESS>_CLI_PATH` (e.g. `CODEX_CLI_PATH`) resolves per active harness at spawn time. The global `AGENT_CLI_PATH` applies to the first entry only, so a stale global override cannot leak onto a fallback agent. The model setting follows the same rule: `AGENT_MODEL` applies to the primary (first) entry, while each fallback uses its own `<HARNESS>_MODEL` (e.g. `GROK_MODEL`) or the CLI default — model ids are provider-specific, so sending one harness's model to another can make the fallback unusable.
 
 ### Model selection
 
@@ -576,7 +580,24 @@ Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-cod
 AGENT_MODEL=sonnet
 ```
 
-The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes). A few harnesses have no model flag and ignore the setting.
+The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). DevIntern passes it to every agent spawn (implementation runs, analysis, reviews, and hook fixes) for the primary harness. A few harnesses have no model flag and ignore the setting.
+
+With a failover chain, configure one model per harness so every entry gets a value its CLI understands:
+
+```bash
+# .devintern-code/.env
+AGENT_HARNESS=opencode,grok
+OPENCODE_MODEL=opencode-go/deepseek-v4.1-flash
+GROK_MODEL=grok-4.7
+```
+
+Resolution order per spawn:
+
+1. `<HARNESS>_MODEL` — explicit override, valid for the primary and every fallback (`OPENCODE_MODEL`, `GROK_MODEL`, `CODEX_MODEL`, `CLAUDE_CODE_MODEL`, …).
+2. `AGENT_MODEL` — when the harness is the only configured entry, or the primary (first) entry of a chain.
+3. Neither set — a fallback runs with its own CLI default model.
+
+`AGENT_MODEL` is never sent to a fallback, so a chain like `opencode,grok` keeps working when OpenCode's model id means nothing to Grok. The worker startup banner lists what each entry resolved to.
 
 ### Reasoning effort
 

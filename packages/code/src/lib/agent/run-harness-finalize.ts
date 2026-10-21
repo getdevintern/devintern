@@ -122,7 +122,7 @@ async function implementPlan(
     maxTurns: ctx.maxTurns,
     skipPermissions: true,
     workingDir: process.cwd(),
-    model: resolveAgentModel(),
+    model: resolveAgentModel(ctx.harness.name),
     effort: resolveAgentEffort(),
   });
   const spawnArgs = [...args, ...buildPromptArgs(ctx.harness, prompt)];

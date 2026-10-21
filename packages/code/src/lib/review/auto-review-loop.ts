@@ -321,7 +321,7 @@ export async function runAgentPrompt(
           maxTurns: 500,
           skipPermissions: true,
           workingDir,
-          model: resolveAgentModel(),
+          model: resolveAgentModel(harness.name),
           effort: resolveAgentEffort(),
         },
       );
