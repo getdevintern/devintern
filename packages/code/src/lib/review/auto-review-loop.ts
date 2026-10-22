@@ -272,14 +272,18 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
  * Parse structured JSON review feedback from agent output.
  *
  * @param agentOutput - Raw stdout from the review agent
+ * @param minPriority - Lowest finding priority that invalidates an approval
  * @returns Validated {@link ReviewFeedback} object
  * @throws When no JSON is found or the structure is invalid
  */
-export function parseReviewFeedback(agentOutput: string): ReviewFeedback {
+export function parseReviewFeedback(
+  agentOutput: string,
+  minPriority: ReviewPriority = "medium",
+): ReviewFeedback {
   try {
     const feedback = parseAgentJsonObject(agentOutput, "approved");
 
-    validateReviewFeedback(feedback);
+    validateReviewFeedback(feedback, minPriority);
     return feedback;
   } catch (error) {
     throw new Error(`Failed to parse review feedback JSON: ${error}`);

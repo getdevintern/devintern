@@ -36,7 +36,7 @@ export interface PipelineContext {
   /** Read the current diff against the configured PR target branch. */
   getDiff(): string;
   /** Parse an agent review verdict and filter findings by priority. */
-  parseReviewFeedback(output: string): ReviewFeedback;
+  parseReviewFeedback(output: string, minPriority?: ReviewPriority): ReviewFeedback;
   filterByPriority(items: ReviewFeedbackItem[], minPriority: ReviewPriority): ReviewFeedbackItem[];
 }
 

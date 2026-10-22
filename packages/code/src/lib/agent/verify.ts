@@ -210,7 +210,10 @@ export async function verifyImplementation(
         state.context.harness,
         state.context.executablePath,
       );
-      feedback = deps.parseFeedback(output);
+      // Validate approvals against this step's threshold, not the auto-review
+      // default: `minSeverity: "high"` makes medium findings advisory, so an
+      // approval carrying them must not be rejected as a parse failure.
+      feedback = deps.parseFeedback(output, minSeverity);
       // Approvals only have to be free of findings at or above the configured
       // blocking threshold; lower-priority notes are advisory here.
       validateReviewFeedback(feedback, minSeverity);
