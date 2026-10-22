@@ -110,7 +110,7 @@ capable and incapable harnesses.
   | deepseek (reasonix) | `--effort <level>` |
   | grok | `--effort <level>` (alias `--reasoning-effort`) |
   | kilo-code | `--variant <effort>` (provider-specific reasoning-effort variant) |
-  | muse | `--reasoning-effort <low\|medium\|high>` (alias `--effort`) |
+  | muse | `--reasoning-effort <low\|medium\|high>` |
   | opencode | `--variant <effort>` (provider-specific reasoning-effort variant) |
   | pi | composed into the model string: `--model <model>:<effort>` |
   | cursor, goose, kimi, qwen | ignored (runner warns when the option is requested) |
