@@ -199,6 +199,10 @@ export {
   detectIncompleteImplementation,
   type IncompleteImplementationResult,
 } from "./detect-incomplete-implementation.js";
+export {
+  IMPLEMENTATION_SUMMARY_END,
+  IMPLEMENTATION_SUMMARY_START,
+} from "./implementation-summary.js";
 
 // Open-question detection (agent blocked on user input)
 export { detectOpenQuestions, type OpenQuestionsResult } from "./detect-open-questions.js";
