@@ -33,6 +33,10 @@ test data into the trackers a worker actually uses.
 | Asana               | no             | none                              | Detection only in Layer 1.                                              |
 | Azure DevOps        | no             | none                              | Detection only in Layer 1.                                              |
 
+The default local run reports these opt-in suites as skipped and planned
+coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
+does not exercise.
+
 ## Layer 1 — read-only workspace smoke (implemented)
 
 ### Command
